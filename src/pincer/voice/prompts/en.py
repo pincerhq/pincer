@@ -507,6 +507,11 @@ CALL_FALLBACK_STATUS = {"completed": "completed", "not_completed": "did not comp
 # Post-call report for a call that never reached a person. No transcript link:
 # there was no conversation. Reasons are keyed by `FailureCode` value.
 CALL_NOT_CONNECTED_REPORT = "📞 Couldn't reach {target} — {reason}."
+# A call that was live when the process restarted: its transcript is lost.
+CALL_INTERRUPTED_REPORT = (
+    "📞 The call to {target} was cut off by a Pincer restart, so there is no summary of it. "
+    "Ask them directly, or call again, to find out how it went."
+)
 CALL_NOT_CONNECTED_REASONS = {
     "busy": "the line was busy",
     "no_answer": "no answer",

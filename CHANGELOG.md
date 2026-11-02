@@ -336,6 +336,27 @@ agent code needs a separate uid or container.
   transferred to a human (`<Dial timeLimit>`), and the metric
   `pincer.voice.receptionist.transfers{result=…}`.
 
+#### Phone calls: the result reaches the chat that asked for it (#303)
+
+When a call placed with `make_phone_call` ends, its final report is also added
+to the chat session it was asked in, so the agent knows whether the callee
+answered and what was agreed. Before, only the channel push carried it and the
+agent's history ended at "now ringing".
+
+- One row per outbound call in the new `pincer_call_origins` table (migration
+  `0026`): who asked, on which channel and in which session, and the final
+  report with a short outcome code (`completed`, `no-answer`, `busy`,
+  `voicemail`, `failed`, `canceled`, `interrupted`). Each report is delivered
+  once, whichever terminal path ends the call. The rows expire with the call
+  transcripts (`PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS`).
+- `GET /api/chat/call-reports?conversation_id=&since=` lists the reports of the
+  calls placed from a web conversation (or the main web chat).
+- A restart no longer loses a call's report. Calls still waiting for one are
+  reloaded at startup and checked with Twilio: one that ended unanswered gets
+  the usual report, and one that was connected when Pincer stopped gets an
+  "interrupted" report (its transcript is lost). A "Connected" status message
+  may repeat after a restart.
+
 #### Google OAuth token from `PINCER_GOOGLE_TOKEN_JSON` (#268)
 
 The Google token no longer has to live in the data volume. Set

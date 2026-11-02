@@ -554,6 +554,11 @@ CALL_FALLBACK_STATUS = {"completed": "abgeschlossen", "not_completed": "nicht ab
 # Bericht für einen Anruf, der niemanden erreicht hat. Kein Transkript-Link: es
 # gab kein Gespräch. Gründe nach `FailureCode`-Wert.
 CALL_NOT_CONNECTED_REPORT = "📞 {target} nicht erreicht — {reason}."
+# A call that was live when the process restarted: its transcript is lost.
+CALL_INTERRUPTED_REPORT = (
+    "📞 Der Anruf bei {target} wurde durch einen Neustart von Pincer unterbrochen, daher gibt es keine "
+    "Zusammenfassung. Fragen Sie direkt nach oder rufen Sie erneut an, um das Ergebnis zu erfahren."
+)
 CALL_NOT_CONNECTED_REASONS = {
     "busy": "die Leitung war besetzt",
     "no_answer": "keine Antwort",

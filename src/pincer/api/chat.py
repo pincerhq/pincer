@@ -21,9 +21,10 @@ import json
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -35,8 +36,9 @@ from pincer.api.approvals import (
 )
 from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
-from pincer.core.session import conversation_key
+from pincer.core.session import channel_session_key, conversation_key
 from pincer.exceptions import BudgetExceededError, LLMError
+from pincer.services.voice import CallsServiceDep
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -79,6 +81,16 @@ class ChatIn(BaseModel):
         if not self.memory and self.conversation_id is None:
             raise ValueError("memory=false requires a conversation_id")
         return self
+
+
+class CallReportOut(BaseModel):
+    """The final report of a phone call asked for in this conversation."""
+
+    call_sid: str
+    outcome: str
+    text: str
+    created_at: str
+    reported_at: str
 
 
 class ApprovalIn(BaseModel):
@@ -237,6 +249,35 @@ async def post_approval(
     if not resolve_web_approval(body.approval_id, user_id, body.approved):
         raise HTTPException(404, "Unknown, expired, or unauthorized approval")
     return {"ok": True}
+
+
+@router.get("/call-reports", response_model=list[CallReportOut])
+async def get_call_reports(
+    user_id: ChatUser,
+    calls: CallsServiceDep,
+    conversation_id: Annotated[str | None, Query(pattern=_UUID_RE.pattern)] = None,
+    since: Annotated[datetime | None, Query(description="Only reports delivered at or after this time")] = None,
+) -> list[CallReportOut]:
+    """Final reports of the calls placed from this conversation (or the main
+    web chat), oldest first. Web chat has no push path, so the browser polls
+    this after a call is placed and once when a conversation is opened."""
+    conversation = None if conversation_id is None else str(uuid.UUID(conversation_id))
+    session_key = _conversation_session_key(user_id, conversation) or channel_session_key(user_id, _CHANNEL)
+    # Stored timestamps are UTC ISO text, compared as such on SQLite.
+    cutoff = None
+    if since is not None:
+        cutoff = (since.astimezone(UTC) if since.tzinfo else since.replace(tzinfo=UTC)).isoformat()
+    rows = await calls.list_call_reports(user_id, session_key, cutoff)
+    return [
+        CallReportOut(
+            call_sid=str(row["call_sid"]),
+            outcome=str(row.get("report_outcome") or ""),
+            text=str(row.get("report_text") or ""),
+            created_at=str(row.get("created_at") or ""),
+            reported_at=str(row.get("reported_at") or ""),
+        )
+        for row in rows
+    ]
 
 
 # Re-exported for tests.

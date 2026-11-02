@@ -290,3 +290,61 @@ def test_chat_returns_503_without_agent():
         headers={"X-Pincer-User": UUID},
     )
     assert r.status_code == 503
+
+
+async def test_call_reports_are_scoped_to_the_user_and_conversation(tmp_path):
+    """Issue #303: web chat pulls the reports of the calls it asked for, and only those."""
+    from pincer.services.voice import CallsService
+    from pincer.services.voice.calls import get_calls_service
+
+    service = await CallsService.for_path(tmp_path / "pincer.db")
+    other_conversation = "33333333-3333-4333-8333-333333333333"
+    rows = [
+        ("CA_conv", UUID, f"web:{UUID}:{CONVERSATION}", "2026-11-02T10:00:00+00:00"),
+        ("CA_late", UUID, f"web:{UUID}:{CONVERSATION}", "2026-11-02T12:00:00+00:00"),
+        ("CA_main", UUID, f"web:{UUID}", "2026-11-02T10:00:00+00:00"),
+        ("CA_other_conv", UUID, f"web:{UUID}:{other_conversation}", "2026-11-02T10:00:00+00:00"),
+        ("CA_other_user", "someone-else", f"web:{UUID}:{CONVERSATION}", "2026-11-02T10:00:00+00:00"),
+    ]
+    for sid, owner, key, at in rows:
+        await service.save_call_origin(
+            {"call_sid": sid, "user_id": owner, "pincer_user_id": owner, "session_key": key, "created_at": at}
+        )
+        await service.complete_call_report(sid, "busy", f"report {sid}", at)
+    await service.save_call_origin(
+        {
+            "call_sid": "CA_ringing",
+            "user_id": UUID,
+            "pincer_user_id": UUID,
+            "session_key": f"web:{UUID}:{CONVERSATION}",
+            "created_at": "2026-11-02T10:00:00+00:00",
+        }
+    )
+
+    client = _make_client()
+    client.app.dependency_overrides[get_calls_service] = lambda: service
+    headers = {"X-Pincer-User": UUID}
+
+    r = client.get("/api/chat/call-reports", params={"conversation_id": CONVERSATION}, headers=headers)
+    assert r.status_code == 200
+    assert [(x["call_sid"], x["outcome"], x["text"]) for x in r.json()] == [
+        ("CA_conv", "busy", "report CA_conv"),
+        ("CA_late", "busy", "report CA_late"),
+    ]
+
+    r = client.get(
+        "/api/chat/call-reports",
+        params={"conversation_id": CONVERSATION, "since": "2026-11-02T13:00:00+02:00"},
+        headers=headers,
+    )
+    assert [x["call_sid"] for x in r.json()] == ["CA_late"]
+
+    r = client.get("/api/chat/call-reports", headers=headers)
+    assert [x["call_sid"] for x in r.json()] == ["CA_main"]
+
+
+def test_call_reports_need_a_user_and_a_valid_conversation():
+    client = _make_client()
+    assert client.get("/api/chat/call-reports").status_code == 400
+    r = client.get("/api/chat/call-reports", params={"conversation_id": "nope"}, headers={"X-Pincer-User": UUID})
+    assert r.status_code == 422

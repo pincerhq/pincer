@@ -509,3 +509,42 @@ def test_fallback_report_comes_from_the_prompt_pack(language, done, not_done):
     report = render_fallback_report(TARGET, 95, "CA1", False, language)
     assert not_done in report
     assert report.endswith("/transcript CA1")
+
+
+# Issue #303: every way a call ends gives exactly one final report, stored
+# with its outcome code for the chat it was asked from.
+@pytest.mark.parametrize(
+    ("path", "data", "outcome"),
+    [
+        ("status", {"CallStatus": "busy"}, "busy"),
+        ("status", {"CallStatus": "no-answer"}, "no-answer"),
+        ("status", {"CallStatus": "canceled"}, "canceled"),
+        ("amd", {"AnsweredBy": "machine_end_beep"}, "voicemail"),
+    ],
+)
+async def test_each_not_connected_end_finalizes_one_report(rig, path, data, outcome):
+    from pincer.services.voice import CallsService
+
+    status_notify.set_report_store(rig.settings.db_path)
+    notes: list[str] = []
+
+    async def reporter(_pincer_user_id: str, _channel: str, _session_key: str, text: str) -> None:
+        notes.append(text)
+
+    status_notify.set_session_reporter(reporter)
+    rig.with_post_call()
+    await rig.dial("CA_end")
+    status_notify.get_call_info("CA_end").session_key = "telegram:user1"  # type: ignore[union-attr]
+
+    await rig.post(path, CallSid="CA_end", **data)
+    await rig.settle()
+    # A late duplicate (Twilio's own `completed` after the hang-up) adds nothing.
+    await rig.post("status", CallSid="CA_end", CallStatus="completed")
+    await rig.settle()
+
+    assert len(rig.sent) == 1, rig.sent
+    assert len(notes) == 1 and rig.sent[0] in notes[0]
+    row = await (await CallsService.for_path(rig.settings.db_path)).get_call_origin("CA_end")
+    assert row is not None
+    assert row["report_outcome"] == outcome
+    assert row["report_text"] == rig.sent[0]

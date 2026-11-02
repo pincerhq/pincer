@@ -1886,7 +1886,7 @@ class VoiceChannel(BaseChannel):
         if unverified:
             outcome += " — note: the agent made a completion claim I could not verify against tool results"
         with contextlib.suppress(Exception):
-            await notify_ended(call_sid, outcome)
+            await notify_ended(call_sid, outcome, outcome_code="completed" if completed else "failed")
 
     async def _close_call_trace(
         self,
@@ -2031,7 +2031,11 @@ class VoiceChannel(BaseChannel):
             from pincer.voice.status_notify import notify_ended
 
             with contextlib.suppress(Exception):
-                await notify_ended(call_sid, "completed" if completed else "did not complete")
+                await notify_ended(
+                    call_sid,
+                    "completed" if completed else "did not complete",
+                    outcome_code="completed" if completed else "failed",
+                )
 
     def _find_active_call_for_user(self, user_id: str) -> str:
         """Find the active call SID for a given user."""

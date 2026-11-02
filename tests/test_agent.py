@@ -351,6 +351,7 @@ async def test_tool_context_prefers_channel_user_id(settings, mock_llm, session_
             "channel_name": "test",
             "timezone": "",
             "tool_call_id": "tc1",
+            "session_key": "test:canonical-r_lutsiv",
         }
     ]
 
@@ -390,6 +391,7 @@ async def test_tool_context_falls_back_to_user_id_when_no_channel_user_id(
             "channel_name": "test",
             "timezone": "",
             "tool_call_id": "tc1",
+            "session_key": "test:user1",
         }
     ]
 
@@ -465,6 +467,7 @@ async def test_stream_tool_context_prefers_channel_user_id(settings, mock_llm, s
             "channel_name": "test",
             "timezone": "",
             "tool_call_id": "tc1",
+            "session_key": "test:canonical-r_lutsiv",
         }
     ]
 

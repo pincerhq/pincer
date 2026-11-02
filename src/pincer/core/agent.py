@@ -465,11 +465,13 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
 class _Turn:
     """One chat turn's tool context: a UUID7 for log tracing (and calendar
     dedup), plus the user's identity timezone, looked up once per turn, and
-    on a phone call the call's (voice) zone."""
+    on a phone call the call's (voice) zone. ``session_key`` is the chat
+    session the turn runs in, so a call it places can report back into it."""
 
     turn_id: str
     timezone: str
     call_timezone: str = ""
+    session_key: str = ""
 
 
 class Agent:
@@ -692,7 +694,7 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        turn = await self._begin_turn(user_id)
+        turn = await self._begin_turn(user_id, session_key=session.session_id)
 
         async def build_prompt(tool_names: list[str] | None) -> str:
             return await self._build_system_prompt(
@@ -1122,7 +1124,7 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        turn = await self._begin_turn(user_id)
+        turn = await self._begin_turn(user_id, session_key=session.session_id)
 
         async def build_prompt(tool_names: list[str]) -> str:
             return await self._build_system_prompt(
@@ -1640,9 +1642,9 @@ class Agent:
             logger.debug("Timezone lookup failed for %s", user_id, exc_info=True)
             return ""
 
-    async def _begin_turn(self, user_id: str) -> _Turn:
+    async def _begin_turn(self, user_id: str, session_key: str = "") -> _Turn:
         """Mint this turn's ID and resolve the user's zone once for all its tool calls."""
-        return _Turn(turn_id=new_id(), timezone=await self._user_timezone(user_id))
+        return _Turn(turn_id=new_id(), timezone=await self._user_timezone(user_id), session_key=session_key)
 
     async def _build_system_prompt(
         self,
@@ -2084,6 +2086,8 @@ class Agent:
                         # Tracing (log lines) and calendar create dedup.
                         "turn_id": turn.turn_id,
                         "tool_call_id": tool_call.id,
+                        # The chat session a placed call reports back into.
+                        **({"session_key": turn.session_key} if turn.session_key else {}),
                     },
                 )
                 if tool_call.name == "make_phone_call":

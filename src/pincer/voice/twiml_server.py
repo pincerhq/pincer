@@ -836,7 +836,7 @@ async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -
         logger.info("AMD verdict [%s] — call already torn down, leaving the report to the pipeline", call_sid)
     else:
         # No conversation state -> end_call fires no post-call pipeline
-        await notify_ended(call_sid, not_connected_reason(FailureCode.VOICEMAIL, user_lang))
+        await notify_ended(call_sid, not_connected_reason(FailureCode.VOICEMAIL, user_lang), outcome_code="voicemail")
     if _engine:
         # The call is live (greeting a voicemail box) — always hang up
         await _engine.end_call(call_sid)
@@ -952,7 +952,11 @@ async def voice_status(request: Request) -> PlainTextResponse:
                 logger.info("Status '%s' [%s] — call already torn down, pipeline owns the report", status, call_sid)
             else:
                 # The call never had state, so no pipeline will run
-                await notify_ended(call_sid, not_connected_reason(end_code, user_lang, status))
+                from pincer.voice.status_notify import outcome_code_for
+
+                await notify_ended(
+                    call_sid, not_connected_reason(end_code, user_lang, status), outcome_code=outcome_code_for(status)
+                )
 
         elif status == "completed" and _engine:
             state = _engine.get_call_state(call_sid)
@@ -974,9 +978,17 @@ async def voice_status(request: Request) -> PlainTextResponse:
                 # voicemail outcome, the summary — is then silently dropped.
                 logger.info("Status 'completed' [%s] — call already torn down, pipeline owns the report", call_sid)
             else:
-                # Ended before any conversation state existed (e.g. hangup during AMD)
-                ended_texts = {"en": "call ended", "de": "Anruf beendet", "uk": "дзвінок завершено"}
-                await notify_ended(call_sid, ended_texts[user_lang])
+                from pincer.voice import status_notify
+
+                info = await status_notify.ensure_tracked(call_sid)
+                if info is not None and info.restored:
+                    # Placed before a restart and connected across it: its
+                    # state and transcript went with the old process.
+                    await status_notify.finalize_interrupted(call_sid)
+                else:
+                    # Ended before any conversation state existed (e.g. hangup during AMD)
+                    ended_texts = {"en": "call ended", "de": "Anruf beendet", "uk": "дзвінок завершено"}
+                    await notify_ended(call_sid, ended_texts[user_lang], outcome_code=status_notify.OUTCOME_COMPLETED)
 
     return PlainTextResponse("OK")
 
@@ -1256,6 +1268,7 @@ async def _record_briefing_lost(call_sid: str, info: Any = None) -> None:
             call_sid,
             "the call was ended because the task you gave it could not be recovered — nothing was said. "
             "Please try again.",
+            outcome_code="failed",
         )
     except Exception:
         logger.debug("briefing-lost notify failed [%s]", call_sid, exc_info=True)
