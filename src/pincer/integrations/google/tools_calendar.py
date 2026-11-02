@@ -56,6 +56,10 @@ KIND_CHANGE_MESSAGE = (
 ALL_DAY_CREATE_MESSAGE = (
     "An all-day event needs both start and end as dates (YYYY-MM-DD); a timed event needs both as date-times."
 )
+REVERSED_ALL_DAY_MESSAGE = (
+    "An all-day event's end date is before its start. The end date is exclusive: "
+    "pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)."
+)
 #: Appended when a same-turn re-call found the event but asked for other details (dedup covers
 #: title and times only, so those details were dropped).
 UNAPPLIED_NOTE = (
@@ -432,11 +436,14 @@ async def google__create_event(
     Offset-less start/end are read in ``timezone`` when given, else in the
     calendar's own zone (see calendar_tz; on a call, the call's zone, which is
     then also the event's stored zone); offset-bearing ones pass unchanged.
-    Two bare dates make an all-day event (Google's end date is exclusive; an
-    end on or before the start means that one day).
+    Two bare dates make an all-day event. Google's end date is exclusive (the
+    schema tells the model to pass the day after the last day); an end equal to
+    the start means that one day, an end before it is refused.
     """
     if is_date_only(start) != is_date_only(end):
         raise ValueError(ALL_DAY_CREATE_MESSAGE)
+    if is_date_only(start) and date.fromisoformat(end.strip()) < date.fromisoformat(start.strip()):
+        raise ValueError(REVERSED_ALL_DAY_MESSAGE)
     svc = await factory.get("calendar")
 
     body: dict[str, Any] = {
@@ -898,9 +905,14 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "start": {
                     "type": "string",
                     "description": "Start time ISO 8601 as LOCAL wall-clock time (e.g. 2026-03-28T14:00:00); "
-                    "without a UTC offset it is read in the calendar's timezone (or the timezone parameter)",
+                    "without a UTC offset it is read in the calendar's timezone (or the timezone parameter). "
+                    "A bare date (YYYY-MM-DD) makes an all-day event",
                 },
-                "end": {"type": "string", "description": "End time ISO 8601, same rules as start"},
+                "end": {
+                    "type": "string",
+                    "description": "End time ISO 8601, same rules as start. For an all-day event the end date is "
+                    "EXCLUSIVE: pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)",
+                },
                 "calendar_id": {"type": "string", "default": "primary"},
                 "description": {"type": "string", "default": ""},
                 "location": {"type": "string", "default": ""},

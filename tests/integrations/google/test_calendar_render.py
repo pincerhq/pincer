@@ -18,6 +18,7 @@ from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
 from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
 from pincer.integrations.google.tools_calendar import (
+    REVERSED_ALL_DAY_MESSAGE,
     google__create_event,
     google__get_event,
     google__list_events,
@@ -530,6 +531,25 @@ async def test_create_with_one_bare_date_is_refused_before_writing(fake_factory,
         await google__create_event(fake_factory, summary="Holiday", start=start, end=end)
 
     assert fake.sent("events.insert") == []
+
+
+async def test_an_all_day_end_before_the_start_is_refused_before_writing(fake_factory, fake):
+    """PR #316 review: a reversed range is a model mistake, not "that one day"."""
+    with pytest.raises(ValueError) as refused:
+        await google__create_event(fake_factory, summary="Vacation", start="2026-11-10", end="2026-11-03")
+
+    assert str(refused.value) == REVERSED_ALL_DAY_MESSAGE
+    assert fake.sent("events.insert") == []
+
+
+def test_the_create_schema_says_bare_dates_are_all_day_and_the_end_is_exclusive(fake_registry):
+    """PR #316 review: "vacation Nov 3 to Nov 5" must reach Google as end 2026-11-06."""
+    [create] = [tool for tool in fake_registry.get_schemas() if tool["name"] == "google__create_event"]
+    start, end = (create["input_schema"]["properties"][key]["description"] for key in ("start", "end"))
+
+    assert "A bare date (YYYY-MM-DD) makes an all-day event" in start
+    assert "the end date is EXCLUSIVE: pass the day after the last day" in end
+    assert "Nov 3 to Nov 5 -> end 2026-11-06" in end
 
 
 # ── On a call, times are read and shown in the call's zone (PR #316 review) ───
