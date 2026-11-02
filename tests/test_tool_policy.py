@@ -210,7 +210,7 @@ def test_appointment_scope_exact():
 
 def test_generic_guest_scope_has_reads_and_owner_writes_only():
     scope = tp.allowed_tools_for_call(_settings(), kind="generic")
-    assert scope == tp.tier_r_tools() | tp.GENERIC_CALL_WRITE_TOOLS
+    assert scope == (tp.tier_r_tools() - tp.CALL_OPT_IN_TOOLS) | tp.GENERIC_CALL_WRITE_TOOLS
     assert "google__create_event" not in scope
     assert "google__update_event" not in scope
 
@@ -221,6 +221,46 @@ def test_generic_registered_user_gets_every_callable_tool():
         assert scope == tp.callable_tools()
         assert "google__create_event" in scope
         assert "google__delete_event" not in scope
+        assert "websearch__search" in scope
+
+
+def test_websearch_is_tier_r():
+    assert tp.tier_of("websearch__search") == tp.TIER_R
+
+
+@pytest.mark.parametrize("kind", ["generic", "appointment", "receptionist"])
+@pytest.mark.parametrize("direction", ["outbound", "inbound"])
+def test_websearch_is_not_in_any_default_guest_scope(kind, direction):
+    assert "websearch__search" not in tp.allowed_tools_for_call(_settings(), kind=kind, direction=direction)
+
+
+@pytest.mark.parametrize("direction", ["outbound", "inbound"])
+def test_registered_user_gets_websearch_and_it_runs_as_tier_r(direction):
+    settings = _settings()
+    state = _state(kind="generic", direction=direction, settings=settings, caller=tp.CALLER_USER)
+    assert "websearch__search" in state.metadata[tp.META_ALLOWED_TOOLS]
+    decision = tp.decide("websearch__search", state, settings, {"query": "Benzinpreis Bünde"})
+    assert (decision.action, decision.reason) == ("execute", "tier_r")
+
+
+@pytest.mark.parametrize("entry", ["websearch__search", "websearch__*"])
+@pytest.mark.parametrize("direction", ["outbound", "inbound"])
+def test_websearch_joins_the_guest_scope_through_the_guest_list(entry, direction):
+    settings = _settings(voice_guests_tools_allowed=f"google__list_events,{entry}")
+    state = _state(kind="generic", direction=direction, settings=settings)
+    assert "websearch__search" in state.metadata[tp.META_ALLOWED_TOOLS]
+    assert tp.unmatched_guest_tool_entries(settings.voice_guests_tools_allowed) == []
+    decision = tp.decide("websearch__search", state, settings, {"query": "Benzinpreis Bünde"})
+    assert (decision.action, decision.reason) == ("execute", "tier_r")
+
+
+@pytest.mark.parametrize("caller", [tp.CALLER_GUEST, tp.CALLER_USER])
+def test_websearch_never_reaches_appointment_calls_or_the_receptionist(caller):
+    settings = _settings(voice_guests_tools_allowed="websearch__search")
+    assert "websearch__search" not in tp.allowed_tools_for_call(settings, kind="appointment", caller_class=caller)
+    for direction in ("outbound", "inbound"):
+        scope = tp.allowed_tools_for_call(settings, kind="receptionist", direction=direction, caller_class=caller)
+        assert "websearch__search" not in scope
 
 
 def test_inbound_excludes_memory_search():
@@ -336,6 +376,9 @@ def test_doctor_tier_x_reachable_self_test(tmp_path, monkeypatch):
     doc = _doctor(tmp_path)
     assert doc._check_voice_tier_x_reachable(_settings()).status == CheckStatus.PASS
     assert doc._check_voice_tier_x_reachable(_settings(voice_guests_tools_allowed="google__*")).status == (
+        CheckStatus.PASS
+    )
+    assert doc._check_voice_tier_x_reachable(_settings(voice_guests_tools_allowed="websearch__search")).status == (
         CheckStatus.PASS
     )
     unmatched = doc._check_voice_tier_x_reachable(_settings(voice_guests_tools_allowed="google__*,email_send"))

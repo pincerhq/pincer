@@ -47,7 +47,7 @@ from pincer.voice.engine import CallDirection
 from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
-from pincer.voice.tool_speech import describe_action, render, render_denied, render_pending
+from pincer.voice.tool_speech import describe_action, render, render_denied, render_duplicate, render_pending
 from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
@@ -115,7 +115,11 @@ TOOL_LATENCY_HINTS_S: dict[str, float] = {
     "contact_lookup": 0.3,
     "send_owner_message": 0.5,
     "memory_note": 0.5,
+    "websearch__search": 3.0,
 }
+# Reads only worth anything while the caller is on the line: a timeout or an
+# error says so instead of promising a post-call follow-up nobody would act on.
+NO_FOLLOW_UP_TOOLS: frozenset[str] = frozenset({"websearch__search"})
 
 # Deny reason used when the callee hangs up while a `user` approval is open
 # (no execution, card edited to "call ended"). Not in §5.2's list because
@@ -268,6 +272,25 @@ class InCallToolGate:
         lang, formality = self.language()
         return str(get_prompt(key, lang, formality) or "")
 
+    def repeated_call_result(self, tool_name: str, arguments: dict[str, Any] | None) -> str:
+        """Fed back instead of re-running a tool call already made this turn;
+        logged like a denial so the call's actions show the model looping."""
+        lang, _ = self.language()
+        args = dict(arguments or {})
+        tier = tool_policy.tier_of(tool_name)
+        reason = tool_policy.REASON_REPEATED_CALL
+        self._log_action(
+            "tool_denied",
+            tool_name,
+            input_summary=tool_policy.canonical_json(args)[:500],
+            output_summary=reason,
+            tier=tier,
+            approval_mode="",
+            deny_reason=reason,
+        )
+        self._metric(tool_name, tool_policy.ToolDecision("deny", reason, tier, ""), "deny", reason)
+        return f"[TOOL RESULT: {render_duplicate(lang)}]"
+
     async def speak(self, text: str) -> None:
         """Deterministic gate speech: through the channel's turn speaker when
         one is set (transcript + CR bookkeeping there), else engine-direct."""
@@ -418,6 +441,15 @@ class InCallToolGate:
         except TimeoutError:
             logger.warning("In-call tool %s timed out after %.0fs [%s]", tool_name, timeout, self.call_sid)
             _trace_tool_timeout(tool_name, timeout)
+            if tool_name in NO_FOLLOW_UP_TOOLS:
+                return await self._deny(
+                    tool_name,
+                    args,
+                    decision,
+                    tool_policy.REASON_TOOL_TIMEOUT,
+                    speak_key="TOOL_NO_PROGRESS",
+                    approval_mode=approval_mode,
+                )
             return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode)
         except asyncio.CancelledError:
             raise
@@ -433,7 +465,7 @@ class InCallToolGate:
                 args,
                 decision,
                 tool_policy.REASON_TOOL_ERROR,
-                speak_key="TOOL_ERROR",
+                speak_key="TOOL_NO_PROGRESS" if tool_name in NO_FOLLOW_UP_TOOLS else "TOOL_ERROR",
                 approval_mode=approval_mode,
             )
             if decision.tier == tool_policy.TIER_W:

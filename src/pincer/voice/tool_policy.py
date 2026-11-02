@@ -56,6 +56,8 @@ TIERS: dict[str, str] = {
     # excludes it — enforced by allowed_tools_for_call (§5.3).
     "memory_search": TIER_R,
     "business_profile_lookup": TIER_R,
+    # Web search (issue #300): not in the guest default, see CALL_OPT_IN_TOOLS.
+    "websearch__search": TIER_R,
     # ── Tier W: reversible writes, approved per caller class (see decide())
     "google__create_event": TIER_W,
     "google__update_event": TIER_W,
@@ -102,6 +104,8 @@ REASON_APPROVAL_DENIED = "approval_denied"
 REASON_APPROVAL_TIMEOUT = "approval_timeout"
 REASON_TOOL_TIMEOUT = "tool_timeout"
 REASON_TOOL_ERROR = "tool_error"
+# The model asked for a call it already made this turn (same tool, same args).
+REASON_REPEATED_CALL = "repeated_call"
 DENY_REASONS: tuple[str, ...] = (
     REASON_TIER_X,
     REASON_NOT_IN_SCOPE,
@@ -110,12 +114,13 @@ DENY_REASONS: tuple[str, ...] = (
     REASON_APPROVAL_TIMEOUT,
     REASON_TOOL_TIMEOUT,
     REASON_TOOL_ERROR,
+    REASON_REPEATED_CALL,
 )
 
 # Per-purpose narrowing (§5.3). The appointment set is fixed. On a generic
-# call a registered user gets every R+W tool; a guest gets "all Tier R + the
-# two owner-facing writes", or exactly what PINCER_VOICE_GUESTS_TOOLS_ALLOWED
-# lists when it is set.
+# call a registered user gets every R+W tool; a guest gets "all Tier R except
+# CALL_OPT_IN_TOOLS + the two owner-facing writes", or exactly what
+# PINCER_VOICE_GUESTS_TOOLS_ALLOWED lists when it is set.
 APPOINTMENT_CALL_TOOLS: frozenset[str] = frozenset(
     {
         "google__check_freebusy",
@@ -127,6 +132,9 @@ APPOINTMENT_CALL_TOOLS: frozenset[str] = frozenset(
     }
 )
 GENERIC_CALL_WRITE_TOOLS: frozenset[str] = frozenset({"send_owner_message", "memory_note"})
+# Tier R/W tools left out of the guest default set: a registered user gets
+# them, a guest only when PINCER_VOICE_GUESTS_TOOLS_ALLOWED lists them.
+CALL_OPT_IN_TOOLS: frozenset[str] = frozenset({"websearch__search"})
 # Sprint 12 §9: the inbound receptionist's EXACT tool set. Explicitly absent
 # vs outbound: memory_search, contact_lookup, google__list_events (event
 # contents must be unreachable — free/busy returns windows only).
@@ -251,7 +259,7 @@ def allowed_tools_for_call(
     (Sprint 6 scheduling call) or ``"generic"`` (make_phone_call / inbound).
     Receptionist and appointment calls have fixed sets. On a generic call a
     registered ``user`` gets every R+W tool; a guest gets the default generic
-    set, or — when ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` is set — exactly the
+    set (without ``CALL_OPT_IN_TOOLS``), or — when ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` is set — exactly the
     R/W tools it matches, minus the inbound exclusions.
     """
     if kind == "receptionist":
@@ -269,7 +277,7 @@ def allowed_tools_for_call(
         if parse_csv(guest_list):
             scope = set(match_tool_patterns(guest_list))
         else:
-            scope = set(tier_r_tools()) | set(GENERIC_CALL_WRITE_TOOLS)
+            scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
         if str(direction).lower().endswith("inbound"):
             scope -= INBOUND_EXCLUDED_TOOLS
     # The scope can never contain an X tool, whatever the inputs were.
@@ -418,6 +426,7 @@ __all__ = [
     "APPROVAL_MODES",
     "CALLER_GUEST",
     "CALLER_USER",
+    "CALL_OPT_IN_TOOLS",
     "DEFAULT_TIER",
     "DENY_REASONS",
     "GENERIC_CALL_WRITE_TOOLS",
