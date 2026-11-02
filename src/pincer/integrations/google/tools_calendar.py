@@ -636,13 +636,17 @@ async def google__update_event(
     Offset-less start/end are read in ``timezone`` when given, else in the
     zone list/search/get show times in (the calendar's; on a call, the call's); the event keeps
     its own stored ``timeZone`` unless ``timezone`` is given. A bare date moves an
-    all-day event; two bare dates follow create's all-day rules (_all_day_span).
+    all-day event; two bare dates follow create's all-day rules (_all_day_span), and so
+    does a bare end alone on an all-day event (against its stored start).
     Given only a new start, the end moves with it (the stored duration is kept);
     given only a new end, the start stays.
     """
     all_day = _all_day_span(start, end) if is_date_only(start) and is_date_only(end) else None
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
+    stored_day = (event.get("start") or {}).get("date")
+    if not start and is_date_only(end) and stored_day:
+        all_day = _all_day_span(stored_day, end)
     if summary:
         event["summary"] = summary
     if description:

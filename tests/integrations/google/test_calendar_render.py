@@ -683,6 +683,29 @@ async def test_an_all_day_update_with_end_before_start_is_refused_before_writing
     assert fake.sent("events.update") == []
 
 
+async def test_a_lone_all_day_end_equal_to_the_stored_start_means_that_one_day(fake_factory, fake):
+    """Review 4: a bare end alone skipped _all_day_span, so "make it end on Nov 3" on a Nov 3 event
+    was sent as an empty range (Google's raw 400)."""
+    event_id = fake.seed_all_day("primary", "Vacation", "2026-11-03", "2026-11-04")
+
+    result = await google__update_event(fake_factory, event_id=event_id, end="2026-11-03")
+
+    stored = fake.event("primary", event_id)
+    assert (stored["start"], stored["end"]) == ({"date": "2026-11-03"}, {"date": "2026-11-04"})
+    assert result.splitlines()[1] == "Start: 2026-11-03 (all day) | End: 2026-11-03 (all day) (Europe/Kiev)"
+
+
+async def test_a_lone_all_day_end_before_the_stored_start_is_refused_before_writing(fake_factory, fake):
+    """Review 4: a raw 400 from Google instead of the reversed-range message."""
+    event_id = fake.seed_all_day("primary", "Vacation", "2026-11-03", "2026-11-04")
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, end="2026-11-01")
+
+    assert str(refused.value) == REVERSED_ALL_DAY_MESSAGE
+    assert fake.sent("events.update") == []
+
+
 def test_the_update_schema_states_the_same_all_day_end_rule_as_create(fake_registry):
     """Review 3: "change my vacation to Nov 3-5" must reach Google as end 2026-11-06 on update too."""
     schemas = {tool["name"]: tool["input_schema"]["properties"] for tool in fake_registry.get_schemas()}
