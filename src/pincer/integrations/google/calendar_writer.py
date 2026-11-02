@@ -27,8 +27,11 @@ and a retried write never duplicates or falsely fails.
   on a retry the event's actual state decides. A delete whose FIRST attempt is
   410 (Google's "already deleted") is a success, reported as such; a first 404
   (wrong ID, no access) stays an error.
-- Every write logs one ``calendar_write`` line (operation, turn, call, calendar,
-  event ID, stored start/end, timezone, dedup hit).
+- Every write attempt logs one ``calendar_write`` line (operation, turn, call,
+  calendar, event ID, start/end, timezone, dedup hit, ``confirmed=``): the stored
+  times when Google confirmed the write, the REQUESTED ones where its response
+  lacks them, and for a write that raised, ``confirmed=False error=<type[ status]>``
+  before the error propagates.
 """
 
 from __future__ import annotations
@@ -36,11 +39,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.quota import with_backoff
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +161,16 @@ def log_write(
     event_id: str = "",
     existed: bool = False,
     confirmed: bool = True,
+    request: dict[str, Any] | None = None,
+    error: BaseException | None = None,
 ) -> None:
-    ev = event or {}
-    start, end = ev.get("start") or {}, ev.get("end") or {}
-    logger.info(
-        "calendar_write op=%s turn=%s call=%s calendar=%s event=%s start=%s end=%s tz=%s dedup=%s confirmed=%s",
+    """One ``calendar_write`` line. ``event`` is Google's response; where it lacks a start or end,
+    ``request`` (the body sent) gives the attempted one. ``error`` (a write that raised) adds
+    ``error=<type[ status]>`` after ``confirmed=``."""
+    ev, sent = event or {}, request or {}
+    start = ev.get("start") or sent.get("start") or {}
+    end = ev.get("end") or sent.get("end") or {}
+    fields = (
         op,
         trace.turn_id or "-",
         trace.call_id or "-",
@@ -170,16 +182,50 @@ def log_write(
         existed,
         confirmed,
     )
+    line = "calendar_write op=%s turn=%s call=%s calendar=%s event=%s start=%s end=%s tz=%s dedup=%s confirmed=%s"
+    if error is None:
+        logger.info(line, *fields)
+    else:
+        logger.info(line + " error=%s", *fields, _error_label(error))
+
+
+def _error_label(error: BaseException) -> str:
+    """``HttpError 503``, or just the type name for an error without an HTTP status."""
+    status = _status(error)
+    return f"{type(error).__name__} {status}" if status is not None else type(error).__name__
+
+
+@contextmanager
+def _logged_if_raised(
+    op: str, trace: Trace, calendar_id: str, request: dict[str, Any] | None, event_id: Callable[[], str]
+) -> Iterator[None]:
+    """Log a write attempt that raises (``confirmed=False error=…``, with the requested times),
+    then let the error propagate. Wraps only the attempt: its outcome logs its own line."""
+    try:
+        yield
+    except Exception as exc:
+        log_write(op, trace, calendar_id, None, event_id=event_id(), confirmed=False, request=request, error=exc)
+        raise
 
 
 def _logged_and_confirmed(
-    op: str, trace: Trace, calendar_id: str, saved: Any, *, event_id: str, existed: bool = False
+    op: str,
+    trace: Trace,
+    calendar_id: str,
+    saved: Any,
+    *,
+    event_id: str,
+    existed: bool = False,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Log the write attempt first (``confirmed=False`` when Google's response has no ID), then
-    confirm it: an unconfirmed write is still traceable in the write log."""
+    """Log the write attempt first (``confirmed=False`` when Google's response has no ID, with the
+    requested times where the response lacks them), then confirm it: an unconfirmed write is
+    still traceable in the write log."""
     response = saved if isinstance(saved, dict) else None
     confirmed = bool(response and response.get("id"))
-    log_write(op, trace, calendar_id, response, event_id=event_id, existed=existed, confirmed=confirmed)
+    log_write(
+        op, trace, calendar_id, response, event_id=event_id, existed=existed, confirmed=confirmed, request=request
+    )
     return _confirmed(saved)
 
 
@@ -209,16 +255,17 @@ async def create(
     """
     trace = trace or Trace()
     event_id = client_event_id(seed, calendar_id, body)
-    for _generation in range(MAX_ID_GENERATIONS):
-        outcome = await _insert_or_fetch(svc, calendar_id, body, event_id, insert_kwargs)
-        if outcome is not None:
-            saved, existed, recovered = outcome
-            break
-        # That ID belongs to a deleted (or purged) event: derive the next one.
-        event_id = client_event_id(f"{seed}\x1fafter-cancelled:{event_id}", calendar_id, body)
-    else:
-        raise RuntimeError(ALL_IDS_TAKEN_MESSAGE)
-    event = _logged_and_confirmed("create", trace, calendar_id, saved, event_id=event_id, existed=existed)
+    with _logged_if_raised("create", trace, calendar_id, body, lambda: event_id):
+        for _generation in range(MAX_ID_GENERATIONS):
+            outcome = await _insert_or_fetch(svc, calendar_id, body, event_id, insert_kwargs)
+            if outcome is not None:
+                saved, existed, recovered = outcome
+                break
+            # That ID belongs to a deleted (or purged) event: derive the next one.
+            event_id = client_event_id(f"{seed}\x1fafter-cancelled:{event_id}", calendar_id, body)
+        else:
+            raise RuntimeError(ALL_IDS_TAKEN_MESSAGE)
+    event = _logged_and_confirmed("create", trace, calendar_id, saved, event_id=event_id, existed=existed, request=body)
     return CreateResult(event=event, existed=existed, recovered=recovered)
 
 
@@ -268,10 +315,12 @@ async def update(
     svc: Any, calendar_id: str, event_id: str, body: dict[str, Any], *, trace: Trace | None = None
 ) -> dict[str, Any]:
     """Replace event ``event_id`` with ``body`` and return Google's stored copy (raises if unconfirmed)."""
-    saved = await with_backoff(
-        lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=body).execute()
-    )
-    return _logged_and_confirmed("update", trace or Trace(), calendar_id, saved, event_id=event_id)
+    trace = trace or Trace()
+    with _logged_if_raised("update", trace, calendar_id, body, lambda: event_id):
+        saved = await with_backoff(
+            lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=body).execute()
+        )
+    return _logged_and_confirmed("update", trace, calendar_id, saved, event_id=event_id, request=body)
 
 
 async def patch(
@@ -285,10 +334,12 @@ async def patch(
     **patch_kwargs: Any,
 ) -> dict[str, Any]:
     """Patch event ``event_id`` (accept, decline, add Meet) and return Google's stored copy (raises if unconfirmed)."""
-    saved = await with_backoff(
-        lambda: svc.events().patch(calendarId=calendar_id, eventId=event_id, body=body, **patch_kwargs).execute()
-    )
-    return _logged_and_confirmed(op, trace or Trace(), calendar_id, saved, event_id=event_id)
+    trace = trace or Trace()
+    with _logged_if_raised(op, trace, calendar_id, body, lambda: event_id):
+        saved = await with_backoff(
+            lambda: svc.events().patch(calendarId=calendar_id, eventId=event_id, body=body, **patch_kwargs).execute()
+        )
+    return _logged_and_confirmed(op, trace, calendar_id, saved, event_id=event_id, request=body)
 
 
 async def _attempted(fn: Any) -> tuple[Any, int]:
@@ -328,15 +379,17 @@ async def delete(svc: Any, calendar_id: str, event_id: str, *, trace: Trace | No
     A 404/410 on a retry is checked against the event's real state: gone or
     ``cancelled`` means the lost first attempt committed (deleted now).
     """
+    trace = trace or Trace()
     already_gone = recovered = False
-    try:
-        await _attempted(lambda: svc.events().delete(calendarId=calendar_id, eventId=event_id).execute())
-    except _AttemptError as failed:
-        if failed.attempts < 2 and _status(failed.error) == _DELETED:
-            already_gone = True
-        else:
-            recovered = await _recovered_after_retry(failed, lambda: _is_gone(svc, calendar_id, event_id))
-    log_write("delete", trace or Trace(), calendar_id, None, event_id=event_id, existed=already_gone or recovered)
+    with _logged_if_raised("delete", trace, calendar_id, None, lambda: event_id):
+        try:
+            await _attempted(lambda: svc.events().delete(calendarId=calendar_id, eventId=event_id).execute())
+        except _AttemptError as failed:
+            if failed.attempts < 2 and _status(failed.error) == _DELETED:
+                already_gone = True
+            else:
+                recovered = await _recovered_after_retry(failed, lambda: _is_gone(svc, calendar_id, event_id))
+    log_write("delete", trace, calendar_id, None, event_id=event_id, existed=already_gone or recovered)
     return already_gone
 
 
@@ -366,12 +419,14 @@ async def move(
     """Move an event to ``destination`` and return Google's stored copy (raises if unconfirmed).
     A 404/410 on a retry is checked against the destination: the event being there
     means the lost first attempt committed."""
+    trace = trace or Trace()
     recovered = False
-    try:
-        moved, _attempts = await _attempted(
-            lambda: svc.events().move(calendarId=calendar_id, eventId=event_id, destination=destination).execute()
-        )
-    except _AttemptError as failed:
-        moved = await _recovered_after_retry(failed, lambda: _live_on(svc, destination, event_id))
-        recovered = True
-    return _logged_and_confirmed("move", trace or Trace(), destination, moved, event_id=event_id, existed=recovered)
+    with _logged_if_raised("move", trace, destination, None, lambda: event_id):
+        try:
+            moved, _attempts = await _attempted(
+                lambda: svc.events().move(calendarId=calendar_id, eventId=event_id, destination=destination).execute()
+            )
+        except _AttemptError as failed:
+            moved = await _recovered_after_retry(failed, lambda: _live_on(svc, destination, event_id))
+            recovered = True
+    return _logged_and_confirmed("move", trace, destination, moved, event_id=event_id, existed=recovered)

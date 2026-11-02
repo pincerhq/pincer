@@ -13,6 +13,7 @@ import re
 from datetime import timedelta
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
@@ -288,6 +289,83 @@ async def test_a_confirmed_write_says_so_in_the_write_log(fake_registry, fake, c
 
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("calendar_write ")]
     assert [line.rsplit(" ", 1)[-1] for line in lines] == ["confirmed=True"], lines
+
+
+RAISED_WRITES = [
+    *UNCONFIRMED_WRITES,
+    ("google__delete_event", {"event_id": "evt1"}),
+]
+WRITE_LOG_OPS_WITH_DELETE = {**WRITE_LOG_OPS, "google__delete_event": "delete"}
+
+
+def _write_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("calendar_write ")]
+
+
+async def test_an_unconfirmed_write_logs_the_requested_times(fake_registry, fake, caplog):
+    """Review 3: the confirmed=False line logged Google's empty response (start=- end=- tz=-)."""
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+    fake.drop_id_on_write = True
+
+    def _response_without_times(event):
+        event.pop("start", None)
+        event.pop("end", None)
+
+    fake.on_store = _response_without_times
+    arguments = {"event_id": "evt1", "start": "2026-11-12T17:00:00"}
+    with (
+        caplog.at_level(logging.INFO, logger="pincer.integrations.google.calendar_writer"),
+        pytest.raises(CalendarWriteNotConfirmedError),
+    ):
+        await fake_registry.execute("google__update_event", arguments, context={"turn_id": "turn-x"})
+
+    assert _write_lines(caplog) == [
+        "calendar_write op=update turn=turn-x call=- calendar=primary event=evt1 "
+        "start=2026-11-12T17:00:00+02:00 end=2026-11-12T18:00:00+02:00 tz=Europe/Kiev dedup=False confirmed=False"
+    ]
+
+
+@pytest.mark.parametrize(("tool", "arguments"), RAISED_WRITES)
+async def test_a_write_that_raises_still_logs_one_attempt_line(
+    fake_registry, fake, caplog, monkeypatch, tool, arguments
+):
+    """Review 3: a non-retriable HttpError (or retries exhausted, or move's unrecovered error) logged no
+    calendar_write line at all."""
+    from integrations.google.fake_calendar import http_error
+    from pincer.integrations.google import calendar_writer
+
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+
+    async def _refused(_fn, *_args, **_kwargs):
+        raise http_error(400, "Bad Request")
+
+    monkeypatch.setattr(calendar_writer, "with_backoff", _refused)
+    with caplog.at_level(logging.INFO, logger="pincer.integrations.google.calendar_writer"), pytest.raises(HttpError):
+        await fake_registry.execute(tool, dict(arguments), context={"turn_id": "turn-x"})
+
+    lines = _write_lines(caplog)
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(f"calendar_write op={WRITE_LOG_OPS_WITH_DELETE[tool]} turn=turn-x ")
+    assert lines[0].endswith(" confirmed=False error=HttpError 400")
+
+
+@pytest.mark.usefixtures("instant_backoff")
+async def test_a_create_whose_retries_run_out_logs_the_requested_times_and_the_error(fake_registry, fake, caplog):
+    for _ in range(6):  # the first attempt and all 5 retries
+        fake.fail_next("events.insert", "before-commit")
+    arguments = {"summary": "Dentist", "start": "2026-11-12T10:00:00", "end": "2026-11-12T11:00:00"}
+
+    with caplog.at_level(logging.INFO, logger="pincer.integrations.google.calendar_writer"), pytest.raises(HttpError):
+        await fake_registry.execute("google__create_event", arguments, context={"turn_id": "turn-x"})
+
+    [line] = _write_lines(caplog)
+    assert line.startswith("calendar_write op=create turn=turn-x call=- calendar=primary event=")
+    assert line.endswith(
+        " start=2026-11-12T10:00:00+02:00 end=2026-11-12T11:00:00+02:00 tz=Europe/Kiev"
+        " dedup=False confirmed=False error=HttpError 503"
+    )
+    assert " event=- " not in line
+    assert fake.events_on("primary") == []
 
 
 # ── Voice format contract on real renderer output ────────────────────────────
