@@ -621,13 +621,16 @@ async def _deferred_on_a_call(settings: Settings, registry: ToolRegistry, tool: 
     return deferred
 
 
-async def _replayed_in_chat(tmp_path, settings: Settings, registry, costs, tool: str, arguments) -> None:
-    """The owner's later "yes, do it" in chat: the agent runs the draft as remembered, off the call."""
+async def _replayed_in_chat(tmp_path, settings: Settings, registry, costs, tool: str, arguments) -> list[str]:
+    """The owner's later "yes, do it" in chat: the agent runs the draft as remembered, off the call.
+    Returns the replay's tool results."""
     sessions = await _sessions(tmp_path, 50)
+    llm = _OneCallLLM(tool, dict(arguments))
     try:
-        await _say(_agent(settings, _OneCallLLM(tool, dict(arguments)), sessions, costs, registry), "telegram", "do it")
+        await _say(_agent(settings, llm, sessions, costs, registry), "telegram", "do it")
     finally:
         await sessions.close()
+    return llm.results
 
 
 async def test_a_deferred_booking_replayed_in_chat_keeps_the_voice_zone(
@@ -666,6 +669,43 @@ async def test_a_deferred_move_replayed_in_chat_keeps_the_voice_zone(
     assert fake.start_of("primary", event_id) == starts
     assert fake.event("primary", event_id)["start"]["timeZone"] == "Europe/Kyiv"
     assert "timezone" not in deferred["draft_args"]
+
+
+async def test_a_timed_out_booking_that_committed_is_not_duplicated_by_its_replay(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review 3: the create times out on the call but Google commits it, and it is deferred.
+    The draft lacked the call's idempotency key, so the "yes, do it" replay in chat got a fresh dedup
+    seed and booked a second identical event. With the key, the replay finds the first one."""
+    from pincer.core.clock import CALL_TIMEZONE_KEY
+
+    day = _tomorrow()
+    arguments = {"summary": "Dentist", "start": f"{day}T14:00:00", "end": f"{day}T15:00:00"}
+    gate = _call_gate(berlin_settings, "generic", registry)
+    gate.requires_approval = lambda _name: False  # straight to execute
+    berlin_settings.voice_tool_timeout_s = 0.5
+    sent = dict(arguments)  # the gate writes the call's key into this dict, as the agent's executor sends it
+
+    async def _commits_then_hangs() -> tuple[str, bool]:
+        await registry.execute(
+            "google__create_event", sent, context={"turn_id": "call-turn", CALL_TIMEZONE_KEY: "Europe/Berlin"}
+        )
+        await asyncio.sleep(5)  # Google committed; the response never arrives in time
+        return "never", False
+
+    await gate.run("google__create_event", sent, _commits_then_hangs, trusted_key=False)
+    (deferred,) = gate.deferred_actions()
+    assert deferred["reason"] == "tool_timeout"  # precondition: deferred
+    assert len(fake.events_on("primary")) == 1  # precondition: the timed-out create committed
+
+    results = await _replayed_in_chat(
+        tmp_path, berlin_settings, registry, costs, "google__create_event", deferred["draft_args"]
+    )
+
+    assert len(fake.events_on("primary")) == 1
+    assert len(fake.sent("events.insert")) == 2  # the replay really wrote, and Google answered 409
+    assert results[0].startswith("Event already created: 'Dentist' (it already exists — not duplicated)"), results
+    assert deferred["draft_args"]["idempotency_key"] == sent["idempotency_key"]
 
 
 class _RememberedNotes:

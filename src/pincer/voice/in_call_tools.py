@@ -392,6 +392,9 @@ class InCallToolGate:
                 arguments.pop("idempotency_key", None)
             if not arguments.get("idempotency_key"):
                 arguments["idempotency_key"] = call_idempotency_key(self.call_sid, tool_name, args)
+        # A deferred draft carries the same key, so its replay off the call finds an event this call's
+        # timed-out write committed ("already created") instead of booking it again.
+        key = str((arguments or {}).get("idempotency_key") or "") if tool_name in IDEMPOTENT_CREATE_TOOLS else ""
         decision = tool_policy.decide(tool_name, self.state, self.settings, args, self.requires_approval)
         logger.info(
             "In-call tool decision [%s]: %s -> %s (%s, tier=%s, mode=%s)",
@@ -407,10 +410,10 @@ class InCallToolGate:
         if decision.action == "need_verbal":
             return await self._start_verify(tool_name, args, decision)
         if decision.action == "need_user_approval":
-            return await self._user_approval(tool_name, args, execute, decision)
+            return await self._user_approval(tool_name, args, execute, decision, key=key)
         approval_mode = "auto" if decision.tier == tool_policy.TIER_R else decision.mode
         user_confirmed = True if decision.mode == "verbal" else None
-        return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed)
+        return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed, key=key)
 
     # ── Deny ─────────────────────────────────────────────
 
@@ -460,6 +463,8 @@ class InCallToolGate:
         decision: tool_policy.ToolDecision,
         approval_mode: str,
         user_confirmed: bool | None,
+        *,
+        key: str = "",
     ) -> GateResult:
         lang, _ = self.language()
         self._metric(tool_name, decision, "execute", decision.reason)
@@ -490,7 +495,7 @@ class InCallToolGate:
                     speak_key="TOOL_NO_PROGRESS",
                     approval_mode=approval_mode,
                 )
-            return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode)
+            return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode, key=key)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # the executor normally catches; belt and braces
@@ -509,7 +514,7 @@ class InCallToolGate:
                 approval_mode=approval_mode,
             )
             if decision.tier == tool_policy.TIER_W:
-                self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR)
+                self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR, key=key)
             return result
 
         spoken = render(tool_name, content, lang, args, self.call_zone)
@@ -551,22 +556,29 @@ class InCallToolGate:
         decision: tool_policy.ToolDecision,
         reason: str,
         approval_mode: str,
+        *,
+        key: str = "",
     ) -> GateResult:
         """Timeouts: speak the deferral line, record the denial, and queue the
         action as a post-call follow-up suggestion (Sprint 3 T3.4 mechanism)."""
         result = await self._deny(
             tool_name, args, decision, reason, speak_key="TOOL_TIMEOUT_DEFER", approval_mode=approval_mode
         )
-        self._add_deferred(tool_name, args, reason)
+        self._add_deferred(tool_name, args, reason, key=key)
         return result
 
-    def _add_deferred(self, tool_name: str, args: dict[str, Any], reason: str) -> None:
+    def _add_deferred(self, tool_name: str, args: dict[str, Any], reason: str, *, key: str = "") -> None:
+        """Queue a follow-up draft. ``key`` is the idempotency key the call's own attempt sent: the
+        replay reuses it as its dedup seed, so a write that committed despite timing out is found."""
         lang, _ = self.language()
+        draft = draft_in_call_zone(tool_name, args, self.call_zone)
+        if key:
+            draft["idempotency_key"] = key
         deferred = self.state.metadata.setdefault(META_DEFERRED, [])
         deferred.append(
             {
                 "tool": tool_name,
-                "draft_args": draft_in_call_zone(tool_name, args, self.call_zone),
+                "draft_args": draft,
                 "reason": reason,
                 # What the caller heard: the same wall clock as the pinned draft.
                 "summary": describe_action(tool_name, args, lang),
@@ -711,6 +723,8 @@ class InCallToolGate:
         args: dict[str, Any],
         execute: Callable[[], Awaitable[tuple[str, bool]]],
         decision: tool_policy.ToolDecision,
+        *,
+        key: str = "",
     ) -> GateResult:
         lang, _ = self.language()
         description = describe_action(tool_name, args, lang)
@@ -765,7 +779,7 @@ class InCallToolGate:
         if outcome == approvals.APPROVED:
             await approvals.finalize(req, approvals.APPROVED)
             self.suppress_llm_speech = False  # the LLM phrases the result
-            return await self._execute(tool_name, args, execute, decision, "user", True)
+            return await self._execute(tool_name, args, execute, decision, "user", True, key=key)
         if outcome == approvals.CALL_ENDED:
             await approvals.finalize(req, approvals.CALL_ENDED)
             return await self._deny(tool_name, args, decision, REASON_CALL_ENDED, approval_mode="user")
@@ -780,7 +794,7 @@ class InCallToolGate:
                 approval_mode="user",
             )
         await approvals.finalize(req, approvals.EXPIRED)
-        return await self._defer(tool_name, args, decision, tool_policy.REASON_APPROVAL_TIMEOUT, "user")
+        return await self._defer(tool_name, args, decision, tool_policy.REASON_APPROVAL_TIMEOUT, "user", key=key)
 
     # ── Call end ─────────────────────────────────────────
 

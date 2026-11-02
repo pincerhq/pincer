@@ -910,9 +910,14 @@ async def test_tool_timeout_defers_to_followup():
     assert "Fertig." not in spoken
     assert state.metadata["writes_used"] == 0
     deferred = state.metadata["deferred_actions"]
-    # Stored like the same create made on the call: in the call's zone (PR #316 review).
+    # Stored like the same create made on the call: in the call's zone (PR #316 review), with the
+    # call's idempotency key, so a replay finds an event the timed-out create committed (review 3).
     assert deferred[0]["reason"] == "tool_timeout"
-    assert deferred[0]["draft_args"] == {**CREATE_ARGS, "timezone": "Europe/Berlin"}
+    assert deferred[0]["draft_args"] == {
+        **CREATE_ARGS,
+        "timezone": "Europe/Berlin",
+        "idempotency_key": ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS),
+    }
     denied = [a for a in channel.get_transcript(CALL).actions if a.action_type == "tool_denied"][0]
     assert denied.deny_reason == "tool_timeout"
     # The deferred action reaches the post-call report + memory follow-ups
