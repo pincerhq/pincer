@@ -1979,6 +1979,8 @@ class Agent:
             turn or await self._begin_turn(user_id), call_timezone=get_voice_timezone(self._settings).key
         )
         if call_gate is None:
+            # Reached from _stream_voice_turn, which passes current_gate() as is: a voice turn
+            # with no gate bound (no tracked call, or one already ended) still reads the voice zone.
             return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=call_turn)
 
         async def _run() -> tuple[str, bool]:
