@@ -895,22 +895,25 @@ class TestConversationRelayProtocol:
 
     async def test_send_speech_reports_delivery(self):
         """F4: True only when the token reached the socket — silence is never
-        reported as success."""
-        from pincer.voice.engine import CallDirection, ConversationRelayEngine
+        reported as success, and a failure says why (#301)."""
+        from pincer.voice.engine import SPEECH_FAILURE_KEY, CallDirection, ConversationRelayEngine
 
         engine = ConversationRelayEngine(MagicMock())
         state = await engine.on_call_start("CA_cr3", "+1", CallDirection.OUTBOUND)
 
         # No websocket attached yet → dropped
         assert await engine.send_speech("CA_cr3", "hello") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "no_websocket"
 
         ws = AsyncMock()
         state.metadata["websocket"] = ws
         assert await engine.send_speech("CA_cr3", "hello") is True
         ws.send_text.assert_called_once()
+        assert state.metadata[SPEECH_FAILURE_KEY] == ""
 
         ws.send_text.side_effect = RuntimeError("socket closed")
         assert await engine.send_speech("CA_cr3", "hello") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "send_error"
 
         # Unknown call
         assert await engine.send_speech("CA_nope", "hello") is False
@@ -971,6 +974,8 @@ class TestUndeliveredTranscript:
         transcript = channel.get_transcript("CA_silent")
         agent_entries = [e for e in transcript.entries if e.speaker == Speaker.AGENT]
         assert agent_entries and agent_entries[-1].state == "undelivered"
+        # the engine named no cause, so the line says so rather than guess
+        assert agent_entries[-1].delivery_reason == "unknown"
         await channel.stop()
 
 

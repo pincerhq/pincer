@@ -94,6 +94,16 @@ def test_silent_agent_is_no_audio_even_when_completed(settings):
     assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NO_AUDIO
 
 
+def test_an_all_cancelled_call_is_not_no_audio(settings):
+    """Barge-ins cut every agent line: the caller interrupted, nothing failed."""
+    channel = _channel(settings)
+    transcript = TranscriptLogger("CA_cut")
+    transcript.log_utterance(Speaker.CALLER, "Hello?")
+    transcript.log_utterance(Speaker.AGENT, "Hi there", state="cancelled", delivery_reason="barge_in")
+    transcript.log_utterance(Speaker.AGENT, "How can I", state="cancelled", delivery_reason="barge_in")
+    assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NONE
+
+
 def test_partially_delivered_call_is_not_no_audio(settings):
     """One undelivered turn in an otherwise audible call is not a silent call."""
     channel = _channel(settings)

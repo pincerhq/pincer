@@ -43,7 +43,7 @@ _FILLER: dict[str, str] = {
     "de": (
         r"ok(?:ay)?|alles klar|danke(?: sch[öo]n| sehr| dir| ihnen)?|vielen dank|gut|super|prima|perfekt|"
         r"ja|nein|genau|das war'?s|das wars|nichts mehr|ebenso|gleichfalls|ihnen auch|dir auch|dann|also|gerne|"
-        r"in ordnung|passt"
+        r"in ordnung|passt|na|naja|nun|so|das wäre alles|das ist alles"
     ),
     "uk": (
         r"добре|гаразд|ок(?:ей)?|дякую|дуже дякую|так|ні|чудово|супер|все|це все|більше нічого|вам теж|"
@@ -103,13 +103,23 @@ def is_farewell(text: str, language: str) -> bool:
     return bool(core.search(t)) and bool(only.match(t))
 
 
+# agent lines the caller never heard (voice/transcript.py NOT_PLAYED_STATES)
+_NOT_PLAYED = frozenset({"undelivered", "cancelled"})
+
+
 def last_agent_said_farewell(transcript: Any, language: str) -> bool:
-    """Did the agent's last utterance contain a goodbye?"""
+    """Did the agent's last utterance the caller heard contain a goodbye?
+
+    Lines that never played (failed or cancelled) are skipped: a goodbye the
+    caller did not hear is not one the agent has said.
+    """
     entries = list(getattr(transcript, "entries", None) or [])
     for entry in reversed(entries):
         speaker = getattr(entry, "speaker", "")
         name = str(getattr(speaker, "value", speaker)).lower()
         if name.endswith("agent"):
+            if str(getattr(entry, "state", "") or "") in _NOT_PLAYED:
+                continue
             return contains_farewell(str(getattr(entry, "text", "") or ""), language)
     return False
 

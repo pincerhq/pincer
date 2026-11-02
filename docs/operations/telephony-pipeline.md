@@ -257,6 +257,20 @@ truthfulness check, `metrics.finish_call`, failure classification
 pipeline as a background task. A "completed" call whose every agent turn was
 `undelivered` is reclassified `no_audio`.
 
+Every agent transcript line carries its delivery outcome. `send_speech` keeps
+its `-> bool` contract and leaves the reason for a False return in
+`state.metadata["last_speech_failure"]` (`SPEECH_FAILURE_KEY`), which
+`VoiceChannel._spoken_state` reads right after the send. A failure is
+`undelivered`; a barge-in or hangup that stopped a line before its first audio
+is `cancelled`, and one that cut it partway is `interrupted`. Both of those are
+deliberate and never feed `no_audio`. The reason is stored per line in
+`pincer_call_transcripts.delivery_reason`; the values are listed in the
+[runbook](runbook.md#silent-agent).
+
+A goodbye only counts as said when it played: `last_agent_said_farewell`
+skips `undelivered` and `cancelled` lines, and an `[END_CALL]` or caller-goodbye
+hangup is not scheduled when the farewell itself failed to play.
+
 ## 4. Turn pipeline and where the time goes
 
 `_run_streaming_turn` already stamps monotonic offsets from `t0` (the moment the

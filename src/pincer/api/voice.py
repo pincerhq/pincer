@@ -196,6 +196,8 @@ class TranscriptLine(BaseModel):
     text: str
     confidence: float = 1.0
     state: str = ""
+    # Why an agent line did not play in full (see voice/transcript.py).
+    delivery_reason: str = ""
     timestamp: str = ""
 
 
@@ -1075,6 +1077,7 @@ async def call_detail(call_sid: str, calls: CallsServiceDep) -> CallDetail:
                 text=mask_pii(t["text"] or ""),
                 confidence=t["confidence"] if t["confidence"] is not None else 1.0,
                 state=t["state"] or "",
+                delivery_reason=t.get("delivery_reason") or "",
                 timestamp=t["timestamp"] or "",
             )
             for t in t_rows

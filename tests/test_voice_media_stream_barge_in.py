@@ -573,9 +573,10 @@ class TestPartialSegments:
         tts.delay_s = 0  # the shutdown goodbye need not take real time
         await channel.stop()
 
-    async def test_a_turn_cancelled_before_any_audio_logs_it_as_undelivered(self):
+    async def test_a_turn_cancelled_before_any_audio_logs_it_as_cancelled(self):
         """Cancelled while still waiting for the first TTS chunk: the caller
-        heard none of it, so it must not be credited as cut off part-way."""
+        heard none of it, so it must not be credited as cut off part-way —
+        and the caller's barge-in is not a delivery failure either."""
         tts = FakeTTS(chunks=20, delay_s=0.05)
         tts.hold_first = asyncio.Event()  # the first synthesis produces nothing until released
         engine = _engine(tts, "off")
@@ -592,7 +593,7 @@ class TestPartialSegments:
         assert turn.cancelled()
         assert sock.events("media") and tts.synthesized[-1] == NEW_REPLY
         line = next(e for e in channel.get_transcript("CA_ms").entries if e.text == OLD_FIRST)
-        assert line.state == "undelivered"
+        assert (line.state, line.delivery_reason) == ("cancelled", "barge_in")
         tts.delay_s = 0
         await channel.stop()
 

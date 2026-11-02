@@ -1277,6 +1277,9 @@ def test_0017_stamps_each_id_with_the_row_s_own_creation_time(migration_url, tmp
 #: What 0018 rebuilds on SQLite to drop the `''` default, besides `voice_calls`.
 _REBUILT_BY_0018 = ["telephony_events", "telephony_spans"]
 
+#: Columns later migrations add on purpose to the tables compared below.
+_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0026
+
 
 def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(migration_url, tmp_path):
     """The SQLite half rebuilds each table from reflection rather than from
@@ -1295,6 +1298,8 @@ def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(mig
         # name but keep it filed under the old one, so it still lines up with
         # `before` and with the `after["schedules"]` lookup below.
         after = {table: _shape(sa.inspect(conn), f"pincer_{table}") for table in [*_CONVERTED, *_REBUILT_BY_0018]}
+        for table, added in _ADDED_AFTER_0018.items():
+            after[table]["columns"] = [c for c in after[table]["columns"] if c[0] not in added]
         if migration_url.startswith("sqlite"):
             assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
 

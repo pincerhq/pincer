@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from voice_harness.transport_fakes import install_fake_twilio
 
-from pincer.voice.engine import CallDirection, MediaStreamEngine
+from pincer.voice.engine import SPEECH_FAILURE_KEY, CallDirection, MediaStreamEngine
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.tts import OUTPUT_PCM_16000, OUTPUT_ULAW_8000, TTSSynthesisError
 
@@ -316,6 +316,7 @@ class TestSpokenFallback:
         assert "technical problem" in twiml  # spoken apology, not silence
         assert engine.get_call_state("CA_tts") is None  # unregistered
         assert ended == ["CA_tts"]
+        assert state.metadata[SPEECH_FAILURE_KEY] == "tts_failed"  # #301: the failure says why
 
     async def test_german_call_gets_german_apology(self, monkeypatch):
         captured: dict = {}

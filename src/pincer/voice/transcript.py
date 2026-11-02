@@ -37,6 +37,16 @@ COMPLETION_CLAIM_PATTERNS = re.compile(
 )
 
 
+# Delivery outcomes an agent line's `state` can carry instead of the call
+# phase. "undelivered" is a failure (send_speech returned False);
+# "cancelled" is a deliberate cut before any of it played; "interrupted"
+# played in part. `TranscriptEntry.delivery_reason` says why.
+UNDELIVERED = "undelivered"
+CANCELLED = "cancelled"
+INTERRUPTED = "interrupted"
+NOT_PLAYED_STATES = frozenset({UNDELIVERED, CANCELLED})
+
+
 class Speaker:
     AGENT = "agent"
     CALLER = "caller"
@@ -55,6 +65,10 @@ class TranscriptEntry:
     # The last agent line of a provider utterance (sent with last=True). A
     # streamed turn spans several; see mark_interrupted().
     ends_utterance: bool = False
+    # Why an agent line is UNDELIVERED / CANCELLED / INTERRUPTED: a
+    # send_speech failure (`send_error`, `tts_failed`, …), `barge_in` or
+    # `call_ended`. Empty for a line that played.
+    delivery_reason: str = ""
 
 
 @dataclass
@@ -105,6 +119,7 @@ class TranscriptLogger:
         is_final: bool = True,
         state: str = "",
         position: int | None = None,
+        delivery_reason: str = "",
     ) -> None:
         """Append a line, or with `position` insert it there: a line whose
         send was cancelled is logged where the send began, before whatever
@@ -115,6 +130,7 @@ class TranscriptLogger:
             confidence=confidence,
             is_final=is_final,
             state=state,
+            delivery_reason=delivery_reason,
         )
         if position is None:
             self._entries.append(entry)
@@ -139,7 +155,9 @@ class TranscriptLogger:
         Termin…") — else the latest. Utterances before it played in full
         and keep their state; inside it, lines `heard` contains keep theirs,
         the first one it does not was cut off ("interrupted"), and every later
-        line never played ("undelivered"). Returns how many lines were re-marked.
+        line never played ("cancelled" — the caller's barge-in, not a
+        failure). Lines already marked as not played keep their state.
+        Returns how many lines were re-marked.
         """
 
         def _norm(value: str) -> str:
@@ -176,9 +194,10 @@ class TranscriptLogger:
             for entry in utterance:
                 if not cut and offset == 0 and _norm(entry.text) in heard_norm:
                     continue
-                if entry.state == "undelivered":
+                if entry.state in NOT_PLAYED_STATES:
                     continue
-                entry.state = "undelivered" if cut else "interrupted"
+                entry.state = CANCELLED if cut else INTERRUPTED
+                entry.delivery_reason = "barge_in"
                 cut = True
                 marked += 1
         return marked
@@ -296,6 +315,7 @@ class TranscriptLogger:
                     "confidence": entry.confidence,
                     "is_final": entry.is_final,
                     "state": entry.state,
+                    "delivery_reason": entry.delivery_reason,
                     "timestamp": entry.timestamp,
                 }
                 for entry in self._entries

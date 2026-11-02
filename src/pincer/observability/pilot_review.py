@@ -151,7 +151,12 @@ async def _transcript(settings: Settings | Any, call_sid: str) -> list[dict[str,
     except Exception:
         return []
     return [
-        {"speaker": str(r["speaker"] or ""), "text": mask_pii(str(r["text"] or "")), "state": str(r["state"] or "")}
+        {
+            "speaker": str(r["speaker"] or ""),
+            "text": mask_pii(str(r["text"] or "")),
+            "state": str(r["state"] or ""),
+            "delivery_reason": str(r.get("delivery_reason") or ""),
+        }
         for r in lines
     ]
 
@@ -165,6 +170,16 @@ REVIEW_QUESTIONS = (
     ("disclosure", "Was the AI disclosure audible and early?"),
     ("would_ship", "Would you be comfortable with this call going to your own customer? (y/n)"),
 )
+
+
+def _delivery_suffix(line: dict[str, str]) -> str:
+    """Marks an agent line that did not play: a failure apart from a deliberate cut."""
+    labels = {"undelivered": "UNDELIVERED", "cancelled": "CANCELLED"}
+    label = labels.get(line.get("state", ""))
+    if label is None:
+        return ""
+    reason = line.get("delivery_reason", "")
+    return f"  ⟵ {label} ({reason})" if reason else f"  ⟵ {label}"
 
 
 def render_spot_check(calls: list[ReviewCall], week: str = "") -> str:
@@ -212,7 +227,7 @@ def render_spot_check(calls: list[ReviewCall], week: str = "") -> str:
             lines.append("```")
             for line in call.transcript:
                 marker = "AGENT" if line["speaker"] == "agent" else line["speaker"].upper()
-                suffix = "  ⟵ UNDELIVERED" if line["state"] == "undelivered" else ""
+                suffix = _delivery_suffix(line)
                 lines.append(f"{marker:>8}: {line['text']}{suffix}")
             lines.append("```")
         else:
