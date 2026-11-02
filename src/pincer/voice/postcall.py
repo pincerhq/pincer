@@ -23,6 +23,8 @@ from pincer.voice import analytics as an
 from pincer.voice import scheduling, status_notify, threads
 from pincer.voice.briefing import briefing_from_state, report_adherence
 from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, CallDirection
+from pincer.voice.in_call_tools import draft_in_call_zone
+from pincer.voice.localtime import get_voice_timezone
 from pincer.voice.outcome import (
     CallOutcome,
     extract_outcome,
@@ -559,6 +561,15 @@ class PostCallProcessor:
             lines.append(f"  • {summary} ({reason})" if reason else f"  • {summary}")
         return "\n".join(lines)
 
+    def _followup_call(self, item: dict[str, Any]) -> str:
+        """``tool=…, args=…`` of a remembered follow-up (deferred in the call, or proposed by the
+        outcome extractor), its times pinned to the call's zone: a later "yes, do it" in chat would
+        otherwise read offset-less times in the calendar's zone, hours off."""
+        tool = str(item.get("tool", ""))
+        draft = item.get("draft_args")
+        args = draft_in_call_zone(tool, draft, get_voice_timezone(self._settings)) if isinstance(draft, dict) else {}
+        return f"tool={tool}, args={json.dumps(args, ensure_ascii=False)}"
+
     async def _write_deferred_followups(
         self,
         call_sid: str,
@@ -578,9 +589,7 @@ class PostCallProcessor:
                     user_id=user_id,
                     content=(
                         f"[Call with {target_label}] Proposed follow-up (deferred during the call, "
-                        f"{item.get('reason', '')}): {item.get('summary', '')} — "
-                        f"tool={item.get('tool', '')}, "
-                        f"args={json.dumps(item.get('draft_args', {}), ensure_ascii=False)}"
+                        f"{item.get('reason', '')}): {item.get('summary', '')} — {self._followup_call(item)}"
                     ),
                     category=MEMORY_CATEGORY,
                     extra_tags=tags,
@@ -685,8 +694,7 @@ class PostCallProcessor:
                     user_id=user_id,
                     content=(
                         f"[Call with {target_label}] Proposed follow-up: {suggestion.get('reason', '')} — "
-                        f"tool={suggestion.get('tool', '')}, "
-                        f"args={json.dumps(suggestion.get('draft_args', {}), ensure_ascii=False)}"
+                        f"{self._followup_call(suggestion)}"
                     ),
                     category=MEMORY_CATEGORY,
                     extra_tags=[*tags, "followup"],

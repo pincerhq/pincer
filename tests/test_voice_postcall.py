@@ -330,3 +330,46 @@ class TestTranscriptTool:
         result = await get_call_transcript("CA_t1")
         assert "no user identity" in result
         assert "Termin" not in result
+
+
+class _Notes:
+    def __init__(self) -> None:
+        self.contents: list[str] = []
+
+    async def store_memory(self, user_id, content, **_kwargs):
+        self.contents.append(content)
+        return str(len(self.contents))
+
+
+def _remembered_args(note: str) -> dict:
+    return json.loads(note.split("args=", 1)[1])
+
+
+async def test_both_kinds_of_follow_up_are_remembered_in_the_calls_zone(tmp_path):
+    """PR #316 review 3 (S4): outcome follow-ups were stored with offset-less times, so a later "yes, do
+    it" in chat read them in the calendar's zone. Deferred and outcome follow-ups are pinned alike."""
+    from pincer.voice.outcome import CallOutcome
+
+    settings = SimpleNamespace(db_path=tmp_path / "pincer.db", voice_timezone="Europe/Berlin", timezone="Europe/Kyiv")
+    notes = _Notes()
+    processor = PostCallProcessor(settings, memory=notes)
+    draft = {"summary": "Dentist", "start": "2026-11-03T14:00:00", "end": "2026-11-03T15:00:00"}
+    pinned = {
+        **draft,
+        "start": "2026-11-03T14:00:00+01:00",
+        "end": "2026-11-03T15:00:00+01:00",
+        "timezone": "Europe/Berlin",
+    }
+
+    await processor._write_memory_notes(
+        CALL_SID,
+        "tester",
+        "Dr. X",
+        CallOutcome(follow_up_suggestions=[{"tool": "google__create_event", "draft_args": draft}]),
+    )
+    await processor._write_deferred_followups(
+        CALL_SID, "tester", "Dr. X", [{"tool": "google__create_event", "draft_args": draft, "reason": "tool_timeout"}]
+    )
+
+    remembered = [_remembered_args(c) for c in notes.contents if "Proposed follow-up" in c]
+    assert remembered == [pinned, pinned]

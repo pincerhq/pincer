@@ -666,3 +666,43 @@ async def test_a_deferred_move_replayed_in_chat_keeps_the_voice_zone(
     assert fake.start_of("primary", event_id) == starts
     assert fake.event("primary", event_id)["start"]["timeZone"] == "Europe/Kyiv"
     assert "timezone" not in deferred["draft_args"]
+
+
+class _RememberedNotes:
+    """The memory backend's store_memory, capturing what postcall remembers."""
+
+    def __init__(self) -> None:
+        self.contents: list[str] = []
+
+    async def store_memory(self, user_id: str, content: str, **_kwargs: Any) -> str:
+        self.contents.append(content)
+        return str(len(self.contents))
+
+
+async def test_an_outcome_follow_up_replayed_in_chat_keeps_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review 3 (S4): the callee agrees to "Tuesday 14:00" on a Berlin call (Kyiv calendar), the
+    outcome extractor drafts start=…T14:00:00, and the owner approves it later in chat. Postcall must
+    remember it pinned to the call's zone, so the replay books 14:00 Berlin, not 14:00 Kyiv."""
+    import json
+
+    from pincer.voice.outcome import CallOutcome
+    from pincer.voice.postcall import PostCallProcessor
+
+    day = _tomorrow()
+    draft = {"summary": "Dentist", "start": f"{day}T14:00:00", "end": f"{day}T15:00:00"}
+    outcome = CallOutcome(
+        follow_up_suggestions=[{"tool": "google__create_event", "reason": "book it", "draft_args": draft}]
+    )
+    notes = _RememberedNotes()
+
+    await PostCallProcessor(berlin_settings, memory=notes)._write_memory_notes("CA-S4", OWNER, "Dr. X", outcome)
+    (note,) = [c for c in notes.contents if "Proposed follow-up" in c]
+    remembered = json.loads(note.split("args=", 1)[1])
+    await _replayed_in_chat(tmp_path, berlin_settings, registry, costs, "google__create_event", remembered)
+
+    (event,) = fake.events_on("primary")
+    berlin = ZoneInfo("Europe/Berlin")
+    assert fake.start_of("primary", event["id"]) == datetime.fromisoformat(f"{day}T14:00:00").replace(tzinfo=berlin)
+    assert event["start"]["timeZone"] == "Europe/Berlin"
