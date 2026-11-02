@@ -605,6 +605,31 @@ async def test_busy_times_without_a_window_on_a_call_are_spoken_in_the_voice_zon
     assert llm.results == [f"[TOOL RESULT: Busy is: {_spoken_day(day)} from 10:00 AM to 11:00 AM.]"]
 
 
+async def test_a_free_busy_check_from_a_bare_day_on_a_call_speaks_the_free_slots(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review 3 (S7): time_min as a bare date alone makes the tool check that whole local day,
+    but the speech had no window end and fell back to busy-only. Busy 15:00-16:00 Berlin leaves
+    midnight to 15:00 and 16:00 to midnight free."""
+    from pincer.voice.tool_speech import spoken_datetime
+
+    day = _tomorrow()
+    berlin = ZoneInfo("Europe/Berlin")
+    at = datetime.fromisoformat(f"{day}T15:00:00").replace(tzinfo=berlin)
+    fake.seed_event("primary", "Dentist", at.isoformat(), (at + timedelta(hours=1)).isoformat())
+    llm = _OneCallLLM("google__check_freebusy", {"emails": "primary", "time_min": day})
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert fake.sent("freebusy.query")  # precondition: the check really ran
+    four_pm = at + timedelta(hours=1)
+    midnight = datetime.fromisoformat(day).replace(tzinfo=berlin) + timedelta(days=1)
+    assert llm.results == [
+        f"[TOOL RESULT: Free would be: {_spoken_day(day)} from 12:00 AM to 3:00 PM and "
+        f"{spoken_datetime(four_pm, 'en')} to {spoken_datetime(midnight, 'en')}.]"
+    ]
+
+
 async def _deferred_on_a_call(settings: Settings, registry: ToolRegistry, tool: str, arguments: dict[str, Any]):
     """A call write the gate defers (the tool times out): the queued follow-up's draft arguments."""
     gate = _call_gate(settings, "generic", registry)

@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pincer.integrations.google.calendar_tz import is_date_only, localize, needs_zone
 from pincer.voice import approvals, tool_policy
 from pincer.voice.engine import CallDirection
 from pincer.voice.localtime import get_voice_timezone
@@ -49,9 +50,7 @@ from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
 from pincer.voice.tool_speech import (
-    DATE_ONLY_RE,
     describe_action,
-    parse_iso,
     render,
     render_denied,
     render_duplicate,
@@ -159,10 +158,9 @@ def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> 
         return draft
     for key in CALL_LOCAL_TIME_ARGS:
         value = draft.get(key)
-        parsed = parse_iso(value)
-        if parsed is not None and parsed.tzinfo is None and not DATE_ONLY_RE.match(str(value).strip()):
-            draft[key] = parsed.replace(tzinfo=zone).isoformat()
-    timed = not DATE_ONLY_RE.match(str(draft.get("start") or "").strip())
+        if isinstance(value, str) and needs_zone(value):
+            draft[key] = localize(value, zone)
+    timed = not is_date_only(str(draft.get("start") or ""))
     if tool_name in CALL_ZONED_CREATE_TOOLS and timed:
         draft["timezone"] = zone.key
     return draft

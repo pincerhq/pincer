@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from pincer.integrations.google.calendar_tz import is_date_only, localize_bound
 from pincer.voice.prompts import get_prompt
 
 if TYPE_CHECKING:
@@ -32,7 +33,6 @@ logger = logging.getLogger(__name__)
 # Anything that looks like machine data: JSON braces and ISO-8601 timestamps.
 ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 RAW_DATA_RE = re.compile(r"[{}]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
-DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _RANGE_JOINERS = {"de": " bis ", "uk": " до ", "en": " to "}
 
 # Tool results whose first line starts like this are failures.
@@ -182,17 +182,26 @@ def _is_error(result: str) -> bool:
 # ── Per-tool renderers ───────────────────────────────────────────────
 
 
-def _window_bound(value: Any, zone: ZoneInfo | None, *, end: bool = False) -> datetime | None:
-    """A free/busy bound as the tool read it: on a call (``zone``), offset-less times are in the
-    call's zone and a bare date is that whole local day; without a zone, as given."""
-    parsed = parse_iso(value)
-    if parsed is None or zone is None:
-        return parsed
-    if parsed.tzinfo is not None:
-        return parsed.astimezone(zone)
-    if end and _is_date_only(value):
-        parsed += timedelta(days=1)
-    return parsed.replace(tzinfo=zone)
+def _freebusy_window(args: dict[str, Any], zone: ZoneInfo | None) -> tuple[datetime | None, datetime | None]:
+    """The free/busy window as the tool read it (tools_calendar._range, through the same
+    calendar_tz helpers): on a call (``zone``), offset-less times are in the call's zone, a bare
+    date is that whole local day, and a bare-date ``time_min`` alone is that one day. Without a
+    zone, as given."""
+    time_min, time_max = args.get("time_min"), args.get("time_max")
+    if zone is None:
+        return parse_iso(time_min), parse_iso(time_max)
+
+    def _bound(value: Any, *, end: bool = False) -> datetime | None:
+        if not isinstance(value, str) or parse_iso(value) is None:
+            return None
+        bound = parse_iso(localize_bound(value, zone, end=end))
+        return bound.astimezone(zone) if bound is not None else None
+
+    if time_max:
+        return _bound(time_min), _bound(time_max, end=True)
+    if _is_date_only(time_min):
+        return _bound(time_min), _bound(time_min, end=True)
+    return _bound(time_min), None
 
 
 def _render_freebusy(result: str, args: dict[str, Any], language: str, zone: ZoneInfo | None = None) -> str:
@@ -203,8 +212,7 @@ def _render_freebusy(result: str, args: dict[str, Any], language: str, zone: Zon
         return str(get_prompt("TOOL_ERROR", language) or "")
     if zone is not None:  # Google's slots are UTC; the caller hears the call's wall clock
         busy = [(start.astimezone(zone), end.astimezone(zone)) for start, end in busy]
-    window_start = _window_bound(args.get("time_min"), zone)
-    window_end = _window_bound(args.get("time_max"), zone, end=True)
+    window_start, window_end = _freebusy_window(args, zone)
     if not busy:
         return _tpl("google__check_freebusy.all_free", language)
     if window_start is None or window_end is None:
@@ -463,7 +471,7 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
 
 
 def _is_date_only(value: Any) -> bool:
-    return isinstance(value, str) and bool(DATE_ONLY_RE.match(value.strip()))
+    return isinstance(value, str) and is_date_only(value)
 
 
 def _spoken_all_day(first: datetime, end: datetime | None, language: str) -> str:
@@ -484,7 +492,6 @@ def _spoken_fallback_when(args: dict[str, Any], language: str) -> str:
 
 
 __all__ = [
-    "DATE_ONLY_RE",
     "ISO_TIMESTAMP_RE",
     "RAW_DATA_RE",
     "WEBSEARCH_MAX_CHARS",
