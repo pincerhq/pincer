@@ -325,6 +325,7 @@ ACTION_DESCRIPTIONS = {
 
 TOOL_SPEECH = {
     "when.all_day": "{days}, на весь день",
+    "when.from_day": "{day} як день початку",
     "google__check_freebusy.free": "Вільно: {slots}.",
     "google__check_freebusy.all_free": "Увесь цей проміжок вільний.",
     "google__check_freebusy.none_free": "На жаль, у цей проміжок нічого не вільно.",

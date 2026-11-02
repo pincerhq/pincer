@@ -175,6 +175,22 @@ def test_an_all_day_create_is_confirmed_as_whole_days(language, one_day, three_d
     assert ts.describe_action("google__create_event", mixed, language) == one_day
 
 
+@pytest.mark.parametrize(
+    ("language", "spoken"),
+    [
+        ("en", "move the appointment 'Vacation' to start on Tuesday, November 10"),
+        ("de", "den Termin „Vacation“ auf einen Beginn am Dienstag, der zehnte November verschieben"),
+        ("uk", "перенесу зустріч 'Vacation' на вівторок, 10 листопада як день початку"),
+    ],
+)
+def test_an_all_day_update_without_an_end_names_no_length(language, spoken):
+    """PR #316 review 3 (S6): a new bare start alone keeps the stored duration (a 3-day event stays 3 days),
+    so the caller must not hear "Tuesday, November 10, all day", which promises one day."""
+    args = {"event_id": "e", "summary": "Vacation", "start": "2026-11-10"}
+
+    assert ts.describe_action("google__update_event", args, language) == spoken
+
+
 def test_spoken_datetime_forms():
     from datetime import datetime
 

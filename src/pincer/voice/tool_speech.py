@@ -437,7 +437,10 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
     table = get_prompt("ACTION_DESCRIPTIONS", language) or {}
     template = str(table.get(tool_name) or table.get("default") or "{tool}")
     start = parse_iso(args.get("start"))
-    if start and _is_date_only(args.get("start")):
+    if start and _is_date_only(args.get("start")) and tool_name == "google__update_event" and not args.get("end"):
+        # A new start alone keeps the stored duration, which the caller has not heard: no length.
+        when = _tpl("when.from_day", language).format(day=spoken_datetime(start, language, include_time=False))
+    elif start and _is_date_only(args.get("start")):
         end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
         when = _spoken_all_day(start, end, language)
     else:
