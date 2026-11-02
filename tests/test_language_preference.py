@@ -52,7 +52,17 @@ def test_with_language_replaces_or_appends():
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("UK", "uk"), (" de ", "de"), ("Ukrainian", "Ukrainian"), ("", None), ("u.k", None), ("x" * 41, None)],
+    [
+        ("UK", "uk"),
+        (" de ", "de"),
+        ("Ukrainian", "uk"),
+        ("Українська", "uk"),
+        ("German", "de"),
+        ("Klingon", "Klingon"),
+        ("", None),
+        ("u.k", None),
+        ("x" * 41, None),
+    ],
 )
 def test_clean_language(raw, expected):
     assert clean_language(raw) == expected
@@ -78,6 +88,22 @@ async def test_set_without_a_profile_creates_one(memory: SQLiteMemoryBackend):
     assert await get_preferred_language(memory, "u1") == "en"
     assert len(await memory.list_memories(user_id="u1", category="profile")) == 1
     assert await get_preferred_language(memory, "u2") is None
+
+
+async def test_set_keeps_the_profile_tags():
+    """The MCP backend replaces a memory's tags on update: without its
+    user/category tags the profile would never be found again."""
+    from pincer.memory.base import Memory
+
+    tags = ["user:u1", "category:profile"]
+    backend = AsyncMock()
+    backend.list_memories.return_value = [
+        Memory(id="m1", user_id="u1", content="Preferred language: en.", category="profile", created_at=0.0, tags=tags)
+    ]
+
+    await set_preferred_language(backend, "u1", "uk")
+
+    backend.update_memory.assert_awaited_once_with("m1", content="Preferred language: uk.", tags=tags)
 
 
 # ── the tool ─────────────────────────────────────────────────────────

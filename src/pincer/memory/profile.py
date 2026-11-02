@@ -34,13 +34,48 @@ def with_language(content: str, language: str) -> str:
     return f"{content.strip()} {sentence}".strip()
 
 
+# Names a model or user may give instead of a code. Voice reads the stored
+# value as a code (its first two letters), so "German" must not stay "German".
+_NAME_TO_CODE = {
+    "english": "en",
+    "englisch": "en",
+    "англійська": "en",
+    "german": "de",
+    "deutsch": "de",
+    "німецька": "de",
+    "ukrainian": "uk",
+    "ukrainisch": "uk",
+    "українська": "uk",
+    "french": "fr",
+    "français": "fr",
+    "spanish": "es",
+    "español": "es",
+    "italian": "it",
+    "italiano": "it",
+    "polish": "pl",
+    "polski": "pl",
+    "portuguese": "pt",
+    "português": "pt",
+    "dutch": "nl",
+    "nederlands": "nl",
+    "turkish": "tr",
+    "türkçe": "tr",
+    "russian": "ru",
+    "русский": "ru",
+}
+
+
 def clean_language(language: str) -> str | None:
     """A storable language value: one short line, no sentence break (the
-    profile is parsed by sentence). Two- or three-letter codes are lowercased."""
+    profile is parsed by sentence). Codes are lowercased and known language
+    names become their ISO 639-1 code; anything else is kept as given."""
     value = " ".join(str(language or "").split()).strip(" .")
     if not value or len(value) > MAX_LANGUAGE_LEN or "." in value:
         return None
-    return value.lower() if len(value) <= 3 else value
+    lowered = value.lower()
+    if lowered in _NAME_TO_CODE:
+        return _NAME_TO_CODE[lowered]
+    return lowered if len(value) <= 3 else value
 
 
 async def get_preferred_language(memory: BaseMemoryBackend, user_id: str) -> str | None:
@@ -57,7 +92,12 @@ async def set_preferred_language(memory: BaseMemoryBackend, user_id: str, langua
     of their profile (name, use-case) as it was."""
     entries = await memory.list_memories(user_id=user_id, category=PROFILE_CATEGORY, limit=1)
     if entries:
-        await memory.update_memory(entries[0].id, content=with_language(entries[0].content, language))
+        entry = entries[0]
+        # The tags go back as they were: the MCP backend replaces them on an
+        # update, and a profile without its user/category tags is never found again.
+        await memory.update_memory(
+            entry.id, content=with_language(entry.content, language), tags=list(entry.tags) or None
+        )
         return
     await memory.store_memory(
         user_id=user_id,

@@ -49,6 +49,9 @@ German please"), switch IMMEDIATELY: start your very next response with exactly 
 [SWITCH_LANGUAGE:<code>] (supported codes: {supported}) followed by your first sentence in the new \
 language. Do NOT ask for confirmation first — speech recognition still listens in the old language, \
 so an answer given in the new language would be lost.
+- If the caller asks for a language NOT in the supported codes, reply with only the token \
+[SWITCH_LANGUAGE:<its ISO 639-1 code>] and nothing else: the system tells the caller which languages \
+this line offers. Never refuse it in your own words.
 - Only if the request is genuinely ambiguous, ask ONE short clarifying question in English.
 - Never mix languages within one response.\
 """

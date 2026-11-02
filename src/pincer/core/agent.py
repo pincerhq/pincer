@@ -1726,23 +1726,34 @@ class Agent:
         if not self._memory or skip_memory:
             return _with_extra(base_prompt)
 
-        try:
-            memories = await self._memory.search_text(user_text, user_id=user_id, limit=3)
-            memory_block = "\n".join(f"- {m.content}" for m in memories)
-        except Exception:
-            self._memory_outage.failed()
-            return _with_extra(base_prompt)
-        self._memory_outage.succeeded()
-        language = None
-        if preferred_language:
-            # Read directly, not through the search above: a message that
-            # shares no word with the profile must still get its language.
-            # A failed read costs the language line, not the memories.
+        store = self._memory
+
+        async def search() -> str | None:
+            """The memories block ("" for none), or None when the search fails."""
             try:
-                language = await get_preferred_language(self._memory, user_id)
+                memories = await store.search_text(user_text, user_id=user_id, limit=3)
+                block = "\n".join(f"- {m.content}" for m in memories)
+            except Exception:
+                # Inside the handler, so the outage warning carries the traceback.
+                self._memory_outage.failed()
+                return None
+            self._memory_outage.succeeded()
+            return block
+
+        async def read_language() -> str | None:
+            # Read directly, not through the search: a message that shares no
+            # word with the profile must still get its language. Either read
+            # failing costs only its own block.
+            if not preferred_language:
+                return None
+            try:
+                return await get_preferred_language(store, user_id)
             except Exception:
                 logger.warning("Failed to read the preferred language for prompt", exc_info=True)
-        if memories:
+                return None
+
+        memory_block, language = await asyncio.gather(search(), read_language())
+        if memory_block:
             base_prompt += f"\n\n[Relevant memories about this user]\n{memory_block}"
         if language:
             base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
@@ -1888,6 +1899,14 @@ class Agent:
         )
 
         if self._memory:
+            if not language:
+                # add_profile replaces the whole profile: a language set
+                # earlier (set_preferred_language, another channel's
+                # onboarding) must survive an answer that names none.
+                try:
+                    language = await get_preferred_language(self._memory, user_id)
+                except Exception:
+                    logger.debug("Failed to read the stored preferred language", exc_info=True)
             try:
                 await self._memory.add_profile(
                     user_id=user_id,

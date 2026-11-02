@@ -386,3 +386,10 @@ class TestLanguagePolicyOffersConfiguredLanguages:
             for key in ("LANGUAGE_NAMES", "LANGUAGE_NAMES_CONTINUE"):
                 names = get_prompt(key, pack)
                 assert set(KNOWN_LANGUAGES) <= set(names), f"{pack}.{key}"
+
+    def test_policy_routes_unsupported_requests_to_the_token(self):
+        from pincer.voice.language_guard import language_policy
+
+        for language in ("en", "de", "uk"):
+            policy = language_policy(language, _settings(voice_supported_languages="en,de"))
+            assert policy.count("[SWITCH_LANGUAGE:") == 2, language

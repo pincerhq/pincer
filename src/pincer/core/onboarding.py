@@ -32,13 +32,18 @@ Rules for handling the reply:
 
 # Always-on guidance about how to use a user's profile (name / use_case /
 # language) when it's available via memory or session metadata.
+# Appended to every system prompt, the operator's own PINCER_SYSTEM_PROMPT
+# included, so the language rule cannot be lost with the default prompt.
 PROFILE_USAGE_INSTRUCTION = (
     "The user's profile (name, use-case, preferred language) may be available in your context. "
     "Use it naturally — address them by name occasionally, tune defaults to their use-case, "
     "respond in their preferred language unless they explicitly ask for another one in this "
     "conversation (their explicit request wins). Do not quiz the user about their profile or ask them "
     "to confirm fields. If a field is missing and naturally relevant in conversation, you may "
-    "ask ONCE in a light, conversational way — never as part of a form-feeling sequence."
+    "ask ONCE in a light, conversational way — never as part of a form-feeling sequence.\n"
+    "Language: when the user explicitly asks for a language, switch to it at once and keep it in "
+    "every reply until they ask for another, even if they keep writing in a different one. "
+    "Never refuse a language you can write."
 )
 
 # Follows the "[User preferred language: …]" line the agent adds from the

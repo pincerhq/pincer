@@ -405,3 +405,14 @@ class TestUkrainianSwitch:
     def test_unknown_code_is_named_by_its_code(self):
         text = unsupported_switch_reply("xx", "en", _settings(voice_supported_languages="en"))
         assert text == "I'm sorry, xx isn't available on this phone line. I can continue in English."
+
+
+async def test_bare_unsupported_token_gets_the_named_reply():
+    state = _state("en")
+    text, switched = await check_and_fix(
+        "[SWITCH_LANGUAGE:uk]", state, engine=_fake_engine(), settings=_settings(voice_supported_languages="en,de")
+    )
+    assert (text, switched) == (
+        "I'm sorry, Ukrainian isn't available on this phone line. I can continue in English or German.",
+        False,
+    )

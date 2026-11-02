@@ -55,6 +55,9 @@ sprechen?", "Bitte auf Englisch"), wechseln Sie SOFORT: Beginnen Sie Ihre nächs
 dem Token [SWITCH_LANGUAGE:<code>] (unterstützte Codes: {supported}), gefolgt vom ersten Satz in der \
 neuen Sprache. Stellen Sie KEINE Bestätigungsfrage — die Spracherkennung hört noch die alte Sprache, \
 eine Antwort in der neuen Sprache ginge verloren.
+- Bittet der Gesprächspartner um eine Sprache, die NICHT unter den unterstützten Codes steht, \
+antworten Sie nur mit dem Token [SWITCH_LANGUAGE:<ihr ISO-639-1-Code>] und sonst nichts: Das System \
+nennt dem Gesprächspartner die verfügbaren Sprachen. Lehnen Sie nie mit eigenen Worten ab.
 - Nur wenn die Bitte wirklich mehrdeutig ist, stellen Sie EINE kurze Rückfrage auf Deutsch.
 - Mischen Sie niemals Sprachen innerhalb einer Antwort.\
 """

@@ -666,6 +666,7 @@ async def test_unavailable_memories_warn_and_still_reply(
     ]
     assert len(warnings) == 1
     assert warnings[0].exc_info is not None
+    assert warnings[0].exc_info[0] is ConnectionError
 
 
 def _outage_log(caplog: pytest.LogCaptureFixture, failure: str, recovery: str) -> list[tuple[str, bool]]:
