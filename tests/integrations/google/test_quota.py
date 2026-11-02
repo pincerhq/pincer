@@ -64,3 +64,46 @@ async def test_only_short_lived_limits_are_retried(status, reason, calls):
 )
 def test_an_outage_is_google_down_or_limiting_us(error, outage):
     assert is_google_outage(error) is outage
+
+
+def _error_info_http_error(status: int, error_info_reason: str, *, legacy_reason: str = "") -> HttpError:
+    """A body with a google.rpc ErrorInfo ``details`` array (UPPER_SNAKE reason), optionally beside the
+    legacy ``errors`` array. googleapiclient (2.194.0, errors.py:64-73) fills ``error_details`` from the
+    first of ``detail``, ``details``, ``errors``, ``message`` it finds, so ``details`` hides ``errors``."""
+    error: dict[str, object] = {
+        "code": status,
+        "message": "Rate Limit Exceeded",
+        "details": [
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": error_info_reason,
+                "domain": "googleapis.com",
+            }
+        ],
+    }
+    if legacy_reason:
+        error["errors"] = [{"reason": legacy_reason, "message": "Rate Limit Exceeded", "domain": "usageLimits"}]
+    return HttpError(SimpleNamespace(status=status, reason=f"HTTP {status}"), json.dumps({"error": error}).encode())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _error_info_http_error(403, "RATE_LIMIT_EXCEEDED", legacy_reason="rateLimitExceeded"),
+        _error_info_http_error(403, "RATE_LIMIT_EXCEEDED"),
+        _error_info_http_error(403, "QUOTA_EXCEEDED"),
+    ],
+    ids=["details-and-errors", "error-info-only", "error-info-quota"],
+)
+def test_a_limit_reported_in_error_info_details_is_an_outage(error):
+    """Review 3 (Q1): a 403 whose body carries ``details`` was read as a bad request, so the reminder
+    loop logged a traceback every tick instead of treating it as Google limiting us."""
+    assert is_google_outage(error) is True
+
+
+def test_error_reasons_reads_both_the_errors_array_and_error_info_details():
+    from pincer.integrations.google.quota import error_reasons
+
+    error = _error_info_http_error(403, "USER_RATE_LIMIT_EXCEEDED", legacy_reason="rateLimitExceeded")
+
+    assert error_reasons(error) == {"rateLimitExceeded", "userRateLimitExceeded"}

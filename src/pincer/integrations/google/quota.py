@@ -9,8 +9,10 @@ an exponential-backoff retry wrapper.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
+import re
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
@@ -27,6 +29,7 @@ RETRIABLE_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded", "ba
 # Exhausted quotas last until Google resets them (daily): never retried, but an outage, not a bug.
 EXHAUSTED_QUOTA_REASONS = frozenset({"quotaExceeded", "dailyLimitExceeded"})
 _SERVER_ERROR_STATUS = 500
+_UPPER_SNAKE_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$")
 
 
 def _http_error(exc: BaseException) -> Any:
@@ -38,12 +41,44 @@ def _http_error(exc: BaseException) -> Any:
     return exc if isinstance(exc, HttpError) else None
 
 
+def _reason_name(raw: str) -> str:
+    """A reason as the legacy ``errors[].reason`` spells it: google.rpc ErrorInfo's UPPER_SNAKE
+    (``RATE_LIMIT_EXCEEDED``) becomes camelCase (``rateLimitExceeded``); others pass unchanged."""
+    if not _UPPER_SNAKE_RE.match(raw):
+        return raw
+    first, *rest = raw.lower().split("_")
+    return first + "".join(part.capitalize() for part in rest)
+
+
+def _error_entries(error: Any) -> list[Any]:
+    """Both reason sources of an error body: the legacy ``error.errors[]`` and google.rpc
+    ``error.details[]`` (ErrorInfo). googleapiclient's ``error_details`` holds only the first of
+    ``detail``/``details``/``errors``/``message`` present, so ``details`` hides ``errors``."""
+    entries = list(error.error_details) if isinstance(error.error_details, list) else []
+    try:
+        data = json.loads(error.content.decode("utf-8"))
+    except (AttributeError, UnicodeDecodeError, ValueError):
+        return entries
+    body = data[0] if isinstance(data, list) and data else data
+    inner = body.get("error") if isinstance(body, dict) else None
+    if isinstance(inner, dict):
+        for key in ("errors", "details"):
+            if isinstance(inner.get(key), list):
+                entries.extend(inner[key])
+    return entries
+
+
 def error_reasons(exc: BaseException) -> set[str]:
-    """The ``reason`` fields of a Google ``HttpError`` (empty for anything else)."""
+    """The ``reason`` fields of a Google ``HttpError``, from ``errors[]`` and ErrorInfo ``details[]``
+    alike, in camelCase (empty for anything else)."""
     error = _http_error(exc)
     if error is None:
         return set()
-    return {str(d.get("reason")) for d in error.error_details or [] if isinstance(d, dict) and d.get("reason")}
+    return {
+        _reason_name(str(entry["reason"]))
+        for entry in _error_entries(error)
+        if isinstance(entry, dict) and entry.get("reason")
+    }
 
 
 def _is_retriable(exc: Exception) -> bool:
