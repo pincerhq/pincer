@@ -796,6 +796,7 @@ async def test_inbound_call_excludes_memory_search():
 async def test_tool_timeout_defers_to_followup():
     settings = _settings()
     settings.voice_tool_timeout_s = 0.05  # type: ignore[assignment]
+    settings.voice_timezone = "Europe/Berlin"
     agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT, delay_s=1.0, then="Fertig.")]])
     channel, engine, state = await _start(agent, settings=settings, appointment=True, modes=OFF)
     await engine.on_speech_input(CALL, "Dienstag passt.")
@@ -804,7 +805,9 @@ async def test_tool_timeout_defers_to_followup():
     assert "Fertig." not in spoken
     assert state.metadata["writes_used"] == 0
     deferred = state.metadata["deferred_actions"]
-    assert deferred[0]["reason"] == "tool_timeout" and deferred[0]["draft_args"] == CREATE_ARGS
+    # Stored like the same create made on the call: in the call's zone (PR #316 review).
+    assert deferred[0]["reason"] == "tool_timeout"
+    assert deferred[0]["draft_args"] == {**CREATE_ARGS, "timezone": "Europe/Berlin"}
     denied = [a for a in channel.get_transcript(CALL).actions if a.action_type == "tool_denied"][0]
     assert denied.deny_reason == "tool_timeout"
     # The deferred action reaches the post-call report + memory follow-ups
@@ -1013,3 +1016,39 @@ def test_time_context_gives_local_clock_and_timezone():
     assert "CURRENT LOCAL DATE" in en and "(never UTC)" in en
     uk = channel._time_context("uk", "sie")
     assert "Europe/Berlin" in uk and "UTC" in uk
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "draft"),
+    [
+        (  # offset-less: the call zone's offset; a timed create is stored in the call's zone
+            "google__create_event",
+            {"summary": "A", "start": "2026-11-05T14:00:00", "end": "2026-11-05T15:00:00"},
+            {
+                "summary": "A",
+                "start": "2026-11-05T14:00:00+01:00",
+                "end": "2026-11-05T15:00:00+01:00",
+                "timezone": "Europe/Berlin",
+            },
+        ),
+        (  # a zone the model named reads its times, on the call and off it: kept as is
+            "google__create_event",
+            {"start": "2026-11-05T14:00:00", "end": "2026-11-05T15:00:00", "timezone": "Europe/Kyiv"},
+            {"start": "2026-11-05T14:00:00", "end": "2026-11-05T15:00:00", "timezone": "Europe/Kyiv"},
+        ),
+        (  # bare dates stay whole days, with no zone
+            "google__create_event",
+            {"start": "2026-11-05", "end": "2026-11-06"},
+            {"start": "2026-11-05", "end": "2026-11-06"},
+        ),
+        (  # a move: offsets only, the event keeps its own zone
+            "google__update_event",
+            {"event_id": "e1", "start": "2026-11-05T17:00:00+02:00"},
+            {"event_id": "e1", "start": "2026-11-05T17:00:00+02:00"},
+        ),
+    ],
+)
+def test_a_deferred_draft_pins_the_calls_zone(tool, args, draft):
+    from zoneinfo import ZoneInfo
+
+    assert ict.draft_in_call_zone(tool, args, ZoneInfo("Europe/Berlin")) == draft

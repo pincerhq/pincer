@@ -48,7 +48,14 @@ from pincer.voice.localtime import get_voice_timezone
 from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
-from pincer.voice.tool_speech import describe_action, render, render_denied, render_pending
+from pincer.voice.tool_speech import (
+    DATE_ONLY_RE,
+    describe_action,
+    parse_iso,
+    render,
+    render_denied,
+    render_pending,
+)
 from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
@@ -129,6 +136,31 @@ META_DEFERRED = "deferred_actions"
 # Tools whose create is made idempotent per call: a yes said twice, or a turn
 # retried, finds the event made the first time instead of booking it again.
 IDEMPOTENT_CREATE_TOOLS = frozenset({"google__create_event"})
+
+# A deferred write is replayed later, off the call, where offset-less times would be read in the
+# calendar's zone: its draft pins the call's zone into these (see draft_in_call_zone).
+CALL_LOCAL_TIME_ARGS = ("start", "end", "time_min", "time_max")
+# Creates whose event is stored in the call's zone when made on the call (tools_calendar._write_zone).
+CALL_ZONED_CREATE_TOOLS = frozenset({"google__create_event"})
+
+
+def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> dict[str, Any]:
+    """``args`` as they would run on the call, for a replay off it: offset-less times get the
+    call zone's offset (bare dates stay whole days), and a timed create gets the call's zone,
+    so it is stored as the same create made on the call would be. A ``timezone`` the model
+    named already says how its times are read, on the call and off it: kept as is."""
+    draft = dict(args)
+    if str(draft.get("timezone") or "").strip():
+        return draft
+    for key in CALL_LOCAL_TIME_ARGS:
+        value = draft.get(key)
+        parsed = parse_iso(value)
+        if parsed is not None and parsed.tzinfo is None and not DATE_ONLY_RE.match(str(value).strip()):
+            draft[key] = parsed.replace(tzinfo=zone).isoformat()
+    timed = not DATE_ONLY_RE.match(str(draft.get("start") or "").strip())
+    if tool_name in CALL_ZONED_CREATE_TOOLS and timed:
+        draft["timezone"] = zone.key
+    return draft
 
 
 def call_idempotency_key(call_sid: str, tool_name: str, args: dict[str, Any]) -> str:
@@ -501,8 +533,9 @@ class InCallToolGate:
         deferred.append(
             {
                 "tool": tool_name,
-                "draft_args": dict(args),
+                "draft_args": draft_in_call_zone(tool_name, args, self.call_zone),
                 "reason": reason,
+                # What the caller heard: the same wall clock as the pinned draft.
                 "summary": describe_action(tool_name, args, lang),
             }
         )

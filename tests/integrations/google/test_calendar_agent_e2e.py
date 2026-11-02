@@ -29,6 +29,7 @@ model obeys the text (the live smoke run covers that).
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import re
 from collections.abc import AsyncIterator
@@ -602,3 +603,66 @@ async def test_busy_times_without_a_window_on_a_call_are_spoken_in_the_voice_zon
 
     assert fake.sent("freebusy.query")  # precondition: the check really ran
     assert llm.results == [f"[TOOL RESULT: Busy is: {_spoken_day(day)} from 10:00 AM to 11:00 AM.]"]
+
+
+async def _deferred_on_a_call(settings: Settings, registry: ToolRegistry, tool: str, arguments: dict[str, Any]):
+    """A call write the gate defers (the tool times out): the queued follow-up's draft arguments."""
+    gate = _call_gate(settings, "generic", registry)
+    gate.requires_approval = lambda _name: False  # straight to execute, which then times out
+    settings.voice_tool_timeout_s = 0.01
+
+    async def _slow() -> tuple[str, bool]:
+        await asyncio.sleep(5)
+        return "never", False
+
+    await gate.run(tool, dict(arguments), _slow, trusted_key=False)
+    (deferred,) = gate.deferred_actions()
+    assert deferred["reason"] == "tool_timeout"  # precondition: deferred, not run
+    return deferred
+
+
+async def _replayed_in_chat(tmp_path, settings: Settings, registry, costs, tool: str, arguments) -> None:
+    """The owner's later "yes, do it" in chat: the agent runs the draft as remembered, off the call."""
+    sessions = await _sessions(tmp_path, 50)
+    try:
+        await _say(_agent(settings, _OneCallLLM(tool, dict(arguments)), sessions, costs, registry), "telegram", "do it")
+    finally:
+        await sessions.close()
+
+
+async def test_a_deferred_booking_replayed_in_chat_keeps_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review: voice zone Berlin, Kyiv calendar, a call's 14:00 booking times out and is
+    deferred. Replayed in chat (no call zone), it must still be 14:00 Berlin, stored as Berlin, as
+    the same booking made on the call would have been — not 14:00 Kyiv."""
+    day = _tomorrow()
+    arguments = {"summary": "Dentist", "start": f"{day}T14:00:00", "end": f"{day}T15:00:00"}
+
+    deferred = await _deferred_on_a_call(berlin_settings, registry, "google__create_event", arguments)
+    await _replayed_in_chat(tmp_path, berlin_settings, registry, costs, "google__create_event", deferred["draft_args"])
+
+    (event,) = fake.events_on("primary")
+    berlin = ZoneInfo("Europe/Berlin")
+    assert fake.start_of("primary", event["id"]) == datetime.fromisoformat(f"{day}T14:00:00").replace(tzinfo=berlin)
+    assert event["start"]["timeZone"] == "Europe/Berlin"
+    assert deferred["summary"] == f"create the appointment 'Dentist' on {_spoken_day(day)} at 2:00 PM"
+
+
+async def test_a_deferred_move_replayed_in_chat_keeps_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """The same for a move: the caller's 17:00 is 17:00 Berlin; the event keeps its own (Kyiv) zone."""
+    day = _tomorrow()
+    event_id = fake.seed_event(
+        "primary", "Dentist", _kyiv(day, "10:00").isoformat(), _kyiv(day, "11:00").isoformat(), time_zone="Europe/Kyiv"
+    )
+    arguments = {"event_id": event_id, "start": f"{day}T17:00:00"}
+
+    deferred = await _deferred_on_a_call(berlin_settings, registry, "google__update_event", arguments)
+    await _replayed_in_chat(tmp_path, berlin_settings, registry, costs, "google__update_event", deferred["draft_args"])
+
+    starts = datetime.fromisoformat(f"{day}T17:00:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    assert fake.start_of("primary", event_id) == starts
+    assert fake.event("primary", event_id)["start"]["timeZone"] == "Europe/Kyiv"
+    assert "timezone" not in deferred["draft_args"]

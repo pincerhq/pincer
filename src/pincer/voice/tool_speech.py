@@ -389,6 +389,7 @@ def _spoken_fallback_when(args: dict[str, Any], language: str) -> str:
 
 
 __all__ = [
+    "DATE_ONLY_RE",
     "ISO_TIMESTAMP_RE",
     "RAW_DATA_RE",
     "describe_action",
