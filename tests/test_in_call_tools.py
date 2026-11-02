@@ -577,6 +577,22 @@ async def test_registered_caller_write_unknown_to_the_registry_is_confirmed(owne
     await channel.stop()
 
 
+WEBSEARCH_ARGS = {"query": "günstigster Benzinpreis Bünde 32257 E10"}
+WEBSEARCH_RESULT = (
+    '{"answer": null, "results": [{"title": "Spritpreise Bünde", "url": "https://www.clever-tanken.de/x", '
+    '"snippet": "E10 ab 1,62 Euro bei der Tankstelle am Markt."}]}'
+)
+
+
+async def test_websearch_is_not_offered_to_a_guest_by_default():
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT)]])
+    channel, engine, state = await _start(agent)
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+    assert agent.gate_results[0].deny_reason == "not_in_call_scope"
+    assert agent.executed == []
+    await channel.stop()
+
+
 async def test_registered_owner_critical_write_needs_spoken_yes(owner_phone):
     agent = ToolAgent([[Tool("send_owner_message", {"text": "Bitte zurückrufen"}, result="sent")]])
     channel, engine, state = await _start(agent, tools=_Registry())
@@ -779,6 +795,95 @@ async def test_a_verbally_confirmed_re_emit_through_the_agent_runs_the_proposed_
     assert not second.is_error
     key = ict.call_idempotency_key(CALL, "google__create_event", proposed)
     assert sent == [({**proposed, "idempotency_key": key}, "Europe/Berlin")]
+    await channel.stop()
+
+
+async def test_websearch_on_the_guest_list_plays_the_filler_and_logs_r_auto():
+    agent = ToolAgent(
+        [
+            [
+                Tool(
+                    "websearch__search",
+                    WEBSEARCH_ARGS,
+                    result=WEBSEARCH_RESULT,
+                    delay_s=0.01,
+                    then="Soll ich mehr suchen?",
+                )
+            ]
+        ]
+    )
+    channel, engine, state = await _start(agent, settings=_settings(voice_guests_tools_allowed="websearch__search"))
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+
+    spoken = engine.spoken[CALL]
+    assert spoken[0] == de_pack.TOOL_WAIT_FILLER, spoken
+    assert spoken.count(de_pack.TOOL_WAIT_FILLER) == 1
+    result = agent.gate_results[0]
+    assert result.executed
+    assert (
+        result.content == "[TOOL RESULT: Laut clever-tanken.de: E10 ab 1,62 Euro bei der Tankstelle am Markt. "
+        "Die Auszüge tragen kein Datum, aktuelle Werte können abweichen.]"
+    )
+    actions = channel.get_transcript(CALL).actions
+    assert actions[-1].action_type == "tool_execute"
+    assert actions[-1].tool_name == "websearch__search"
+    assert actions[-1].tier == "R" and actions[-1].approval_mode == "auto"
+    await channel.stop()
+
+
+async def test_registered_caller_gets_websearch_without_any_setting(owner_phone):
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT)]])
+    channel, engine, state = await _start(agent, tools=_Registry())
+    assert "websearch__search" in state.metadata["allowed_tools"]
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+    result = agent.gate_results[0]
+    assert result.executed and result.content.startswith("[TOOL RESULT: Laut clever-tanken.de:")
+    assert channel.get_transcript(CALL).actions[-1].approval_mode == "auto"
+    await channel.stop()
+
+
+async def test_websearch_timeout_says_so_and_queues_no_follow_up():
+    settings = _settings(voice_guests_tools_allowed="websearch__search")
+    settings.voice_tool_timeout_s = 0.05  # type: ignore[assignment]
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT, delay_s=1.0)]])
+    channel, engine, state = await _start(agent, settings=settings)
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+
+    assert agent.gate_results[0].deny_reason == "tool_timeout"
+    assert de_pack.TOOL_NO_PROGRESS in engine.spoken[CALL]
+    assert de_pack.TOOL_TIMEOUT_DEFER not in engine.spoken[CALL]
+    assert state.metadata.get("deferred_actions", []) == []
+    await channel.stop()
+
+
+async def test_websearch_error_says_so_and_queues_no_follow_up():
+    settings = _settings(voice_guests_tools_allowed="websearch__search")
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result="Error: provider down", is_error=True)]])
+    channel, engine, state = await _start(agent, settings=settings)
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+
+    assert agent.gate_results[0].deny_reason == "tool_error"
+    assert de_pack.TOOL_NO_PROGRESS in engine.spoken[CALL]
+    assert de_pack.TOOL_ERROR not in engine.spoken[CALL]
+    assert state.metadata.get("deferred_actions", []) == []
+    await channel.stop()
+
+
+async def test_a_repeated_call_is_logged_as_denied():
+    agent = ToolAgent([[Text("Gerne.")]])
+    channel, engine, state = await _start(agent)
+    gate = channel.get_tool_gate(CALL)
+
+    content = gate.repeated_call_result("google__list_events", {"max_results": 5})
+
+    assert content.startswith("[TOOL RESULT: ") and "denselben Angaben" in content
+    row = channel.get_transcript(CALL).actions[-1]
+    assert (row.action_type, row.tool_name, row.deny_reason, row.tier) == (
+        "tool_denied",
+        "google__list_events",
+        "repeated_call",
+        "R",
+    )
     await channel.stop()
 
 

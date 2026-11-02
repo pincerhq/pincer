@@ -476,7 +476,7 @@ tools. The allowlist is a tier table in `src/pincer/voice/tool_policy.py`
 
 | Tier | Tools | Behaviour |
 |------|-------|-----------|
-| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup` | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
+| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup`, `websearch__search` (not for guests by default, see below) | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
 | **W** reversible writes | `google__create_event`, `google__update_event`, `send_owner_message`, `memory_note` | Approved per caller (below); counted against `PINCER_VOICE_MAX_WRITES_PER_CALL` |
 | **X** never on a call | `email_send`, `google__delete_event`, `make_phone_call`, `schedule_appointment_call`, `file_*`, `config_*`, `memory_dump`, `do_not_call_*`, **and every unlisted tool** | Not callable — its schema is never passed to the model. No setting can change this. |
 
@@ -495,7 +495,7 @@ phones = ["+4915112345678"]
 | Caller | Tool scope on a generic call | Tier W approval |
 |--------|------------------------------|-----------------|
 | **Registered user** (confirmed phone) | Every Tier R/W tool | The standard tool approval policy (`PINCER_APPROVAL_POLICY`): a tool that needs approval is confirmed out loud, anything else runs directly. Under the default `critical` mode, calendar writes run at once; `send_owner_message` is confirmed. |
-| **Guest** (any other number, or a failed lookup) | All reads plus `send_owner_message` and `memory_note` — or, when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` is set, exactly the R/W tools it lists (it replaces the default set, so list the reads guests need too) (`google__*` patterns allowed; Tier X never matches). Inbound guests never get `memory_search`. | Always out loud |
+| **Guest** (any other number, or a failed lookup) | All reads except web search, plus `send_owner_message` and `memory_note` — or, when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` is set, exactly the R/W tools it lists (it replaces the default set, so list the reads guests need too) (`google__*` patterns allowed; Tier X never matches). Inbound guests never get `memory_search`. | Always out loud |
 
 With no `phones` configured, everyone on a call is a guest, and on a generic
 call the agent cannot create calendar events. Startup logs a warning and
@@ -504,6 +504,29 @@ call the agent cannot create calendar events. Startup logs a warning and
 Appointment calls (`schedule_appointment_call`) and the inbound receptionist
 keep their own fixed tool sets whoever is on the line. The receptionist's
 bookings follow `PINCER_RECEPTIONIST_BOOKING_APPROVAL`.
+
+Web search (`websearch__search`, needs the `websearch` MCP server connected)
+is a read that guests don't get by default: a registered user has it, a guest
+only when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` lists it (by name or a pattern
+such as `websearch__*`). Appointment calls and the receptionist never get it.
+It runs without approval — the server's chat-side `approval_required` does not
+apply in a call, where the tier table is the authority — and the model hears
+the top two snippets as "According to <site>: …" (the page title only when a
+snippet is empty), then "These snippets carry no date, current figures may
+differ": the search server returns no publication date, so the result carries
+a source but no freshness. Output the MCP bridge flags as possible prompt
+injection is dropped, not passed on. If the search times out or fails, the
+caller hears "I can't find that out right now" and nothing is queued for after
+the call.
+
+The system prompt follows the call's tool set: tool hints and the
+connected-MCP-server list name only the tools the call actually offers, so a
+model is never told about a tool it cannot call. When nothing fits a request,
+the call rules tell it to say so in one sentence and offer to note it or pass
+it on. A turn that repeats a tool call it already made (same name, same
+arguments) gets "already called" back instead of a second run, and the call's
+actions log it as denied with `repeated_call`; after two repeats the turn ends
+with a short "I can't find that out right now".
 
 An **inbound** call from a confirmed phone belongs to that identity: its call
 row, transcript, memory and threads. An outbound call stays with the user who

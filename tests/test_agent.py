@@ -1389,8 +1389,9 @@ async def test_run_headless_reselects_from_allowed_tools_after_a_skill(
     assert "google__" in second.kwargs["system"]
 
 
-async def test_in_call_prompt_hints_follow_the_registry(settings, mock_llm, session_manager, cost_tracker):
-    """In a call the gate owns the tool set, but the hints follow the registry, as on the streaming voice path."""
+async def test_in_call_prompt_hints_follow_the_offered_tools(settings, mock_llm, session_manager, cost_tracker):
+    """In a call the gate owns the tool set and the hints follow it (issue #300): a hint for a tool
+    the model was not given gets the nearest offered tool called in its place."""
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
     agent.tool_selector = _RecordingSelector(settings, {"whoami"})
     gate = MagicMock()
@@ -1401,7 +1402,8 @@ async def test_in_call_prompt_hints_follow_the_registry(settings, mock_llm, sess
 
     kwargs = mock_llm.complete.call_args.kwargs
     assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
-    assert "make_phone_call tool" in kwargs["system"]
+    assert "make_phone_call tool" not in kwargs["system"]
+    assert "Google Workspace Tool Chains" not in kwargs["system"]
     assert agent.tool_selector.calls == []  # the gate, not the selector, picks in-call tools
 
 

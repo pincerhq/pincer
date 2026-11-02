@@ -15,7 +15,8 @@ ask them to repeat that specific detail ("Sorry, I didn't catch that — could y
 Never trail off mid-thought.
 7. You have access to the caller's conversation history from their text chats.
 8. When reporting tool results, summarize them conversationally — don't read raw data.
-9. Say a short filler like "Let me check that..." BEFORE running a tool, so the caller never hears dead air.
+9. Say a short filler like "Let me check that..." BEFORE running a tool, so the caller never hears dead air — \
+at most ONE per reply, and none once a tool result is in.
 10. NEVER claim something is done, booked, sent, or cancelled unless a tool result in this call confirms it. \
 If a tool failed or hasn't run, say so honestly.
 11. Be warm but concise. Every extra word is wasted time on a phone call.
@@ -253,6 +254,10 @@ TOOL_TIMEOUT_DEFER = "I'll sort that out afterwards and get back to you."
 
 TOOL_ERROR = "That didn't work just now. I'll take care of it afterwards."
 
+# Spoken when the model keeps calling the same tool with the same arguments
+# within one turn and the turn is cut short.
+TOOL_NO_PROGRESS = "I'm afraid I can't find that out right now."
+
 VERIFY_ACTION = "Just to confirm: I would now {action}. Is that right?"
 
 VERIFY_REASK = "Sorry, I didn't catch that. {question}"
@@ -306,9 +311,12 @@ honestly; never claim it is done.
 system asks the call partner to confirm when that is needed. Never ask for confirmation yourself, and \
 never ask again after a yes. If the partner declines, do not insist.
 - An empty calendar or an empty search result is never a reason not to create an appointment.
-- If the call partner asks for something you have no tool for on this call, say plainly that you can't \
-do it on this call. Offer to pass it on if send_owner_message is available. Never pretend to do it, and \
-never ask to confirm an action you cannot perform.\
+- If none of your tools on this call fits the request, say so plainly in ONE sentence ("I'm afraid I can't \
+look that up during the call.") and offer to note it or pass it on to your user, if you have a tool for \
+that. NEVER call an unrelated tool as a substitute, never pretend to do it, and never ask to confirm an \
+action you cannot perform.
+- Never call a tool again with the same arguments. If the result does not answer the question, say so once.
+- If a lookup is missing an essential detail, ask for it first (e.g. for fuel prices: E5, E10 or diesel?).\
 """
 
 # How a proposed write is described in VERIFY_ACTION ({action}); keyed by
@@ -341,6 +349,12 @@ TOOL_SPEECH = {
     "memory_search.none": "I have nothing noted about that.",
     "memory_search.some": "Noted earlier: {items}.",
     "business_profile_lookup.ok": "{profile}.",
+    "websearch.some": "According to {source}: {text}",
+    "websearch.none": "I found nothing about that on the web.",
+    "websearch.unknown_source": "a website",
+    "websearch.undated": "These snippets carry no date, current figures may differ.",
+    "duplicate": "This tool was already called with the same arguments. Answer with what you have, "
+    "or say honestly that you cannot find it out. Do not call it again.",
     "default.ok": "Done.",
     "pending": "Action pending the partner's confirmation: {action}. Do not claim it is done.",
     "denied": "The action could not be carried out. Do not claim it is done.",
