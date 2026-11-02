@@ -36,6 +36,7 @@ and a retried write never duplicates or falsely fails.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -200,10 +201,12 @@ def _logged_if_raised(
     op: str, trace: Trace, calendar_id: str, request: dict[str, Any] | None, event_id: Callable[[], str]
 ) -> Iterator[None]:
     """Log a write attempt that raises (``confirmed=False error=…``, with the requested times),
-    then let the error propagate. Wraps only the attempt: its outcome logs its own line."""
+    then let the error propagate. Wraps only the attempt: its outcome logs its own line.
+    A cancel counts too: the in-call timeout cancels the attempt while the thread's execute()
+    may still commit. KeyboardInterrupt and SystemExit are left alone."""
     try:
         yield
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         log_write(op, trace, calendar_id, None, event_id=event_id(), confirmed=False, request=request, error=exc)
         raise
 

@@ -8,6 +8,7 @@ agent clock is ``Europe/Berlin`` (PINCER_TIMEZONE) or ``Europe/Kyiv`` (identity)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import timedelta
@@ -347,6 +348,34 @@ async def test_a_write_that_raises_still_logs_one_attempt_line(
     assert len(lines) == 1, lines
     assert lines[0].startswith(f"calendar_write op={WRITE_LOG_OPS_WITH_DELETE[tool]} turn=turn-x ")
     assert lines[0].endswith(" confirmed=False error=HttpError 400")
+
+
+@pytest.mark.parametrize(("tool", "arguments"), RAISED_WRITES)
+async def test_a_write_cancelled_by_a_timeout_still_logs_one_attempt_line(
+    fake_registry, fake, caplog, monkeypatch, tool, arguments
+):
+    """Review 4: the in-call gate's wait_for cancels a slow write with CancelledError (a BaseException),
+    which logged no calendar_write line while the thread's execute() could still commit."""
+    from pincer.integrations.google import calendar_writer
+
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+
+    async def _slow(_fn, *_args, **_kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(calendar_writer, "with_backoff", _slow)
+    with (
+        caplog.at_level(logging.INFO, logger="pincer.integrations.google.calendar_writer"),
+        pytest.raises(TimeoutError),
+    ):
+        await asyncio.wait_for(
+            fake_registry.execute(tool, dict(arguments), context={"turn_id": "turn-x"}), timeout=0.05
+        )
+
+    lines = _write_lines(caplog)
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(f"calendar_write op={WRITE_LOG_OPS_WITH_DELETE[tool]} turn=turn-x ")
+    assert lines[0].endswith(" confirmed=False error=CancelledError")
 
 
 @pytest.mark.usefixtures("instant_backoff")
