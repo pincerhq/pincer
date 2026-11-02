@@ -18,6 +18,7 @@ from voice_harness.settings import apply_test_paths
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.core.agent import Agent
 from pincer.voice.engine import CallDirection
+from pincer.voice.language_guard import language_policy
 from pincer.voice.prompts import de as de_pack
 from pincer.voice.prompts import en as en_pack
 from pincer.voice.stt import stt_config_for_language
@@ -78,11 +79,11 @@ class TestSinglePackContext:
 
         # The full de pack is present…
         assert de_pack.VOICE_SYSTEM_PROMPT in extra
-        assert de_pack.LANGUAGE_POLICY in extra
+        assert language_policy("de", _settings()) in extra
         # …and no en-pack fragment leaked in.
         en_fragments = [
             en_pack.VOICE_SYSTEM_PROMPT,
-            en_pack.LANGUAGE_POLICY,
+            language_policy("en", _settings()),
             *en_pack.PHASE_INSTRUCTIONS.values(),
         ]
         for fragment in en_fragments:
@@ -96,7 +97,7 @@ class TestSinglePackContext:
 
         extra = handler.received[0].extra_system
         assert en_pack.VOICE_SYSTEM_PROMPT in extra
-        assert en_pack.LANGUAGE_POLICY in extra
+        assert language_policy("en", _settings()) in extra
         assert de_pack.VOICE_SYSTEM_PROMPT not in extra
         await channel.stop()
 
@@ -212,7 +213,50 @@ class TestExplicitSwitch:
         await engine.on_speech_input("CA_lang", "Can we continue in French please?")
 
         assert state.language == "en"
-        assert engine.spoken["CA_lang"] == [en_pack.LANGUAGE_SWITCH_UNSUPPORTED]
+        assert engine.spoken["CA_lang"] == [
+            "I'm sorry, French isn't available on this phone line. I can continue in English, German or Ukrainian."
+        ]
+        await channel.stop()
+
+
+class TestUkrainianMidCall:
+    """#305: a caller on an English call asks for Ukrainian."""
+
+    async def test_switch_to_ukrainian_sticks_and_repins_transcription(self, monkeypatch):
+        import json
+        from unittest.mock import AsyncMock
+
+        from voice_harness.fake_engine import FakeVoiceEngine
+
+        from pincer.voice.prompts import uk as uk_pack
+
+        # A ConversationRelay call: the switch must move Twilio's STT/TTS too.
+        monkeypatch.setattr(FakeVoiceEngine, "engine_name", property(lambda self: "conversation_relay"))
+        handler = ScriptedHandler(
+            [
+                "[SWITCH_LANGUAGE:uk] Звісно, продовжимо українською. Чим можу допомогти?",
+                "Гаразд, я запишу вас на вівторок о третій годині. Щось іще?",
+            ]
+        )
+        channel, engine, state = await _start_call(handler, language="en")
+        ws = MagicMock()
+        ws.send_text = AsyncMock()
+        state.metadata["websocket"] = ws
+
+        await engine.on_speech_input("CA_lang", "Can we speak Ukrainian, please?")
+        assert state.language == "uk"
+        sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
+        assert {"type": "language", "ttsLanguage": "uk-UA", "transcriptionLanguage": "uk-UA"} in sent
+
+        await engine.on_speech_input("CA_lang", "Запишіть мене, будь ласка, на вівторок.")
+        assert state.language == "uk"
+        assert engine.spoken["CA_lang"] == [
+            "Звісно, продовжимо українською. Чим можу допомогти?",
+            "Гаразд, я запишу вас на вівторок о третій годині. Щось іще?",
+        ]
+        # The later turn is built from the uk pack, and was not regenerated as drift.
+        assert len(handler.received) == 2
+        assert uk_pack.VOICE_SYSTEM_PROMPT in handler.received[1].extra_system
         await channel.stop()
 
 

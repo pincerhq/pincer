@@ -7,6 +7,7 @@ Media Streams WebSocket connections, and fallback error handling.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -33,6 +34,7 @@ from pincer.voice.webhook_auth import (
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+    from pincer.memory.base import BaseMemoryBackend
     from pincer.voice.engine import VoiceEngine
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,10 @@ logger = logging.getLogger(__name__)
 # registered before the call is refused. The dial and the promotion are
 # milliseconds apart; this is the margin, not a retry budget.
 SETUP_STATE_WAIT_S = 3.0
+
+# How long an inbound webhook waits for the caller's stored language before
+# answering in the default one: Twilio is holding the line meanwhile.
+CALLER_LANGUAGE_TIMEOUT_S = 1.5
 
 # Twilio sends a media frame every 20 ms. Anything beyond this is a real gap in
 # the inbound audio — network, provider buffering, or our own event loop being
@@ -57,13 +63,43 @@ voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
 _engine: VoiceEngine | None = None
 _settings: Settings | None = None
+_memory: BaseMemoryBackend | None = None
 
 
-def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
-    """Wire up the voice engine and settings for route handlers."""
-    global _engine, _settings  # noqa: PLW0603
+def init_voice_routes(engine: VoiceEngine, settings: Settings, memory: BaseMemoryBackend | None = None) -> None:
+    """Wire up the voice engine, settings and memory (for the caller's preferred language) for route handlers."""
+    global _engine, _settings, _memory  # noqa: PLW0603
     _engine = engine
     _settings = settings
+    _memory = memory
+
+
+async def _caller_preferred_language(caller: str) -> str:
+    """The stored preferred language of the registered user calling from
+    ``caller``, or "" for a guest, no memory, or a failed lookup.
+
+    An inbound call starts in it, so a Ukrainian-speaking user is heard by
+    Ukrainian speech recognition from the first word instead of having to ask
+    for a switch through an English transcriber.
+    """
+    if _memory is None or _settings is None or not caller:
+        return ""
+    from pincer.db.engine import get_database_url
+    from pincer.memory.profile import get_preferred_language
+    from pincer.services.identity import IdentityService
+
+    async def lookup() -> str:
+        assert _memory is not None and _settings is not None
+        owner = await IdentityService(get_database_url(_settings.db_path)).user_for_confirmed_phone(caller)
+        if not owner:
+            return ""
+        return await get_preferred_language(_memory, owner) or ""
+
+    try:
+        return await asyncio.wait_for(lookup(), CALLER_LANGUAGE_TIMEOUT_S)
+    except Exception:
+        logger.warning("Caller language lookup failed — using the default call language", exc_info=True)
+        return ""
 
 
 def get_engine() -> VoiceEngine | None:
@@ -178,14 +214,14 @@ async def voice_webhook(request: Request) -> Response:
 
     from pincer.voice.engine import CallDirection
     from pincer.voice.language import resolve_call_language
+    from pincer.voice.receptionist.profile import get_profile, receptionist_active
     from pincer.voice.twiml_builder import build_connect_twiml
 
-    call_language = resolve_call_language(_settings)
-
-    # Sprint 12: receptionist line — blocklist, capacity, profile language
-    from pincer.voice.receptionist.profile import get_profile, receptionist_active
-
-    if receptionist_active(_settings):
+    # Sprint 12: a receptionist line speaks its profile's language (and may
+    # decline the call); any other line, a registered caller's own language.
+    if not receptionist_active(_settings):
+        call_language = resolve_call_language(_settings, await _caller_preferred_language(caller))
+    else:
         profile = get_profile()
         assert profile is not None
         call_language = resolve_call_language(_settings, profile.default_language)

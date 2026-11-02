@@ -616,6 +616,13 @@ async def _build_core(settings: Settings) -> CoreComponents:
             memory_store = None
             summarizer = None
 
+    # After the MCP fallback above: a tool bound to a memory backend that was
+    # just closed would fail every time the model calls it.
+    if memory_store is not None:
+        from pincer.tools.builtin.language_pref import register_language_tools
+
+        register_language_tools(tools, memory_store)
+
     # Create agent
     agent = Agent(
         settings=settings,
@@ -1511,7 +1518,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             await vc.start(on_message)
             channel_map[vc.name] = vc
             router.register(ChannelType.VOICE, vc)
-            init_voice_routes(voice_engine, settings)
+            init_voice_routes(voice_engine, settings, memory=memory_store)
             if getattr(settings, "receptionist_enabled", False) is True:
                 from pincer.voice.twiml_server import set_transfer_session_resolver
 

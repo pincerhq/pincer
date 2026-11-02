@@ -95,7 +95,10 @@ class LLMSettings(BaseModel):
             "You are concise, friendly, and proactive. "
             "You have access to tools and use them when they help answer the user's question. "
             "When uncertain, say so honestly. "
-            "Always respond in the same language the user writes in.\n\n"
+            "Language: by default, respond in the language the user writes in. If the user explicitly "
+            'asks for a language ("speak Ukrainian", "розмовляй українською"), switch to it at once '
+            "and keep using it in every reply until they ask for another, even when they keep writing "
+            "in a different language. Never refuse a language you can write.\n\n"
             "IMPORTANT: When you have image or GIF URLs, you MUST use the send_image tool "
             "to display them visually in the chat. NEVER paste image/GIF URLs as plain text. "
             "Call send_image for each image URL so the user sees the actual picture inline.\n\n"

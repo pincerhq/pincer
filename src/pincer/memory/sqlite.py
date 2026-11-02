@@ -143,9 +143,16 @@ class SqlMemoryBackend(BaseMemoryBackend):
     ) -> str | None:
         """Upsert a single 'profile' memory entry for a user.
 
-        Replaces any prior profile entry so the latest information wins.
+        Replaces any prior profile entry so the latest information wins,
+        except the preferred language: it is kept when ``language`` is None,
+        since ``set_preferred_language`` may have set it after (or on another
+        channel than) onboarding. A ``language`` that is not a language code
+        is dropped (see ``memory.profile.clean_language``).
         Returns the new memory id, or None if no fields were provided.
         """
+        from pincer.memory.profile import clean_language, get_preferred_language
+
+        language = clean_language(language) or await get_preferred_language(self, user_id)
         parts: list[str] = []
         if name:
             parts.append(f"The user's name is {name}.")

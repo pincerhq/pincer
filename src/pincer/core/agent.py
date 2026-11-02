@@ -24,8 +24,10 @@ from typing import TYPE_CHECKING, Any
 from pincer.core.clock import current_time_block
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
+    LANGUAGE_TOOL_HINT,
     ONBOARDING_FOLLOWUP_INSTRUCTION,
     ONBOARDING_QUESTION_EN,
+    PREFERRED_LANGUAGE_NOTE,
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
@@ -43,6 +45,8 @@ from pincer.memory.base import (
     PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
     PINCER_MEMORY_USER_REQUEST_PREFIX,
 )
+from pincer.memory.profile import get_preferred_language
+from pincer.tools.builtin.language_pref import TOOL_NAME as LANGUAGE_TOOL_NAME
 from pincer.tools.path_sandbox import SandboxDenied
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
@@ -709,6 +713,7 @@ class Agent:
                 extra_system="\n\n".join(extra_parts) or None,
                 skip_memory=not memory,
                 tool_names=tool_names,
+                preferred_language=(channel_name or channel) != "voice",
             )
 
         # The hints follow the tools this turn sends, in a call too: a prompt
@@ -1350,7 +1355,11 @@ class Agent:
         # The hints and the MCP server block name only the tools this turn
         # sends (issue #300).
         system_prompt = await self._build_system_prompt(
-            user_id, text, extra_system=extra_system, tool_names=_schema_names(tool_schemas)
+            user_id,
+            text,
+            extra_system=extra_system,
+            tool_names=_schema_names(tool_schemas),
+            preferred_language=False,
         )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
 
@@ -1624,11 +1633,15 @@ class Agent:
         extra_system: str | None = None,
         skip_memory: bool = False,
         tool_names: Collection[str] | None = None,
+        preferred_language: bool = True,
     ) -> str:
         """Build system prompt, injecting relevant memories if available.
 
         ``tool_names`` are the tools sent with this turn (the tool hints and
         the MCP server block follow them); ``None`` means the whole registry.
+        ``preferred_language`` False leaves out the user's stored language:
+        a voice call speaks the one language pinned on the call (its
+        LANGUAGE_POLICY), and an outbound call's other party is not the user.
         """
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
         offered = None if tool_names is None else set(tool_names)
@@ -1641,6 +1654,9 @@ class Agent:
                 "\n\nWhen the user asks you to call a phone number, you MUST use the "
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
+
+        if LANGUAGE_TOOL_NAME in tool_names:
+            base_prompt += "\n\n" + LANGUAGE_TOOL_HINT
 
         # Google Workspace tool chain hints when the tools they name are sent
         if _GOOGLE_HINT_TOOLS.intersection(tool_names):
@@ -1710,16 +1726,38 @@ class Agent:
         if not self._memory or skip_memory:
             return _with_extra(base_prompt)
 
-        try:
-            memories = await self._memory.search_text(user_text, user_id=user_id, limit=3)
-            memory_block = "\n".join(f"- {m.content}" for m in memories)
-        except Exception:
-            self._memory_outage.failed()
-            return _with_extra(base_prompt)
-        self._memory_outage.succeeded()
-        if not memories:
-            return _with_extra(base_prompt)
-        return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
+        store = self._memory
+
+        async def search() -> str | None:
+            """The memories block ("" for none), or None when the search fails."""
+            try:
+                memories = await store.search_text(user_text, user_id=user_id, limit=3)
+                block = "\n".join(f"- {m.content}" for m in memories)
+            except Exception:
+                # Inside the handler, so the outage warning carries the traceback.
+                self._memory_outage.failed()
+                return None
+            self._memory_outage.succeeded()
+            return block
+
+        async def read_language() -> str | None:
+            # Read directly, not through the search: a message that shares no
+            # word with the profile must still get its language. Either read
+            # failing costs only its own block.
+            if not preferred_language:
+                return None
+            try:
+                return await get_preferred_language(store, user_id)
+            except Exception:
+                logger.warning("Failed to read the preferred language for prompt", exc_info=True)
+                return None
+
+        memory_block, language = await asyncio.gather(search(), read_language())
+        if memory_block:
+            base_prompt += f"\n\n[Relevant memories about this user]\n{memory_block}"
+        if language:
+            base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
+        return _with_extra(base_prompt)
 
     @staticmethod
     def _memory_for_turn(session: Session, memory: bool) -> bool:

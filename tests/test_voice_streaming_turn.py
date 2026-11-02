@@ -143,7 +143,8 @@ class TestSentenceStreaming:
         await engine.on_speech_input("CA_stream", "Hallo.")
         extra = agent.calls[0]["extra_system"]
         assert de_pack.VOICE_SYSTEM_PROMPT in extra
-        assert de_pack.LANGUAGE_POLICY in extra
+        assert de_pack.LANGUAGE_POLICY.split("{supported}")[0] in extra
+        assert "(unterstützte Codes: en, de, uk)" in extra
         await channel.stop()
 
 
@@ -436,15 +437,27 @@ class TestGuardsUnderStreaming:
         assert spoken[0].startswith("Gerne, dann sprechen wir Deutsch.")
         await channel.stop()
 
+    async def test_bare_unsupported_token_gets_the_named_reply(self):
+        """#305: the policy tells the model to answer an unsupported request with the token alone."""
+        channel, engine, agent, state = await _start([text_chunks("[SWITCH_LANGUAGE:fr]")], language="en")
+
+        await engine.on_speech_input("CA_stream", "Can we speak French please?")
+
+        assert engine.spoken["CA_stream"] == [
+            "I'm sorry, French isn't available on this phone line. I can continue in English, German or Ukrainian."
+        ]
+        assert state.language == "en"
+        await channel.stop()
+
     async def test_unsupported_switch_declined_and_rest_suppressed(self):
         script = text_chunks("[SWITCH_LANGUAGE:fr] Bien sûr, on continue. ", "Je peux vous aider avec tout.")
         channel, engine, agent, state = await _start([script], language="en")
 
         await engine.on_speech_input("CA_stream", "Can we speak French please?")
 
-        from pincer.voice.prompts import en as en_pack
-
-        assert engine.spoken["CA_stream"] == [en_pack.LANGUAGE_SWITCH_UNSUPPORTED]
+        assert engine.spoken["CA_stream"] == [
+            "I'm sorry, French isn't available on this phone line. I can continue in English, German or Ukrainian."
+        ]
         assert state.language == "en"
         await channel.stop()
 
