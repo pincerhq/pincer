@@ -204,6 +204,24 @@ class TestStatusNotify:
         assert status_notify.get_call_info("CA1") is None
 
 
+@pytest.mark.parametrize(
+    ("completed", "end_code", "provider_status", "expected"),
+    [
+        (True, "", "", "completed"),
+        (False, "", "", "failed"),
+        (False, "llm_error", "", "failed"),
+        (True, "shutdown", "", "completed"),
+        (False, "busy", "busy", "busy"),
+        (False, "no_answer", "", "no-answer"),
+        (False, "voicemail", "", "voicemail"),
+        (False, "call_setup", "canceled", "canceled"),
+    ],
+)
+def test_final_outcome_code_is_the_same_on_every_path(completed, end_code, provider_status, expected):
+    """The pipeline and the channel fallbacks store one code for the same call."""
+    assert status_notify.final_outcome_code(completed, end_code, provider_status) == expected
+
+
 class TestCallReportPersistence:
     """Issue #303: the routing of a call's final report survives a restart."""
 

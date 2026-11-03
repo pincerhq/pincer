@@ -173,10 +173,11 @@ class PostCallProcessor:
         # An answered call that still ended without a conversation (voicemail
         # detected after pickup) says so, in the report language.
         end_code = str(state.metadata.get(END_CODE_KEY) or "")
-        outcome_code = status_notify.OUTCOME_COMPLETED
         if end_code and not an.was_conversational(failure_code=end_code):
             report = f"{report}\nℹ️ {not_connected_reason(end_code, language)}"
-            outcome_code = status_notify.outcome_code_for(failure_code=end_code)
+        outcome_code = status_notify.final_outcome_code(
+            completed, end_code, str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+        )
 
         note = await self._appointment_note(call_sid, language)
         if note:

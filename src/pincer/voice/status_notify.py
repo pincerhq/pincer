@@ -49,6 +49,7 @@ OUTCOME_INTERRUPTED = "interrupted"
 RINGING_ALLOWANCE_S = 600
 # Bound on the whole startup reconcile, so a slow Twilio never holds it open.
 RECONCILE_TIMEOUT_S = 60.0
+_MAX_TRACKED = 200
 
 
 @dataclass
@@ -76,7 +77,6 @@ _outbound_calls: dict[str, _OutboundCallInfo] = {}
 # Calls whose final report is being delivered: a second ending (the /status
 # webhook racing the post-call pipeline) must not deliver it again meanwhile.
 _finalizing: set[str] = set()
-_MAX_TRACKED = 200
 
 
 def set_status_notifier(notifier: Callable[[str, str, str], Awaitable[bool]] | None) -> None:
@@ -227,15 +227,32 @@ async def notify_ended(call_sid: str, outcome: str = "", *, outcome_code: str = 
     return await finalize_report(call_sid, text, outcome_code)
 
 
-def outcome_code_for(provider_status: str = "", failure_code: str = "") -> str:
-    """The short `report_outcome` code for a call that reached nobody, from
-    Twilio's status when it has one, else from the failure code."""
+def _not_connected_code(provider_status: str, failure_code: str) -> str:
+    """Why nobody was reached, when Twilio's status or the failure code says ("" otherwise)."""
     if provider_status in (OUTCOME_BUSY, OUTCOME_NO_ANSWER, OUTCOME_FAILED, OUTCOME_CANCELED):
         return provider_status
     by_code = {"busy": OUTCOME_BUSY, "no_answer": OUTCOME_NO_ANSWER, "voicemail": OUTCOME_VOICEMAIL}
-    if failure_code in by_code:
-        return by_code[failure_code]
+    return by_code.get(failure_code, "")
+
+
+def outcome_code_for(provider_status: str = "", failure_code: str = "") -> str:
+    """The short `report_outcome` code for a call that reached nobody, from
+    Twilio's status when it has one, else from the failure code."""
+    code = _not_connected_code(provider_status, failure_code)
+    if code:
+        return code
     return OUTCOME_COMPLETED if failure_code in ("", "none") else OUTCOME_FAILED
+
+
+def final_outcome_code(completed: bool, end_code: str = "", provider_status: str = "") -> str:
+    """The `report_outcome` code of a call that had state, the same whichever
+    path reports it (the post-call pipeline or a fallback): the reason nobody
+    was reached when Twilio's status or the end code names one, else whether
+    the call completed."""
+    code = _not_connected_code(provider_status, end_code)
+    if code:
+        return code
+    return OUTCOME_COMPLETED if completed else OUTCOME_FAILED
 
 
 async def finalize_report(call_sid: str, text: str, outcome: str = "") -> bool:

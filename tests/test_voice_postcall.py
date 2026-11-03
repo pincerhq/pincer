@@ -414,3 +414,24 @@ async def test_a_completed_call_report_reaches_its_chat_session_and_is_stored(tm
         assert (row["report_outcome"], row["report_text"]) == ("completed", report)
     finally:
         status_notify._reset_for_tests()
+
+
+async def test_an_answered_call_that_failed_is_stored_as_failed(tmp_path):
+    """An answered call that did not complete is not reported as `completed`."""
+    from pincer.services.voice import CallsService
+
+    status_notify._reset_for_tests()
+    settings = _settings(tmp_path)
+    status_notify.set_report_store(settings.db_path)
+    status_notify.register_outbound_call(CALL_SID, user_id="12345", channel="telegram", language="de")
+    try:
+        processor = PostCallProcessor(settings, llm=None, db_path=str(settings.db_path))
+        state = _state()
+        state.metadata["failure_code"] = "llm_error"
+        await processor.process(CALL_SID, state, _transcript(), completed=False)
+
+        row = await (await CallsService.for_path(settings.db_path)).get_call_origin(CALL_SID)
+        assert row is not None
+        assert row["report_outcome"] == "failed"
+    finally:
+        status_notify._reset_for_tests()

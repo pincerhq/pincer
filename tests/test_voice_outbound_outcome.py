@@ -548,3 +548,27 @@ async def test_each_not_connected_end_finalizes_one_report(rig, path, data, outc
     assert row is not None
     assert row["report_outcome"] == outcome
     assert row["report_text"] == rig.sent[0]
+
+
+@pytest.mark.parametrize(
+    ("path", "data", "outcome"),
+    [
+        ("status", {"CallStatus": "busy"}, "busy"),
+        ("status", {"CallStatus": "no-answer"}, "no-answer"),
+        ("amd", {"AnsweredBy": "machine_end_beep"}, "voicemail"),
+    ],
+)
+async def test_the_channel_fallback_stores_the_same_outcome_as_the_pipeline(rig, path, data, outcome):
+    """No post-call processor wired: the fallback status names the cause and
+    stores the code the pipeline would, not a blanket `failed`."""
+    from pincer.services.voice import CallsService
+
+    status_notify.set_report_store(rig.settings.db_path)
+    await rig.dial("CA_fb")
+    await rig.post(path, CallSid="CA_fb", **data)
+    await rig.settle()
+
+    assert len(rig.sent) == 1, rig.sent
+    row = await (await CallsService.for_path(rig.settings.db_path)).get_call_origin("CA_fb")
+    assert row is not None
+    assert row["report_outcome"] == outcome
