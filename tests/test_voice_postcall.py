@@ -406,6 +406,7 @@ async def test_a_completed_call_report_reaches_its_chat_session_and_is_stored(tm
     try:
         processor = PostCallProcessor(settings, llm=FakeLLM(GOOD_JSON), db_path=str(settings.db_path))
         report = await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+        await status_notify.drain()
 
         assert sent == [report]
         assert notes == [("alice", "telegram", "unified:alice", f"📞 Call report (Dr. Müller):\n{report}")]

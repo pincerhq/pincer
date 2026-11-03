@@ -177,6 +177,7 @@ class TestStatusNotify:
         assert await status_notify.finalize_report("CA1", "📞 Couldn't reach Dentist — busy.", "busy")
         assert not await status_notify.finalize_report("CA1", "again", "busy")
         assert not await status_notify.notify_ended("CA1", "late")
+        await status_notify.drain()
 
         assert sent == ["📞 Couldn't reach Dentist — busy."]
         assert notes == [("alice", "telegram", "k1", "📞 Call report (Dentist):\n📞 Couldn't reach Dentist — busy.")]
@@ -187,6 +188,7 @@ class TestStatusNotify:
         status_notify.set_session_reporter(reporter)
         status_notify.register_outbound_call("CA1", "dashboard", channel="web")
         await status_notify.finalize_report("CA1", "report", "completed")
+        await status_notify.drain()
         reporter.assert_not_awaited()
 
     async def test_a_failing_session_reporter_does_not_stop_the_push(self):
@@ -200,8 +202,37 @@ class TestStatusNotify:
         status_notify.set_session_reporter(AsyncMock(side_effect=RuntimeError("db down")))
         status_notify.register_outbound_call("CA1", "123", channel="telegram", session_key="k1")
         assert await status_notify.finalize_report("CA1", "report", "completed")
+        await status_notify.drain()
         assert sent == ["report"]
         assert status_notify.get_call_info("CA1") is None
+
+    async def test_finalize_does_not_wait_for_a_busy_chat_session(self):
+        """The chat's turn may be held for minutes (an approval prompt): the
+        push and the caller (a voicemail hang-up, a webhook) go on at once."""
+        import asyncio
+
+        sent: list[str] = []
+        release = asyncio.Event()
+        notes: list[str] = []
+
+        async def notifier(user_id, channel, text):
+            sent.append(text)
+            return True
+
+        async def reporter(pincer_user_id, channel, session_key, text):
+            await release.wait()
+            notes.append(text)
+
+        status_notify.set_status_notifier(notifier)
+        status_notify.set_session_reporter(reporter)
+        status_notify.register_outbound_call("CA1", "123", channel="web", session_key="web:alice:c1")
+
+        assert await asyncio.wait_for(status_notify.finalize_report("CA1", "report", "voicemail"), 1)
+        assert sent == ["report"] and notes == []
+
+        release.set()
+        await status_notify.drain()
+        assert len(notes) == 1 and notes[0].endswith("report")
 
 
 @pytest.mark.parametrize(
@@ -293,6 +324,32 @@ class TestCallReportPersistence:
         reports = await (await self._service(store)).list_call_reports("alice", "k1")
         assert [(r["call_sid"], r["report_outcome"]) for r in reports] == [("CA1", "busy")]
 
+    async def test_a_dial_time_row_landing_mid_claim_is_still_reported(self, store, monkeypatch):
+        """The origin insert commits between the claim's UPDATE (no row yet)
+        and its read: the report is claimed and sent, not taken as delivered."""
+        from pincer.services.voice import CallsService
+
+        sent = self._capture()
+        status_notify.register_outbound_call("CA1", "123", channel="telegram")
+        real_complete = CallsService.complete_call_report
+        calls = 0
+
+        async def complete_racing_the_insert(service, call_sid, outcome, text, reported_at):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await service.save_call_origin({"call_sid": call_sid, "user_id": "123", "created_at": reported_at})
+                return False
+            return await real_complete(service, call_sid, outcome, text, reported_at)
+
+        monkeypatch.setattr(CallsService, "complete_call_report", complete_racing_the_insert)
+        assert await status_notify.finalize_report("CA1", "report", "busy")
+
+        assert sent == ["report"]
+        row = await (await self._service(store)).get_call_origin("CA1")
+        assert (row["report_outcome"], row["report_text"]) == ("busy", "report")
+        assert row["reported_at"]
+
     async def test_a_database_failure_at_dial_time_keeps_the_call_tracked(self, store, monkeypatch):
         from pincer.services.voice import CallsService
 
@@ -365,6 +422,33 @@ class TestCallReportPersistence:
 
         await asyncio.wait_for(status_notify.reconcile(["CA1"], hang, lambda _sid: False, timeout=0.05), 1)
         assert status_notify.get_call_info("CA1") is not None
+
+    async def test_a_timeout_mid_finalize_still_delivers_the_claimed_report(self, store):
+        """The reconcile timeout fires after the report was claimed: the push
+        still happens, so the row is never marked reported without a message."""
+        import asyncio
+
+        sent: list[str] = []
+        pushing = asyncio.Event()
+
+        async def slow_notifier(user_id, channel, text):
+            pushing.set()
+            await asyncio.sleep(0.2)
+            sent.append(text)
+            return True
+
+        status_notify.set_status_notifier(slow_notifier)
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram", target_name="Dentist")
+
+        async def busy(_sid):
+            return "busy"
+
+        await status_notify.reconcile(["CA1"], busy, lambda _sid: False, timeout=0.05)
+        assert pushing.is_set() and sent == []
+        await status_notify.drain()
+        assert len(sent) == 1 and "Couldn't reach Dentist" in sent[0]
+        row = await (await self._service(store)).get_call_origin("CA1")
+        assert row["report_outcome"] == "busy"
 
     async def test_status_callback_after_a_restart_reports_once(self, store):
         """Restart while connected: Twilio's `completed` arrives at a process

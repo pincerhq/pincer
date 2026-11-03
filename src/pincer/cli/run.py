@@ -1561,6 +1561,9 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
             status_notify.set_report_store(settings.db_path)
             status_notify.set_session_reporter(_voice_session_reporter)
+            # Last started, first stopped: session notes still being written
+            # land before the sessions are saved and closed.
+            shutdown.on_stop("call report notes", status_notify.drain)
             # Reloaded before the webhooks serve, so a /status or relay setup
             # for a call placed before the restart finds its routing; the
             # Twilio round-trips of the reconcile run in the background.

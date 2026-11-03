@@ -538,9 +538,11 @@ async def test_each_not_connected_end_finalizes_one_report(rig, path, data, outc
 
     await rig.post(path, CallSid="CA_end", **data)
     await rig.settle()
+    await status_notify.drain()
     # A late duplicate (Twilio's own `completed` after the hang-up) adds nothing.
     await rig.post("status", CallSid="CA_end", CallStatus="completed")
     await rig.settle()
+    await status_notify.drain()
 
     assert len(rig.sent) == 1, rig.sent
     assert len(notes) == 1 and rig.sent[0] in notes[0]

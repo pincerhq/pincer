@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,8 @@ OUTCOME_INTERRUPTED = "interrupted"
 RINGING_ALLOWANCE_S = 600
 # Bound on the whole startup reconcile, so a slow Twilio never holds it open.
 RECONCILE_TIMEOUT_S = 60.0
+# How long shutdown waits for session notes still being written.
+DRAIN_TIMEOUT_S = 10.0
 _MAX_TRACKED = 200
 
 
@@ -77,6 +79,9 @@ _outbound_calls: dict[str, _OutboundCallInfo] = {}
 # Calls whose final report is being delivered: a second ending (the /status
 # webhook racing the post-call pipeline) must not deliver it again meanwhile.
 _finalizing: set[str] = set()
+# Detached work (session notes, finalizations shielded from cancellation),
+# held so it is not garbage-collected mid-run and so shutdown can wait for it.
+_background: set[asyncio.Task[Any]] = set()
 
 
 def set_status_notifier(notifier: Callable[[str, str, str], Awaitable[bool]] | None) -> None:
@@ -278,16 +283,42 @@ async def finalize_report(call_sid: str, text: str, outcome: str = "") -> bool:
             return False
         delivered = await notify_stage(call_sid, STAGE_ENDED, text)
         if info.session_key and _session_reporter is not None:
-            try:
-                target = info.target_name or info.target_number or call_sid
-                note = f"📞 Call report ({target}):\n{text}"
-                await _session_reporter(info.pincer_user_id or info.user_id, info.channel, info.session_key, note)
-            except Exception:
-                logger.exception("Call report not added to its chat session [%s]", call_sid)
+            # Detached: the note waits for the chat's turn lock, and that turn
+            # may stay open for minutes (an approval prompt). The callers here
+            # hang up voicemail and answer Twilio webhooks; they must not wait.
+            _spawn(_report_to_session(call_sid, info, text), name=f"call-report-note-{call_sid}")
         return delivered
     finally:
         _outbound_calls.pop(call_sid, None)
         _finalizing.discard(call_sid)
+
+
+def _spawn(coro: Coroutine[Any, Any, Any], *, name: str) -> asyncio.Task[Any]:
+    task = asyncio.create_task(coro, name=name)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
+
+
+async def _report_to_session(call_sid: str, info: _OutboundCallInfo, text: str) -> None:
+    if _session_reporter is None:
+        return
+    target = info.target_name or info.target_number or call_sid
+    note = f"📞 Call report ({target}):\n{text}"
+    try:
+        await _session_reporter(info.pincer_user_id or info.user_id, info.channel, info.session_key, note)
+    except Exception:
+        logger.exception("Call report not added to its chat session [%s]", call_sid)
+
+
+async def drain(timeout: float = DRAIN_TIMEOUT_S) -> None:
+    """Wait for detached session notes and finalizations (shutdown, tests)."""
+    pending = set(_background)
+    if not pending:
+        return
+    _, still_running = await asyncio.wait(pending, timeout=timeout)
+    if still_running:
+        logger.warning("%d call report task(s) still running at shutdown", len(still_running))
 
 
 async def _store() -> Any:
@@ -314,8 +345,14 @@ async def _claim_report(call_sid: str, info: _OutboundCallInfo, outcome: str, te
     try:
         if await service.complete_call_report(call_sid, outcome, text, now):
             return True
-        if await service.get_call_origin(call_sid) is not None:
-            return False
+        row = await service.get_call_origin(call_sid)
+        if row is not None:
+            if row.get("reported_at"):
+                return False
+            # The dial-time insert landed between the UPDATE and this read (a
+            # call over before `make_phone_call` returned): claim it now.
+            await service.complete_call_report(call_sid, outcome, text, now)
+            return True
         await service.save_call_origin(
             {
                 "call_sid": call_sid,
@@ -476,10 +513,13 @@ async def _reconcile(
         except Exception:
             logger.info("Status of reloaded call %s unknown — leaving it to /status", call_sid, exc_info=True)
             continue
+        # Shielded: the overall timeout (or shutdown) must not cancel a
+        # finalization after it claimed the report but before it sent it, or
+        # the report would be marked delivered and never go out.
         if status in NOT_CONNECTED_STATUS:
-            await finalize_not_connected(call_sid, status)
+            await asyncio.shield(_spawn(finalize_not_connected(call_sid, status), name=f"reconcile-{call_sid}"))
         elif status == "completed":
-            await finalize_interrupted(call_sid)
+            await asyncio.shield(_spawn(finalize_interrupted(call_sid), name=f"reconcile-{call_sid}"))
 
 
 def _reset_for_tests() -> None:
@@ -489,3 +529,6 @@ def _reset_for_tests() -> None:
     _db_path = ""
     _outbound_calls.clear()
     _finalizing.clear()
+    for task in _background:
+        task.cancel()
+    _background.clear()
