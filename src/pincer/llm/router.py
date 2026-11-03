@@ -80,12 +80,100 @@ def summary_target(settings: Settings) -> tuple[str, str]:
     return provider or settings.default_provider, model
 
 
+def voice_turn_target(settings: Settings, value: str | None = None) -> tuple[str, str]:
+    """(provider name, model) a voice turn asks for.
+
+    ``value`` defaults to ``settings.voice_turn_model``:
+
+    - ``""`` → the default provider and its own default model (``""``);
+    - ``"<model>"`` → that model on the default provider;
+    - ``"<provider>:<model>"`` → that provider and model. The text before the
+      first colon is always the provider, so ``ollama:llama3:8b`` keeps the
+      colon in its model. Unlike ``summary_target``, an unknown prefix is not
+      folded into the model id: a misspelt or unconfigured provider must fall
+      back to the default model, never send ``azure:gpt-5-mini`` as one id.
+    """
+    raw = str(getattr(settings, "voice_turn_model", "") if value is None else value).strip()
+    prefix, sep, rest = raw.partition(":")
+    if sep:
+        return prefix.strip() or settings.default_provider, rest.strip()
+    return settings.default_provider, raw
+
+
+def provider_default_model(settings: Settings, name: str) -> str:
+    """The model a provider uses when a call passes none (mirrors the leaf constructors)."""
+    if name == "openai":
+        return settings.openai_model or settings.default_model
+    if name == "anthropic":
+        return settings.anthropic_model or settings.default_model
+    if name and name == settings.openai_compatible_provider:
+        return settings.openai_compatible_model or settings.default_model
+    if name and name == settings.anthropic_compatible_provider:
+        return settings.anthropic_compatible_model or settings.default_model
+    return settings.default_model
+
+
+def _wire_safe_model(settings: Settings, name: str, model: str) -> str:
+    """``""`` (the provider's default) when ``model`` is an Anthropic id bound for an OpenAI-wire provider."""
+    if model.startswith("claude") and is_openai_wire(settings, name):
+        return ""
+    return model
+
+
+def _build_leaf_for(settings: Settings, name: str, model_hint: str = "") -> BaseLLMProvider:
+    """``_build_leaf`` for a per-call model.
+
+    ``model_hint`` is the model the caller will request. An OpenAI-wire leaf
+    with no model of its own falls back to ``default_model``, which trips its
+    claude-* fail-fast guard on an Anthropic default; the hint stands in as its
+    default instead, since the caller passes the model explicitly anyway.
+    """
+    if model_hint and not model_hint.startswith("claude"):
+        if name == "openai" and not settings.openai_model:
+            settings = settings.model_copy(update={"openai_model": model_hint})
+        elif name and name == settings.openai_compatible_provider and not settings.openai_compatible_model:
+            settings = settings.model_copy(update={"openai_compatible_model": model_hint})
+    return _build_leaf(settings, name)
+
+
+def voice_turn_unusable_reason(settings: Settings, value: str | None = None) -> str | None:
+    """Why a voice turn model can't run here, or ``None`` when it can.
+
+    The default provider is always usable (the pool is validated at startup).
+    Any other provider must build from the configured credentials — nothing
+    is sent over the network.
+    """
+    name, model = voice_turn_target(settings, value)
+    if name == settings.default_provider:
+        return None
+    try:
+        _build_leaf_for(settings, name, _wire_safe_model(settings, name, model))
+    except Exception as e:
+        return str(e)
+    return None
+
+
+def effective_voice_turn(settings: Settings, value: str | None = None) -> tuple[str, str]:
+    """(provider, model) a voice turn really runs on — the default when the override can't."""
+    if voice_turn_unusable_reason(settings, value) is not None:
+        name, model = settings.default_provider, ""
+    else:
+        name, model = voice_turn_target(settings, value)
+        model = _wire_safe_model(settings, name, model)
+    return name, model or provider_default_model(settings, name)
+
+
 class LLMRouter(BaseLLMProvider):
     """Single construction + failover entry point. Drop-in `BaseLLMProvider`."""
 
     def __init__(self) -> None:
         self._settings = get_settings()
         self._pool: dict[str, BaseLLMProvider] | None = None
+        # Providers that failed to build on demand: never rebuilt (or re-logged)
+        # per call. Credentials don't change while the process runs.
+        self._unavailable: set[str] = set()
+        # voice_turn_model values already warned about (one line per value, not per turn)
+        self._voice_warned: set[str] = set()
 
     # ── Construction ─────────────────────────────────────
 
@@ -145,28 +233,69 @@ class LLMRouter(BaseLLMProvider):
 
     def get_provider(self, name: str, model_hint: str = "") -> BaseLLMProvider | None:
         """Provider by name — from the active pool, or built on demand when
-        its credentials exist. Used by the voice turn-model override
-        (Sprint 5: e.g. voice_turn_model="openai:gpt-5-mini" while the default
-        provider stays anthropic). Returns None when unavailable.
+        its credentials exist. Used by the voice turn-model override (e.g.
+        voice_turn_model="openai:gpt-5-mini" while the default provider stays
+        anthropic). Returns None when unavailable; a failure is logged and
+        remembered once, never rebuilt per call.
 
-        ``model_hint``: the model the caller will request. Lets an on-demand
-        OpenAI-wire leaf construct even when its default model would resolve
-        to a claude-* id (its fail-fast guard), since every voice call passes
-        the model explicitly anyway.
+        ``model_hint``: the model the caller will request (see ``_build_leaf_for``).
         """
         pool = self._build_pool()
         if name in pool:
             return pool[name]
-        settings = self._settings
-        if model_hint and name == "openai" and not settings.openai_model:
-            settings = settings.model_copy(update={"openai_model": model_hint})
+        if name in self._unavailable:
+            return None
         try:
-            provider = _build_leaf(settings, name)
+            provider = _build_leaf_for(self._settings, name, model_hint)
         except Exception as e:
             logger.warning("Provider %r unavailable for per-call override: %s", name, e)
+            self._unavailable.add(name)
             return None
         pool[name] = provider  # memoise alongside the configured pool
         return provider
+
+    def resolve_voice_turn(self) -> tuple[BaseLLMProvider, str | None]:
+        """Provider and model for one voice turn (see ``voice_turn_target``).
+
+        The default provider is served by the router itself, so a voice turn
+        keeps failover. An override whose provider can't be built falls back
+        to the default provider with its own model (``None``): a foreign model
+        id would 404 there. Each fallback is logged once per distinct
+        ``voice_turn_model`` value.
+        """
+        s = self._settings
+        raw = str(getattr(s, "voice_turn_model", "") or "").strip()
+        name, model = voice_turn_target(s, raw)
+        safe = _wire_safe_model(s, name, model)
+        if safe != model:
+            self._warn_voice_once(
+                f"{raw}#wire",
+                "voice_turn_model %r is an Anthropic model id but provider %r is OpenAI-wire — "
+                "using that provider's default model instead",
+                raw,
+                name,
+            )
+            model = safe
+        if name == s.default_provider:
+            self._build_pool()
+            return self, model or None
+        provider = self.get_provider(name, model_hint=model)
+        if provider is None:
+            self._warn_voice_once(
+                raw,
+                "voice_turn_model %r: provider %r is unavailable — using the default provider %r and its model",
+                raw,
+                name,
+                s.default_provider,
+            )
+            return self, None
+        return provider, model or None
+
+    def _warn_voice_once(self, key: str, msg: str, *args: object) -> None:
+        if key in self._voice_warned:
+            return
+        self._voice_warned.add(key)
+        logger.warning(msg, *args)
 
     def is_free(self, provider: str) -> bool:
         """A provider is free when it has no API key (e.g. a local Ollama endpoint)."""

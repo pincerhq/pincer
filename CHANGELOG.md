@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Voice: turns use the default provider and model unless the override can really run (#305)
+
+A voice turn model whose provider can't be built here (its key or base URL is
+missing) no longer shadows the default or warns on every turn.
+
+- A stored dashboard override (`data_dir/voice_runtime.json`) that can't run is
+  ignored at startup with one log line, and the environment value stays in
+  effect. The file is kept, so restoring the key brings the override back.
+- At runtime an unusable `PINCER_VOICE_TURN_MODEL` falls back to the default
+  provider and its own model, with one warning per value. A provider that fails
+  to build is not rebuilt per turn.
+- `PUT /api/voice/config` returns 422 for a model whose provider can't be
+  built. `GET` adds `effective_provider` / `effective_model`, which show what a
+  turn really runs on.
+- Dashboard choices are offered only when their provider builds. A model for
+  another provider always carries its `provider:` prefix (`anthropic:claude-haiku-…`
+  on a non-Anthropic default), and configured compatible endpoints (e.g.
+  `azure:gpt-5.4-mini`) are offered by their own model.
+- `azure:gpt-5-mini` works as the voice model with Azure in the
+  OpenAI-compatible slot, even when `PINCER_OPENAI_COMPATIBLE_MODEL` is unset
+  and the default model is a `claude-*` id. `.env.example` has an Azure example.
+- New `PINCER_OPENAI_REASONING_EFFORT` (default empty = not sent) sets
+  `reasoning_effort` for OpenAI reasoning models on any OpenAI-wire provider.
+  `low` suits voice, whose short token budget medium reasoning can exhaust.
+- Language-switch diagnostics: each voice turn logs the call language, the
+  pinned STT language and the start of the caller's words, and whether the
+  reply carried a `[SWITCH_LANGUAGE:xx]` token. Each call logs its resolved
+  provider/model once.
+
 #### Calendar: one Google Workspace toolset, stored times in the calendar's zone (#297)
 
 Creating, moving and renaming calendar events now go through the Google

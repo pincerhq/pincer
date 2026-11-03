@@ -61,6 +61,8 @@ def _router_with_pool(default, failovers, pool, *, summary_provider=None, summar
         anthropic_compatible_provider="",
     )
     r._pool = pool
+    r._unavailable = set()
+    r._voice_warned = set()
     return r
 
 

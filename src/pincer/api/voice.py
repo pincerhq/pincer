@@ -285,6 +285,10 @@ class VoiceConfig(BaseModel):
     voice_turn_model: str
     default_model: str
     choices: list[TurnModelChoice]
+    # What a voice turn really runs on: the default provider/model when the
+    # selected override can't be built here (missing key or base URL).
+    effective_provider: str = ""
+    effective_model: str = ""
 
 
 class VoiceConfigUpdate(BaseModel):
@@ -1471,23 +1475,57 @@ async def initiate_call(body: InitiateCallIn) -> InitiateCallOut:
     )
 
 
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+
 def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
-    """Model options offered in the dashboard, gated on configured API keys."""
-    choices = [TurnModelChoice(value="", label=f"Default ({settings.default_model})")]
-    try:
-        has_anthropic = bool(settings.anthropic_api_key.get_secret_value())
-    except AttributeError:
-        has_anthropic = False
-    try:
-        has_openai = bool(settings.openai_api_key.get_secret_value())
-    except AttributeError:
-        has_openai = False
-    if has_anthropic:
-        choices.append(TurnModelChoice(value="claude-haiku-4-5-20251001", label="Claude Haiku 4.5 (fast)"))
-    if has_openai:
-        choices.append(TurnModelChoice(value="openai:gpt-5-mini", label="GPT-5 mini (OpenAI, reasoning)"))
-        choices.append(TurnModelChoice(value="openai:gpt-4o-mini", label="GPT-4o mini (OpenAI, fast)"))
+    """Model options offered in the dashboard: only the ones whose provider
+    builds here. A bare model id means "this model on the default provider",
+    so every model meant for another provider carries its ``provider:`` prefix."""
+    from pincer.llm.router import is_openai_wire, provider_default_model, voice_turn_unusable_reason
+
+    default_provider = str(getattr(settings, "default_provider", "") or "")
+    default_label = f"Default ({provider_default_model(settings, default_provider)})"
+    candidates: list[TurnModelChoice] = [TurnModelChoice(value="", label=default_label)]
+
+    # Configured compatible endpoints (e.g. azure, ollama), by their own model.
+    for name, own_model in (
+        (settings.openai_compatible_provider, settings.openai_compatible_model),
+        (settings.anthropic_compatible_provider, settings.anthropic_compatible_model),
+    ):
+        model = own_model or settings.default_model
+        if not name or (model.startswith("claude") and is_openai_wire(settings, name)):
+            continue
+        candidates.append(TurnModelChoice(value=f"{name}:{model}", label=f"{model} ({name})"))
+
+    haiku = HAIKU_MODEL if default_provider == "anthropic" else f"anthropic:{HAIKU_MODEL}"
+    candidates.append(TurnModelChoice(value=haiku, label="Claude Haiku 4.5 (fast)"))
+    candidates.append(TurnModelChoice(value="openai:gpt-5-mini", label="GPT-5 mini (OpenAI, reasoning)"))
+    candidates.append(TurnModelChoice(value="openai:gpt-4o-mini", label="GPT-4o mini (OpenAI, fast)"))
+
+    choices: list[TurnModelChoice] = []
+    seen: set[str] = set()
+    for choice in candidates:
+        if choice.value in seen:
+            continue
+        if choice.value and voice_turn_unusable_reason(settings, choice.value) is not None:
+            continue
+        seen.add(choice.value)
+        choices.append(choice)
     return choices
+
+
+def _voice_config(settings: Any, current: str) -> VoiceConfig:
+    from pincer.llm.router import effective_voice_turn
+
+    provider, model = effective_voice_turn(settings, current)
+    return VoiceConfig(
+        voice_turn_model=current,
+        default_model=str(getattr(settings, "default_model", "") or ""),
+        choices=_turn_model_choices(settings),
+        effective_provider=provider,
+        effective_model=model,
+    )
 
 
 def _live_settings_objects(request: Request) -> list[Any]:
@@ -1507,12 +1545,7 @@ async def voice_config(request: Request) -> VoiceConfig:
     """Current voice turn model + the options the dashboard can offer."""
     settings_objects = _live_settings_objects(request)
     current = str(getattr(settings_objects[-1], "voice_turn_model", "") or "")
-    base = get_settings_relaxed()
-    return VoiceConfig(
-        voice_turn_model=current,
-        default_model=str(getattr(base, "default_model", "") or ""),
-        choices=_turn_model_choices(base),
-    )
+    return _voice_config(get_settings_relaxed(), current)
 
 
 @router.put("/config", response_model=VoiceConfig)
@@ -1526,6 +1559,11 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
     model = body.voice_turn_model.strip()
     if not TURN_MODEL_RE.match(model):
         raise HTTPException(status_code=422, detail=f"Invalid turn model format: {model!r}")
+    from pincer.llm.router import voice_turn_unusable_reason
+
+    reason = voice_turn_unusable_reason(get_settings_relaxed(), model)
+    if reason is not None:
+        raise HTTPException(status_code=422, detail=f"Turn model {model!r} can't be used here: {reason}")
 
     settings_objects = _live_settings_objects(request)
     for settings_obj in settings_objects:
@@ -1536,12 +1574,7 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
         logger.exception("voice_runtime.json write failed — change is active but not persisted")
 
     logger.info("Voice turn model set via API: %r", model or "(default)")
-    base = get_settings_relaxed()
-    return VoiceConfig(
-        voice_turn_model=model,
-        default_model=str(getattr(base, "default_model", "") or ""),
-        choices=_turn_model_choices(base),
-    )
+    return _voice_config(get_settings_relaxed(), model)
 
 
 @router.post("/schedule", response_model=ScheduleAppointmentOut, status_code=201)

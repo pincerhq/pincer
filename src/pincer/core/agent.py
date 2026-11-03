@@ -516,6 +516,8 @@ class Agent:
         # DEBUG repeats, INFO on recovery), not once per message.
         self._mcp_list_outage = LogOnce(logger, recovery="Fetching the MCP server list for prompt recovered")
         self._memory_outage = LogOnce(logger, recovery="Fetching memories for prompt recovered")
+        # Voice calls whose resolved provider/model was already logged (once per call)
+        self._voice_model_logged: set[str] = set()
 
     async def _repair_tool_pairs(self, session: Session) -> bool:
         """Strip orphaned tool pairs from the session and persist it.
@@ -1273,6 +1275,7 @@ class Agent:
     async def end_voice_session(self, session_key: str) -> None:
         """Drop a finished call's session from the cache (see ``stream_voice_turn``)."""
         await self._sessions.evict(session_key)
+        self._voice_model_logged.discard(session_key)
 
     async def stream_voice_turn(
         self,
@@ -1377,24 +1380,26 @@ class Agent:
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
 
         # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
-        # "claude-..." = default provider, that model; "openai:gpt-5-mini" =
-        # that provider AND model — cross-provider tiering, chosen at runtime
-        # from the dashboard (/api/voice/config).
+        # "<model>" = default provider, that model; "openai:gpt-5-mini" = that
+        # provider AND model — cross-provider tiering, chosen at runtime from
+        # the dashboard (/api/voice/config). The router falls back to the
+        # default provider and model when the override can't be built.
         voice_llm: BaseLLMProvider = self._llm
-        raw_turn_model = str(getattr(self._settings, "voice_turn_model", "") or "")
-        voice_model: str | None = raw_turn_model or None
-        if ":" in raw_turn_model:
-            provider_name, _, model_part = raw_turn_model.partition(":")
-            voice_model = model_part.strip() or None
-            if isinstance(self._llm, LLMRouter):
-                specific = self._llm.get_provider(provider_name.strip(), model_hint=voice_model or "")
-                if specific is not None:
-                    voice_llm = specific
-                else:
-                    logger.warning(
-                        "voice_turn_model provider %r unavailable — using the default provider", provider_name
-                    )
-                    voice_model = None  # a foreign model id would 404 on the default provider
+        voice_model: str | None
+        if isinstance(self._llm, LLMRouter):
+            voice_llm, voice_model = self._llm.resolve_voice_turn()
+        else:
+            raw_turn_model = str(getattr(self._settings, "voice_turn_model", "") or "")
+            # No router to build another provider: only a bare model can apply.
+            voice_model = None if ":" in raw_turn_model else (raw_turn_model or None)
+        if session_key and session_key not in self._voice_model_logged:
+            self._voice_model_logged.add(session_key)
+            logger.info(
+                "Voice call %s runs on provider %s / model %s",
+                session_key,
+                getattr(voice_llm, "_provider_name", "") or getattr(self._settings, "default_provider", ""),
+                voice_model or "(provider default)",
+            )
         if timings is not None:
             # T5.1 stage split: everything before the LLM request (session I/O,
             # memory search, prompt assembly) vs. actual provider TTFT.

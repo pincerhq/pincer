@@ -1114,6 +1114,7 @@ class VoiceChannel(BaseChannel):
 
         transcript = self._transcripts[call_sid]
         transcript.log_utterance(Speaker.CALLER, text, state=str(sm.phase))
+        self._log_turn_language(call_sid, state, text)
 
         # The greeting phases end the moment the callee speaks. An outbound
         # call is a conversation we started, not a caller's request to capture.
@@ -1211,6 +1212,19 @@ class VoiceChannel(BaseChannel):
         self._active_turns[call_sid] = turn
         turn.add_done_callback(lambda t: self._turn_done(call_sid, trace, t))
         return turn
+
+    def _log_turn_language(self, call_sid: str, state: CallState, text: str) -> None:
+        """Diagnostics for in-call language switching: the language transcription
+        is pinned to and the start of what it heard, so a garbled request (STT on
+        the wrong language) can be told apart from a model that ignored it."""
+        from pincer.voice.language import relay_language, stt_language
+
+        language = str(state.language or "en")
+        engine_name = str(getattr(self._engine, "engine_name", "") or "")
+        stt = relay_language(language) if engine_name == "conversation_relay" else stt_language(language)
+        logger.info(
+            "Voice turn [%s]: call language %s, STT pinned to %s, caller said %r", call_sid, language, stt, text[:80]
+        )
 
     async def _run_buffered_turn(
         self,
@@ -1391,6 +1405,7 @@ class VoiceChannel(BaseChannel):
             nonlocal buffered_mode, suppress_rest
             call_lang = str(state.language or "en")[:2]
             requested, stripped = parse_switch_token(sentence)
+            logger.info("Switch token on first sentence [%s]: %s", call_sid, requested or "none")
             if requested is not None:
                 from pincer.voice.language import de_formality, supported_languages
 

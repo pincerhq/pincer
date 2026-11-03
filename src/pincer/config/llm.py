@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import NoDecode
@@ -43,6 +43,12 @@ class LLMSettings(BaseModel):
     openai_api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
     openai_base_url: str = Field(default="https://api.openai.com/v1", description="OpenAI API base URL")
     openai_model: str = Field(default="", description="Model for the 'openai' provider (defaults to default_model)")
+    # Sent only to OpenAI reasoning models (GPT-5, o-series) on any OpenAI-wire
+    # provider. "" = don't send (the API default, "medium"), which can spend a
+    # short voice reply's whole token budget on reasoning; "low" suits voice.
+    openai_reasoning_effort: Literal["", "minimal", "low", "medium", "high"] = Field(
+        default="", description="reasoning_effort for OpenAI reasoning models ('' = API default)"
+    )
 
     # Compatible endpoints — name each one, set its base URL; key optional; model
     # falls back to default_model when empty.

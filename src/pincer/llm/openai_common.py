@@ -189,6 +189,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
+        self._reasoning_effort = str(getattr(settings, "openai_reasoning_effort", "") or "")
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
@@ -198,6 +199,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
             kwargs.pop("temperature", None)
             logger.debug("Dropping temperature: %s does not accept it", model)
+            if self._reasoning_effort:
+                kwargs["reasoning_effort"] = self._reasoning_effort
         return kwargs
 
     def _build_kwargs(

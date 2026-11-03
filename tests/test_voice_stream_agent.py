@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.exceptions import LLMError
@@ -292,6 +293,7 @@ class TestCrossProviderVoiceModel:
         router = LLMRouter.__new__(LLMRouter)  # skip __init__ (env-based)
         router._settings = settings
         router._pool = {"anthropic": ScriptedProvider([])}
+        router._unavailable, router._voice_warned = set(), set()
 
         def fake_get_provider(name, model_hint=""):
             assert name == "openai"
@@ -317,6 +319,7 @@ class TestCrossProviderVoiceModel:
         router = LLMRouter.__new__(LLMRouter)
         router._settings = settings
         router._pool = {"anthropic": default_provider}
+        router._unavailable, router._voice_warned = set(), set()
         router.get_provider = lambda name, model_hint="": None  # type: ignore[method-assign]
         router.stream_turn = default_provider.stream_turn  # type: ignore[method-assign]
         router.is_free = lambda p: False  # type: ignore[method-assign]
@@ -327,6 +330,37 @@ class TestCrossProviderVoiceModel:
         assert chunks[-1].content == "Fallback answer here."
         # foreign model id must NOT be sent to the default provider (would 404)
         assert default_provider.calls[0]["model"] is None
+
+    async def test_stale_override_without_key_runs_on_default_every_turn(
+        self, settings, session_manager, cost_tracker, tool_registry, caplog
+    ):
+        """#305: a stored openai:… override with no OpenAI key — the real router
+        resolution falls back to the default provider and model, and says so once."""
+        import logging
+
+        from pincer.llm.router import LLMRouter
+
+        settings.voice_turn_model = "openai:gpt-5-mini"
+        settings.openai_api_key = SecretStr("")
+        default_provider = ScriptedProvider([_text_turn("First answer here."), _text_turn("Second answer here.")])
+
+        router = LLMRouter.__new__(LLMRouter)
+        router._settings = settings
+        router._pool = {"anthropic": default_provider}
+        router._unavailable, router._voice_warned = set(), set()
+        router.stream_turn = default_provider.stream_turn  # type: ignore[method-assign]
+        router.is_free = lambda p: False  # type: ignore[method-assign]
+
+        caplog.set_level(logging.WARNING, logger="pincer.llm.router")
+        agent = Agent(settings, router, session_manager, cost_tracker, tool_registry)
+        await _collect(agent, user_id="u1", channel="voice", text="Hi")
+        await _collect(agent, user_id="u1", channel="voice", text="Again")
+
+        assert [c["model"] for c in default_provider.calls] == [None, None]
+        assert router._unavailable == {"openai"}
+        warnings = [r.getMessage() for r in caplog.records if r.name == "pincer.llm.router"]
+        assert len([w for w in warnings if "per-call override" in w]) == 1
+        assert len([w for w in warnings if "voice_turn_model" in w]) == 1
 
 
 class TestVoiceToolCap:

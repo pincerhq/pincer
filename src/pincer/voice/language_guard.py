@@ -325,6 +325,7 @@ async def check_and_fix(
     formality = de_formality(settings)
 
     requested, stripped = parse_switch_token(response)
+    logger.info("Switch token in reply [%s]: %s", state.call_sid, requested or "none")
     if requested is not None:
         if requested == call_lang:
             return stripped or response, False
