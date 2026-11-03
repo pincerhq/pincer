@@ -33,9 +33,18 @@ class ScriptedProvider(BaseLLMProvider):
         raise AssertionError("voice turns must not use stream()")
         yield ""  # pragma: no cover
 
-    async def stream_turn(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def stream_turn(
+        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, **extra
+    ):
         self.calls.append(
-            {"tools": tools, "model": model, "max_tokens": max_tokens, "system": system, "messages": list(messages)}
+            {
+                "tools": tools,
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": system,
+                "messages": list(messages),
+                **extra,
+            }
         )
         for event in self.turns.pop(0):
             yield event
@@ -357,10 +366,35 @@ class TestCrossProviderVoiceModel:
         await _collect(agent, user_id="u1", channel="voice", text="Again")
 
         assert [c["model"] for c in default_provider.calls] == [None, None]
-        assert router._unavailable == {"openai"}
+        assert router._unavailable == {("openai", "gpt-5-mini")}
         warnings = [r.getMessage() for r in caplog.records if r.name == "pincer.llm.router"]
         assert len([w for w in warnings if "per-call override" in w]) == 1
         assert len([w for w in warnings if "voice_turn_model" in w]) == 1
+
+
+class TestVoiceReasoningEffort:
+    async def test_effort_passed_only_when_set(self, settings, session_manager, cost_tracker, tool_registry):
+        provider = ScriptedProvider([_text_turn("Plain answer."), _text_turn("Low effort answer.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+        await _collect(agent, user_id="u1", channel="voice", text="Hi")
+        settings.voice_reasoning_effort = "low"
+        await _collect(agent, user_id="u1", channel="voice", text="Again")
+        assert "reasoning_effort" not in provider.calls[0]
+        assert provider.calls[1]["reasoning_effort"] == "low"
+
+    async def test_router_passes_effort_through(self, settings):
+        from pincer.llm.router import LLMRouter
+
+        leaf = ScriptedProvider([_text_turn("One."), _text_turn("Two.")])
+        router = LLMRouter.__new__(LLMRouter)
+        router._settings = settings
+        router._pool = {settings.default_provider: leaf}  # whatever the env made the default
+        router._unavailable, router._voice_warned = set(), set()
+        settings.fallback_providers = []
+        [e async for e in router.stream_turn([], reasoning_effort="high")]
+        [e async for e in router.stream_turn([])]
+        assert leaf.calls[0]["reasoning_effort"] == "high"
+        assert "reasoning_effort" not in leaf.calls[1]
 
 
 class TestVoiceToolCap:

@@ -156,10 +156,12 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): text deltas arrive as
         the model writes; the final message (tool calls + usage) comes from the
-        same stream — tools are never lost, nothing is generated twice."""
+        same stream — tools are never lost, nothing is generated twice.
+        ``reasoning_effort`` is an OpenAI knob and is ignored here."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
 
         try:

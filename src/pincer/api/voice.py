@@ -1483,6 +1483,7 @@ def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
     builds here. A bare model id means "this model on the default provider",
     so every model meant for another provider carries its ``provider:`` prefix."""
     from pincer.llm.router import is_openai_wire, provider_default_model, voice_turn_unusable_reason
+    from pincer.voice.runtime_config import TURN_MODEL_RE
 
     default_provider = str(getattr(settings, "default_provider", "") or "")
     default_label = f"Default ({provider_default_model(settings, default_provider)})"
@@ -1506,7 +1507,9 @@ def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
     choices: list[TurnModelChoice] = []
     seen: set[str] = set()
     for choice in candidates:
-        if choice.value in seen:
+        # Never offer a value PUT /config would reject (e.g. a compatible
+        # provider name that isn't a lowercase slug).
+        if choice.value in seen or not TURN_MODEL_RE.match(choice.value):
             continue
         if choice.value and voice_turn_unusable_reason(settings, choice.value) is not None:
             continue
@@ -1545,7 +1548,9 @@ async def voice_config(request: Request) -> VoiceConfig:
     """Current voice turn model + the options the dashboard can offer."""
     settings_objects = _live_settings_objects(request)
     current = str(getattr(settings_objects[-1], "voice_turn_model", "") or "")
-    return _voice_config(get_settings_relaxed(), current)
+    # Probing each choice constructs SDK clients: keep it off the event loop
+    # that also carries live call audio.
+    return await asyncio.to_thread(_voice_config, get_settings_relaxed(), current)
 
 
 @router.put("/config", response_model=VoiceConfig)
@@ -1561,7 +1566,7 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
         raise HTTPException(status_code=422, detail=f"Invalid turn model format: {model!r}")
     from pincer.llm.router import voice_turn_unusable_reason
 
-    reason = voice_turn_unusable_reason(get_settings_relaxed(), model)
+    reason = await asyncio.to_thread(voice_turn_unusable_reason, get_settings_relaxed(), model)
     if reason is not None:
         raise HTTPException(status_code=422, detail=f"Turn model {model!r} can't be used here: {reason}")
 
@@ -1574,7 +1579,7 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
         logger.exception("voice_runtime.json write failed — change is active but not persisted")
 
     logger.info("Voice turn model set via API: %r", model or "(default)")
-    return _voice_config(get_settings_relaxed(), model)
+    return await asyncio.to_thread(_voice_config, get_settings_relaxed(), model)
 
 
 @router.post("/schedule", response_model=ScheduleAppointmentOut, status_code=201)

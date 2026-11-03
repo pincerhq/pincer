@@ -30,13 +30,17 @@ missing) no longer shadows the default or warns on every turn.
 - `azure:gpt-5-mini` works as the voice model with Azure in the
   OpenAI-compatible slot, even when `PINCER_OPENAI_COMPATIBLE_MODEL` is unset
   and the default model is a `claude-*` id. `.env.example` has an Azure example.
-- New `PINCER_OPENAI_REASONING_EFFORT` (default empty = not sent) sets
-  `reasoning_effort` for OpenAI reasoning models on any OpenAI-wire provider.
-  `low` suits voice, whose short token budget medium reasoning can exhaust.
-- Language-switch diagnostics: each voice turn logs the call language, the
-  pinned STT language and the start of the caller's words, and whether the
-  reply carried a `[SWITCH_LANGUAGE:xx]` token. Each call logs its resolved
-  provider/model once.
+- New `PINCER_VOICE_REASONING_EFFORT` (`low` | `medium` | `high`, default empty =
+  not sent) sets `reasoning_effort` for voice turns on OpenAI reasoning models
+  on any OpenAI-wire provider. Other channels are untouched. `low` suits voice,
+  whose short token budget medium reasoning can exhaust.
+- A provider-qualified voice model may contain `:` or `/` (e.g.
+  `ollama:llama3.2:latest`), so every model the dashboard offers can be saved.
+  The dashboard config handlers build their provider checks off the event loop.
+- Language-switch diagnostics: each voice turn logs at INFO the call language,
+  the pinned STT language and the start of the caller's words (PII-masked). A
+  parsed `[SWITCH_LANGUAGE:xx]` token is logged at INFO, its absence only at
+  DEBUG. Each call logs its resolved provider/model once.
 
 #### Calendar: one Google Workspace toolset, stored times in the calendar's zone (#297)
 

@@ -127,6 +127,19 @@ def test_anthropic_override_with_key_builds():
     assert model == "claude-haiku-4-5"
 
 
+def test_failed_build_without_hint_does_not_block_a_buildable_model():
+    """A build that failed for lack of a model hint must not poison the provider
+    for a later override that does build (the dashboard accepts that one)."""
+    settings = _gemma(openai_api_key="sk-x", voice_turn_model="openai:claude-haiku-4-5")
+    router = _router(settings)
+    assert router.resolve_voice_turn() == (router, None)
+    settings.voice_turn_model = "openai:gpt-5-mini"
+    assert voice_turn_unusable_reason(settings) is None
+    provider, model = router.resolve_voice_turn()
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert model == "gpt-5-mini"
+
+
 def test_bare_claude_model_on_openai_wire_default_uses_provider_model(caplog):
     router = _router(_azure_default(voice_turn_model="claude-haiku-4-5"))
     caplog.set_level(logging.WARNING, logger="pincer.llm.router")
@@ -201,12 +214,59 @@ def test_reasoning_model_gets_completion_tokens_and_no_temperature():
     assert kwargs["max_completion_tokens"] == 220
     assert "max_tokens" not in kwargs
     assert "temperature" not in kwargs
-    assert "reasoning_effort" not in kwargs  # unset → the API default
+    assert "reasoning_effort" not in kwargs  # never on a plain (non-voice) request
 
 
-def test_reasoning_effort_sent_only_to_reasoning_models():
-    settings = _azure_default(openai_reasoning_effort="low")
-    assert _kwargs(settings, "gpt-5.4-mini")["reasoning_effort"] == "low"
-    legacy = _kwargs(settings, "gpt-4o-mini")
+class _Sent(Exception):
+    pass
+
+
+async def _stream_turn_kwargs(model: str, effort: str | None) -> dict:
+    """The request kwargs stream_turn sends (the request itself is cut short)."""
+    from unittest.mock import AsyncMock
+
+    provider = OpenAICompatibleProvider(_azure_default(), "azure")
+    create = AsyncMock(side_effect=_Sent)
+    provider._client.chat.completions.create = create  # type: ignore[method-assign]
+    with pytest.raises(_Sent):
+        async for _ in provider.stream_turn([], model=model, max_tokens=220, reasoning_effort=effort):
+            pass
+    return create.call_args.kwargs
+
+
+async def test_reasoning_effort_sent_only_to_reasoning_models():
+    assert (await _stream_turn_kwargs("gpt-5.4-mini", "low"))["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in await _stream_turn_kwargs("gpt-5.4-mini", None)
+    legacy = await _stream_turn_kwargs("gpt-4o-mini", "low")
     assert "reasoning_effort" not in legacy
     assert legacy["max_tokens"] == 220
+
+
+def test_voice_reasoning_effort_rejects_minimal():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _azure_default(voice_reasoning_effort="minimal")
+
+
+# ── One resolver: the dashboard reports what turns really run on ─────────────
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "openai:gpt-5-mini", "anthropic:claude-haiku-4-5", "azure:gpt-5-mini", "claude-haiku-4-5", "x:y"],
+)
+@pytest.mark.parametrize("anthropic_key", ["", "sk-ant"])
+def test_effective_matches_resolved(value, anthropic_key):
+    settings = _gemma(
+        anthropic_api_key=anthropic_key,
+        openai_compatible_provider="azure",
+        openai_compatible_base_url=AZURE_URL,
+        voice_turn_model=value,
+    )
+    router = _router(settings)
+    provider, model = router.resolve_voice_turn()
+    name = settings.default_provider if provider is router else provider._provider_name
+    effective = effective_voice_turn(settings)
+    assert effective[0] == name
+    assert effective[1] == (model or router_mod.provider_default_model(settings, name))

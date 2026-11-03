@@ -1218,12 +1218,16 @@ class VoiceChannel(BaseChannel):
         is pinned to and the start of what it heard, so a garbled request (STT on
         the wrong language) can be told apart from a model that ignored it."""
         from pincer.voice.language import relay_language, stt_language
+        from pincer.voice.pii_guard import sanitize_for_logs
 
         language = str(state.language or "en")
-        engine_name = str(getattr(self._engine, "engine_name", "") or "")
-        stt = relay_language(language) if engine_name == "conversation_relay" else stt_language(language)
+        stt = relay_language(language) if state.engine_type == "conversation_relay" else stt_language(language)
         logger.info(
-            "Voice turn [%s]: call language %s, STT pinned to %s, caller said %r", call_sid, language, stt, text[:80]
+            "Voice turn [%s]: call language %s, STT pinned to %s, caller said %r",
+            call_sid,
+            language,
+            stt,
+            sanitize_for_logs(text)[:80],
         )
 
     async def _run_buffered_turn(
@@ -1405,7 +1409,12 @@ class VoiceChannel(BaseChannel):
             nonlocal buffered_mode, suppress_rest
             call_lang = str(state.language or "en")[:2]
             requested, stripped = parse_switch_token(sentence)
-            logger.info("Switch token on first sentence [%s]: %s", call_sid, requested or "none")
+            logger.log(
+                logging.INFO if requested else logging.DEBUG,
+                "Switch token on first sentence [%s]: %s",
+                call_sid,
+                requested or "none",
+            )
             if requested is not None:
                 from pincer.voice.language import de_formality, supported_languages
 

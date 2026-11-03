@@ -189,7 +189,6 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
-        self._reasoning_effort = str(getattr(settings, "openai_reasoning_effort", "") or "")
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
@@ -199,8 +198,6 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
             kwargs.pop("temperature", None)
             logger.debug("Dropping temperature: %s does not accept it", model)
-            if self._reasoning_effort:
-                kwargs["reasoning_effort"] = self._reasoning_effort
         return kwargs
 
     def _build_kwargs(
@@ -276,12 +273,16 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): content deltas are
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
-        Anthropic implementation, so the voice pipeline can run either."""
+        Anthropic implementation, so the voice pipeline can run either.
+        ``reasoning_effort`` is sent only to OpenAI reasoning models."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        if reasoning_effort and openai_is_reasoning_model(str(kwargs["model"])):
+            kwargs["reasoning_effort"] = reasoning_effort
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 

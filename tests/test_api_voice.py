@@ -531,6 +531,12 @@ class TestVoiceConfig:
         assert client.put("/api/voice/config", json={"voice_turn_model": ""}).status_code == 200
         assert client.get("/api/voice/config").json()["voice_turn_model"] == ""
 
+    @pytest.mark.parametrize("value", ["", "claude-haiku-4-5", "openai:gpt-5-mini", "ollama:llama3.2:latest"])
+    def test_turn_model_re_accepts(self, value):
+        from pincer.voice.runtime_config import TURN_MODEL_RE
+
+        assert TURN_MODEL_RE.match(value)
+
     @pytest.mark.parametrize("bad", ["has spaces", "UPPER:case-provider:x", "a:b:c:d$"])
     def test_put_config_rejects_garbage(self, client, bad):
         assert client.put("/api/voice/config", json={"voice_turn_model": bad}).status_code == 422

@@ -1274,8 +1274,8 @@ class Agent:
 
     async def end_voice_session(self, session_key: str) -> None:
         """Drop a finished call's session from the cache (see ``stream_voice_turn``)."""
-        await self._sessions.evict(session_key)
         self._voice_model_logged.discard(session_key)
+        await self._sessions.evict(session_key)
 
     async def stream_voice_turn(
         self,
@@ -1378,6 +1378,10 @@ class Agent:
             preferred_language=False,
         )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
+        # Reasoning models can spend that whole budget thinking; only passed when
+        # set, and only OpenAI reasoning models act on it.
+        effort = str(getattr(self._settings, "voice_reasoning_effort", "") or "")
+        effort_kwargs: dict[str, Any] = {"reasoning_effort": effort} if effort else {}
 
         # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
         # "<model>" = default provider, that model; "openai:gpt-5-mini" = that
@@ -1445,6 +1449,7 @@ class Agent:
                     system=system_prompt,
                     model=voice_model,
                     max_tokens=max_tokens,
+                    **effort_kwargs,
                 ):
                     if event.response is not None:
                         response = event.response

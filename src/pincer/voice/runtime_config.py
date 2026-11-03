@@ -29,9 +29,11 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_FILE = "voice_runtime.json"
 
-# "" | "<model>" | "<provider>:<model>" — provider names are lowercase slugs;
-# model ids never contain a colon themselves.
-TURN_MODEL_RE = re.compile(r"^$|^(?:[a-z][a-z0-9_-]{1,31}:)?[A-Za-z0-9._-]{1,80}$")
+# "" | "<model>" | "<provider>:<model>" — provider names are lowercase slugs.
+# Only a provider-qualified model may carry ':' (Ollama tags like
+# llama3.2:latest): a bare model with a colon would read as "<provider>:<model>".
+# Either may carry '/' (gateway ids like meta/llama-3).
+TURN_MODEL_RE = re.compile(r"^$|^[a-z][a-z0-9_-]{1,31}:[A-Za-z0-9._:/-]{1,80}$|^[A-Za-z0-9._/-]{1,80}$")
 
 
 def _path(settings: Any) -> Path | None:
