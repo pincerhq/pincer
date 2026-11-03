@@ -100,7 +100,7 @@ class _PendingPrompt:
 # (2=LOGGED_OUT, 3=TEMP_BANNED, 4=MAIN_DEVICE_GONE, 6=CLIENT_OUTDATED, 7=BAD_USER_AGENT)
 _WA_CLIENT_OUTDATED_ACTION = (
     "WhatsApp rejected the client protocol version. "
-    "Run `uv pip install -U 'neonize>=0.4.3'` (or `pip install -U neonize`) and restart. "
+    "Run `uv pip install -U 'neonize>=0.5.2'` (or `pip install -U neonize`) and restart. "
     "See docs/whatsapp-troubleshooting.md if already on the latest neonize."
 )
 _WA_LOGGED_OUT_ACTION = (

@@ -1232,7 +1232,9 @@ class SecurityDoctor:
 
     # Minimum neonize release carrying a whatsmeow build WhatsApp still accepts.
     # Bump when upstream ships a fix for a fresh `err-client-outdated` wave.
-    _WA_NEONIZE_MIN = (0, 4, 3)
+    # 0.5.0+ also guards empty event payloads; 0.4.x panics in Go
+    # (`index out of range [0] with length 0` in getBytesAndSize).
+    _WA_NEONIZE_MIN = (0, 5, 2)
 
     def _check_whatsapp_neonize_version(self) -> CheckResult:
         try:

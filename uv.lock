@@ -2762,7 +2762,7 @@ wheels = [
 
 [[package]]
 name = "neonize"
-version = "0.4.3.post0"
+version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -2776,18 +2776,16 @@ dependencies = [
     { name = "segno" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/e9/f611667c8b6bfb80b37c1a84b8694157c18c61db5705fa379b7fe7b5a24c/neonize-0.4.3.post0.tar.gz", hash = "sha256:659feb762ce9f3e9c1c2c359b3adfefe93e4cb746d03d6f4ec53f853a1e8414c", size = 502861, upload-time = "2026-07-12T09:35:36.509Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/01/0397619931f5d318ad0670dd527a79bf589d06c57b5ea9da40e1d9d84dd2/neonize-0.4.3.post0-py3-none-any.whl", hash = "sha256:c9ea72794f265e51f3484ba95e5dcedbb399d323e5335820545ff335a81a8129", size = 604187, upload-time = "2026-07-12T09:35:35.262Z" },
-    { url = "https://files.pythonhosted.org/packages/4e/c7/29776da49acfb612c8dcbbce6d75b91452c9d034d8c244dadfa97b05547d/neonize-0.4.3.post0-py310-none-macosx_12_0_arm64.whl", hash = "sha256:16562910a728c82ea749340e8beadc0022468ad7a463ddca7f12071f3ad2cc46", size = 7170385, upload-time = "2026-07-12T09:27:26.587Z" },
-    { url = "https://files.pythonhosted.org/packages/b8/b9/81e408f176d6065ccf3f3f4c8dcec64238304d123e60856e9a4d3f240e8e/neonize-0.4.3.post0-py310-none-macosx_12_0_x86_64.whl", hash = "sha256:dabd4835f15f9381a78a7fece5a00a32d2f85d0f1c83d4ccb72fa4d6693bb569", size = 7654249, upload-time = "2026-07-12T09:27:28.341Z" },
-    { url = "https://files.pythonhosted.org/packages/ba/eb/17094cbcc32b517bad27df6ba32fdf4aa71ff26986ffd0c9cfc0a3c815c3/neonize-0.4.3.post0-py310-none-manylinux2014_aarch64.whl", hash = "sha256:4654bc1157dfbdbc9747ee6786a1703d6c82563f99d60e33c3760fc22f304128", size = 7399556, upload-time = "2026-07-12T09:31:31.621Z" },
-    { url = "https://files.pythonhosted.org/packages/90/13/42872c04e2ff1f8e4e71c08d39a635785f25a383b7302904c3040d55b39c/neonize-0.4.3.post0-py310-none-manylinux2014_i686.whl", hash = "sha256:9fffc6e337f59e149f6580df66cb1796a5acabf8f717ce7762484247f5cd9a05", size = 10693381, upload-time = "2026-07-12T09:34:17.01Z" },
-    { url = "https://files.pythonhosted.org/packages/a7/32/91cd90f2447033399f8c908855cdb084ef2c40e62ab8d2dbf9667f33c833/neonize-0.4.3.post0-py310-none-manylinux2014_s390x.whl", hash = "sha256:4f059081ea7a81eceeaa4486f6ec7fc69b405e09ef75a65c5d18aaa364dd1201", size = 7974851, upload-time = "2026-07-12T09:31:33.664Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/b6/b5376fd3901caafb696ad090cdd48b04f3728ff437efe2dd0515339dc662/neonize-0.4.3.post0-py310-none-manylinux2014_x86_64.whl", hash = "sha256:e5ac977bf6e71f7a11920f3aff86b61fd58acb324325e2cbb884b93426971f08", size = 7977344, upload-time = "2026-07-12T09:31:35.756Z" },
-    { url = "https://files.pythonhosted.org/packages/ea/36/ac17cc7e599cd7991652d8754d71501e6adca30b172acb32a8ff817709f9/neonize-0.4.3.post0-py310-none-win32.whl", hash = "sha256:13b4ff1e4b1a86d8c3d427b41dd49d5735dd87b22edadd9b94b064b53fad9ea7", size = 7783622, upload-time = "2026-07-12T09:34:19.529Z" },
-    { url = "https://files.pythonhosted.org/packages/70/e5/460c0a129c1a4eafd53b78152fb0189b1a458e498c72d9a0f30900ed66ff/neonize-0.4.3.post0-py310-none-win_amd64.whl", hash = "sha256:4c0f4dd3b6592d9c0ba42211d2a28b91a00362ea4278a5de2497a1fdd8ebcc98", size = 7862158, upload-time = "2026-07-12T09:34:21.653Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/08/c693c5c819e16eded9d0b8330fb8a1e905ceb22cbe4fbdbf7d99cce9217d/neonize-0.4.3.post0-py310-none-win_arm64.whl", hash = "sha256:4ba4f252450c0f8abf906c3e45eafb14a5cf93a356923669a012fd66504ad1b7", size = 7142843, upload-time = "2026-07-12T09:34:23.748Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/d2/891ce51005e9dee9c7bc9784e479a93f548be29b5a442199fde986a67ef6/neonize-0.6.1-py310-none-macosx_12_0_arm64.whl", hash = "sha256:14a33dc48fda81c72c5bae9186c8a9bdbfd7d488dd3bda5993dff01630b216d3", size = 6435139, upload-time = "2026-11-02T04:13:49.353Z" },
+    { url = "https://files.pythonhosted.org/packages/de/af/e35c145d0afc6d6f0d07dec14e7503d8e9612ab76945ba7f401f27b9f734/neonize-0.6.1-py310-none-macosx_12_0_x86_64.whl", hash = "sha256:ebc7fc0ab075ddd7b0a861bd213c464891a65442d78b8b808281c3f8bdeebe4c", size = 6869546, upload-time = "2026-11-02T04:13:51.566Z" },
+    { url = "https://files.pythonhosted.org/packages/97/ef/97cc645328b5cc6227042c2f22e5bd1b9850dc9af3b8b077f26de10db9fa/neonize-0.6.1-py310-none-manylinux2014_aarch64.whl", hash = "sha256:89bce6ce8680f5b26b12a844b9d84fdadf62f7a8bc964ca85a3391e5ddaf0a82", size = 6656747, upload-time = "2026-11-02T04:13:54.62Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/c8/3985c5620d4215bee105a8283435a2bb7da16462f24aa8b80eaa745e81f8/neonize-0.6.1-py310-none-manylinux2014_i686.whl", hash = "sha256:41d630d5588f8832c58f25126fce3b36994a589c9cde591e81412e6209f4c730", size = 9712654, upload-time = "2026-11-02T04:13:56.96Z" },
+    { url = "https://files.pythonhosted.org/packages/74/60/44599df5351f07ccbb1a087e8df910fae9010ced83d45f27dc4c40d275cc/neonize-0.6.1-py310-none-manylinux2014_s390x.whl", hash = "sha256:6f9cc8f091c657feaf7da3729cee5edd996a2695512e961a98241739230d4ee8", size = 7148828, upload-time = "2026-11-02T04:13:59.182Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/04/bae115e51ccd72c5c98d1426d49b895d607ec5cc4c3dcef00cfc6c99f99e/neonize-0.6.1-py310-none-manylinux2014_x86_64.whl", hash = "sha256:a304bfb4fab31b8f5fe54dda05e30cfe294c35140398f98492be47a1e8c62d13", size = 7165365, upload-time = "2026-11-02T04:14:01.025Z" },
+    { url = "https://files.pythonhosted.org/packages/64/71/a6dacfb8eee5746794335eba17741735919d8c8c7571f853bc98d078a3f4/neonize-0.6.1-py310-none-win32.whl", hash = "sha256:37dcd2790f6c4d6d78cfa5954db8e2241c50b98e9dc3dd52d54009b66d94eda2", size = 7009502, upload-time = "2026-11-02T04:14:02.71Z" },
+    { url = "https://files.pythonhosted.org/packages/10/83/b6434757a7a226a7abde34dc640e53e54df86af9a71698acb3d1d0f48c7a/neonize-0.6.1-py310-none-win_amd64.whl", hash = "sha256:b9017df5a44862ff28083852c6e2aa953048e66dfd0c0de10bc3abcce56a433a", size = 7089124, upload-time = "2026-11-02T04:14:05.034Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/28/73d3e0c2b032967c36e5f0bb4c6b44a3ff04cc858017fb7504e6ab447ed5/neonize-0.6.1-py310-none-win_arm64.whl", hash = "sha256:c444cd7bebb3cef343e27e46f9257a2c36c329ec7200f7b76e0ecb73d778d360", size = 6449695, upload-time = "2026-11-02T04:14:07.507Z" },
 ]
 
 [[package]]
@@ -3358,14 +3356,14 @@ requires-dist = [
     { name = "microsoft-teams-apps", extras = ["graph"], marker = "extra == 'teams'", specifier = ">=2.0.13.4" },
     { name = "ms365-mcp", marker = "extra == 'mcp'", editable = "src/ms365-mcp" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.18.0" },
-    { name = "neonize", specifier = ">=0.4.3" },
+    { name = "neonize", specifier = ">=0.5.2" },
     { name = "openai", specifier = ">=1.60.0" },
     { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "tasks-redis", "postgres", "remote-skills"], marker = "extra == 'all'" },
     { name = "pincer-mcps", marker = "extra == 'mcp'", editable = "src/pincer-mcps" },
     { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40.0" },
     { name = "pomodoro-mcp", marker = "extra == 'mcp'", editable = "src/pomodoro-mcp" },
-    { name = "protobuf", specifier = ">=6.33.2,<7.0" },
+    { name = "protobuf", specifier = ">=7.34.1,<8.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
@@ -3601,17 +3599,17 @@ wheels = [
 
 [[package]]
 name = "protobuf"
-version = "6.33.6"
+version = "7.36.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/66/70/e908e9c5e52ef7c3a6c7902c9dfbb34c7e29c25d2f81ade3856445fd5c94/protobuf-6.33.6.tar.gz", hash = "sha256:a6768d25248312c297558af96a9f9c929e8c4cee0659cb07e780731095f38135", size = 444531, upload-time = "2026-03-18T19:05:00.988Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/89/5b8517baa72f84a67b8a307ba953c91057af618bf40bf676f3c03551f8f0/protobuf-7.36.2.tar.gz", hash = "sha256:497d0463ff3316681da6c0b9e8d06cb465d61abce00b613ab42226175644d1bb", size = 512737, upload-time = "2026-09-17T20:07:59.326Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/9f/2f509339e89cfa6f6a4c4ff50438db9ca488dec341f7e454adad60150b00/protobuf-6.33.6-cp310-abi3-win32.whl", hash = "sha256:7d29d9b65f8afef196f8334e80d6bc1d5d4adedb449971fefd3723824e6e77d3", size = 425739, upload-time = "2026-03-18T19:04:48.373Z" },
-    { url = "https://files.pythonhosted.org/packages/76/5d/683efcd4798e0030c1bab27374fd13a89f7c2515fb1f3123efdfaa5eab57/protobuf-6.33.6-cp310-abi3-win_amd64.whl", hash = "sha256:0cd27b587afca21b7cfa59a74dcbd48a50f0a6400cfb59391340ad729d91d326", size = 437089, upload-time = "2026-03-18T19:04:50.381Z" },
-    { url = "https://files.pythonhosted.org/packages/5c/01/a3c3ed5cd186f39e7880f8303cc51385a198a81469d53d0fdecf1f64d929/protobuf-6.33.6-cp39-abi3-macosx_10_9_universal2.whl", hash = "sha256:9720e6961b251bde64edfdab7d500725a2af5280f3f4c87e57c0208376aa8c3a", size = 427737, upload-time = "2026-03-18T19:04:51.866Z" },
-    { url = "https://files.pythonhosted.org/packages/ee/90/b3c01fdec7d2f627b3a6884243ba328c1217ed2d978def5c12dc50d328a3/protobuf-6.33.6-cp39-abi3-manylinux2014_aarch64.whl", hash = "sha256:e2afbae9b8e1825e3529f88d514754e094278bb95eadc0e199751cdd9a2e82a2", size = 324610, upload-time = "2026-03-18T19:04:53.096Z" },
-    { url = "https://files.pythonhosted.org/packages/9b/ca/25afc144934014700c52e05103c2421997482d561f3101ff352e1292fb81/protobuf-6.33.6-cp39-abi3-manylinux2014_s390x.whl", hash = "sha256:c96c37eec15086b79762ed265d59ab204dabc53056e3443e702d2681f4b39ce3", size = 339381, upload-time = "2026-03-18T19:04:54.616Z" },
-    { url = "https://files.pythonhosted.org/packages/16/92/d1e32e3e0d894fe00b15ce28ad4944ab692713f2e7f0a99787405e43533a/protobuf-6.33.6-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:e9db7e292e0ab79dd108d7f1a94fe31601ce1ee3f7b79e0692043423020b0593", size = 323436, upload-time = "2026-03-18T19:04:55.768Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/72/02445137af02769918a93807b2b7890047c32bfb9f90371cbc12688819eb/protobuf-6.33.6-py3-none-any.whl", hash = "sha256:77179e006c476e69bf8e8ce866640091ec42e1beb80b213c3900006ecfba6901", size = 170656, upload-time = "2026-03-18T19:04:59.826Z" },
+    { url = "https://files.pythonhosted.org/packages/32/72/98342feb672507c8f3a69e34b4fa8961f608edba5c1a48a6f47156d92cb5/protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl", hash = "sha256:cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e", size = 456039, upload-time = "2026-09-17T20:07:51.542Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/ea/91fdf7c2b8bbd49cde056f00a9df6773532987e1c00fe2830b895af95c7e/protobuf-7.36.2-cp310-abi3-manylinux2014_aarch64.whl", hash = "sha256:e11e1f0180583a2af89db6a2ecd9e8dc40aa6d2988ca175bfd0e6d12ea72d74e", size = 344219, upload-time = "2026-09-17T20:07:52.914Z" },
+    { url = "https://files.pythonhosted.org/packages/17/ab/5fd5f8ece73fad885c5a09aa849b32d70472f954ba3a92d3bb5974ea953b/protobuf-7.36.2-cp310-abi3-manylinux2014_s390x.whl", hash = "sha256:f4fee11ec330d238b34a05c9b675f693c20415d1c5bd7d5320cc2f8a798eb9cf", size = 357223, upload-time = "2026-09-17T20:07:53.985Z" },
+    { url = "https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl", hash = "sha256:89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2", size = 343223, upload-time = "2026-09-17T20:07:54.931Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/1b/dcc64f358fcb51811b58ae40b3d28f820725f116d86487cc20bd4b130701/protobuf-7.36.2-cp310-abi3-win32.whl", hash = "sha256:912c1221170e16c08d1f086762f563dd61ff83c18b5fa6652952dfaded66f728", size = 442998, upload-time = "2026-09-17T20:07:55.826Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/55/b77bda4e5e5f5971fb51b07663694690e9afdb9402136c16a522bd621cad/protobuf-7.36.2-cp310-abi3-win_amd64.whl", hash = "sha256:a300819d441e078a5608c0d3c709796bb548136058fda017ae51d425b44fd353", size = 456514, upload-time = "2026-09-17T20:07:57.188Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/04/d52c7016b04b6c5108f26691f9d33ec82a9b65d041f1a9c771137693d618/protobuf-7.36.2-py3-none-any.whl", hash = "sha256:bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e", size = 179806, upload-time = "2026-09-17T20:07:58.211Z" },
 ]
 
 [[package]]

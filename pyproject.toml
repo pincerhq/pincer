@@ -34,12 +34,14 @@ dependencies = [
     # WhatsApp frequently invalidates older protocol versions; keep floor at a
     # release that carries a known-accepted whatsmeow build. Bump when the
     # server returns `err-client-outdated` (see docs/whatsapp-troubleshooting.md).
-    "neonize>=0.4.3",
-    # neonize 0.3.16 ships protobuf gencode 7.34.1 without pinning a runtime
-    # floor; older protobuf runtimes raise `incompatible Protobuf Gencode/Runtime
-    # versions` at pairing time. Keep this aligned with neonize's gencode.
-    # Latest version fix this issue
-    "protobuf>=6.33.2,<7.0",
+    # 0.4.x panics the whole process when an event marshals to an empty
+    # protobuf (`index out of range [0] with length 0` in getBytesAndSize);
+    # 0.5.0 added the empty-payload guard.
+    "neonize>=0.5.2",
+    # neonize 0.5+ ships protobuf gencode 7.34.1; an older protobuf runtime
+    # raises `incompatible Protobuf Gencode/Runtime versions` on import.
+    # Keep this floor aligned with neonize's gencode.
+    "protobuf>=7.34.1,<8.0",
     # Sprint 4: Discord (PyNaCl required for voice)
     "discord.py[voice]>=2.3,<3.0",
     "qrcode[pil]>=8.0",
