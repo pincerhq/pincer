@@ -497,6 +497,11 @@ class TestVoiceConfig:
     def test_put_config_applies_live_and_persists(self, client, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
+        from pincer.config import get_settings_relaxed
+
+        monkeypatch.setenv("PINCER_OPENAI_API_KEY", "sk-test")  # openai:… must build to be selectable
+        get_settings_relaxed.cache_clear()
+
         # A running agent whose settings instance differs from the API's
         agent_settings = SimpleNamespace(voice_turn_model="")
         client.app.state.agent = SimpleNamespace(_settings=agent_settings, _tools=None)
@@ -526,9 +531,167 @@ class TestVoiceConfig:
         assert client.put("/api/voice/config", json={"voice_turn_model": ""}).status_code == 200
         assert client.get("/api/voice/config").json()["voice_turn_model"] == ""
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "claude-haiku-4-5",
+            "openai:gpt-5-mini",
+            "ollama:llama3.2:latest",  # ':' inside a provider-qualified model
+            "gateway:meta/llama-3",  # '/' in a provider-qualified model
+            "anthropic/claude-haiku-4.5",  # '/' in a bare (vendor-prefixed) model
+            "openai:" + "m" * 80,  # longest model part
+        ],
+    )
+    def test_turn_model_re_accepts(self, value):
+        from pincer.voice.runtime_config import TURN_MODEL_RE
+
+        assert TURN_MODEL_RE.match(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "a:b",  # one-letter provider: reads as a bare model with a colon
+            "/gpt-5-mini",  # leading '/'
+            "openai:/gpt-5-mini",  # leading '/' after the provider
+            "openai::gpt-5-mini",  # empty model start
+            "-gpt",  # leading '-'
+            "m" * 81,  # over-long bare id
+            "openai:" + "m" * 81,  # over-long qualified id
+            "x" * 33 + ":gpt",  # over-long provider
+            "Azure:gpt-5-mini",  # provider names are lowercase slugs
+        ],
+    )
+    def test_turn_model_re_rejects(self, value):
+        from pincer.voice.runtime_config import TURN_MODEL_RE
+
+        assert not TURN_MODEL_RE.match(value)
+
     @pytest.mark.parametrize("bad", ["has spaces", "UPPER:case-provider:x", "a:b:c:d$"])
     def test_put_config_rejects_garbage(self, client, bad):
         assert client.put("/api/voice/config", json={"voice_turn_model": bad}).status_code == 422
+
+    @staticmethod
+    def _env(monkeypatch, **env: str) -> None:
+        from pincer.config import get_settings_relaxed
+
+        for key, value in env.items():
+            monkeypatch.setenv(f"PINCER_{key.upper()}", value)
+        get_settings_relaxed.cache_clear()
+
+    def _gemma_default(self, monkeypatch) -> None:
+        """A custom Anthropic-wire default provider with no OpenAI key (#305)."""
+        self._env(
+            monkeypatch,
+            default_provider="gemma_anthropic",
+            default_model="claude-sonnet-5-5",
+            anthropic_compatible_provider="gemma_anthropic",
+            anthropic_compatible_base_url="http://gemma.local",
+            anthropic_compatible_model="local-model",
+            openai_api_key="",
+        )
+
+    def test_put_unbuildable_provider_is_422(self, client, monkeypatch, tmp_path):
+        self._gemma_default(monkeypatch)
+        r = client.put("/api/voice/config", json={"voice_turn_model": "openai:gpt-5-mini"})
+        assert r.status_code == 422
+        assert "PINCER_OPENAI_API_KEY" in r.json()["detail"]
+        assert not (tmp_path / "voice_runtime.json").exists()  # nothing persisted
+        r = client.put("/api/voice/config", json={"voice_turn_model": "azure:gpt-5-mini"})
+        assert r.status_code == 422
+
+    def test_choices_are_provider_qualified_on_custom_default(self, client, monkeypatch):
+        self._gemma_default(monkeypatch)
+        choices = client.get("/api/voice/config").json()["choices"]
+        assert choices[0] == {"value": "", "label": "Default (local-model)"}
+        values = [c["value"] for c in choices]
+        assert "gemma_anthropic:local-model" in values
+        assert "anthropic:claude-haiku-4-5-20251001" in values  # the conftest Anthropic key
+        assert "claude-haiku-4-5-20251001" not in values  # bare = sent to gemma
+        assert not [v for v in values if v.startswith("openai:")]
+        for value in values[1:]:  # every offered choice is accepted back
+            assert client.put("/api/voice/config", json={"voice_turn_model": value}).status_code == 200
+
+    def test_choices_bare_haiku_on_anthropic_default(self, client, monkeypatch):
+        self._env(monkeypatch, default_provider="anthropic", openai_api_key="sk-test")
+        values = [c["value"] for c in client.get("/api/voice/config").json()["choices"]]
+        assert "claude-haiku-4-5-20251001" in values
+        assert {"openai:gpt-5-mini", "openai:gpt-4o-mini"} <= set(values)
+
+    def test_choices_offer_azure_when_it_is_the_default(self, client, monkeypatch):
+        self._env(
+            monkeypatch,
+            default_provider="azure",
+            default_model="gpt-5.4-mini",
+            openai_compatible_provider="azure",
+            openai_compatible_base_url="https://res.openai.azure.com/openai/v1/",
+            openai_compatible_api_key="azure-key",
+            anthropic_api_key="",
+            openai_api_key="",
+        )
+        data = client.get("/api/voice/config").json()
+        assert [c["value"] for c in data["choices"]] == ["", "azure:gpt-5.4-mini"]
+        assert (data["effective_provider"], data["effective_model"]) == ("azure", "gpt-5.4-mini")
+
+    def test_get_reports_effective_model(self, client, monkeypatch):
+        from types import SimpleNamespace
+
+        self._gemma_default(monkeypatch)
+        data = client.get("/api/voice/config").json()
+        assert (data["effective_provider"], data["effective_model"]) == ("gemma_anthropic", "local-model")
+
+        # A stale override on the live agent (e.g. set from the env) is reported
+        # as what really runs: the default provider and its model.
+        client.app.state.agent = SimpleNamespace(_settings=SimpleNamespace(voice_turn_model="openai:gpt-5-mini"))
+        data = client.get("/api/voice/config").json()
+        assert data["voice_turn_model"] == "openai:gpt-5-mini"
+        assert (data["effective_provider"], data["effective_model"]) == ("gemma_anthropic", "local-model")
+
+        assert (
+            client.put("/api/voice/config", json={"voice_turn_model": "anthropic:claude-haiku-4-5"}).status_code == 200
+        )
+        data = client.get("/api/voice/config").json()
+        assert (data["effective_provider"], data["effective_model"]) == ("anthropic", "claude-haiku-4-5")
+
+
+class TestApplyOverrides:
+    def _stored(self, tmp_path, model: str):
+        import json as _json
+        from types import SimpleNamespace
+
+        (tmp_path / "voice_runtime.json").write_text(_json.dumps({"voice_turn_model": model}))
+        return SimpleNamespace(voice_turn_model="", data_dir=tmp_path)
+
+    def test_unusable_stored_override_is_skipped(self, tmp_path, caplog):
+        import logging
+
+        settings = self._stored(tmp_path, "openai:gpt-5-mini")
+        caplog.set_level(logging.INFO, logger="pincer.voice.runtime_config")
+        from pincer.voice.runtime_config import apply_overrides
+
+        apply_overrides(settings, unusable_reason=lambda m: "provider 'openai' needs PINCER_OPENAI_API_KEY")
+        assert settings.voice_turn_model == ""  # env value kept
+        assert (tmp_path / "voice_runtime.json").read_text().count("openai:gpt-5-mini") == 1  # file untouched
+        assert [r.getMessage() for r in caplog.records if "Ignoring stored voice turn model" in r.getMessage()]
+
+    def test_usable_stored_override_applies(self, tmp_path):
+        from pincer.voice.runtime_config import apply_overrides
+
+        settings = self._stored(tmp_path, "anthropic:claude-haiku-4-5")
+        seen: list[str] = []
+        apply_overrides(settings, unusable_reason=lambda m: seen.append(m) or None)
+        assert settings.voice_turn_model == "anthropic:claude-haiku-4-5"
+        assert seen == ["anthropic:claude-haiku-4-5"]
+
+    def test_with_the_router_check(self, tmp_path):
+        from pincer.config import Settings
+        from pincer.llm.router import plan_voice_turn
+        from pincer.voice.runtime_config import apply_overrides
+
+        live = Settings(openai_api_key="", data_dir=tmp_path)  # type: ignore[arg-type]
+        (tmp_path / "voice_runtime.json").write_text('{"voice_turn_model": "openai:gpt-5-mini"}')
+        apply_overrides(live, unusable_reason=lambda m: plan_voice_turn(live, m).unusable)
+        assert live.voice_turn_model == ""
 
 
 # ── Sprint 12: receptionist messages ────────────────────────────────

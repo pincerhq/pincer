@@ -15,9 +15,10 @@ from typing import TYPE_CHECKING, Any
 import openai
 from openai import AsyncOpenAI
 
+from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
-from pincer.llm.model_params import openai_is_reasoning_model
+from pincer.llm.model_params import openai_accepts_reasoning_effort, openai_is_reasoning_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from pincer.config import Settings
 
 logger = logging.getLogger(__name__)
+# One INFO line per model id that a configured reasoning_effort can't apply to
+_effort_skipped = LogOncePerKey(logger, logging.INFO)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -273,12 +276,27 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): content deltas are
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
-        Anthropic implementation, so the voice pipeline can run either."""
+        Anthropic implementation, so the voice pipeline can run either.
+        ``reasoning_effort`` is sent only to models known to take it
+        (``openai_accepts_reasoning_effort``)."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        if reasoning_effort:
+            request_model = str(kwargs["model"])
+            if openai_accepts_reasoning_effort(request_model):
+                kwargs["reasoning_effort"] = reasoning_effort
+            else:
+                _effort_skipped.log(
+                    request_model,
+                    "reasoning_effort %r not sent: %r is not a known OpenAI reasoning model id "
+                    "(on Azure the deployment name must look like one, e.g. gpt-5-mini)",
+                    reasoning_effort,
+                    request_model,
+                )
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
@@ -256,6 +258,14 @@ class ChannelSettings(BaseModel):
         ge=32,
         le=1024,
         description="max_tokens per voice turn — short spoken replies keep latency and streaming granularity tight",
+    )
+    # Voice turns only, and only on OpenAI reasoning models (GPT-5, o-series) on
+    # an OpenAI-wire provider. "" = not sent (the API default, "medium"), which
+    # can spend the short voice budget above on reasoning and leave no reply.
+    # "minimal" is left out: GPT-5.1+ and the o-series reject it.
+    voice_reasoning_effort: Literal["", "low", "medium", "high"] = Field(
+        default="",
+        description="reasoning_effort for voice turns on OpenAI reasoning models ('' = API default)",
     )
     voice_stt_endpointing_ms: int = Field(
         default=0,

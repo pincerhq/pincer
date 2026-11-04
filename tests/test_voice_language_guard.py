@@ -416,3 +416,33 @@ async def test_bare_unsupported_token_gets_the_named_reply():
         "I'm sorry, Ukrainian isn't available on this phone line. I can continue in English or German.",
         False,
     )
+
+
+def test_turn_log_keeps_caller_words_out_of_info(caplog):
+    """The per-turn diagnostics line is metadata only at INFO; the words are DEBUG."""
+    import logging
+    from types import SimpleNamespace
+
+    from pincer.channels.phone_calls import VoiceChannel
+
+    words = "call me at 0151 1234 5678, I live at 12 Baker Street"
+    state = SimpleNamespace(language="en", engine_type="conversation_relay")
+    caplog.set_level(logging.INFO, logger="pincer.channels.phone_calls")
+    VoiceChannel._log_turn_language(None, "CA1", state, words)  # type: ignore[arg-type]
+    info = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert info == [f"Voice turn [CA1]: call language en, STT pinned to en-US, caller said {len(words)} chars"]
+    assert "Baker" not in " ".join(info)
+
+
+def test_switch_token_log_levels(caplog):
+    import logging
+
+    from pincer.voice.language_guard import log_switch_token
+
+    caplog.set_level(logging.DEBUG, logger="pincer.voice.language_guard")
+    log_switch_token("CA1", "reply", "uk")
+    log_switch_token("CA1", "first sentence", None)
+    assert [(r.getMessage(), r.levelno) for r in caplog.records] == [
+        ("Switch token in reply [CA1]: uk", logging.INFO),
+        ("Switch token in first sentence [CA1]: none", logging.DEBUG),
+    ]

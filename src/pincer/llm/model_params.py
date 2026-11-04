@@ -59,3 +59,27 @@ def openai_is_reasoning_model(model: str) -> bool:
     if bare.startswith(_OPENAI_SAMPLING_PREFIXES):
         return False
     return _OPENAI_MODEL_RE.match(bare) is not None
+
+
+# OpenAI models known to take `reasoning_effort` (low/medium/high), optionally
+# dated. A strict allow-list, unlike the temperature rule above: here a false
+# positive ADDS a parameter, and a model that rejects it fails every request.
+# Left out on purpose: o1-mini / o1-preview and gpt-5-chat-* (no reasoning
+# knob). Unknown or later names get no effort — the API default — until added.
+_OPENAI_EFFORT_RE = re.compile(
+    r"(?:o1(?:-pro)?|o3(?:-mini|-pro)?|o4-mini|gpt-5(?:\.\d+)?(?:-(?:mini|nano|pro|codex(?:-mini)?))?)"
+    r"(?:-\d{4}-\d{2}-\d{2})?$"
+)
+
+
+def openai_accepts_reasoning_effort(model: str) -> bool:
+    """Whether `reasoning_effort` may be sent to this OpenAI-wire model.
+
+    The model id has to look like an OpenAI one: on Azure that is the
+    deployment name, so a deployment called e.g. ``voice-fast`` never gets it.
+    A fine-tune ``ft:<base>:…`` or gateway ``vendor/`` prefix is stripped.
+    """
+    bare = model.lower().rsplit("/", 1)[-1]
+    if bare.startswith("ft:"):
+        bare = bare.removeprefix("ft:").split(":", 1)[0]
+    return _OPENAI_EFFORT_RE.match(bare) is not None

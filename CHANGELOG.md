@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Voice: turns use the default provider and model unless the override can really run (#305)
+
+A voice turn model whose provider can't be built here (its key or base URL is
+missing) no longer shadows the default or warns on every turn.
+
+- A stored dashboard override (`data_dir/voice_runtime.json`) that can't run is
+  ignored at startup with one log line, and the environment value stays in
+  effect. The file is kept, so restoring the key brings the override back.
+- At runtime an unusable `PINCER_VOICE_TURN_MODEL` falls back to the default
+  provider and its own model, with one warning per value. A provider that fails
+  to build is not rebuilt per turn. The call, the startup check and the
+  dashboard read the same resolution, so they report the same model.
+- When the LLM router fails over, an explicit model goes to the primary only.
+  Failover providers use their own model, so an `azure:gpt-5-mini` voice turn
+  no longer sends that Azure deployment name to an `anthropic` failover.
+- `PUT /api/voice/config` returns 422 for a model whose provider can't be
+  built. `GET` adds `effective_provider` / `effective_model`, which show what a
+  turn really runs on.
+- Dashboard choices are offered only when their provider builds. A model for
+  another provider always carries its `provider:` prefix (`anthropic:claude-haiku-…`
+  on a non-Anthropic default), and configured compatible endpoints (e.g.
+  `azure:gpt-5.4-mini`) are offered by their own model.
+- `azure:gpt-5-mini` works as the voice model with Azure in the
+  OpenAI-compatible slot, even when `PINCER_OPENAI_COMPATIBLE_MODEL` is unset
+  and the default model is a `claude-*` id. `.env.example` has an Azure example.
+- New `PINCER_VOICE_REASONING_EFFORT` (`low` | `medium` | `high`, default empty =
+  not sent) sets `reasoning_effort` for voice turns on any OpenAI-wire provider.
+  Other channels are untouched. `low` suits voice, whose short token budget
+  medium reasoning can exhaust. It is sent only to model ids known to take it
+  (GPT-5 family, o1, o3, o4-mini; not `gpt-5-chat-*`, `o1-mini` or
+  `o1-preview`). On Azure the deployment name has to look like one of those
+  ids. Otherwise it is skipped, with one INFO line per model id.
+- `PUT /api/voice/config` accepts more shapes. A provider-qualified model may
+  contain `:` or `/` (e.g. `ollama:llama3.2:latest`, `gateway:meta/llama-3`),
+  and a bare model may contain `/`, so every model the dashboard offers can be
+  saved. A model id must start with a letter or digit.
+  The dashboard config handlers build their provider checks off the event loop.
+- Language-switch diagnostics: each voice turn logs at INFO the call language,
+  the pinned STT language and the length of the caller's words. The words
+  themselves are call content and are logged only at DEBUG, as the start of the
+  text after the log PII filter. A parsed `[SWITCH_LANGUAGE:xx]` token is
+  logged at INFO, its absence only at DEBUG. Each call logs its resolved
+  provider/model once.
+
 #### Calendar: one Google Workspace toolset, stored times in the calendar's zone (#297)
 
 Creating, moving and renaming calendar events now go through the Google

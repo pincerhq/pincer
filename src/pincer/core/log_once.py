@@ -11,6 +11,7 @@ clears, so an outage is one line, not one a minute.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 
 
 class LogOnce:
@@ -42,3 +43,33 @@ class LogOnce:
         if was_logged and self._recovery:
             self._logger.info(self._recovery)
         return was_logged
+
+
+class LogOncePerKey:
+    """``LogOnce`` per key: the first ``log(key, …)`` for each key at ``level``,
+    repeats for that key at DEBUG. For conditions that differ by value (e.g. one
+    line per misconfigured model id), not one line for the whole outage.
+
+    At most ``max_keys`` keys are remembered; the oldest is forgotten first, so
+    a long-lived process never grows this without bound (a forgotten key just
+    logs at ``level`` once more).
+    """
+
+    def __init__(self, logger: logging.Logger, level: int = logging.WARNING, *, max_keys: int = 256) -> None:
+        self._logger = logger
+        self._level = level
+        self._max_keys = max_keys
+        self._seen: OrderedDict[str, None] = OrderedDict()
+
+    def log(self, key: str, msg: str, *args: object) -> None:
+        if key in self._seen:
+            self._seen.move_to_end(key)
+            self._logger.debug(msg, *args)
+            return
+        self._seen[key] = None
+        if len(self._seen) > self._max_keys:
+            self._seen.popitem(last=False)
+        self._logger.log(self._level, msg, *args)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._seen

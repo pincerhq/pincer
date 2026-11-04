@@ -161,6 +161,7 @@ class BaseLLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """Stream ONE turn: text tokens as they arrive, then the complete
         LLMResponse (with tool calls and usage) as the final event.
@@ -168,6 +169,9 @@ class BaseLLMProvider(ABC):
         Unlike ``stream()`` this never loses tool calls, and unlike
         ``complete()`` the caller sees text before generation finishes —
         the voice latency pipeline (Sprint 5) depends on both properties.
+
+        ``reasoning_effort`` is a hint for reasoning models; providers that
+        have no such knob ignore it.
 
         Default implementation falls back to ``complete()`` (one text event
         with the full content, then the response) so every provider works;
