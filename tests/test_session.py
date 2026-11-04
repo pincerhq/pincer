@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
 from pincer.core.session import ONBOARDING_PROMPT_SENT_KEY, SessionManager, conversation_key
-from pincer.llm.base import LLMMessage, MessageRole
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ThinkingBlock
 from pincer.services.sessions import SessionService
 
 if TYPE_CHECKING:
@@ -366,3 +368,36 @@ def test_a_call_report_after_the_reply_serializes_for_the_next_turn():
 
     openai = convert_messages_to_openai(history)
     assert [m["role"] for m in openai] == ["user", "assistant", "assistant", "user"]
+
+
+async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, caplog):
+    """The trimmed session stays cached; what lives only within a turn is gone even when the save fails."""
+    session = await session_manager.get_or_create("user1", "test")
+    session_manager.begin_turn(session)
+    thinking = [ThinkingBlock("thinking", thinking="SECRET-THOUGHT", signature="SIG")]
+    for index in range(25):  # past the fixture's cap of 20: nothing is trimmed within the turn
+        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
+        await session_manager.add_message(
+            session,
+            LLMMessage(
+                role=role,
+                content=f"message {index}",
+                images=[ImageContent(data="aW1n", media_type="image/png")] if index == 24 else [],
+                thinking_blocks=list(thinking) if role is MessageRole.ASSISTANT else [],
+            ),
+        )
+    assert len(session.messages) == 25  # precondition: no trimming within the turn
+
+    async def failing_save(**kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with patch.object(session_manager._store, "save", side_effect=failing_save), caplog.at_level(logging.WARNING):
+        await session_manager.end_turn(session)
+
+    assert len(session.messages) == 20
+    assert session._turn_open is False
+    assert all(not m.thinking_blocks and not m.images for m in session.messages)
+    warnings = [r for r in caplog.records if r.name == "pincer.core.session" and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert session.session_id in warnings[0].getMessage()
+    assert "SECRET-THOUGHT" not in warnings[0].getMessage()

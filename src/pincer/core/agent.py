@@ -575,6 +575,8 @@ class Agent:
             return False
         logger.info("Repaired orphaned tool pairs (%d -> %d messages)", len(session.messages), len(clean))
         session.messages = clean
+        # The history changed under the turn's thinking blocks: drop them (Q2c)
+        strip_thinking(session.messages)
         await self._sessions.save(session)
         return True
 
@@ -694,6 +696,7 @@ class Agent:
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
         try:
+            self._sessions.begin_turn(session)
             memory = self._memory_for_turn(session, memory)
             onboarding = (
                 await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
@@ -780,13 +783,9 @@ class Agent:
                         system=system_prompt,
                     )
                     last_response = response
-                    # By the second iteration the model has already either
-                    # committed to a tool call or produced final text — the
-                    # image no longer needs to be resent (and, unlike text,
-                    # isn't persisted across turns anyway; see LLMMessage.to_dict).
-                    # Cuts vision re-ingestion cost on every retry within this loop.
-                    if user_msg.images:
-                        user_msg.images = []
+                    # The image stays on every request of the turn: dropping it
+                    # would change the history under the turn's thinking blocks.
+                    # end_turn drops it (images are never persisted).
                 except BudgetExceededError:
                     final_text = (
                         "Warning: Daily budget limit reached. "
@@ -897,6 +896,8 @@ class Agent:
                             self._tools.get_schemas(), text, session.messages, skills_loaded
                         )
                         if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                            # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
+                            strip_thinking(session.messages)
                             tool_schemas = reselected
                             system_prompt = await build_prompt(_schema_names(tool_schemas))
 
@@ -972,8 +973,8 @@ class Agent:
                 call_sids=call_sids,
             )
         finally:
-            # Thinking is kept within one turn only; the session stays cached across turns
-            strip_thinking(session.messages)
+            # Drops the turn's thinking (the session stays cached across turns) and trims
+            await self._sessions.end_turn(session)
 
     async def run_headless(
         self,
@@ -1055,7 +1056,12 @@ class Agent:
 
             if response.has_tool_calls:
                 messages.append(
-                    LLMMessage(role=MessageRole.ASSISTANT, content=response.content, tool_calls=response.tool_calls)
+                    LLMMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=response.content,
+                        tool_calls=response.tool_calls,
+                        thinking_blocks=list(response.thinking_blocks),
+                    )
                 )
 
                 iteration_had_error = False
@@ -1080,6 +1086,8 @@ class Agent:
                     # From the allowed_tools subset only, like the first selection.
                     reselected = await self._reselect_after_skills(candidates, prompt, messages, skills_loaded)
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
+                        strip_thinking(messages)
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
                             user_id,
@@ -1162,6 +1170,7 @@ class Agent:
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
         try:
+            self._sessions.begin_turn(session)
             memory = self._memory_for_turn(session, memory)
             onboarding = (
                 await self._onboarding_for_turn(session, user_id, channel, channel_name=None)
@@ -1225,10 +1234,6 @@ class Agent:
                         tools=tool_schemas,
                         system=system_prompt,
                     )
-                    # See handle_message: drop the image after the first
-                    # completion so later retries in this loop don't resend it.
-                    if user_msg.images:
-                        user_msg.images = []
                 except BudgetExceededError:
                     yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                     return
@@ -1284,6 +1289,8 @@ class Agent:
                         self._tools.get_schemas(), text, session.messages, skills_loaded
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
+                        strip_thinking(session.messages)
                         tool_schemas = reselected
                         system_prompt = await build_prompt(_schema_names(tool_schemas))
 
@@ -1312,7 +1319,10 @@ class Agent:
                 yield StreamChunk(StreamEventType.DONE, fallback)
                 return
 
-            # Stream the final response
+            # Stream the final response. It sends no tools, unlike the turn's earlier
+            # requests: that is a history edit for preserved thinking, so the turn's
+            # thinking is dropped before it (Q2c).
+            strip_thinking(session.messages)
             full_text = ""
             try:
                 async for token in self._llm.stream(
@@ -1349,8 +1359,8 @@ class Agent:
 
             yield StreamChunk(StreamEventType.DONE, full_text)
         finally:
-            # Thinking is kept within one turn only; the session stays cached across turns
-            strip_thinking(session.messages)
+            # Drops the turn's thinking (the session stays cached across turns) and trims
+            await self._sessions.end_turn(session)
 
     async def end_voice_session(self, session_key: str) -> None:
         """Drop a finished call's session from the cache (see ``stream_voice_turn``)."""
@@ -1428,6 +1438,7 @@ class Agent:
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
         try:
+            self._sessions.begin_turn(session)
             user_msg = LLMMessage(role=MessageRole.USER, content=text)
             await self._sessions.add_message(session, user_msg)
             # NOTE: no summarizer here — it is an LLM call on the voice critical
@@ -1745,8 +1756,8 @@ class Agent:
                 await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
             yield StreamChunk(StreamEventType.DONE, full_text)
         finally:
-            # Thinking is kept within one turn only; the session stays cached across turns
-            strip_thinking(session.messages)
+            # Drops the turn's thinking (the session stays cached across turns) and trims
+            await self._sessions.end_turn(session)
 
     async def _select_tools(
         self,

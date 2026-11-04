@@ -87,9 +87,10 @@ def sse_body(blocks: list[dict[str, Any]], stop_reason: str, model: str = "claud
 
 
 class ScriptedAnthropic:
-    """An Anthropic provider whose HTTP responses are scripted, one per request."""
+    """An Anthropic provider whose HTTP responses are scripted, one per request:
+    `(blocks, stop_reason)` streams a response, an int returns that HTTP error."""
 
-    def __init__(self, settings: Settings, responses: list[tuple[list[dict[str, Any]], str]]) -> None:
+    def __init__(self, settings: Settings, responses: list[tuple[list[dict[str, Any]], str] | int]) -> None:
         self._responses = list(responses)
         self.requests: list[dict[str, Any]] = []
         self.raw_requests: list[str] = []
@@ -110,5 +111,9 @@ class ScriptedAnthropic:
         self.requests.append(json.loads(request.content))
         if not self._responses:
             raise AssertionError(f"unscripted request #{len(self.requests)}")
-        blocks, stop_reason = self._responses.pop(0)
+        scripted = self._responses.pop(0)
+        if isinstance(scripted, int):  # an HTTP error status (4xx is not retried by the SDK)
+            error = {"type": "error", "error": {"type": "invalid_request_error", "message": "scripted failure"}}
+            return httpx.Response(scripted, json=error)
+        blocks, stop_reason = scripted
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse_body(blocks, stop_reason))
