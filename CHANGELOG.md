@@ -395,6 +395,10 @@ agent's history ended at "now ringing".
   transcripts (`PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS`).
 - `GET /api/chat/call-reports?conversation_id=&since=` lists the reports of the
   calls placed from a web conversation (or the main web chat).
+- Web chat learns which calls a turn placed, so a page waits only for those
+  reports. The `make_phone_call` tool `done` frame of `/api/chat/stream` carries
+  `call_sid` when the dial was placed (not when it was refused or failed), and
+  `/api/chat/message` returns `call_sids`.
 - A restart no longer loses a call's report. Calls still waiting for one are
   reloaded at startup and checked with Twilio: one that ended unanswered gets
   the usual report, and one that was connected when Pincer stopped gets an

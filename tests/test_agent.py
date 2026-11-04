@@ -20,10 +20,11 @@ from pincer.core.agent import (
     StreamEventType,
     _is_tool_pair_error,
     _sanitize_tool_pairs,
+    placed_call_sid,
 )
 from pincer.core.session import SessionManager
 from pincer.exceptions import BudgetExceededError, LLMError
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall, ToolResult
 from pincer.memory.mcp import MCPMemoryBackend
 from pincer.memory.summarizer import Summarizer
 from pincer.tools.builtin import files
@@ -426,6 +427,86 @@ async def test_tool_context_carries_the_users_identity_timezone(settings, mock_l
 
     assert [ctx.get("timezone") for ctx in seen_contexts] == ["Europe/Kyiv"]
     assert "canonical-r_lutsiv" in looked_up
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "is_error", "sid"),
+    [
+        ("make_phone_call", "Call initiated successfully.\nCall SID: CA1\nTo: +4930123\nPurpose: x\n", False, "CA1"),
+        ("make_phone_call", "Call placed and already finished.\nCall SID: CA2\nTo: +4930123\n", False, "CA2"),
+        # A dial that ended before Twilio confirmed it names its SID, but no report follows.
+        ("make_phone_call", "Error: the call to +4930123 was placed (CA3) but already ended: busy.", False, ""),
+        ("make_phone_call", "Error: Daily outbound call limit reached (10). Try again tomorrow.", False, ""),
+        ("make_phone_call", "Call SID: CA4", True, ""),
+        ("whoami", "Call SID: CA5", False, ""),
+    ],
+)
+def test_placed_call_sid_only_names_a_placed_call(name, content, is_error, sid):
+    assert placed_call_sid(name, ToolResult(tool_call_id="tc1", content=content, is_error=is_error)) == sid
+
+
+def _dialing_registry(results: list[str]) -> ToolRegistry:
+    """A registry whose make_phone_call returns `results` in turn."""
+    registry = ToolRegistry()
+    pending = iter(results)
+
+    async def make_phone_call(context: dict | None = None) -> str:
+        return next(pending)
+
+    registry.register(
+        name="make_phone_call",
+        description="Places a call",
+        handler=make_phone_call,
+        parameters={"type": "object", "properties": {}},
+    )
+    return registry
+
+
+def _two_dials_then_text() -> list[LLMResponse]:
+    return [
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id="tc1", name="make_phone_call", arguments={}),
+                ToolCall(id="tc2", name="make_phone_call", arguments={}),
+            ],
+            model="test",
+            input_tokens=50,
+            output_tokens=30,
+            stop_reason="tool_use",
+        ),
+        LLMResponse(content="ringing", model="test", input_tokens=80, output_tokens=20, stop_reason="end_turn"),
+    ]
+
+
+_DIAL_RESULTS = [
+    "Error: Daily outbound call limit reached (10). Try again tomorrow.",
+    "Call initiated successfully.\nCall SID: CA9\nTo: +4930123\nPurpose: x\n",
+]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_returns_the_calls_it_placed(settings, mock_llm, session_manager, cost_tracker):
+    mock_llm.complete.side_effect = _two_dials_then_text()
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    result = await agent.handle_message("user1", "test", "call them")
+
+    assert result.call_sids == ["CA9"]
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_dial_done_carries_the_placed_call_sid(settings, mock_llm, session_manager, cost_tracker):
+    mock_llm.complete.side_effect = _two_dials_then_text()
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    done = [
+        chunk.call_sid
+        async for chunk in agent.handle_message_stream("user1", "test", "call them")
+        if chunk.type == StreamEventType.TOOL_DONE
+    ]
+
+    assert done == ["", "CA9"]
 
 
 @pytest.mark.asyncio

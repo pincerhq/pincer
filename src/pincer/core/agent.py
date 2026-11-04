@@ -15,9 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -246,10 +247,13 @@ class StreamEventType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class StreamChunk:
-    """A single event in a streaming agent response."""
+    """A single event in a streaming agent response. A TOOL_DONE of a dial
+    that was placed carries its ``call_sid``, so web chat can wait for that
+    call's report."""
 
     type: StreamEventType
     content: str
+    call_sid: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +281,8 @@ class AgentResponse:
     cost_usd: float = 0.0
     tool_calls_made: int = 0
     model: str = ""
+    # Calls this turn placed, each of which reports back later.
+    call_sids: list[str] = field(default_factory=list)
 
 
 def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
@@ -307,6 +313,24 @@ def _loaded_skill(tool_call: ToolCall, result: ToolResult) -> str | None:
     if tool_call.name != _LOAD_SKILL_TOOL or result.is_error or result.content.startswith("Error"):
         return None
     return result.content
+
+
+_CALL_TOOL = "make_phone_call"
+# make_phone_call's result for a placed call (voice/outbound.py); its error
+# results may name a SID too, but no report follows them.
+_PLACED_CALL_SID_RE = re.compile(r"^Call SID: (\S+)$", re.MULTILINE)
+
+
+def placed_call_sid(tool_name: str, result: ToolResult) -> str:
+    """The SID of the call this tool result placed, or "" when none was.
+
+    make_phone_call reports a refused or failed dial as a normal result
+    starting with "Error", not as is_error.
+    """
+    if tool_name != _CALL_TOOL or result.is_error or result.content.startswith("Error"):
+        return ""
+    match = _PLACED_CALL_SID_RE.search(result.content)
+    return match.group(1) if match else ""
 
 
 def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
@@ -721,6 +745,7 @@ class Agent:
 
         total_cost = 0.0
         tool_calls_count = 0
+        call_sids: list[str] = []
         final_text = ""
         last_response: LLMResponse | None = None
         consecutive_errors = 0
@@ -828,6 +853,8 @@ class Agent:
                         tool_call_id=result.tool_call_id,
                     )
                     await self._sessions.add_message(session, result_msg)
+                    if (sid := placed_call_sid(tool_call.name, result)) and sid not in call_sids:
+                        call_sids.append(sid)
 
                     if result.is_error:
                         iteration_had_error = True
@@ -917,6 +944,7 @@ class Agent:
             cost_usd=total_cost,
             tool_calls_made=tool_calls_count,
             model=last_response.model if last_response else "",
+            call_sids=call_sids,
         )
 
     async def run_headless(
@@ -1204,7 +1232,7 @@ class Agent:
                     tool_call_id=result.tool_call_id,
                 )
                 await self._sessions.add_message(session, result_msg)
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
+                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, placed_call_sid(tool_call.name, result))
                 if result.is_error:
                     iteration_had_error = True
                 elif (skill := _loaded_skill(tool_call, result)) is not None:
@@ -1574,7 +1602,7 @@ class Agent:
                     session,
                     LLMMessage(role=MessageRole.TOOL_RESULT, content=result.content, tool_call_id=result.tool_call_id),
                 )
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
+                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, placed_call_sid(tool_call.name, result))
                 if result.is_error:
                     iteration_had_error = True
 
