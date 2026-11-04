@@ -554,9 +554,11 @@ async def make_phone_call(
         )
 
         # T1.5: live status updates back to the initiating user (max 3/call)
-        from pincer.voice.status_notify import notify_dialing, register_outbound_call
+        # Issue #303: the chat session it was asked in gets the final report,
+        # and the origin row keeps that routing across a restart.
+        from pincer.voice.status_notify import notify_dialing, track_outbound_call
 
-        register_outbound_call(
+        await track_outbound_call(
             call_sid,
             user_id=user_id,
             channel=ctx.get("channel", ""),
@@ -565,6 +567,8 @@ async def make_phone_call(
             language=call_language,
             target_name=str(target_name or "").strip(),
             instructions=str(instructions or "").strip(),
+            pincer_user_id=str(ctx.get("pincer_user_id") or ""),
+            session_key=str(ctx.get("session_key") or ""),
         )
         if finished:
             logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)
@@ -578,13 +582,15 @@ async def make_phone_call(
             purpose,
         )
 
-        return (
-            f"Call initiated successfully.\n"
-            f"Call SID: {call_sid}\n"
-            f"To: {validated}\n"
-            f"Purpose: {purpose}\n"
-            f"The call is now ringing. I'll update you when it connects."
-        )
+        # Web chat gets no live "connected" push, only the final report.
+        if ctx.get("channel") == "web":
+            progress = "The call is now ringing. The result will appear in this chat when the call ends."
+        else:
+            progress = (
+                "The call is now ringing. I'll update you when it connects, "
+                "and the result will appear in this chat when the call ends."
+            )
+        return f"Call initiated successfully.\nCall SID: {call_sid}\nTo: {validated}\nPurpose: {purpose}\n{progress}"
 
     except ImportError:
         logger.info("make_phone_call aborted: Twilio SDK not installed")

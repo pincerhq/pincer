@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db.session import session_scope
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
-from pincer.models.voice import CallAction, CallAnalytics, InboundMessage, OutboundCallLog, VoiceCall
+from pincer.models.voice import CallAction, CallAnalytics, CallOrigin, InboundMessage, OutboundCallLog, VoiceCall
 from pincer.models.voice import CallTranscript as CallTranscriptModel
 from pincer.repositories.base import repository_for
 from pincer.repositories.voice import AnalyticsRepository
@@ -28,6 +28,8 @@ VOICE_TABLES: Sequence[tuple[Any, Any]] = (
     (CallAction, CallAction.timestamp),
     (InboundMessage, InboundMessage.created_at),
     (OutboundCallLog, OutboundCallLog.placed_at),
+    # The final report summarizes what was said on the call (issue #303).
+    (CallOrigin, CallOrigin.created_at),
 )
 
 #: Telephony telemetry keeps its own, longer window: it is technical data

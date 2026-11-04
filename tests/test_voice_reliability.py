@@ -149,6 +149,355 @@ class TestStatusNotify:
         status_notify.set_status_notifier(notifier)
         assert not await status_notify.notify_connected("CA_unknown")
 
+    async def test_origin_fields_are_tracked(self):
+        status_notify.register_outbound_call(
+            "CA1", "123", channel="telegram", pincer_user_id="alice", session_key="unified:alice"
+        )
+        info = status_notify.get_call_info("CA1")
+        assert info is not None
+        assert (info.pincer_user_id, info.session_key) == ("alice", "unified:alice")
+
+    async def test_finalize_report_runs_once_per_call(self):
+        sent: list[str] = []
+        notes: list[tuple[str, str, str, str]] = []
+
+        async def notifier(user_id, channel, text):
+            sent.append(text)
+            return True
+
+        async def reporter(pincer_user_id, channel, session_key, text):
+            notes.append((pincer_user_id, channel, session_key, text))
+
+        status_notify.set_status_notifier(notifier)
+        status_notify.set_session_reporter(reporter)
+        status_notify.register_outbound_call(
+            "CA1", "123", channel="telegram", target_name="Dentist", pincer_user_id="alice", session_key="k1"
+        )
+
+        assert await status_notify.finalize_report("CA1", "📞 Couldn't reach Dentist — busy.", "busy")
+        assert not await status_notify.finalize_report("CA1", "again", "busy")
+        assert not await status_notify.notify_ended("CA1", "late")
+        await status_notify.drain()
+
+        assert sent == ["📞 Couldn't reach Dentist — busy."]
+        assert notes == [("alice", "telegram", "k1", "📞 Call report (Dentist):\n📞 Couldn't reach Dentist — busy.")]
+
+    async def test_no_session_key_skips_the_session_report(self):
+        """Dashboard, scheduled and demo calls have no chat to report into."""
+        reporter = AsyncMock()
+        status_notify.set_session_reporter(reporter)
+        status_notify.register_outbound_call("CA1", "dashboard", channel="web")
+        await status_notify.finalize_report("CA1", "report", "completed")
+        await status_notify.drain()
+        reporter.assert_not_awaited()
+
+    async def test_a_failing_session_reporter_does_not_stop_the_push(self):
+        sent: list[str] = []
+
+        async def notifier(user_id, channel, text):
+            sent.append(text)
+            return True
+
+        status_notify.set_status_notifier(notifier)
+        status_notify.set_session_reporter(AsyncMock(side_effect=RuntimeError("db down")))
+        status_notify.register_outbound_call("CA1", "123", channel="telegram", session_key="k1")
+        assert await status_notify.finalize_report("CA1", "report", "completed")
+        await status_notify.drain()
+        assert sent == ["report"]
+        assert status_notify.get_call_info("CA1") is None
+
+    async def test_finalize_does_not_wait_for_a_busy_chat_session(self):
+        """The chat's turn may be held for minutes (an approval prompt): the
+        push and the caller (a voicemail hang-up, a webhook) go on at once."""
+        import asyncio
+
+        sent: list[str] = []
+        release = asyncio.Event()
+        notes: list[str] = []
+
+        async def notifier(user_id, channel, text):
+            sent.append(text)
+            return True
+
+        async def reporter(pincer_user_id, channel, session_key, text):
+            await release.wait()
+            notes.append(text)
+
+        status_notify.set_status_notifier(notifier)
+        status_notify.set_session_reporter(reporter)
+        status_notify.register_outbound_call("CA1", "123", channel="web", session_key="web:alice:c1")
+
+        assert await asyncio.wait_for(status_notify.finalize_report("CA1", "report", "voicemail"), 1)
+        assert sent == ["report"] and notes == []
+
+        release.set()
+        await status_notify.drain()
+        assert len(notes) == 1 and notes[0].endswith("report")
+
+
+@pytest.mark.parametrize(
+    ("completed", "end_code", "provider_status", "expected"),
+    [
+        (True, "", "", "completed"),
+        (False, "", "", "failed"),
+        (False, "llm_error", "", "failed"),
+        (True, "shutdown", "", "completed"),
+        (False, "busy", "busy", "busy"),
+        (False, "no_answer", "", "no-answer"),
+        (False, "voicemail", "", "voicemail"),
+        (False, "call_setup", "canceled", "canceled"),
+    ],
+)
+def test_final_outcome_code_is_the_same_on_every_path(completed, end_code, provider_status, expected):
+    """The pipeline and the channel fallbacks store one code for the same call."""
+    assert status_notify.final_outcome_code(completed, end_code, provider_status) == expected
+
+
+class TestCallReportPersistence:
+    """Issue #303: the routing of a call's final report survives a restart."""
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        db_path = tmp_path / "pincer.db"
+        status_notify.set_report_store(db_path)
+        return db_path
+
+    @staticmethod
+    async def _service(db_path):
+        from pincer.services.voice import CallsService
+
+        return await CallsService.for_path(db_path)
+
+    @staticmethod
+    def _capture() -> list[str]:
+        sent: list[str] = []
+
+        async def notifier(user_id, channel, text):
+            sent.append(text)
+            return True
+
+        status_notify.set_status_notifier(notifier)
+        return sent
+
+    @staticmethod
+    def _restart() -> None:
+        """What a process restart leaves of the in-memory tracking: nothing."""
+        status_notify._outbound_calls.clear()
+
+    async def test_origin_row_is_written_at_dial_time(self, store):
+        await status_notify.track_outbound_call(
+            "CA1",
+            "123",
+            channel="telegram",
+            target_number="+4930123",
+            target_name="Dentist",
+            language="de",
+            purpose="book",
+            pincer_user_id="alice",
+            session_key="unified:alice",
+        )
+        row = await (await self._service(store)).get_call_origin("CA1")
+        assert row is not None
+        assert (row["user_id"], row["pincer_user_id"], row["session_key"]) == ("123", "alice", "unified:alice")
+        assert (row["channel"], row["language"], row["target_name"]) == ("telegram", "de", "Dentist")
+        assert row["reported_at"] is None
+
+    async def test_finalize_stores_the_report_once(self, store):
+        sent = self._capture()
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram", session_key="k1")
+        assert await status_notify.finalize_report("CA1", "report", "no-answer")
+
+        # A second process (or a replayed webhook) finds the report already out.
+        status_notify.register_outbound_call("CA1", "123", channel="telegram", session_key="k1")
+        assert not await status_notify.finalize_report("CA1", "report again", "no-answer")
+
+        assert sent == ["report"]
+        row = await (await self._service(store)).get_call_origin("CA1")
+        assert (row["report_outcome"], row["report_text"]) == ("no-answer", "report")
+        assert row["reported_at"]
+
+    async def test_a_report_without_an_origin_row_is_still_stored(self, store):
+        """The dial-time write failed: the final report writes the whole row."""
+        self._capture()
+        status_notify.register_outbound_call("CA1", "123", channel="web", pincer_user_id="alice", session_key="k1")
+        await status_notify.finalize_report("CA1", "report", "busy")
+        reports = await (await self._service(store)).list_call_reports("alice", "k1")
+        assert [(r["call_sid"], r["report_outcome"]) for r in reports] == [("CA1", "busy")]
+
+    async def test_a_dial_time_row_landing_mid_claim_is_still_reported(self, store, monkeypatch):
+        """The origin insert commits between the claim's UPDATE (no row yet)
+        and its read: the report is claimed and sent, not taken as delivered."""
+        from pincer.services.voice import CallsService
+
+        sent = self._capture()
+        status_notify.register_outbound_call("CA1", "123", channel="telegram")
+        real_complete = CallsService.complete_call_report
+        calls = 0
+
+        async def complete_racing_the_insert(service, call_sid, outcome, text, reported_at):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await service.save_call_origin({"call_sid": call_sid, "user_id": "123", "created_at": reported_at})
+                return False
+            return await real_complete(service, call_sid, outcome, text, reported_at)
+
+        monkeypatch.setattr(CallsService, "complete_call_report", complete_racing_the_insert)
+        assert await status_notify.finalize_report("CA1", "report", "busy")
+
+        assert sent == ["report"]
+        row = await (await self._service(store)).get_call_origin("CA1")
+        assert (row["report_outcome"], row["report_text"]) == ("busy", "report")
+        assert row["reported_at"]
+
+    async def test_a_database_failure_at_dial_time_keeps_the_call_tracked(self, store, monkeypatch):
+        from pincer.services.voice import CallsService
+
+        monkeypatch.setattr(CallsService, "save_call_origin", AsyncMock(side_effect=RuntimeError("db down")))
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram")
+        assert status_notify.get_call_user("CA1") == "123"
+
+    async def test_hydrate_loads_only_recent_unreported_calls(self, store):
+        from datetime import UTC, datetime, timedelta
+
+        service = await self._service(store)
+        now = datetime.now(UTC)
+        base = {"user_id": "123", "channel": "telegram", "language": "de", "session_key": "k1"}
+        await service.save_call_origin({**base, "call_sid": "CA_live", "created_at": now.isoformat()})
+        old = (now - timedelta(seconds=600 + status_notify.RINGING_ALLOWANCE_S + 60)).isoformat()
+        await service.save_call_origin({**base, "call_sid": "CA_old", "created_at": old})
+        await service.save_call_origin({**base, "call_sid": "CA_done", "created_at": now.isoformat()})
+        await service.complete_call_report("CA_done", "completed", "report", now.isoformat())
+
+        assert await status_notify.hydrate(600) == ["CA_live"]
+        info = status_notify.get_call_info("CA_live")
+        assert info is not None and info.restored
+        assert (info.user_id, info.language, info.session_key) == ("123", "de", "k1")
+        assert status_notify.get_call_language("CA_live") == "de"
+
+    async def test_reconcile_finalizes_calls_that_ended_while_down(self, store):
+        sent = self._capture()
+        for sid in ("CA_busy", "CA_cut", "CA_ringing", "CA_unknown"):
+            await status_notify.track_outbound_call(sid, "123", channel="telegram", target_name="Dentist")
+        self._restart()
+        loaded = await status_notify.hydrate(600)
+        assert sorted(loaded) == ["CA_busy", "CA_cut", "CA_ringing", "CA_unknown"]
+
+        statuses = {"CA_busy": "busy", "CA_cut": "completed", "CA_ringing": "ringing"}
+
+        async def fetch(sid):
+            if sid not in statuses:
+                raise RuntimeError("twilio down")
+            return statuses[sid]
+
+        await status_notify.reconcile(loaded, fetch, lambda _sid: False)
+
+        assert len(sent) == 2
+        assert any("Couldn't reach Dentist" in text for text in sent)
+        assert any("cut off by a Pincer restart" in text for text in sent)
+        # Still live or unknown: left for the /status callback.
+        assert status_notify.get_call_info("CA_ringing") is not None
+        assert status_notify.get_call_info("CA_unknown") is not None
+        service = await self._service(store)
+        assert (await service.get_call_origin("CA_busy"))["report_outcome"] == "busy"
+        assert (await service.get_call_origin("CA_cut"))["report_outcome"] == "interrupted"
+        assert (await service.get_call_origin("CA_ringing"))["reported_at"] is None
+
+    async def test_reconcile_skips_calls_with_live_state(self, store):
+        sent = self._capture()
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram")
+        fetch = AsyncMock(return_value="completed")
+        await status_notify.reconcile(["CA1"], fetch, lambda _sid: True)
+        fetch.assert_not_awaited()
+        assert sent == []
+
+    async def test_reconcile_is_bounded(self, store):
+        import asyncio
+
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram")
+
+        async def hang(_sid):
+            await asyncio.sleep(10)
+            return "completed"
+
+        await asyncio.wait_for(status_notify.reconcile(["CA1"], hang, lambda _sid: False, timeout=0.05), 1)
+        assert status_notify.get_call_info("CA1") is not None
+
+    async def test_a_timeout_mid_finalize_still_delivers_the_claimed_report(self, store):
+        """The reconcile timeout fires after the report was claimed: the push
+        still happens, so the row is never marked reported without a message."""
+        import asyncio
+
+        sent: list[str] = []
+        pushing = asyncio.Event()
+
+        async def slow_notifier(user_id, channel, text):
+            pushing.set()
+            await asyncio.sleep(0.2)
+            sent.append(text)
+            return True
+
+        status_notify.set_status_notifier(slow_notifier)
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram", target_name="Dentist")
+
+        async def busy(_sid):
+            return "busy"
+
+        await status_notify.reconcile(["CA1"], busy, lambda _sid: False, timeout=0.05)
+        assert pushing.is_set() and sent == []
+        await status_notify.drain()
+        assert len(sent) == 1 and "Couldn't reach Dentist" in sent[0]
+        row = await (await self._service(store)).get_call_origin("CA1")
+        assert row["report_outcome"] == "busy"
+
+    async def test_status_callback_after_a_restart_reports_once(self, store):
+        """Restart while connected: Twilio's `completed` arrives at a process
+        with no state for the call. One interrupted report, never two."""
+        sent = self._capture()
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram", target_name="Dentist")
+        self._restart()
+        await status_notify.hydrate(600)
+
+        engine = MagicMock()
+        engine.get_call_state.return_value = None
+        engine.was_recently_ended.return_value = False
+        settings = apply_test_paths(MagicMock(), store.parent)
+        settings.twilio_auth_token.get_secret_value.return_value = ""
+        init_voice_routes(engine, settings)
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.include_router(twilio_router)
+        client = TestClient(app)
+        for _ in range(2):
+            r = client.post("/api/apps/twilio/status", data={"CallSid": "CA1", "CallStatus": "completed"})
+            assert r.status_code == 200
+
+        assert len(sent) == 1
+        assert "cut off by a Pincer restart" in sent[0]
+
+    async def test_status_callback_before_hydrate_still_finds_the_call(self, store):
+        """Restart while ringing, the rejection arriving before the reload ran."""
+        sent = self._capture()
+        await status_notify.track_outbound_call("CA1", "123", channel="telegram", target_name="Dentist")
+        self._restart()
+
+        engine = MagicMock()
+        engine.get_call_state.return_value = None
+        engine.was_recently_ended.return_value = False
+        settings = apply_test_paths(MagicMock(), store.parent)
+        settings.twilio_auth_token.get_secret_value.return_value = ""
+        init_voice_routes(engine, settings)
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.include_router(twilio_router)
+        r = TestClient(app).post("/api/apps/twilio/status", data={"CallSid": "CA1", "CallStatus": "busy"})
+        assert r.status_code == 200
+
+        assert len(sent) == 1
+        assert "busy" in sent[0].lower() or "besetzt" in sent[0]
+
 
 # ── Truthfulness assertion (T1.4) ────────────────────────────────────────────
 
@@ -628,50 +977,56 @@ class TestUndeliveredTranscript:
 # ── Outbound AMD parameter ────────────────────────────────────────────────────
 
 
+def _fake_outbound_dial(monkeypatch, tmp_path) -> dict:
+    """Settings and a fake Twilio for `make_phone_call`; returns the dial kwargs once placed."""
+    settings = MagicMock()
+    settings.voice_enabled = True
+    settings.voice_outbound_enabled = True
+    settings.voice_webhook_base_url = "https://example.com"
+    settings.voice_outbound_max_daily = 10
+    settings.voice_max_call_duration = 600
+    settings.voice_engine = "conversation_relay"
+    settings.voice_language = "en-US"
+    settings.voice_machine_detection = True
+    settings.voice_consent_mode = "none"
+    settings.voice_recording_enabled = False
+    settings.voice_consent_language = ""
+    settings.voice_assistant_name = ""
+    settings.voice_intro_text = ""
+    # Sprint 8: the outbound gate persists its call log here; without a real
+    # path the MagicMock stringifies into a junk file in the repo root.
+    settings.db_path = str(tmp_path / "pincer.db")
+    settings.twilio_account_sid = "AC123"
+    settings.twilio_auth_token.get_secret_value.return_value = "token"
+    settings.twilio_phone_number = "+15550001111"
+    monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
+
+    captured: dict = {}
+
+    class FakeCalls:
+        async def create_async(self, **kwargs):
+            captured.update(kwargs)
+            call = MagicMock()
+            call.sid = "CA_out"
+            return call
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = FakeCalls()
+
+    from voice_harness.transport_fakes import install_fake_twilio
+
+    install_fake_twilio(monkeypatch, FakeClient)
+    # an engine another test left in twiml_server would take the dial instead
+    monkeypatch.setattr("pincer.voice.twiml_server._engine", None)
+    return captured
+
+
 class TestOutboundMachineDetection:
     async def test_machine_detection_param_sent(self, monkeypatch, tmp_path):
         from pincer.voice import outbound
 
-        settings = MagicMock()
-        settings.voice_enabled = True
-        settings.voice_outbound_enabled = True
-        settings.voice_webhook_base_url = "https://example.com"
-        settings.voice_outbound_max_daily = 10
-        settings.voice_max_call_duration = 600
-        settings.voice_engine = "conversation_relay"
-        settings.voice_language = "en-US"
-        settings.voice_machine_detection = True
-        settings.voice_consent_mode = "none"
-        settings.voice_recording_enabled = False
-        settings.voice_consent_language = ""
-        settings.voice_assistant_name = ""
-        settings.voice_intro_text = ""
-        # Sprint 8: the outbound gate persists its call log here; without a real
-        # path the MagicMock stringifies into a junk file in the repo root.
-        settings.db_path = str(tmp_path / "pincer.db")
-        settings.twilio_account_sid = "AC123"
-        settings.twilio_auth_token.get_secret_value.return_value = "token"
-        settings.twilio_phone_number = "+15550001111"
-        monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
-
-        captured: dict = {}
-
-        class FakeCalls:
-            async def create_async(self, **kwargs):
-                captured.update(kwargs)
-                call = MagicMock()
-                call.sid = "CA_out"
-                return call
-
-        class FakeClient:
-            def __init__(self, *args, **kwargs):
-                self.calls = FakeCalls()
-
-        from voice_harness.transport_fakes import install_fake_twilio
-
-        install_fake_twilio(monkeypatch, FakeClient)
-        # an engine another test left in twiml_server would take the dial instead
-        monkeypatch.setattr("pincer.voice.twiml_server._engine", None)
+        captured = _fake_outbound_dial(monkeypatch, tmp_path)
 
         result = await outbound.make_phone_call("+14155551234", "test purpose", context={"user_id": "u1"})
         assert "Call initiated" in result
@@ -683,3 +1038,21 @@ class TestOutboundMachineDetection:
         assert captured.get("async_amd") == "true"
         assert captured.get("async_amd_status_callback") == "https://example.com/api/apps/twilio/amd"
         assert captured.get("async_amd_status_callback_method") == "POST"
+
+    async def test_the_dial_records_the_chat_it_was_asked_in(self, monkeypatch, tmp_path):
+        """Issue #303: the origin row carries the session key, and web chat is
+        told the result comes into the chat (it gets no "connected" push)."""
+        from pincer.services.voice import CallsService
+        from pincer.voice import outbound
+
+        _fake_outbound_dial(monkeypatch, tmp_path)
+        status_notify.set_report_store(tmp_path / "pincer.db")
+        context = {"user_id": "alice", "pincer_user_id": "alice", "channel": "web", "session_key": "web:alice:c1"}
+
+        result = await outbound.make_phone_call("+14155551234", "test purpose", context=context)
+
+        assert "The result will appear in this chat when the call ends." in result
+        assert "when it connects" not in result
+        row = await (await CallsService.for_path(tmp_path / "pincer.db")).get_call_origin("CA_out")
+        assert row is not None
+        assert (row["pincer_user_id"], row["channel"], row["session_key"]) == ("alice", "web", "web:alice:c1")

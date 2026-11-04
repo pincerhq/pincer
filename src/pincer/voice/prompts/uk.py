@@ -498,6 +498,11 @@ CALL_FALLBACK_STATUS = {"completed": "завершено", "not_completed": "н�
 # Звіт про дзвінок, який нікого не застав. Без посилання на транскрипт: розмови
 # не було. Причини за значенням `FailureCode`.
 CALL_NOT_CONNECTED_REPORT = "📞 Не вдалося додзвонитися до {target} — {reason}."
+# A call that was live when the process restarted: its transcript is lost.
+CALL_INTERRUPTED_REPORT = (
+    "📞 Дзвінок до {target} обірвався через перезапуск Pincer, тому підсумку немає. "
+    "Уточніть результат напряму або зателефонуйте ще раз."
+)
 CALL_NOT_CONNECTED_REASONS = {
     "busy": "лінія була зайнята",
     "no_answer": "немає відповіді",

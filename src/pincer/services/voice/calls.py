@@ -10,6 +10,7 @@ from pincer.db.session import session_scope
 from pincer.models.voice import CallAction, CallTranscript
 from pincer.repositories.voice import (
     CallActionRepository,
+    CallOriginRepository,
     CallRepository,
     ThreadMemberRepository,
     TranscriptRepository,
@@ -181,6 +182,38 @@ class CallsService(DatabaseService):
     async def actions_for(self, call_id: str) -> list[dict[str, Any]]:
         async with session_scope(self._url) as session:
             rows = await CallActionRepository(session).for_call(call_id)
+        return [_as_dict(row) for row in rows]
+
+    # ── Call origins (issue #303) ─────────────────────────
+
+    async def save_call_origin(self, values: dict[str, Any]) -> None:
+        """Record who asked for an outbound call, where, and in which chat."""
+        async with session_scope(self._url) as session:
+            await CallOriginRepository(session).save(values)
+
+    async def complete_call_report(self, call_sid: str, outcome: str, text: str, reported_at: str) -> bool:
+        """Store the call's final report. False when it was already reported
+        (or the call has no origin row): the report must not go out twice."""
+        async with session_scope(self._url) as session:
+            return await CallOriginRepository(session).complete(call_sid, outcome, text, reported_at) > 0
+
+    async def get_call_origin(self, call_sid: str) -> dict[str, Any] | None:
+        async with session_scope(self._url) as session:
+            row = await CallOriginRepository(session).get(call_sid)
+        return None if row is None else _as_dict(row)
+
+    async def list_unreported_since(self, cutoff: str) -> list[dict[str, Any]]:
+        """Calls placed since `cutoff` whose final report never went out."""
+        async with session_scope(self._url) as session:
+            rows = await CallOriginRepository(session).unreported_since(cutoff)
+        return [_as_dict(row) for row in rows]
+
+    async def list_call_reports(
+        self, pincer_user_id: str, session_key: str, since: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The final reports of the calls one chat session asked for, oldest first."""
+        async with session_scope(self._url) as session:
+            rows = await CallOriginRepository(session).reports_for_session(pincer_user_id, session_key, since)
         return [_as_dict(row) for row in rows]
 
 

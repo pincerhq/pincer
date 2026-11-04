@@ -373,3 +373,66 @@ async def test_both_kinds_of_follow_up_are_remembered_in_the_calls_zone(tmp_path
 
     remembered = [_remembered_args(c) for c in notes.contents if "Proposed follow-up" in c]
     assert remembered == [pinned, pinned]
+
+
+async def test_a_completed_call_report_reaches_its_chat_session_and_is_stored(tmp_path):
+    """Issue #303: the agent's own history gets the report, not only the channel."""
+    from pincer.services.voice import CallsService
+
+    status_notify._reset_for_tests()
+    settings = _settings(tmp_path)
+    status_notify.set_report_store(settings.db_path)
+    sent: list[str] = []
+    notes: list[tuple[str, str, str, str]] = []
+
+    async def notifier(user_id, channel, text):
+        sent.append(text)
+        return True
+
+    async def reporter(pincer_user_id, channel, session_key, text):
+        notes.append((pincer_user_id, channel, session_key, text))
+
+    status_notify.set_status_notifier(notifier)
+    status_notify.set_session_reporter(reporter)
+    await status_notify.track_outbound_call(
+        CALL_SID,
+        user_id="12345",
+        channel="telegram",
+        target_name="Dr. Müller",
+        language="de",
+        pincer_user_id="alice",
+        session_key="unified:alice",
+    )
+    try:
+        processor = PostCallProcessor(settings, llm=FakeLLM(GOOD_JSON), db_path=str(settings.db_path))
+        report = await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+        await status_notify.drain()
+
+        assert sent == [report]
+        assert notes == [("alice", "telegram", "unified:alice", f"📞 Call report (Dr. Müller):\n{report}")]
+        row = await (await CallsService.for_path(settings.db_path)).get_call_origin(CALL_SID)
+        assert row is not None
+        assert (row["report_outcome"], row["report_text"]) == ("completed", report)
+    finally:
+        status_notify._reset_for_tests()
+
+
+async def test_an_answered_call_that_failed_is_stored_as_failed(tmp_path):
+    """An answered call that did not complete is not reported as `completed`."""
+    from pincer.services.voice import CallsService
+
+    status_notify._reset_for_tests()
+    settings = _settings(tmp_path)
+    status_notify.set_report_store(settings.db_path)
+    status_notify.register_outbound_call(CALL_SID, user_id="12345", channel="telegram", language="de")
+    try:
+        processor = PostCallProcessor(settings, llm=None, db_path=str(settings.db_path))
+        state = _state()
+        state.metadata["failure_code"] = "llm_error"
+        await processor.process(CALL_SID, state, _transcript(), completed=False)
+
+        row = await (await CallsService.for_path(settings.db_path)).get_call_origin(CALL_SID)
+        assert row is not None
+        assert row["report_outcome"] == "failed"
+    finally:
+        status_notify._reset_for_tests()

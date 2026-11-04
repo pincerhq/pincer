@@ -175,6 +175,9 @@ class PostCallProcessor:
         end_code = str(state.metadata.get(END_CODE_KEY) or "")
         if end_code and not an.was_conversational(failure_code=end_code):
             report = f"{report}\nℹ️ {not_connected_reason(end_code, language)}"
+        outcome_code = status_notify.final_outcome_code(
+            completed, end_code, str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+        )
 
         note = await self._appointment_note(call_sid, language)
         if note:
@@ -226,7 +229,7 @@ class PostCallProcessor:
         if negative_line:
             report = f"{report}\n{negative_line}"
 
-        return await self._deliver(call_sid, report, thread_update, language)
+        return await self._deliver(call_sid, report, thread_update, language, outcome_code)
 
     @staticmethod
     def _never_connected(state: CallState, conversational: bool) -> bool:
@@ -275,7 +278,9 @@ class PostCallProcessor:
             report = f"{report}\n{opt_out_note}"
         if not persisted:
             report = f"{report}\n{self._persist_failure_note(language)}"
-        return await self._deliver(call_sid, report, thread_update, language)
+        # Nobody answered: never "completed", whatever the (missing) code says.
+        outcome_code = status_notify.outcome_code_for(provider_status, failure_code or "unknown")
+        return await self._deliver(call_sid, report, thread_update, language, outcome_code)
 
     async def _appointment_note(self, call_sid: str, language: str) -> str:
         """Sprint 6: appointment scheduling calls get their post-call chain —
@@ -296,15 +301,18 @@ class PostCallProcessor:
         scheduling.clear_appointment(call_sid)
         return str(note or "")
 
-    async def _deliver(self, call_sid: str, report: str, thread_update: Any, language: str) -> str:
+    async def _deliver(
+        self, call_sid: str, report: str, thread_update: Any, language: str, outcome_code: str = ""
+    ) -> str:
         # Sprint 13 §10: which matter this call belongs to, what is still
         # open, and whether the matter is now settled — wrapped around the
         # Sprint 3 report rather than replacing any of it.
         report = threads.decorate_report(report, thread_update, self._settings, language)
 
-        # Final user message — replaces the plain "call ended" status (still ≤3 msgs/call)
-        delivered = await status_notify.notify_stage(call_sid, status_notify.STAGE_ENDED, report)
-        status_notify.clear_call(call_sid)
+        # Final user message — replaces the plain "call ended" status (still ≤3
+        # msgs/call). Also lands in the chat session that asked for the call,
+        # and is stored once on its origin row (issue #303).
+        delivered = await status_notify.finalize_report(call_sid, report, outcome_code)
 
         # T9.5: the report-delivery SLI is the gap between hangup and this
         # moment. Stamped only on actual delivery — an undelivered report must

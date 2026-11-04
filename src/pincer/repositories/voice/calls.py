@@ -1,4 +1,4 @@
-"""The call log and what was said on it: `voice_calls`, `call_transcripts`, `call_actions`."""
+"""The call log and what was said on it: `voice_calls`, `call_transcripts`, `call_actions`, `call_origins`."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
 from pincer.db.ids import is_id
-from pincer.models.voice import CallAction, CallThread, CallTranscript, VoiceCall
+from pincer.models.voice import CallAction, CallOrigin, CallThread, CallTranscript, VoiceCall
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -202,3 +202,50 @@ class CallActionRepository(BaseRepository[CallAction, str]):
 
     async def for_call(self, call_id: str) -> Sequence[CallAction]:
         return await self.list(col(CallAction.call_id) == call_id, order_by=[col(CallAction.timestamp)])
+
+
+class CallOriginRepository(BaseRepository[CallOrigin, str]):
+    model = CallOrigin
+
+    async def save(self, values: dict[str, Any]) -> None:
+        """Insert the origin of a call; a repeat for the same SID updates the
+        routing but never touches a report already written."""
+        stored = dict(values)
+        await self.session.exec(
+            upsert(
+                dialect_of(self.session),
+                CallOrigin,
+                stored,
+                index_elements=["call_sid"],
+                set_=lambda excluded: {name: excluded[name] for name in stored if name != "call_sid"},
+            )
+        )
+
+    async def complete(self, call_sid: str, outcome: str, text: str, reported_at: str) -> int:
+        """Write the final report, only if none was written yet: 1 when this
+        call wrote it, 0 when it was already reported (or no row exists)."""
+        stmt = (
+            update(CallOrigin)
+            .where(col(CallOrigin.call_sid) == call_sid, col(CallOrigin.reported_at).is_(None))
+            .values(report_outcome=outcome, report_text=text, reported_at=reported_at)
+        )
+        return int((await self.session.exec(stmt)).rowcount)
+
+    async def unreported_since(self, cutoff: str) -> Sequence[CallOrigin]:
+        return await self.list(
+            col(CallOrigin.reported_at).is_(None),
+            col(CallOrigin.created_at) >= cutoff,
+            order_by=[col(CallOrigin.created_at)],
+        )
+
+    async def reports_for_session(
+        self, pincer_user_id: str, session_key: str, since: str | None
+    ) -> Sequence[CallOrigin]:
+        where = [
+            col(CallOrigin.pincer_user_id) == pincer_user_id,
+            col(CallOrigin.session_key) == session_key,
+            col(CallOrigin.reported_at).is_not(None),
+        ]
+        if since:
+            where.append(col(CallOrigin.reported_at) >= since)
+        return await self.list(*where, order_by=[col(CallOrigin.reported_at)])

@@ -47,6 +47,11 @@ def _resolve_session_key(user_id: str, channel: str, pincer_user_id: str = "", s
     return _session_key(user_id, channel)
 
 
+def channel_session_key(user_id: str, channel: str) -> str:
+    """A user's main session on a channel (no conversation, no identity)."""
+    return _session_key(user_id, channel)
+
+
 def conversation_key(user_id: str, channel: str, conversation_id: str) -> str:
     """One conversation of a user's, nested under their channel session."""
     return f"{_session_key(user_id, channel)}:{conversation_id}"
@@ -236,6 +241,17 @@ class SessionManager:
             )
 
         await self._persist(session)
+
+    async def append_note(self, session_key: str, user_id: str, channel: str, text: str) -> None:
+        """Add an assistant message to a session from outside any turn (a
+        phone call's final report), in turn order with the user's own turns.
+
+        A trailing assistant message is fine: the Anthropic serializer merges
+        consecutive same-role messages, and OpenAI accepts them as they are.
+        """
+        async with self.turn(user_id, channel, session_key=session_key):
+            session = await self.get_or_create(user_id, channel, session_key=session_key)
+            await self.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
 
     async def save(self, session: Session) -> None:
         """Write the session out after its messages were changed in place."""

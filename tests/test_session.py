@@ -307,3 +307,62 @@ async def test_turn_uses_same_unified_key_as_session(session_manager):
     async with session_manager.turn("user", "chat", pincer_user_id="canonical"):
         session = await session_manager.get_or_create("user", "chat", pincer_user_id="canonical")
         assert session.session_id in session_manager._turn_locks
+
+
+async def test_append_note_adds_an_assistant_message_to_the_exact_session(session_manager: SessionManager):
+    """A call report lands in the session the call was asked in, after the turn that asked for it."""
+    key = conversation_key("u", "web", CONVERSATION)
+    session = await session_manager.get_or_create("u", "web", session_key=key)
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="call the dentist"))
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="It's ringing."))
+    await session_manager.evict(key)
+
+    await session_manager.append_note(key, "u", "web", "📞 Call report (Dentist):\nNo answer.")
+
+    reloaded = await session_manager.get_or_create("u", "web", session_key=key)
+    assert [(m.role, m.content) for m in reloaded.messages][-1] == (
+        MessageRole.ASSISTANT,
+        "📞 Call report (Dentist):\nNo answer.",
+    )
+    main = await session_manager.get_or_create("u", "web")
+    assert main.messages == []
+
+
+async def test_append_note_waits_for_a_turn_in_progress(session_manager: SessionManager):
+    """The note goes in after the running turn's own messages, never between them."""
+    import asyncio
+
+    key = "telegram:u"
+    async with session_manager.turn("u", "telegram", session_key=key):
+        note = asyncio.create_task(session_manager.append_note(key, "u", "telegram", "report"))
+        await asyncio.sleep(0.01)
+        session = await session_manager.get_or_create("u", "telegram", session_key=key)
+        await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="turn reply"))
+    await note
+    session = await session_manager.get_or_create("u", "telegram", session_key=key)
+    assert [m.content for m in session.messages] == ["turn reply", "report"]
+
+
+def test_a_call_report_after_the_reply_serializes_for_the_next_turn():
+    """Report + previous reply are two assistant messages in a row: Anthropic
+    gets them merged into one, OpenAI as they are, and the next user turn follows."""
+    from types import SimpleNamespace
+
+    from pincer.llm.anthropic_common import AnthropicCompatibleProvider
+    from pincer.llm.openai_common import convert_messages_to_openai
+
+    history = [
+        LLMMessage(role=MessageRole.USER, content="call the dentist"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="It's ringing."),
+        LLMMessage(role=MessageRole.ASSISTANT, content="📞 Call report (Dentist):\nNo answer."),
+        LLMMessage(role=MessageRole.USER, content="did they answer?"),
+    ]
+
+    anthropic_self = SimpleNamespace(_validate_api_messages=AnthropicCompatibleProvider._validate_api_messages)
+    anthropic = AnthropicCompatibleProvider._convert_messages(anthropic_self, history)  # type: ignore[arg-type]
+    assert [m["role"] for m in anthropic] == ["user", "assistant", "user"]
+    assert "No answer." in anthropic[1]["content"]
+    assert "It's ringing." in anthropic[1]["content"]
+
+    openai = convert_messages_to_openai(history)
+    assert [m["role"] for m in openai] == ["user", "assistant", "assistant", "user"]

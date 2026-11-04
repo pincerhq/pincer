@@ -9,7 +9,15 @@ from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.models.observability import AppointmentOutcome, CallCost, CanaryRun
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
-from pincer.models.voice import CallAction, CallAnalytics, CallTranscript, InboundMessage, OutboundCallLog, VoiceCall
+from pincer.models.voice import (
+    CallAction,
+    CallAnalytics,
+    CallOrigin,
+    CallTranscript,
+    InboundMessage,
+    OutboundCallLog,
+    VoiceCall,
+)
 from pincer.repositories.base import BaseRepository
 from pincer.services.observability import BookingsService, CallCostsService, CanaryService
 from pincer.services.retention import RetentionService
@@ -25,6 +33,7 @@ _TABLES = [
         CallAction,
         InboundMessage,
         OutboundCallLog,
+        CallOrigin,
         CallAnalytics,
         TelephonyCall,
         TelephonyEvent,
@@ -137,6 +146,8 @@ async def test_the_voice_purge_deletes_expired_rows_and_keeps_the_rest(url):
         CallAction(call_id="CA_old", action_type="tool_call", timestamp=OLD),
         InboundMessage(call_sid="CA_old", created_at=OLD),
         OutboundCallLog(phone_number="+4930111", placed_at=OLD, local_day="2020-01-01"),
+        CallOrigin(call_sid="CA_old", user_id="u", created_at=OLD, report_text="report"),
+        CallOrigin(call_sid="CA_new", user_id="u", created_at=RECENT),
     )
 
     deleted = await RetentionService(url).purge_voice(CUTOFF)
@@ -147,8 +158,10 @@ async def test_the_voice_purge_deletes_expired_rows_and_keeps_the_rest(url):
         "pincer_call_actions": 1,
         "pincer_inbound_messages": 1,
         "pincer_outbound_call_logs": 1,
+        "pincer_call_origins": 1,
     }
     assert await _count(url, VoiceCall) == 1
+    assert await _count(url, CallOrigin) == 1
     assert await _count(url, CallTranscript) == 1
 
 

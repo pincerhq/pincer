@@ -1895,7 +1895,7 @@ class VoiceChannel(BaseChannel):
             return
 
         # T1.5 fallback (no processor wired): plain final status, even on failure
-        from pincer.voice.status_notify import notify_ended
+        from pincer.voice.status_notify import final_outcome_code, notify_ended
 
         outcome = f"{'completed' if completed else 'did not complete'} ({state.duration_seconds}s)"
         if end_code:
@@ -1909,7 +1909,13 @@ class VoiceChannel(BaseChannel):
         if unverified:
             outcome += " — note: the agent made a completion claim I could not verify against tool results"
         with contextlib.suppress(Exception):
-            await notify_ended(call_sid, outcome)
+            await notify_ended(
+                call_sid,
+                outcome,
+                outcome_code=final_outcome_code(
+                    completed, end_code, str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+                ),
+            )
 
     async def _close_call_trace(
         self,
@@ -2051,10 +2057,15 @@ class VoiceChannel(BaseChannel):
             await self._post_call_processor.process(call_sid, state, transcript, completed, unverified)
         except Exception:
             logger.exception("Post-call pipeline failed for %s — sending fallback status", call_sid)
-            from pincer.voice.status_notify import notify_ended
+            from pincer.voice.status_notify import final_outcome_code, notify_ended
 
+            code = final_outcome_code(
+                completed,
+                str(state.metadata.get(END_CODE_KEY) or ""),
+                str(state.metadata.get(PROVIDER_STATUS_KEY) or ""),
+            )
             with contextlib.suppress(Exception):
-                await notify_ended(call_sid, "completed" if completed else "did not complete")
+                await notify_ended(call_sid, "completed" if completed else "did not complete", outcome_code=code)
 
     def _find_active_call_for_user(self, user_id: str) -> str:
         """Find the active call SID for a given user."""

@@ -187,3 +187,35 @@ class CallAnalytics(SQLModel, table=True):
     sentiment_rationale: str | None = Field(default=None, sa_column=Column(Text()))
     sentiment_reason: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     created_at: str = Field(sa_column=Column(IsoText(), nullable=False))
+
+
+class CallOrigin(SQLModel, table=True):
+    """Where an outbound call was asked for, and the report it ended with.
+
+    Written at dial time, so the routing of a call's final report survives a
+    restart (`status_notify` keeps it in memory only); `reported_at` is set
+    once, when the final report is delivered.
+    """
+
+    __tablename__ = "pincer_call_origins"
+    __table_args__ = (
+        Index("idx_call_origins_session", "pincer_user_id", "session_key"),
+        Index("idx_call_origins_reported", "reported_at"),
+    )
+
+    call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
+    # The delivery id on the channel (a Telegram chat id); `pincer_user_id` is the identity.
+    user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    pincer_user_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    channel: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    # The chat session that asked for the call ("" for calls with no chat).
+    session_key: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    language: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    target_number: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    target_name: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    purpose: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    instructions: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    created_at: str = Field(sa_column=Column(IsoText(), nullable=False))
+    report_outcome: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    report_text: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    reported_at: str | None = Field(default=None, sa_column=Column(IsoText()))
