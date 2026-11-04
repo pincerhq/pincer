@@ -36,6 +36,10 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
 - `PINCER_VOICE_MAX_RESPONSE_TOKENS` now defaults to 1024 (was 220) and
   accepts up to 128000 (was 1024). It is the worst-case silence before a
   reply, shared by the model's thinking and its speech.
+- A Claude model's thinking (including redacted thinking) is now passed back
+  unchanged on every follow-up request within the same turn, so the model
+  keeps its reasoning across tool calls. It is dropped when the turn ends and
+  is never saved in the session, shown, spoken or logged.
 
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 

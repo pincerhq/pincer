@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic_sse as sse
 import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
-from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ToolCall
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ThinkingBlock, ToolCall
 
 MODULE = "pincer.llm.anthropic_common"
 
@@ -606,3 +607,148 @@ class TestTemperatureByModel:
         provider = self._provider(anthropic_settings)
         kwargs = await self._sent_kwargs(provider, method)
         assert kwargs["temperature"] == anthropic_settings.temperature
+
+
+# ── Thinking blocks (issue #345) ─────────────────────
+
+_THOUGHT = "SECRET-THOUGHT-7f3a"
+_SIGNATURE = "SIG-7f3a-signature"
+_REDACTED = "REDACTED-7f3a-data"
+_THINKING_BLOCKS = [
+    ThinkingBlock("thinking", thinking=_THOUGHT, signature=_SIGNATURE),
+    ThinkingBlock("redacted_thinking", data=_REDACTED),
+]
+_THINKING_API = [
+    {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+    {"type": "redacted_thinking", "data": _REDACTED},
+]
+_THINKING_REPLY = (
+    [sse.thinking(_THOUGHT, _SIGNATURE), sse.redacted(_REDACTED), sse.text("Hello!"), sse.tool_use("toolu_1", "t", {})],
+    "tool_use",
+)
+
+
+async def _sent_messages(settings, messages: list[LLMMessage]) -> list[dict]:
+    """The `messages` of the request the provider really sends for this history."""
+    async with sse.ScriptedAnthropic(settings, [([sse.text("ok")], "end_turn")]) as llm:
+        await llm.provider.complete(messages)
+    return llm.requests[0]["messages"]
+
+
+async def test_complete_keeps_thinking_blocks_verbatim_in_order(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_THINKING_REPLY]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.thinking_blocks == _THINKING_BLOCKS
+    assert result.content == "Hello!"
+    assert [tc.id for tc in result.tool_calls] == ["toolu_1"]
+
+
+async def test_stream_turn_keeps_thinking_blocks_and_never_streams_them_as_text(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_THINKING_REPLY]) as llm:
+        events = [e async for e in llm.provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")])]
+
+    assert "".join(e.text for e in events) == "Hello!"
+    final = events[-1].response
+    assert final is not None
+    assert final.thinking_blocks == _THINKING_BLOCKS
+    assert final.content == "Hello!"
+
+
+async def test_stream_never_yields_thinking_as_text(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_THINKING_REPLY]) as llm:
+        tokens = [t async for t in llm.provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
+
+    assert tokens == ["Hello!"]
+
+
+async def test_tool_call_turn_sends_thinking_first_then_text_then_tool_use(anthropic_settings):
+    call = ToolCall(id="toolu_1", name="t", arguments={"a": 1})
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(
+                role=MessageRole.ASSISTANT,
+                content="Checking.",
+                tool_calls=[call],
+                thinking_blocks=list(_THINKING_BLOCKS),
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [
+            *_THINKING_API,
+            {"type": "text", "text": "Checking."},
+            {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": 1}},
+        ],
+    }
+
+
+async def test_text_turn_sends_thinking_first_then_text(anthropic_settings):
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="Hello!", thinking_blocks=list(_THINKING_BLOCKS)),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1] == {"role": "assistant", "content": [*_THINKING_API, {"type": "text", "text": "Hello!"}]}
+
+
+async def test_text_turn_without_text_never_sends_thinking_alone(anthropic_settings):
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="", thinking_blocks=list(_THINKING_BLOCKS)),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1] == {"role": "assistant", "content": ""}  # exactly as without thinking
+
+
+async def test_merging_assistant_turns_keeps_thinking_first(anthropic_settings):
+    call = ToolCall(id="toolu_1", name="t", arguments={})
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="One moment."),
+            LLMMessage(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[call], thinking_blocks=list(_THINKING_BLOCKS)
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [
+            *_THINKING_API,
+            {"type": "text", "text": "One moment."},
+            {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {}},
+        ],
+    }
+
+
+async def test_orphaned_tool_call_turn_is_dropped_with_its_thinking(anthropic_settings):
+    orphan = ToolCall(id="orphan", name="t", arguments={})
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[orphan], thinking_blocks=list(_THINKING_BLOCKS)
+            ),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent == [{"role": "user", "content": "hi\nagain"}]

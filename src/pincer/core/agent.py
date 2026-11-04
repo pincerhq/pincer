@@ -41,6 +41,7 @@ from pincer.llm.base import (
     MessageRole,
     ToolCall,
     ToolResult,
+    strip_thinking,
 )
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
@@ -692,282 +693,287 @@ class Agent:
         """
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-        memory = self._memory_for_turn(session, memory)
-        onboarding = (
-            await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
-            if memory
-            else _NO_ONBOARDING
-        )
-
-        # Build user message
-        img_contents: list[ImageContent] = []
-        if images:
-            for raw, media_type in images:
-                img_contents.append(ImageContent.from_bytes(raw, media_type))
-
-        user_msg = LLMMessage(
-            role=MessageRole.USER,
-            content=text,
-            images=img_contents,
-        )
-        await self._sessions.add_message(session, user_msg)
-
-        # Summarize if conversation is getting long (the summary is a memory)
-        if memory:
-            await self._maybe_summarize(session)
-
-        # Build system prompt with relevant memories — inject the onboarding
-        # followup instruction only on the turn that handles the user's reply.
-        extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
-        if extra_system:
-            extra_parts.append(extra_system)
-        # Get tool schemas. In call context (Sprint 11) the bound in-call gate
-        # owns the EXACT tool set — the blocking voice path (guard regeneration,
-        # harness) must never see more than the streaming path does.
-        from pincer.voice.in_call_tools import current_gate
-
-        call_gate = current_gate()
-        if not self._tools.has_tools:
-            tool_schemas = None
-        elif call_gate is not None:
-            tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
-        else:
-            tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session.messages)
-        logger.debug(
-            "Tools available (%d): %s",
-            len(tool_schemas or []),
-            [t.get("name") for t in (tool_schemas or [])],
-        )
-
-        turn = await self._begin_turn(user_id, session_key=session.session_id)
-
-        async def build_prompt(tool_names: list[str] | None) -> str:
-            return await self._build_system_prompt(
-                user_id,
-                text,
-                extra_system="\n\n".join(extra_parts) or None,
-                skip_memory=not memory,
-                tool_names=tool_names,
-                user_timezone=turn.timezone,
-                preferred_language=(channel_name or channel) != "voice",
-            )
-
-        # The hints follow the tools this turn sends, in a call too: a prompt
-        # that advertises a tool the model was not given gets the nearest
-        # offered tool called in its place (issue #300).
-        system_prompt = await build_prompt(_schema_names(tool_schemas))
-
-        total_cost = 0.0
-        tool_calls_count = 0
-        call_sids: list[str] = []
-        final_text = ""
-        last_response: LLMResponse | None = None
-        consecutive_errors = 0
-        sanitize_attempts = 0
-        repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
-
-        # ── ReAct Loop ───────────────────────────────────
-        for _iteration in range(self._settings.max_tool_iterations):
-            # Proactive sanitization: fix orphaned pairs before they reach the API
-            await self._repair_tool_pairs(session)
-
-            try:
-                response: LLMResponse = await self._llm.complete(
-                    messages=session.messages,
-                    tools=tool_schemas,
-                    system=system_prompt,
-                )
-                last_response = response
-                # By the second iteration the model has already either
-                # committed to a tool call or produced final text — the
-                # image no longer needs to be resent (and, unlike text,
-                # isn't persisted across turns anyway; see LLMMessage.to_dict).
-                # Cuts vision re-ingestion cost on every retry within this loop.
-                if user_msg.images:
-                    user_msg.images = []
-            except BudgetExceededError:
-                final_text = (
-                    "Warning: Daily budget limit reached. "
-                    f"Limit: ${self._settings.daily_budget_usd:.2f}. "
-                    "I'll be back tomorrow, or you can increase the limit."
-                )
-                break
-            except LLMError as e:
-                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
-                if recovery is _PairRecovery.RETRY:
-                    sanitize_attempts += 1
-                    continue
-                if recovery is _PairRecovery.CLEARED:
-                    final_text = _SESSION_CLEARED_TEXT
-                    break
-                if call_sids:
-                    # A call is already ringing: an error response would hide
-                    # it from the channel, which then never waits for its report.
-                    logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
-                    final_text = _CALL_PLACED_THEN_FAILED_TEXT
-                    break
-                raise
-
-            # Track cost
-            try:
-                # Attribute cost to the provider that actually served (may be a
-                # failover), not the configured primary.
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                cost = await self._costs.record(
-                    provider=provider,
-                    model=response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    session_id=session.session_id,
-                    is_free=is_free,
-                )
-                total_cost += cost
-            except BudgetExceededError as e:
-                final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
-                break
-
-            _refuse_truncated_tool_calls(response, self._settings.max_tokens)
-
-            # If the LLM wants to use tools
-            if response.has_tool_calls:
-                logger.info(
-                    "LLM requested tools: %s",
-                    [tc.name for tc in response.tool_calls],
-                )
-                # Save the assistant's tool-call message
-                assistant_msg = LLMMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                )
-                await self._sessions.add_message(session, assistant_msg)
-
-                # Execute each tool
-                iteration_had_error = False
-                skills_loaded: list[str] = []
-                ran_new_call = False
-                for tool_call in response.tool_calls:
-                    tool_calls_count += 1
-                    if repeats is not None and repeats.is_repeat(tool_call):
-                        result = repeats.repeat_result(tool_call)
-                    elif call_gate is not None:
-                        result = await self._execute_call_tool(
-                            tool_call,
-                            user_id,
-                            channel,
-                            channel_user_id,
-                            call_gate,
-                            channel_name=channel_name,
-                            turn=turn,
-                        )
-                        if repeats is not None:
-                            repeats.record(tool_call, result)
-                        ran_new_call = True
-                    else:
-                        result = await self._execute_tool(
-                            tool_call, user_id, channel, channel_name, channel_user_id, turn=turn
-                        )
-
-                    result_msg = LLMMessage(
-                        role=MessageRole.TOOL_RESULT,
-                        content=result.content,
-                        tool_call_id=result.tool_call_id,
-                    )
-                    await self._sessions.add_message(session, result_msg)
-                    if (sid := _placed_call_sid(tool_call.name, result)) and sid not in call_sids:
-                        call_sids.append(sid)
-
-                    if result.is_error:
-                        iteration_had_error = True
-                    elif (skill := _loaded_skill(tool_call, result)) is not None:
-                        skills_loaded.append(skill)
-
-                # A batch that also ran a new call goes back to the model, which
-                # has not seen that result yet.
-                if repeats is not None and repeats.exhausted and not ran_new_call:
-                    final_text = repeats.no_progress_line()
-                    break
-
-                if skills_loaded and call_gate is None:
-                    reselected = await self._reselect_after_skills(
-                        self._tools.get_schemas(), text, session.messages, skills_loaded
-                    )
-                    if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        tool_schemas = reselected
-                        system_prompt = await build_prompt(_schema_names(tool_schemas))
-
-                if iteration_had_error:
-                    consecutive_errors += 1
-                    if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
-                        logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
-                        final_text = (
-                            response.content
-                            if response.content
-                            else "I'm having repeated tool failures. Let me respond with what I have."
-                        )
-                        break
-                else:
-                    consecutive_errors = 0
-
-                # Continue loop — LLM will see tool results
-                continue
-
-            # No tool calls — we have the final answer
-            final_text = response.content
-            break
-        else:
-            # Loop exhausted
-            final_text = (
-                last_response.content
-                if last_response and last_response.content
-                else "I seem to be going in circles. Let me give you what I have so far."
-            )
-
-        # ── Onboarding: append warm question on a fresh session ────────────
-        asking = bool(final_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
         try:
-            if asking:
-                final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
+            memory = self._memory_for_turn(session, memory)
+            onboarding = (
+                await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
+                if memory
+                else _NO_ONBOARDING
+            )
 
-            # Save final assistant message
-            if final_text:
-                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=final_text)
-                await self._sessions.add_message(session, final_msg)
-            if asking:
-                await self._record_onboarding_prompt(session, user_id, channel)
-        finally:
-            if asking:
-                self._onboarding_reserved.discard((user_id, channel))
+            # Build user message
+            img_contents: list[ImageContent] = []
+            if images:
+                for raw, media_type in images:
+                    img_contents.append(ImageContent.from_bytes(raw, media_type))
 
-        # ── Onboarding: parse the user's reply and close the gate ─────────
-        if onboarding.ingest:
-            await self._ingest_onboarding_reply(text, user_id, channel)
+            user_msg = LLMMessage(
+                role=MessageRole.USER,
+                content=text,
+                images=img_contents,
+            )
+            await self._sessions.add_message(session, user_msg)
 
-        # Store the final exchange as a memory for future retrieval
-        if self._memory and memory and final_text:
-            try:
-                tag_channel = channel_name or channel
-                extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
-                await self._memory.store_memory(
-                    user_id=user_id,
-                    content=(
-                        f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n"
-                        f"{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {final_text}"
-                    ),
-                    category="exchange",
-                    extra_tags=extra_tags,
+            # Summarize if conversation is getting long (the summary is a memory)
+            if memory:
+                await self._maybe_summarize(session)
+
+            # Build system prompt with relevant memories — inject the onboarding
+            # followup instruction only on the turn that handles the user's reply.
+            extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
+            if extra_system:
+                extra_parts.append(extra_system)
+            # Get tool schemas. In call context (Sprint 11) the bound in-call gate
+            # owns the EXACT tool set — the blocking voice path (guard regeneration,
+            # harness) must never see more than the streaming path does.
+            from pincer.voice.in_call_tools import current_gate
+
+            call_gate = current_gate()
+            if not self._tools.has_tools:
+                tool_schemas = None
+            elif call_gate is not None:
+                tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
+            else:
+                tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session.messages)
+            logger.debug(
+                "Tools available (%d): %s",
+                len(tool_schemas or []),
+                [t.get("name") for t in (tool_schemas or [])],
+            )
+
+            turn = await self._begin_turn(user_id, session_key=session.session_id)
+
+            async def build_prompt(tool_names: list[str] | None) -> str:
+                return await self._build_system_prompt(
+                    user_id,
+                    text,
+                    extra_system="\n\n".join(extra_parts) or None,
+                    skip_memory=not memory,
+                    tool_names=tool_names,
+                    user_timezone=turn.timezone,
+                    preferred_language=(channel_name or channel) != "voice",
                 )
-            except Exception:
-                logger.debug("Failed to store exchange memory", exc_info=True)
 
-        return AgentResponse(
-            text=final_text,
-            cost_usd=total_cost,
-            tool_calls_made=tool_calls_count,
-            model=last_response.model if last_response else "",
-            call_sids=call_sids,
-        )
+            # The hints follow the tools this turn sends, in a call too: a prompt
+            # that advertises a tool the model was not given gets the nearest
+            # offered tool called in its place (issue #300).
+            system_prompt = await build_prompt(_schema_names(tool_schemas))
+
+            total_cost = 0.0
+            tool_calls_count = 0
+            call_sids: list[str] = []
+            final_text = ""
+            last_response: LLMResponse | None = None
+            consecutive_errors = 0
+            sanitize_attempts = 0
+            repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
+
+            # ── ReAct Loop ───────────────────────────────────
+            for _iteration in range(self._settings.max_tool_iterations):
+                # Proactive sanitization: fix orphaned pairs before they reach the API
+                await self._repair_tool_pairs(session)
+
+                try:
+                    response: LLMResponse = await self._llm.complete(
+                        messages=session.messages,
+                        tools=tool_schemas,
+                        system=system_prompt,
+                    )
+                    last_response = response
+                    # By the second iteration the model has already either
+                    # committed to a tool call or produced final text — the
+                    # image no longer needs to be resent (and, unlike text,
+                    # isn't persisted across turns anyway; see LLMMessage.to_dict).
+                    # Cuts vision re-ingestion cost on every retry within this loop.
+                    if user_msg.images:
+                        user_msg.images = []
+                except BudgetExceededError:
+                    final_text = (
+                        "Warning: Daily budget limit reached. "
+                        f"Limit: ${self._settings.daily_budget_usd:.2f}. "
+                        "I'll be back tomorrow, or you can increase the limit."
+                    )
+                    break
+                except LLMError as e:
+                    recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                    if recovery is _PairRecovery.RETRY:
+                        sanitize_attempts += 1
+                        continue
+                    if recovery is _PairRecovery.CLEARED:
+                        final_text = _SESSION_CLEARED_TEXT
+                        break
+                    if call_sids:
+                        # A call is already ringing: an error response would hide
+                        # it from the channel, which then never waits for its report.
+                        logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
+                        final_text = _CALL_PLACED_THEN_FAILED_TEXT
+                        break
+                    raise
+
+                # Track cost
+                try:
+                    # Attribute cost to the provider that actually served (may be a
+                    # failover), not the configured primary.
+                    provider = response.provider or self._settings.default_provider
+                    is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+                    cost = await self._costs.record(
+                        provider=provider,
+                        model=response.model,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        session_id=session.session_id,
+                        is_free=is_free,
+                    )
+                    total_cost += cost
+                except BudgetExceededError as e:
+                    final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
+                    break
+
+                _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+
+                # If the LLM wants to use tools
+                if response.has_tool_calls:
+                    logger.info(
+                        "LLM requested tools: %s",
+                        [tc.name for tc in response.tool_calls],
+                    )
+                    # Save the assistant's tool-call message
+                    assistant_msg = LLMMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=response.content,
+                        tool_calls=response.tool_calls,
+                        thinking_blocks=list(response.thinking_blocks),
+                    )
+                    await self._sessions.add_message(session, assistant_msg)
+
+                    # Execute each tool
+                    iteration_had_error = False
+                    skills_loaded: list[str] = []
+                    ran_new_call = False
+                    for tool_call in response.tool_calls:
+                        tool_calls_count += 1
+                        if repeats is not None and repeats.is_repeat(tool_call):
+                            result = repeats.repeat_result(tool_call)
+                        elif call_gate is not None:
+                            result = await self._execute_call_tool(
+                                tool_call,
+                                user_id,
+                                channel,
+                                channel_user_id,
+                                call_gate,
+                                channel_name=channel_name,
+                                turn=turn,
+                            )
+                            if repeats is not None:
+                                repeats.record(tool_call, result)
+                            ran_new_call = True
+                        else:
+                            result = await self._execute_tool(
+                                tool_call, user_id, channel, channel_name, channel_user_id, turn=turn
+                            )
+
+                        result_msg = LLMMessage(
+                            role=MessageRole.TOOL_RESULT,
+                            content=result.content,
+                            tool_call_id=result.tool_call_id,
+                        )
+                        await self._sessions.add_message(session, result_msg)
+                        if (sid := _placed_call_sid(tool_call.name, result)) and sid not in call_sids:
+                            call_sids.append(sid)
+
+                        if result.is_error:
+                            iteration_had_error = True
+                        elif (skill := _loaded_skill(tool_call, result)) is not None:
+                            skills_loaded.append(skill)
+
+                    # A batch that also ran a new call goes back to the model, which
+                    # has not seen that result yet.
+                    if repeats is not None and repeats.exhausted and not ran_new_call:
+                        final_text = repeats.no_progress_line()
+                        break
+
+                    if skills_loaded and call_gate is None:
+                        reselected = await self._reselect_after_skills(
+                            self._tools.get_schemas(), text, session.messages, skills_loaded
+                        )
+                        if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                            tool_schemas = reselected
+                            system_prompt = await build_prompt(_schema_names(tool_schemas))
+
+                    if iteration_had_error:
+                        consecutive_errors += 1
+                        if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                            logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
+                            final_text = (
+                                response.content
+                                if response.content
+                                else "I'm having repeated tool failures. Let me respond with what I have."
+                            )
+                            break
+                    else:
+                        consecutive_errors = 0
+
+                    # Continue loop — LLM will see tool results
+                    continue
+
+                # No tool calls — we have the final answer
+                final_text = response.content
+                break
+            else:
+                # Loop exhausted
+                final_text = (
+                    last_response.content
+                    if last_response and last_response.content
+                    else "I seem to be going in circles. Let me give you what I have so far."
+                )
+
+            # ── Onboarding: append warm question on a fresh session ────────────
+            asking = bool(final_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
+            try:
+                if asking:
+                    final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
+
+                # Save final assistant message
+                if final_text:
+                    final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=final_text)
+                    await self._sessions.add_message(session, final_msg)
+                if asking:
+                    await self._record_onboarding_prompt(session, user_id, channel)
+            finally:
+                if asking:
+                    self._onboarding_reserved.discard((user_id, channel))
+
+            # ── Onboarding: parse the user's reply and close the gate ─────────
+            if onboarding.ingest:
+                await self._ingest_onboarding_reply(text, user_id, channel)
+
+            # Store the final exchange as a memory for future retrieval
+            if self._memory and memory and final_text:
+                try:
+                    tag_channel = channel_name or channel
+                    extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
+                    await self._memory.store_memory(
+                        user_id=user_id,
+                        content=(
+                            f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n"
+                            f"{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {final_text}"
+                        ),
+                        category="exchange",
+                        extra_tags=extra_tags,
+                    )
+                except Exception:
+                    logger.debug("Failed to store exchange memory", exc_info=True)
+
+            return AgentResponse(
+                text=final_text,
+                cost_usd=total_cost,
+                tool_calls_made=tool_calls_count,
+                model=last_response.model if last_response else "",
+                call_sids=call_sids,
+            )
+        finally:
+            # Thinking is kept within one turn only; the session stays cached across turns
+            strip_thinking(session.messages)
 
     async def run_headless(
         self,
@@ -1155,187 +1161,196 @@ class Agent:
         """
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-        memory = self._memory_for_turn(session, memory)
-        onboarding = (
-            await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
-        )
-
-        img_contents: list[ImageContent] = []
-        if images:
-            for raw, media_type in images:
-                img_contents.append(ImageContent.from_bytes(raw, media_type))
-
-        user_msg = LLMMessage(
-            role=MessageRole.USER,
-            content=text,
-            images=img_contents,
-        )
-        await self._sessions.add_message(session, user_msg)
-
-        if memory:
-            await self._maybe_summarize(session)
-
-        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
-        tool_schemas = (
-            await self._select_tools(self._tools.get_schemas(), text, session.messages)
-            if self._tools.has_tools
-            else None
-        )
-        logger.debug(
-            "Tools available (%d): %s",
-            len(tool_schemas or []),
-            [t.get("name") for t in (tool_schemas or [])],
-        )
-
-        turn = await self._begin_turn(user_id, session_key=session.session_id)
-
-        async def build_prompt(tool_names: list[str]) -> str:
-            return await self._build_system_prompt(
-                user_id,
-                text,
-                extra_system=extra_system,
-                skip_memory=not memory,
-                tool_names=tool_names,
-                user_timezone=turn.timezone,
+        try:
+            memory = self._memory_for_turn(session, memory)
+            onboarding = (
+                await self._onboarding_for_turn(session, user_id, channel, channel_name=None)
+                if memory
+                else _NO_ONBOARDING
             )
 
-        system_prompt = await build_prompt(_schema_names(tool_schemas))
-        consecutive_errors = 0
-        circuit_broken = False
-        sanitize_attempts = 0
-        response: LLMResponse | None = None
+            img_contents: list[ImageContent] = []
+            if images:
+                for raw, media_type in images:
+                    img_contents.append(ImageContent.from_bytes(raw, media_type))
 
-        # Tool-call iterations (non-streaming)
-        for _iteration in range(self._settings.max_tool_iterations):
-            # Proactive sanitization: fix orphaned pairs before they reach the API
-            await self._repair_tool_pairs(session)
+            user_msg = LLMMessage(
+                role=MessageRole.USER,
+                content=text,
+                images=img_contents,
+            )
+            await self._sessions.add_message(session, user_msg)
 
-            try:
-                response = await self._llm.complete(
-                    messages=session.messages,
-                    tools=tool_schemas,
-                    system=system_prompt,
+            if memory:
+                await self._maybe_summarize(session)
+
+            extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
+            tool_schemas = (
+                await self._select_tools(self._tools.get_schemas(), text, session.messages)
+                if self._tools.has_tools
+                else None
+            )
+            logger.debug(
+                "Tools available (%d): %s",
+                len(tool_schemas or []),
+                [t.get("name") for t in (tool_schemas or [])],
+            )
+
+            turn = await self._begin_turn(user_id, session_key=session.session_id)
+
+            async def build_prompt(tool_names: list[str]) -> str:
+                return await self._build_system_prompt(
+                    user_id,
+                    text,
+                    extra_system=extra_system,
+                    skip_memory=not memory,
+                    tool_names=tool_names,
+                    user_timezone=turn.timezone,
                 )
-                # See handle_message: drop the image after the first
-                # completion so later retries in this loop don't resend it.
-                if user_msg.images:
-                    user_msg.images = []
-            except BudgetExceededError:
-                yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
-                return
-            except LLMError as e:
-                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
-                if recovery is _PairRecovery.RETRY:
-                    sanitize_attempts += 1
-                    continue
-                if recovery is _PairRecovery.CLEARED:
-                    yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
+
+            system_prompt = await build_prompt(_schema_names(tool_schemas))
+            consecutive_errors = 0
+            circuit_broken = False
+            sanitize_attempts = 0
+            response: LLMResponse | None = None
+
+            # Tool-call iterations (non-streaming)
+            for _iteration in range(self._settings.max_tool_iterations):
+                # Proactive sanitization: fix orphaned pairs before they reach the API
+                await self._repair_tool_pairs(session)
+
+                try:
+                    response = await self._llm.complete(
+                        messages=session.messages,
+                        tools=tool_schemas,
+                        system=system_prompt,
+                    )
+                    # See handle_message: drop the image after the first
+                    # completion so later retries in this loop don't resend it.
+                    if user_msg.images:
+                        user_msg.images = []
+                except BudgetExceededError:
+                    yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                     return
-                raise
+                except LLMError as e:
+                    recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                    if recovery is _PairRecovery.RETRY:
+                        sanitize_attempts += 1
+                        continue
+                    if recovery is _PairRecovery.CLEARED:
+                        yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
+                        return
+                    raise
 
-            _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+                _refuse_truncated_tool_calls(response, self._settings.max_tokens)
 
-            if not response.has_tool_calls:
-                break
-
-            logger.info(
-                "LLM requested tools: %s",
-                [tc.name for tc in response.tool_calls],
-            )
-            assistant_msg = LLMMessage(
-                role=MessageRole.ASSISTANT,
-                content=response.content,
-                tool_calls=response.tool_calls,
-            )
-            await self._sessions.add_message(session, assistant_msg)
-
-            iteration_had_error = False
-            skills_loaded: list[str] = []
-            for tool_call in response.tool_calls:
-                yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
-                result = await self._execute_tool(
-                    tool_call, user_id, channel, channel_user_id=channel_user_id, turn=turn
-                )
-                result_msg = LLMMessage(
-                    role=MessageRole.TOOL_RESULT,
-                    content=result.content,
-                    tool_call_id=result.tool_call_id,
-                )
-                await self._sessions.add_message(session, result_msg)
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, _placed_call_sid(tool_call.name, result))
-                if result.is_error:
-                    iteration_had_error = True
-                elif (skill := _loaded_skill(tool_call, result)) is not None:
-                    skills_loaded.append(skill)
-            if skills_loaded:
-                reselected = await self._reselect_after_skills(
-                    self._tools.get_schemas(), text, session.messages, skills_loaded
-                )
-                if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                    tool_schemas = reselected
-                    system_prompt = await build_prompt(_schema_names(tool_schemas))
-
-            if iteration_had_error:
-                consecutive_errors += 1
-                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
-                    logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
-                    circuit_broken = True
+                if not response.has_tool_calls:
                     break
+
+                logger.info(
+                    "LLM requested tools: %s",
+                    [tc.name for tc in response.tool_calls],
+                )
+                assistant_msg = LLMMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                    thinking_blocks=list(response.thinking_blocks),
+                )
+                await self._sessions.add_message(session, assistant_msg)
+
+                iteration_had_error = False
+                skills_loaded: list[str] = []
+                for tool_call in response.tool_calls:
+                    yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
+                    result = await self._execute_tool(
+                        tool_call, user_id, channel, channel_user_id=channel_user_id, turn=turn
+                    )
+                    result_msg = LLMMessage(
+                        role=MessageRole.TOOL_RESULT,
+                        content=result.content,
+                        tool_call_id=result.tool_call_id,
+                    )
+                    await self._sessions.add_message(session, result_msg)
+                    yield StreamChunk(
+                        StreamEventType.TOOL_DONE, tool_call.name, _placed_call_sid(tool_call.name, result)
+                    )
+                    if result.is_error:
+                        iteration_had_error = True
+                    elif (skill := _loaded_skill(tool_call, result)) is not None:
+                        skills_loaded.append(skill)
+                if skills_loaded:
+                    reselected = await self._reselect_after_skills(
+                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                    )
+                    if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                        tool_schemas = reselected
+                        system_prompt = await build_prompt(_schema_names(tool_schemas))
+
+                if iteration_had_error:
+                    consecutive_errors += 1
+                    if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                        logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
+                        circuit_broken = True
+                        break
+                else:
+                    consecutive_errors = 0
             else:
-                consecutive_errors = 0
-        else:
-            fallback_content = response.content if response and response.content else "Max iterations reached."
-            yield StreamChunk(StreamEventType.DONE, fallback_content)
-            return
+                fallback_content = response.content if response and response.content else "Max iterations reached."
+                yield StreamChunk(StreamEventType.DONE, fallback_content)
+                return
 
-        if circuit_broken:
-            fallback = (
-                response.content
-                if response and response.content
-                else "I'm having repeated tool failures. Let me respond with what I have."
-            )
-            if fallback:
-                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
-                await self._sessions.add_message(session, final_msg)
-            yield StreamChunk(StreamEventType.DONE, fallback)
-            return
+            if circuit_broken:
+                fallback = (
+                    response.content
+                    if response and response.content
+                    else "I'm having repeated tool failures. Let me respond with what I have."
+                )
+                if fallback:
+                    final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
+                    await self._sessions.add_message(session, final_msg)
+                yield StreamChunk(StreamEventType.DONE, fallback)
+                return
 
-        # Stream the final response
-        full_text = ""
-        try:
-            async for token in self._llm.stream(
-                messages=session.messages,
-                system=system_prompt,
-            ):
-                full_text += token
-                yield StreamChunk(StreamEventType.TEXT, token)
-        except Exception:
-            logger.exception("Streaming failed, falling back to complete()")
-            if not full_text:
-                full_text = response.content if response else ""
+            # Stream the final response
+            full_text = ""
+            try:
+                async for token in self._llm.stream(
+                    messages=session.messages,
+                    system=system_prompt,
+                ):
+                    full_text += token
+                    yield StreamChunk(StreamEventType.TEXT, token)
+            except Exception:
+                logger.exception("Streaming failed, falling back to complete()")
+                if not full_text:
+                    full_text = response.content if response else ""
 
-        # ── Onboarding: append warm question on a fresh session ────────────
-        asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
-        try:
-            if asking:
-                tail = "\n\n" + ONBOARDING_QUESTION_EN
-                full_text = full_text.rstrip() + tail
-                yield StreamChunk(StreamEventType.TEXT, tail)
+            # ── Onboarding: append warm question on a fresh session ────────────
+            asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
+            try:
+                if asking:
+                    tail = "\n\n" + ONBOARDING_QUESTION_EN
+                    full_text = full_text.rstrip() + tail
+                    yield StreamChunk(StreamEventType.TEXT, tail)
 
-            if full_text:
-                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
-                await self._sessions.add_message(session, final_msg)
-            if asking:
-                await self._record_onboarding_prompt(session, user_id, channel)
+                if full_text:
+                    final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
+                    await self._sessions.add_message(session, final_msg)
+                if asking:
+                    await self._record_onboarding_prompt(session, user_id, channel)
+            finally:
+                if asking:
+                    self._onboarding_reserved.discard((user_id, channel))
+
+            # ── Onboarding: parse the user's reply and close the gate ─────────
+            if onboarding.ingest:
+                await self._ingest_onboarding_reply(text, user_id, channel)
+
+            yield StreamChunk(StreamEventType.DONE, full_text)
         finally:
-            if asking:
-                self._onboarding_reserved.discard((user_id, channel))
-
-        # ── Onboarding: parse the user's reply and close the gate ─────────
-        if onboarding.ingest:
-            await self._ingest_onboarding_reply(text, user_id, channel)
-
-        yield StreamChunk(StreamEventType.DONE, full_text)
+            # Thinking is kept within one turn only; the session stays cached across turns
+            strip_thinking(session.messages)
 
     async def end_voice_session(self, session_key: str) -> None:
         """Drop a finished call's session from the cache (see ``stream_voice_turn``)."""
@@ -1412,312 +1427,326 @@ class Agent:
         turn_started = time.monotonic()
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-        user_msg = LLMMessage(role=MessageRole.USER, content=text)
-        await self._sessions.add_message(session, user_msg)
-        # NOTE: no summarizer here — it is an LLM call on the voice critical
-        # path (seconds of dead air when it triggers mid-conversation).
-        # add_message auto-trims to max_session_messages, so context stays
-        # bounded; text channels keep the richer summarize-then-trim flow.
+        try:
+            user_msg = LLMMessage(role=MessageRole.USER, content=text)
+            await self._sessions.add_message(session, user_msg)
+            # NOTE: no summarizer here — it is an LLM call on the voice critical
+            # path (seconds of dead air when it triggers mid-conversation).
+            # add_message auto-trims to max_session_messages, so context stays
+            # bounded; text channels keep the richer summarize-then-trim flow.
 
-        turn = await self._begin_turn(user_id)
-        # Sprint 11: in call context the bound gate owns the EXACT tool set
-        # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
-        # when no gate is bound (legacy callers, tests).
-        from pincer.voice.in_call_tools import current_gate
+            turn = await self._begin_turn(user_id)
+            # Sprint 11: in call context the bound gate owns the EXACT tool set
+            # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
+            # when no gate is bound (legacy callers, tests).
+            from pincer.voice.in_call_tools import current_gate
 
-        call_gate = current_gate()
-        if not self._tools.has_tools:
-            tool_schemas = None
-        elif call_gate is not None:
-            tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
-        else:
-            tool_schemas = filter_voice_tools(self._tools.get_schemas())
-        # The hints and the MCP server block name only the tools this turn
-        # sends (issue #300).
-        system_prompt = await self._build_system_prompt(
-            user_id,
-            text,
-            extra_system=extra_system,
-            tool_names=_schema_names(tool_schemas),
-            user_timezone=turn.timezone,
-            preferred_language=False,
-        )
-        max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 1024) or 1024)
-        # Reasoning models can spend that whole budget thinking; only the OpenAI
-        # reasoning models that take the knob act on it.
-        reasoning_effort = str(getattr(self._settings, "voice_reasoning_effort", "") or "") or None
-
-        # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
-        # "<model>" = default provider, that model; "openai:gpt-5-mini" = that
-        # provider AND model — cross-provider tiering, chosen at runtime from
-        # the dashboard (/api/voice/config) — which updates THIS settings
-        # object, so its value is passed in. The default provider and model
-        # are used when the override can't be built.
-        turn_model = str(getattr(self._settings, "voice_turn_model", "") or "")
-        voice_llm: BaseLLMProvider
-        if isinstance(self._llm, LLMRouter):
-            voice_llm, plan = self._llm.resolve_voice_turn(turn_model)
-        else:
-            # No router to build another provider: only the default provider can run.
-            voice_llm = self._llm
-            plan = plan_voice_turn(self._settings, turn_model, build=_no_router_build)
-        voice_model = plan.model or None
-        if session_key and session_key not in self._voice_model_logged:
-            self._voice_model_logged.add(session_key)
-            logger.info(
-                "Voice call %s runs on provider %s / model %s", session_key, plan.provider, plan.effective_model
+            call_gate = current_gate()
+            if not self._tools.has_tools:
+                tool_schemas = None
+            elif call_gate is not None:
+                tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
+            else:
+                tool_schemas = filter_voice_tools(self._tools.get_schemas())
+            # The hints and the MCP server block name only the tools this turn
+            # sends (issue #300).
+            system_prompt = await self._build_system_prompt(
+                user_id,
+                text,
+                extra_system=extra_system,
+                tool_names=_schema_names(tool_schemas),
+                user_timezone=turn.timezone,
+                preferred_language=False,
             )
-        if timings is not None:
-            # T5.1 stage split: everything before the LLM request (session I/O,
-            # memory search, prompt assembly) vs. actual provider TTFT.
-            timings["prep_ms"] = (time.monotonic() - turn_started) * 1000.0
+            max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 1024) or 1024)
+            # Reasoning models can spend that whole budget thinking; only the OpenAI
+            # reasoning models that take the knob act on it.
+            reasoning_effort = str(getattr(self._settings, "voice_reasoning_effort", "") or "") or None
 
-        # Telephony telemetry. The turn tracer travels on a contextvar (bound by
-        # the voice channel), so this stays a no-op for every non-voice caller
-        # and the agent keeps no dependency on the voice subsystem's objects.
-        from pincer.voice.telemetry.schema import EventName as _TelemetryEvent
-        from pincer.voice.telemetry.schema import SpanName as _TelemetrySpan
-        from pincer.voice.telemetry.schema import SpanStatus as _SpanStatus
-        from pincer.voice.telemetry.tracer import current_turn_tracer
-
-        turn_trace = current_turn_tracer()
-        if turn_trace is not None:
-            turn_trace.stamp(_TelemetryEvent.AGENT_PREP_DONE)
-
-        full_text = ""
-        consecutive_errors = 0
-        sanitize_attempts = 0
-        repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
-
-        for _iteration in range(self._settings.max_tool_iterations):
-            await self._repair_tool_pairs(session)
-
-            # One tool iteration is one request, plus at most one silent retry
-            # when that request is cut off before saying anything (Q8d). The
-            # retry does not use up a tool iteration.
-            request_max_tokens = max_tokens
-            retried = False
-            recover_pairs = False
-            while True:
-                response: LLMResponse | None = None
-                request_text = ""  # what THIS request streamed, apart from the turn's full_text
-                llm_span = (
-                    turn_trace.open_span(
-                        _TelemetrySpan.LLM,
-                        attempt=_iteration + 1,
-                        model=voice_model or "",
-                        provider=getattr(voice_llm, "name", ""),
-                        **({"retry": True, "max_tokens": request_max_tokens} if retried else {}),
-                    )
-                    if turn_trace is not None
-                    else None
+            # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
+            # "<model>" = default provider, that model; "openai:gpt-5-mini" = that
+            # provider AND model — cross-provider tiering, chosen at runtime from
+            # the dashboard (/api/voice/config) — which updates THIS settings
+            # object, so its value is passed in. The default provider and model
+            # are used when the override can't be built.
+            turn_model = str(getattr(self._settings, "voice_turn_model", "") or "")
+            voice_llm: BaseLLMProvider
+            if isinstance(self._llm, LLMRouter):
+                voice_llm, plan = self._llm.resolve_voice_turn(turn_model)
+            else:
+                # No router to build another provider: only the default provider can run.
+                voice_llm = self._llm
+                plan = plan_voice_turn(self._settings, turn_model, build=_no_router_build)
+            voice_model = plan.model or None
+            if session_key and session_key not in self._voice_model_logged:
+                self._voice_model_logged.add(session_key)
+                logger.info(
+                    "Voice call %s runs on provider %s / model %s", session_key, plan.provider, plan.effective_model
                 )
-                if turn_trace is not None:
-                    turn_trace.stamp(_TelemetryEvent.LLM_REQUEST, model=voice_model or "", iteration=_iteration + 1)
-                try:
-                    async for event in voice_llm.stream_turn(
-                        messages=session.messages,
-                        tools=tool_schemas,
-                        system=system_prompt,
-                        model=voice_model,
-                        max_tokens=request_max_tokens,
-                        reasoning_effort=reasoning_effort,
-                    ):
-                        if event.response is not None:
-                            response = event.response
-                        elif event.text:
-                            if turn_trace is not None:
-                                turn_trace.stamp(_TelemetryEvent.LLM_FIRST_TOKEN)
-                            full_text += event.text
-                            request_text += event.text
-                            yield StreamChunk(StreamEventType.TEXT, event.text)
-                except BudgetExceededError:
-                    if llm_span is not None:
-                        llm_span.close(_SpanStatus.DENIED, reason="budget")
-                    budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
-                    yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
-                    return
-                except LLMError as e:
-                    if llm_span is not None:
-                        llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
-                    # CLEARED raises too: this utterance fails, but the cleared
-                    # session lets the call's next one go through.
-                    if await self._recover_from_tool_pair_error(session, e, sanitize_attempts) is _PairRecovery.RETRY:
-                        sanitize_attempts += 1
-                        recover_pairs = True
-                        break
-                    raise
-                if llm_span is not None:
-                    cut_off = response is not None and response.truncated
-                    llm_span.close(
-                        _SpanStatus.ERROR if cut_off else "",
-                        output_tokens=getattr(response, "output_tokens", 0) if response else 0,
-                        model=getattr(response, "model", "") if response else "",
-                        **({"error": "output_truncated"} if cut_off else {}),
-                    )
-                if response is None:  # provider stream ended without a final event
-                    raise LLMError("stream_turn ended without a final response")
+            if timings is not None:
+                # T5.1 stage split: everything before the LLM request (session I/O,
+                # memory search, prompt assembly) vs. actual provider TTFT.
+                timings["prep_ms"] = (time.monotonic() - turn_started) * 1000.0
 
-                if timings is not None:
-                    # Cache visibility: did the tools-prefix prompt cache hit?
-                    timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
-                    timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
-                    timings.setdefault("input_tokens", float(response.input_tokens))
-                    # Which model actually served the turn (A/B attribution in the
-                    # latency log — the runtime override can change mid-session).
-                    if response.model:
-                        timings.setdefault("turn_model", response.model)
+            # Telephony telemetry. The turn tracer travels on a contextvar (bound by
+            # the voice channel), so this stays a no-op for every non-voice caller
+            # and the agent keeps no dependency on the voice subsystem's objects.
+            from pincer.voice.telemetry.schema import EventName as _TelemetryEvent
+            from pincer.voice.telemetry.schema import SpanName as _TelemetrySpan
+            from pincer.voice.telemetry.schema import SpanStatus as _SpanStatus
+            from pincer.voice.telemetry.tracer import current_turn_tracer
 
-                try:
-                    provider = response.provider or self._settings.default_provider
-                    is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                    await self._costs.record(
-                        provider=provider,
-                        model=response.model,
-                        input_tokens=response.input_tokens,
-                        output_tokens=response.output_tokens,
-                        session_id=session.session_id,
-                        is_free=is_free,
-                    )
-                except BudgetExceededError:
-                    pass  # this turn already ran; the next turn hits the budget gate
+            turn_trace = current_turn_tracer()
+            if turn_trace is not None:
+                turn_trace.stamp(_TelemetryEvent.AGENT_PREP_DONE)
 
-                if not response.truncated:
-                    break
-                decision = decide_voice_truncation(
-                    streamed_text=bool(request_text),
-                    tool_calls=response.has_tool_calls,
-                    max_tokens=request_max_tokens,
-                    retried=retried,
-                )
-                if decision.action is TruncationAction.RETRY and decision.max_tokens is not None:
-                    # The cut-off response is dropped: nothing saved, no tool run,
-                    # and the caller heard nothing from it.
-                    if turn_trace is not None:
-                        # call.retry records an ERROR-coded "llm_retry" event (always
-                        # recorded, so the retry rate is measurable on every call) and
-                        # bumps the call's retry_count. It feeds the llm_error count,
-                        # which does not page.
-                        turn_trace.call.retry(
-                            "llm",
-                            attempt=2,
-                            max_tokens=decision.max_tokens,
-                            output_tokens=response.output_tokens,
+            full_text = ""
+            consecutive_errors = 0
+            sanitize_attempts = 0
+            repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
+
+            for _iteration in range(self._settings.max_tool_iterations):
+                await self._repair_tool_pairs(session)
+
+                # One tool iteration is one request, plus at most one silent retry
+                # when that request is cut off before saying anything (Q8d). The
+                # retry does not use up a tool iteration.
+                request_max_tokens = max_tokens
+                retried = False
+                recover_pairs = False
+                while True:
+                    response: LLMResponse | None = None
+                    request_text = ""  # what THIS request streamed, apart from the turn's full_text
+                    llm_span = (
+                        turn_trace.open_span(
+                            _TelemetrySpan.LLM,
+                            attempt=_iteration + 1,
+                            model=voice_model or "",
+                            provider=getattr(voice_llm, "name", ""),
+                            **({"retry": True, "max_tokens": request_max_tokens} if retried else {}),
                         )
-                    request_max_tokens = decision.max_tokens
-                    retried = True
-                    continue
-                if decision.action is TruncationAction.RAISE:
-                    # Logged once, without a traceback, by the voice channel.
-                    raise LLMOutputTruncatedError(response.output_tokens, request_max_tokens)
-                logger.warning(
-                    "Voice turn [%s] cut off mid-sentence at max_tokens: %d of %d output tokens",
-                    session_key or "-",
-                    response.output_tokens,
-                    request_max_tokens,
-                )
-                if turn_trace is not None:
-                    turn_trace.stamp(
-                        _TelemetryEvent.LLM_OUTPUT_TRUNCATED,
-                        output_tokens=response.output_tokens,
-                        max_tokens=request_max_tokens,
+                        if turn_trace is not None
+                        else None
                     )
-                break
-            if recover_pairs:
-                continue
-            assert response is not None  # the request loop leaves with a response or raises
+                    if turn_trace is not None:
+                        turn_trace.stamp(_TelemetryEvent.LLM_REQUEST, model=voice_model or "", iteration=_iteration + 1)
+                    try:
+                        async for event in voice_llm.stream_turn(
+                            messages=session.messages,
+                            tools=tool_schemas,
+                            system=system_prompt,
+                            model=voice_model,
+                            max_tokens=request_max_tokens,
+                            reasoning_effort=reasoning_effort,
+                        ):
+                            if event.response is not None:
+                                response = event.response
+                            elif event.text:
+                                if turn_trace is not None:
+                                    turn_trace.stamp(_TelemetryEvent.LLM_FIRST_TOKEN)
+                                full_text += event.text
+                                request_text += event.text
+                                yield StreamChunk(StreamEventType.TEXT, event.text)
+                    except BudgetExceededError:
+                        if llm_span is not None:
+                            llm_span.close(_SpanStatus.DENIED, reason="budget")
+                        budget_note = (
+                            f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
+                        )
+                        yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
+                        return
+                    except LLMError as e:
+                        if llm_span is not None:
+                            llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
+                        # CLEARED raises too: this utterance fails, but the cleared
+                        # session lets the call's next one go through.
+                        if (
+                            await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                            is _PairRecovery.RETRY
+                        ):
+                            sanitize_attempts += 1
+                            recover_pairs = True
+                            break
+                        raise
+                    if llm_span is not None:
+                        cut_off = response is not None and response.truncated
+                        llm_span.close(
+                            _SpanStatus.ERROR if cut_off else "",
+                            output_tokens=getattr(response, "output_tokens", 0) if response else 0,
+                            model=getattr(response, "model", "") if response else "",
+                            **({"error": "output_truncated"} if cut_off else {}),
+                        )
+                    if response is None:  # provider stream ended without a final event
+                        raise LLMError("stream_turn ended without a final response")
 
-            if not response.has_tool_calls:
-                break
+                    if timings is not None:
+                        # Cache visibility: did the tools-prefix prompt cache hit?
+                        timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
+                        timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
+                        timings.setdefault("input_tokens", float(response.input_tokens))
+                        # Which model actually served the turn (A/B attribution in the
+                        # latency log — the runtime override can change mid-session).
+                        if response.model:
+                            timings.setdefault("turn_model", response.model)
 
-            assistant_msg = LLMMessage(
-                role=MessageRole.ASSISTANT, content=response.content, tool_calls=response.tool_calls
-            )
-            await self._sessions.add_message(session, assistant_msg)
+                    try:
+                        provider = response.provider or self._settings.default_provider
+                        is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+                        await self._costs.record(
+                            provider=provider,
+                            model=response.model,
+                            input_tokens=response.input_tokens,
+                            output_tokens=response.output_tokens,
+                            session_id=session.session_id,
+                            is_free=is_free,
+                        )
+                    except BudgetExceededError:
+                        pass  # this turn already ran; the next turn hits the budget gate
 
-            iteration_had_error = False
-            ran_new_call = False
-            for tool_call in response.tool_calls:
-                if repeats is not None and repeats.is_repeat(tool_call):
-                    repeat = repeats.repeat_result(tool_call)
+                    if not response.truncated:
+                        break
+                    decision = decide_voice_truncation(
+                        streamed_text=bool(request_text),
+                        tool_calls=response.has_tool_calls,
+                        max_tokens=request_max_tokens,
+                        retried=retried,
+                    )
+                    if decision.action is TruncationAction.RETRY and decision.max_tokens is not None:
+                        # The cut-off response is dropped: nothing saved, no tool run,
+                        # and the caller heard nothing from it.
+                        if turn_trace is not None:
+                            # call.retry records an ERROR-coded "llm_retry" event (always
+                            # recorded, so the retry rate is measurable on every call) and
+                            # bumps the call's retry_count. It feeds the llm_error count,
+                            # which does not page.
+                            turn_trace.call.retry(
+                                "llm",
+                                attempt=2,
+                                max_tokens=decision.max_tokens,
+                                output_tokens=response.output_tokens,
+                            )
+                        request_max_tokens = decision.max_tokens
+                        retried = True
+                        continue
+                    if decision.action is TruncationAction.RAISE:
+                        # Logged once, without a traceback, by the voice channel.
+                        raise LLMOutputTruncatedError(response.output_tokens, request_max_tokens)
+                    logger.warning(
+                        "Voice turn [%s] cut off mid-sentence at max_tokens: %d of %d output tokens",
+                        session_key or "-",
+                        response.output_tokens,
+                        request_max_tokens,
+                    )
+                    if turn_trace is not None:
+                        turn_trace.stamp(
+                            _TelemetryEvent.LLM_OUTPUT_TRUNCATED,
+                            output_tokens=response.output_tokens,
+                            max_tokens=request_max_tokens,
+                        )
+                    break
+                if recover_pairs:
+                    continue
+                assert response is not None  # the request loop leaves with a response or raises
+
+                if not response.has_tool_calls:
+                    break
+
+                assistant_msg = LLMMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                    thinking_blocks=list(response.thinking_blocks),
+                )
+                await self._sessions.add_message(session, assistant_msg)
+
+                iteration_had_error = False
+                ran_new_call = False
+                for tool_call in response.tool_calls:
+                    if repeats is not None and repeats.is_repeat(tool_call):
+                        repeat = repeats.repeat_result(tool_call)
+                        await self._sessions.add_message(
+                            session,
+                            LLMMessage(
+                                role=MessageRole.TOOL_RESULT, content=repeat.content, tool_call_id=repeat.tool_call_id
+                            ),
+                        )
+                        iteration_had_error = iteration_had_error or repeat.is_error
+                        continue
+                    ran_new_call = True
+                    yield StreamChunk(StreamEventType.TOOL_START, tool_call.name)
+                    tool_span = (
+                        turn_trace.open_span(
+                            _TelemetrySpan.TOOL,
+                            tool=tool_call.name,
+                            iteration=_iteration + 1,
+                            provider_request_id=getattr(tool_call, "id", "") or "",
+                        )
+                        if turn_trace is not None
+                        else None
+                    )
+                    if turn_trace is not None:
+                        # An EVENT per tool, not a turn stamp: a stamp records only
+                        # the first occurrence, which would hide every tool after
+                        # the first in a turn that called several.
+                        turn_trace.call.event(
+                            _TelemetryEvent.TOOL_START,
+                            turn_id=turn_trace.turn.turn_id,
+                            span_id=turn_trace.span_id,
+                            tool=tool_call.name,
+                            iteration=_iteration + 1,
+                        )
+                        turn_trace.bump("tool_calls")
+                    result = await self._execute_call_tool(
+                        tool_call, user_id, channel, channel_user_id, call_gate, turn=turn
+                    )
+                    if repeats is not None:
+                        repeats.record(tool_call, result)
+                    if tool_span is not None:
+                        tool_span.close(_SpanStatus.ERROR if result.is_error else _SpanStatus.OK)
+                    if turn_trace is not None:
+                        turn_trace.call.event(
+                            _TelemetryEvent.TOOL_END,
+                            turn_id=turn_trace.turn.turn_id,
+                            span_id=turn_trace.span_id,
+                            tool=tool_call.name,
+                            error=bool(result.is_error),
+                        )
                     await self._sessions.add_message(
                         session,
                         LLMMessage(
-                            role=MessageRole.TOOL_RESULT, content=repeat.content, tool_call_id=repeat.tool_call_id
+                            role=MessageRole.TOOL_RESULT, content=result.content, tool_call_id=result.tool_call_id
                         ),
                     )
-                    iteration_had_error = iteration_had_error or repeat.is_error
-                    continue
-                ran_new_call = True
-                yield StreamChunk(StreamEventType.TOOL_START, tool_call.name)
-                tool_span = (
-                    turn_trace.open_span(
-                        _TelemetrySpan.TOOL,
-                        tool=tool_call.name,
-                        iteration=_iteration + 1,
-                        provider_request_id=getattr(tool_call, "id", "") or "",
-                    )
-                    if turn_trace is not None
-                    else None
-                )
-                if turn_trace is not None:
-                    # An EVENT per tool, not a turn stamp: a stamp records only
-                    # the first occurrence, which would hide every tool after
-                    # the first in a turn that called several.
-                    turn_trace.call.event(
-                        _TelemetryEvent.TOOL_START,
-                        turn_id=turn_trace.turn.turn_id,
-                        span_id=turn_trace.span_id,
-                        tool=tool_call.name,
-                        iteration=_iteration + 1,
-                    )
-                    turn_trace.bump("tool_calls")
-                result = await self._execute_call_tool(
-                    tool_call, user_id, channel, channel_user_id, call_gate, turn=turn
-                )
-                if repeats is not None:
-                    repeats.record(tool_call, result)
-                if tool_span is not None:
-                    tool_span.close(_SpanStatus.ERROR if result.is_error else _SpanStatus.OK)
-                if turn_trace is not None:
-                    turn_trace.call.event(
-                        _TelemetryEvent.TOOL_END,
-                        turn_id=turn_trace.turn.turn_id,
-                        span_id=turn_trace.span_id,
-                        tool=tool_call.name,
-                        error=bool(result.is_error),
-                    )
-                await self._sessions.add_message(
-                    session,
-                    LLMMessage(role=MessageRole.TOOL_RESULT, content=result.content, tool_call_id=result.tool_call_id),
-                )
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
-                if result.is_error:
-                    iteration_had_error = True
+                    yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
+                    if result.is_error:
+                        iteration_had_error = True
 
-            # A batch that also ran a new call goes back to the model, which
-            # has not seen that result yet.
-            if repeats is not None and repeats.exhausted and not ran_new_call:
-                fallback = repeats.no_progress_line()
-                if fallback:
-                    spoken = f" {fallback}" if full_text and not full_text.endswith(" ") else fallback
-                    full_text += spoken
-                    yield StreamChunk(StreamEventType.TEXT, spoken)
-                break
-
-            if iteration_had_error:
-                consecutive_errors += 1
-                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
-                    logger.warning("Voice turn circuit breaker: %d consecutive tool errors", consecutive_errors)
+                # A batch that also ran a new call goes back to the model, which
+                # has not seen that result yet.
+                if repeats is not None and repeats.exhausted and not ran_new_call:
+                    fallback = repeats.no_progress_line()
+                    if fallback:
+                        spoken = f" {fallback}" if full_text and not full_text.endswith(" ") else fallback
+                        full_text += spoken
+                        yield StreamChunk(StreamEventType.TEXT, spoken)
                     break
-            else:
-                consecutive_errors = 0
 
-        if turn_trace is not None:
-            turn_trace.stamp(_TelemetryEvent.LLM_DONE, characters=len(full_text))
-        if full_text:
-            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
-        yield StreamChunk(StreamEventType.DONE, full_text)
+                if iteration_had_error:
+                    consecutive_errors += 1
+                    if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                        logger.warning("Voice turn circuit breaker: %d consecutive tool errors", consecutive_errors)
+                        break
+                else:
+                    consecutive_errors = 0
+
+            if turn_trace is not None:
+                turn_trace.stamp(_TelemetryEvent.LLM_DONE, characters=len(full_text))
+            if full_text:
+                await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
+            yield StreamChunk(StreamEventType.DONE, full_text)
+        finally:
+            # Thinking is kept within one turn only; the session stays cached across turns
+            strip_thinking(session.messages)
 
     async def _select_tools(
         self,

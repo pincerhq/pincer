@@ -11,7 +11,7 @@ import base64
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -39,6 +39,20 @@ class ImageContent:
         return cls(data=base64.b64encode(raw).decode(), media_type=media_type)
 
 
+@dataclass(frozen=True, slots=True)
+class ThinkingBlock:
+    """One thinking or redacted-thinking block of a response, verbatim.
+
+    Kept only within the agent turn that produced it, and never saved, shown
+    or logged: the content fields stay out of the repr.
+    """
+
+    kind: Literal["thinking", "redacted_thinking"]
+    thinking: str = field(default="", repr=False)  # kind == "thinking"
+    signature: str = field(default="", repr=False)  # kind == "thinking"
+    data: str = field(default="", repr=False)  # kind == "redacted_thinking" (encrypted)
+
+
 @dataclass(slots=True)
 class LLMMessage:
     """Unified message format for all providers."""
@@ -48,6 +62,8 @@ class LLMMessage:
     images: list[ImageContent] = field(default_factory=list)
     tool_call_id: str | None = None  # For tool_result messages
     tool_calls: list[ToolCall] = field(default_factory=list)  # From assistant
+    # The response's thinking, sent back on the turn's later requests; never in to_dict
+    thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal dict for session storage (JSON-serializable)."""
@@ -108,6 +124,7 @@ class LLMResponse:
     # Prompt-cache usage (Sprint 5, T5.4) — 0 when the provider doesn't report it
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -117,6 +134,13 @@ class LLMResponse:
     def truncated(self) -> bool:
         """The output stopped on max_tokens: its last block may be incomplete."""
         return self.stop_reason == STOP_REASON_MAX_TOKENS
+
+
+def strip_thinking(messages: list[LLMMessage]) -> None:
+    """Drop every message's thinking blocks, in place (end of an agent turn)."""
+    for message in messages:
+        if message.thinking_blocks:
+            message.thinking_blocks = []
 
 
 @dataclass(frozen=True, slots=True)

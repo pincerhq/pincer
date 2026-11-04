@@ -18,6 +18,8 @@ from anthropic.types import (
     TextBlock,
     ToolUseBlock,
 )
+from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
+from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
@@ -26,6 +28,7 @@ from pincer.llm.base import (
     LLMResponse,
     MessageRole,
     StreamTurnEvent,
+    ThinkingBlock,
     ToolCall,
 )
 from pincer.llm.model_params import anthropic_accepts_sampling
@@ -36,6 +39,9 @@ if TYPE_CHECKING:
     from pincer.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# Content block types that carry a response's thinking
+_THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -235,7 +241,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 continue
 
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                content_blocks: list[dict[str, Any]] = []
+                # Thinking first, then text, then tool_use: the order the API
+                # expects. A response with thinking after a tool_use (interleaved)
+                # would be reordered here.
+                content_blocks: list[dict[str, Any]] = [self._thinking_to_api(b) for b in msg.thinking_blocks]
                 if msg.content:
                     content_blocks.append({"type": "text", "text": msg.content})
                 for tc in msg.tool_calls:
@@ -248,6 +257,15 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                         }
                     )
                 result.append({"role": "assistant", "content": content_blocks})
+                continue
+
+            # Thinking with no text after it is not sent: an assistant message
+            # holding only thinking is never valid.
+            if msg.role == MessageRole.ASSISTANT and msg.thinking_blocks and msg.content:
+                thinking_first = [self._thinking_to_api(b) for b in msg.thinking_blocks]
+                result.append(
+                    {"role": "assistant", "content": [*thinking_first, {"type": "text", "text": msg.content}]}
+                )
                 continue
 
             # Standard text or text+image
@@ -271,6 +289,13 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 result.append({"role": msg.role.value, "content": msg.content})
 
         return self._validate_api_messages(result)
+
+    @staticmethod
+    def _thinking_to_api(block: ThinkingBlock) -> dict[str, Any]:
+        """A thinking block exactly as the response carried it."""
+        if block.kind == "redacted_thinking":
+            return {"type": "redacted_thinking", "data": block.data}
+        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
 
     @staticmethod
     def _validate_api_messages(
@@ -308,7 +333,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                         for b in blocks
                         if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in result_ids)
                     ]
-                    if not surviving:
+                    if all(_is_thinking(b) for b in surviving):  # thinking alone is never sent
                         logger.debug("Dropping assistant message: all tool_use blocks orphaned")
                         continue
                     if len(surviving) != len(blocks):
@@ -359,6 +384,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                     merged[-1] = {**prev, "content": [{"type": "text", "text": prev_content}] + cur_content}
                 elif isinstance(prev_content, list) and isinstance(cur_content, str):
                     merged[-1] = {**prev, "content": prev_content + [{"type": "text", "text": cur_content}]}
+                if merged[-1]["role"] == "assistant" and isinstance(merged[-1]["content"], list):
+                    merged[-1] = {**merged[-1], "content": _thinking_first(merged[-1]["content"])}
             else:
                 merged.append(msg)
 
@@ -372,10 +399,15 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         """Parse Anthropic Message into unified LLMResponse."""
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        thinking_blocks: list[ThinkingBlock] = []
 
         for block in response.content:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
+            elif isinstance(block, SDKThinkingBlock):
+                thinking_blocks.append(ThinkingBlock("thinking", thinking=block.thinking, signature=block.signature))
+            elif isinstance(block, SDKRedactedThinkingBlock):
+                thinking_blocks.append(ThinkingBlock("redacted_thinking", data=block.data))
             elif isinstance(block, ToolUseBlock):
                 tool_calls.append(
                     ToolCall(
@@ -395,4 +427,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             # Cache visibility (Sprint 5): whether the tools-prefix cache hit
             cache_read_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
             cache_write_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
+            thinking_blocks=thinking_blocks,
         )
+
+
+def _is_thinking(block: Any) -> bool:
+    return isinstance(block, dict) and block.get("type") in _THINKING_TYPES
+
+
+def _thinking_first(blocks: list[Any]) -> list[Any]:
+    """Thinking blocks ahead of all others; both keep their own order."""
+    return [b for b in blocks if _is_thinking(b)] + [b for b in blocks if not _is_thinking(b)]
