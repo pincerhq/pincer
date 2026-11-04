@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### LLM: cut-off responses never run tool calls; cut-off voice turns recover (#345)
+
+A model response that stops on its output limit (`max_tokens`) may end in a
+tool call whose input is incomplete. Such a call is never run, on any channel.
+
+- The tool calls of a response cut off by `max_tokens` are not executed, and
+  the cut-off turn is not saved to the session. Chat turns fail with an LLM
+  error (`LLMOutputTruncatedError`) instead; a scheduled action returns its
+  usual "couldn't complete" message. A cut-off reply that is only text is
+  still delivered as before.
+- OpenAI-wire providers report a `length` stop as `max_tokens`, like
+  Anthropic, so the same protection applies there. A streamed tool call whose
+  arguments were cut off is no longer run with empty arguments.
+- On a phone call, a request cut off before it said anything is retried once,
+  silently, with four times the voice limit (at most 128000). If that doesn't
+  help, the caller hears the "could you say that again?" line and the call
+  continues. A reply cut off mid-sentence ends the turn with what was said.
+- Cut-off voice turns have their own counter: the third in a row plays the
+  goodbye line and ends the call (reason `repeated_llm_truncations`). A good
+  turn resets it. Other errors keep their own two-in-a-row rule, and the two
+  counters don't affect each other.
+- Cut-off voice turns are tagged `output_truncated` in telemetry and logged as
+  one WARNING line without a traceback. Silent retries count in the call's
+  `retry_count` and as an `llm_retry` event.
+- `PINCER_VOICE_MAX_RESPONSE_TOKENS` now defaults to 1024 (was 220) and
+  accepts up to 128000 (was 1024). It is the worst-case silence before a
+  reply, shared by the model's thinking and its speech.
+
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 
 Identities used to be pruned against the config at every start: removing a

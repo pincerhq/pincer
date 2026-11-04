@@ -53,6 +53,7 @@ from pincer.tools.path_sandbox import SandboxDenied
 from pincer.voice.localtime import get_voice_timezone
 from pincer.voice.outbound import TOOL_NAME as CALL_TOOL_NAME
 from pincer.voice.outbound import placed_call_sid
+from pincer.voice.truncation import TruncationAction, decide_voice_truncation
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -1391,7 +1392,7 @@ class Agent:
           language policy, phase instruction, appointment block);
         - tools filtered to the voice-compatible set (smaller schemas, no
           shell/file tools mid-call);
-        - short outputs: ``voice_max_response_tokens`` (default 220) and an
+        - short outputs: ``voice_max_response_tokens`` (default 1024) and an
           optional fast ``voice_turn_model``;
         - no onboarding flow (nobody onboards mid-phone-call).
 
@@ -1441,7 +1442,7 @@ class Agent:
             user_timezone=turn.timezone,
             preferred_language=False,
         )
-        max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
+        max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 1024) or 1024)
         # Reasoning models can spend that whole budget thinking; only the OpenAI
         # reasoning models that take the knob act on it.
         reasoning_effort = str(getattr(self._settings, "voice_reasoning_effort", "") or "") or None
@@ -1491,83 +1492,140 @@ class Agent:
         for _iteration in range(self._settings.max_tool_iterations):
             await self._repair_tool_pairs(session)
 
-            response: LLMResponse | None = None
-            llm_span = (
-                turn_trace.open_span(
-                    _TelemetrySpan.LLM,
-                    attempt=_iteration + 1,
-                    model=voice_model or "",
-                    provider=getattr(voice_llm, "name", ""),
+            # One tool iteration is one request, plus at most one silent retry
+            # when that request is cut off before saying anything (Q8d). The
+            # retry does not use up a tool iteration.
+            request_max_tokens = max_tokens
+            retried = False
+            recover_pairs = False
+            while True:
+                response: LLMResponse | None = None
+                request_text = ""  # what THIS request streamed, apart from the turn's full_text
+                llm_span = (
+                    turn_trace.open_span(
+                        _TelemetrySpan.LLM,
+                        attempt=_iteration + 1,
+                        model=voice_model or "",
+                        provider=getattr(voice_llm, "name", ""),
+                        **({"retry": True, "max_tokens": request_max_tokens} if retried else {}),
+                    )
+                    if turn_trace is not None
+                    else None
                 )
-                if turn_trace is not None
-                else None
-            )
-            if turn_trace is not None:
-                turn_trace.stamp(_TelemetryEvent.LLM_REQUEST, model=voice_model or "", iteration=_iteration + 1)
-            try:
-                async for event in voice_llm.stream_turn(
-                    messages=session.messages,
-                    tools=tool_schemas,
-                    system=system_prompt,
-                    model=voice_model,
-                    max_tokens=max_tokens,
-                    reasoning_effort=reasoning_effort,
-                ):
-                    if event.response is not None:
-                        response = event.response
-                    elif event.text:
-                        if turn_trace is not None:
-                            turn_trace.stamp(_TelemetryEvent.LLM_FIRST_TOKEN)
-                        full_text += event.text
-                        yield StreamChunk(StreamEventType.TEXT, event.text)
-            except BudgetExceededError:
+                if turn_trace is not None:
+                    turn_trace.stamp(_TelemetryEvent.LLM_REQUEST, model=voice_model or "", iteration=_iteration + 1)
+                try:
+                    async for event in voice_llm.stream_turn(
+                        messages=session.messages,
+                        tools=tool_schemas,
+                        system=system_prompt,
+                        model=voice_model,
+                        max_tokens=request_max_tokens,
+                        reasoning_effort=reasoning_effort,
+                    ):
+                        if event.response is not None:
+                            response = event.response
+                        elif event.text:
+                            if turn_trace is not None:
+                                turn_trace.stamp(_TelemetryEvent.LLM_FIRST_TOKEN)
+                            full_text += event.text
+                            request_text += event.text
+                            yield StreamChunk(StreamEventType.TEXT, event.text)
+                except BudgetExceededError:
+                    if llm_span is not None:
+                        llm_span.close(_SpanStatus.DENIED, reason="budget")
+                    budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
+                    yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
+                    return
+                except LLMError as e:
+                    if llm_span is not None:
+                        llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
+                    # CLEARED raises too: this utterance fails, but the cleared
+                    # session lets the call's next one go through.
+                    if await self._recover_from_tool_pair_error(session, e, sanitize_attempts) is _PairRecovery.RETRY:
+                        sanitize_attempts += 1
+                        recover_pairs = True
+                        break
+                    raise
                 if llm_span is not None:
-                    llm_span.close(_SpanStatus.DENIED, reason="budget")
-                budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
-                yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
-                return
-            except LLMError as e:
-                if llm_span is not None:
-                    llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
-                # CLEARED raises too: this utterance fails, but the cleared
-                # session lets the call's next one go through.
-                if await self._recover_from_tool_pair_error(session, e, sanitize_attempts) is _PairRecovery.RETRY:
-                    sanitize_attempts += 1
+                    cut_off = response is not None and response.truncated
+                    llm_span.close(
+                        _SpanStatus.ERROR if cut_off else "",
+                        output_tokens=getattr(response, "output_tokens", 0) if response else 0,
+                        model=getattr(response, "model", "") if response else "",
+                        **({"error": "output_truncated"} if cut_off else {}),
+                    )
+                if response is None:  # provider stream ended without a final event
+                    raise LLMError("stream_turn ended without a final response")
+
+                if timings is not None:
+                    # Cache visibility: did the tools-prefix prompt cache hit?
+                    timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
+                    timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
+                    timings.setdefault("input_tokens", float(response.input_tokens))
+                    # Which model actually served the turn (A/B attribution in the
+                    # latency log — the runtime override can change mid-session).
+                    if response.model:
+                        timings.setdefault("turn_model", response.model)
+
+                try:
+                    provider = response.provider or self._settings.default_provider
+                    is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+                    await self._costs.record(
+                        provider=provider,
+                        model=response.model,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        session_id=session.session_id,
+                        is_free=is_free,
+                    )
+                except BudgetExceededError:
+                    pass  # this turn already ran; the next turn hits the budget gate
+
+                if not response.truncated:
+                    break
+                decision = decide_voice_truncation(
+                    streamed_text=bool(request_text),
+                    tool_calls=response.has_tool_calls,
+                    max_tokens=request_max_tokens,
+                    retried=retried,
+                )
+                if decision.action is TruncationAction.RETRY and decision.max_tokens is not None:
+                    # The cut-off response is dropped: nothing saved, no tool run,
+                    # and the caller heard nothing from it.
+                    if turn_trace is not None:
+                        # call.retry records an ERROR-coded "llm_retry" event (always
+                        # recorded, so the retry rate is measurable on every call) and
+                        # bumps the call's retry_count. It feeds the llm_error count,
+                        # which does not page.
+                        turn_trace.call.retry(
+                            "llm",
+                            attempt=2,
+                            max_tokens=decision.max_tokens,
+                            output_tokens=response.output_tokens,
+                        )
+                    request_max_tokens = decision.max_tokens
+                    retried = True
                     continue
-                raise
-            if llm_span is not None:
-                llm_span.close(
-                    output_tokens=getattr(response, "output_tokens", 0) if response else 0,
-                    model=getattr(response, "model", "") if response else "",
+                if decision.action is TruncationAction.RAISE:
+                    # Logged once, without a traceback, by the voice channel.
+                    raise LLMOutputTruncatedError(response.output_tokens, request_max_tokens)
+                logger.warning(
+                    "Voice turn [%s] cut off mid-sentence at max_tokens: %d of %d output tokens",
+                    session_key or "-",
+                    response.output_tokens,
+                    request_max_tokens,
                 )
-            if response is None:  # provider stream ended without a final event
-                raise LLMError("stream_turn ended without a final response")
-
-            if timings is not None:
-                # Cache visibility: did the tools-prefix prompt cache hit?
-                timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
-                timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
-                timings.setdefault("input_tokens", float(response.input_tokens))
-                # Which model actually served the turn (A/B attribution in the
-                # latency log — the runtime override can change mid-session).
-                if response.model:
-                    timings.setdefault("turn_model", response.model)
-
-            try:
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                await self._costs.record(
-                    provider=provider,
-                    model=response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    session_id=session.session_id,
-                    is_free=is_free,
-                )
-            except BudgetExceededError:
-                pass  # this turn already ran; the next turn hits the budget gate
-
-            _refuse_truncated_tool_calls(response, max_tokens)
+                if turn_trace is not None:
+                    turn_trace.stamp(
+                        _TelemetryEvent.LLM_OUTPUT_TRUNCATED,
+                        output_tokens=response.output_tokens,
+                        max_tokens=request_max_tokens,
+                    )
+                break
+            if recover_pairs:
+                continue
+            assert response is not None  # the request loop leaves with a response or raises
 
             if not response.has_tool_calls:
                 break

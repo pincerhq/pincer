@@ -11,10 +11,14 @@ import pytest
 
 from pincer.config import Settings
 from pincer.core.agent import Agent, StreamChunk, StreamEventType
+from pincer.db import ensure_schema_current
 from pincer.exceptions import LLMError, LLMOutputTruncatedError
 from pincer.llm.base import BaseLLMProvider, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.tools.registry import ToolRegistry
+from pincer.voice.telemetry import queries, runtime
+from pincer.voice.telemetry.recorder import get_recorder
+from pincer.voice.telemetry.tracer import bind_turn_tracer, drain_pending
 
 _DONE = LLMResponse(content="done", model="test-model", input_tokens=10, output_tokens=5, stop_reason="end_turn")
 _CUT_OFF_CALL = ToolCall(id="tc1", name="create_event", arguments={"title": "Dentist"})
@@ -36,6 +40,7 @@ class _ScriptedVoiceProvider(BaseLLMProvider):
 
     def __init__(self, turns: list[list[StreamTurnEvent]]) -> None:
         self.turns = list(turns)
+        self.requests: list[dict[str, Any]] = []
 
     async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
         raise AssertionError("voice turns must not use complete()")
@@ -47,6 +52,7 @@ class _ScriptedVoiceProvider(BaseLLMProvider):
     async def stream_turn(
         self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, reasoning_effort=None
     ):
+        self.requests.append({"max_tokens": max_tokens, "messages": [m.content for m in messages]})
         for event in self.turns.pop(0):
             yield event
 
@@ -171,6 +177,7 @@ async def test_voice_turn_never_runs_a_cut_off_tool_call(settings, session_manag
 
     assert recording.runs == []
     execute.assert_not_awaited()
+    assert len(provider.requests) == 1  # text was already spoken: no silent retry
     session = await session_manager.get_or_create("+4930111222", "voice")
     assert [m.role for m in session.messages] == [MessageRole.USER]
 
@@ -203,9 +210,11 @@ async def test_openai_voice_turn_never_runs_a_tool_call_with_cut_off_arguments(
     with patch("pincer.llm.openai_common.AsyncOpenAI") as mock_cls:
         mock_cls.return_value = MagicMock()
         provider = OpenAICompatibleProvider(provider_settings, "openai")
+    # Nothing is spoken, so the voice turn retries once with a bigger limit;
+    # the retry is cut off the same way.
     streams = [
         [_openai_chunk(tool_args='{"title": "Dent'), _openai_chunk(finish="length")],
-        [_openai_chunk(finish="stop")],
+        [_openai_chunk(tool_args='{"title": "Dentist", "whe'), _openai_chunk(finish="length")],
     ]
 
     async def fake_stream(**kwargs):
@@ -224,3 +233,213 @@ async def test_openai_voice_turn_never_runs_a_tool_call_with_cut_off_arguments(
 
     assert recording.runs == []
     execute.assert_not_awaited()
+
+
+# ── Voice: silent retry and the truncation policy (slice 2, Q8d) ──────────────
+
+
+def _voice_text(*tokens: str, truncated: bool = False) -> list[StreamTurnEvent]:
+    events = [StreamTurnEvent(text=t) for t in tokens]
+    events.append(
+        StreamTurnEvent(
+            response=LLMResponse(
+                content="".join(tokens),
+                model="test-model",
+                input_tokens=50,
+                output_tokens=220 if truncated else 12,
+                stop_reason="max_tokens" if truncated else "end_turn",
+            )
+        )
+    )
+    return events
+
+
+def _voice_cut_off_tool() -> list[StreamTurnEvent]:
+    return [StreamTurnEvent(response=_cut_off_tool_response())]
+
+
+def _voice_tool_call() -> list[StreamTurnEvent]:
+    return [
+        StreamTurnEvent(
+            response=LLMResponse(
+                tool_calls=[ToolCall(id="tc2", name="create_event", arguments={"title": "Dentist"})],
+                model="test-model",
+                input_tokens=50,
+                output_tokens=30,
+                stop_reason="tool_use",
+            )
+        )
+    ]
+
+
+def _voice_agent(settings, session_manager, cost_tracker, recording, turns, *, limit: int = 220):
+    settings.voice_turn_model = ""
+    settings.voice_max_response_tokens = limit
+    provider = _ScriptedVoiceProvider(turns)
+    return Agent(settings, provider, session_manager, cost_tracker, recording.registry), provider
+
+
+async def _voice_chunks(agent: Agent, text: str = "Termin beim Zahnarzt") -> list[StreamChunk]:
+    return [c async for c in agent.stream_voice_turn("+4930111222", "voice", text)]
+
+
+async def test_voice_cut_off_with_nothing_spoken_is_retried_silently(
+    settings, session_manager, cost_tracker, recording
+):
+    agent, provider = _voice_agent(
+        settings, session_manager, cost_tracker, recording, [_voice_cut_off_tool(), _voice_text("Gerne.")]
+    )
+
+    chunks = await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [220, 880]
+    assert provider.requests[1]["messages"] == provider.requests[0]["messages"]
+    assert [c.content for c in chunks if c.type == StreamEventType.TEXT] == ["Gerne."]
+    assert StreamEventType.TOOL_START not in [c.type for c in chunks]
+    assert recording.runs == []
+    session = await session_manager.get_or_create("+4930111222", "voice")
+    assert [m.role for m in session.messages] == [MessageRole.USER, MessageRole.ASSISTANT]
+
+
+async def test_voice_retry_that_is_also_cut_off_raises(settings, session_manager, cost_tracker, recording):
+    agent, provider = _voice_agent(
+        settings, session_manager, cost_tracker, recording, [_voice_cut_off_tool(), _voice_cut_off_tool()]
+    )
+
+    with pytest.raises(LLMOutputTruncatedError) as excinfo:
+        await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [220, 880]
+    assert excinfo.value.max_tokens == 880
+    assert recording.runs == []
+
+
+async def test_voice_retry_cut_off_with_nothing_said_raises(settings, session_manager, cost_tracker, recording):
+    agent, provider = _voice_agent(
+        settings,
+        session_manager,
+        cost_tracker,
+        recording,
+        [_voice_text(truncated=True), _voice_text(truncated=True)],
+    )
+
+    with pytest.raises(LLMOutputTruncatedError):
+        await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [220, 880]
+
+
+async def test_voice_cut_off_at_the_ceiling_is_not_retried(settings, session_manager, cost_tracker, recording):
+    agent, provider = _voice_agent(
+        settings, session_manager, cost_tracker, recording, [_voice_cut_off_tool()], limit=128_000
+    )
+
+    with pytest.raises(LLMOutputTruncatedError):
+        await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [128_000]
+    assert recording.runs == []
+
+
+async def test_voice_only_the_retried_request_gets_the_bigger_limit(settings, session_manager, cost_tracker, recording):
+    agent, provider = _voice_agent(
+        settings,
+        session_manager,
+        cost_tracker,
+        recording,
+        [_voice_cut_off_tool(), _voice_tool_call(), _voice_text("Eingetragen."), _voice_text("Bitte.")],
+    )
+
+    await _voice_chunks(agent)
+    await _voice_chunks(agent, "Danke")
+
+    assert [r["max_tokens"] for r in provider.requests] == [220, 880, 220, 220]
+    assert recording.runs == [{"title": "Dentist"}]  # the retry's complete tool call ran
+
+
+async def test_voice_cut_off_after_earlier_speech_still_raises(settings, session_manager, cost_tracker, recording):
+    """ "Let me check" was spoken and a tool ran; the next request and its retry
+    are both cut off before saying anything. The caller must not be left with a
+    promise and silence: the turn raises (lead ruling on Q8d)."""
+    agent, provider = _voice_agent(
+        settings,
+        session_manager,
+        cost_tracker,
+        recording,
+        [
+            [StreamTurnEvent(text="Ich schaue nach. "), *_voice_tool_call()],
+            _voice_text(truncated=True),
+            _voice_text(truncated=True),
+        ],
+    )
+
+    with pytest.raises(LLMOutputTruncatedError):
+        await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [220, 220, 880]
+
+
+@pytest.fixture
+async def telemetry(tmp_path):
+    db_path = tmp_path / "telephony.db"
+    ensure_schema_current(db_path)
+    runtime.reset_for_tests(db_path=str(db_path))
+    await get_recorder().start()
+    yield db_path
+    await runtime.shutdown()
+    runtime.reset_for_tests()
+
+
+async def _traced_voice_turn(agent: Agent, call_sid: str) -> list[StreamChunk]:
+    tracer = runtime.start_call(provider_call_id=call_sid, direction="inbound", engine="media_streams")
+    assert tracer is not None
+    tracer.answered()
+    turn = tracer.start_turn(speech_end_ns=tracer.watch.started_ns)
+    with bind_turn_tracer(turn):
+        chunks = await _voice_chunks(agent)
+    turn.finish()
+    await tracer.finish(status="completed", failure_code="none")
+    await drain_pending()
+    await get_recorder().flush()
+    return chunks
+
+
+async def test_voice_cut_off_mid_sentence_ends_the_turn_with_what_was_said(
+    telemetry, settings, session_manager, cost_tracker, recording, caplog
+):
+    agent, provider = _voice_agent(
+        settings, session_manager, cost_tracker, recording, [_voice_text("Ihr Termin ist am ", truncated=True)]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="pincer.core.agent"):
+        chunks = await _traced_voice_turn(agent, "CA_midsentence")
+
+    assert chunks[-1].type == StreamEventType.DONE
+    assert chunks[-1].content == "Ihr Termin ist am "
+    assert len(provider.requests) == 1
+    warnings = [r for r in caplog.records if r.name == "pincer.core.agent" and r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "220 of 220" in warnings[0].getMessage()
+    call = await queries.get_call(telemetry, "CA_midsentence")
+    events = await queries.get_events(telemetry, call["call_id"])
+    cut = [e for e in events if e["name"] == "llm.output_truncated"]
+    assert len(cut) == 1
+    assert cut[0]["attributes"]["max_tokens"] == 220
+
+
+async def test_voice_silent_retry_is_recorded_in_telemetry(
+    telemetry, settings, session_manager, cost_tracker, recording
+):
+    agent, _provider = _voice_agent(
+        settings, session_manager, cost_tracker, recording, [_voice_cut_off_tool(), _voice_text("Gerne.")]
+    )
+
+    await _traced_voice_turn(agent, "CA_retry")
+
+    call = await queries.get_call(telemetry, "CA_retry")
+    assert call["retry_count"] == 1
+    events = await queries.get_events(telemetry, call["call_id"])
+    retries = [e for e in events if e["attributes"].get("code") == "llm_retry"]
+    assert len(retries) == 1
+    assert retries[0]["attributes"]["attempt"] == 2
+    assert retries[0]["attributes"]["max_tokens"] == 880

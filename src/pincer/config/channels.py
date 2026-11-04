@@ -4,6 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
+# The largest output a voice request may ask for: the 5.5 models' output limit
+VOICE_MAX_RESPONSE_TOKENS_CEILING = 128_000
+
 
 class ChannelSettings(BaseModel):
     # ── Telegram ─────────────────────────────────────────
@@ -256,10 +259,11 @@ class ChannelSettings(BaseModel):
         "Also switchable at runtime from the dashboard (PUT /api/voice/config).",
     )
     voice_max_response_tokens: int = Field(
-        default=220,
+        default=1024,
         ge=32,
-        le=1024,
-        description="max_tokens per voice turn — short spoken replies keep latency and streaming granularity tight",
+        le=VOICE_MAX_RESPONSE_TOKENS_CEILING,
+        description="max_tokens per voice request: the worst-case silence before a reply, shared by the "
+        "model's thinking and its speech. A request cut off before saying anything is retried once at 4x.",
     )
     # Voice turns only, and only on OpenAI reasoning models (GPT-5, o-series) on
     # an OpenAI-wire provider. "" = not sent (the API default, "medium"), which

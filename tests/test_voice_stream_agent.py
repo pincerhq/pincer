@@ -101,6 +101,7 @@ class TestBaseStreamTurnFallback:
 class TestStreamVoiceTurn:
     async def test_text_streamed_and_persisted(self, settings, session_manager, cost_tracker, tool_registry):
         settings.voice_turn_model = ""  # hermetic: a developer .env may set an override
+        settings.voice_max_response_tokens = 220  # hermetic: the default and a developer .env vary
         provider = ScriptedProvider([_text_turn("Gerne. ", "Einen Moment bitte.")])
         agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
 

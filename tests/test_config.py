@@ -241,3 +241,31 @@ def test_parse_slack_allowlist_empty() -> None:
 def test_parse_slack_allowlist_list_passthrough() -> None:
     result = Settings.parse_slack_allowlist(["U123", "U456"])
     assert result == ["U123", "U456"]
+
+
+def test_voice_max_response_tokens_defaults_to_1024(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Room for thinking by default (issue #345). Immune to the environment and to a developer's .env."""
+    monkeypatch.delenv("PINCER_VOICE_MAX_RESPONSE_TOKENS", raising=False)
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert s.voice_max_response_tokens == 1024
+
+
+@pytest.mark.parametrize(("value", "accepted"), [(31, False), (32, True), (128_000, True), (128_001, False)])
+def test_voice_max_response_tokens_bounds(tmp_path: Path, value: int, accepted: bool) -> None:
+    def build() -> Settings:
+        return Settings(
+            anthropic_api_key="sk-test",  # type: ignore[arg-type]
+            data_dir=tmp_path,
+            voice_max_response_tokens=value,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+
+    if accepted:
+        assert build().voice_max_response_tokens == value
+    else:
+        with pytest.raises(ValidationError, match="voice_max_response_tokens"):
+            build()
