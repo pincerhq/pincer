@@ -33,7 +33,10 @@ RUNTIME_FILE = "voice_runtime.json"
 # Only a provider-qualified model may carry ':' (Ollama tags like
 # llama3.2:latest): a bare model with a colon would read as "<provider>:<model>".
 # Either may carry '/' (gateway ids like meta/llama-3).
-TURN_MODEL_RE = re.compile(r"^$|^[a-z][a-z0-9_-]{1,31}:[A-Za-z0-9._:/-]{1,80}$|^[A-Za-z0-9._/-]{1,80}$")
+# A model id starts with a letter or digit (no leading '/', '.', ':' or '-').
+TURN_MODEL_RE = re.compile(
+    r"^$|^[a-z][a-z0-9_-]{1,31}:[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$|^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$"
+)
 
 
 def _path(settings: Any) -> Path | None:

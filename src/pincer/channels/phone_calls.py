@@ -1215,20 +1215,23 @@ class VoiceChannel(BaseChannel):
 
     def _log_turn_language(self, call_sid: str, state: CallState, text: str) -> None:
         """Diagnostics for in-call language switching: the language transcription
-        is pinned to and the start of what it heard, so a garbled request (STT on
-        the wrong language) can be told apart from a model that ignored it."""
+        is pinned to, so a garbled request (STT on the wrong language) can be told
+        apart from a model that ignored it. The caller's words are call content:
+        INFO carries only their length, the (masked) text itself is DEBUG."""
         from pincer.voice.language import relay_language, stt_language
         from pincer.voice.pii_guard import sanitize_for_logs
 
         language = str(state.language or "en")
         stt = relay_language(language) if state.engine_type == "conversation_relay" else stt_language(language)
         logger.info(
-            "Voice turn [%s]: call language %s, STT pinned to %s, caller said %r",
+            "Voice turn [%s]: call language %s, STT pinned to %s, caller said %d chars",
             call_sid,
             language,
             stt,
-            sanitize_for_logs(text)[:80],
+            len(text),
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Voice turn [%s] text: %r", call_sid, sanitize_for_logs(text)[:80])
 
     async def _run_buffered_turn(
         self,
@@ -1349,6 +1352,7 @@ class VoiceChannel(BaseChannel):
         from pincer.core.agent import StreamEventType
         from pincer.voice.language_guard import (
             detect_language,
+            log_switch_token,
             parse_switch_token,
             perform_switch,
             unsupported_switch_reply,
@@ -1409,12 +1413,7 @@ class VoiceChannel(BaseChannel):
             nonlocal buffered_mode, suppress_rest
             call_lang = str(state.language or "en")[:2]
             requested, stripped = parse_switch_token(sentence)
-            logger.log(
-                logging.INFO if requested else logging.DEBUG,
-                "Switch token on first sentence [%s]: %s",
-                call_sid,
-                requested or "none",
-            )
+            log_switch_token(call_sid, "first sentence", requested)
             if requested is not None:
                 from pincer.voice.language import de_formality, supported_languages
 

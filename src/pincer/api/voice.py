@@ -58,6 +58,8 @@ router = APIRouter(prefix="/api/voice", tags=["voice"])
 #: (16) before that, and both still have to be accepted — an id that is
 #: merely unknown belongs in a 404, not a 422.
 _THREAD_ID_MAX = 36
+# The fast Claude tier offered as a voice turn model (see _turn_model_choices)
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 
 def _get_engine() -> VoiceEngine | None:
@@ -1475,14 +1477,11 @@ async def initiate_call(body: InitiateCallIn) -> InitiateCallOut:
     )
 
 
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-
-
 def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
     """Model options offered in the dashboard: only the ones whose provider
     builds here. A bare model id means "this model on the default provider",
     so every model meant for another provider carries its ``provider:`` prefix."""
-    from pincer.llm.router import is_openai_wire, provider_default_model, voice_turn_unusable_reason
+    from pincer.llm.router import plan_voice_turn, provider_default_model, wire_safe_model
     from pincer.voice.runtime_config import TURN_MODEL_RE
 
     default_provider = str(getattr(settings, "default_provider", "") or "")
@@ -1495,7 +1494,7 @@ def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
         (settings.anthropic_compatible_provider, settings.anthropic_compatible_model),
     ):
         model = own_model or settings.default_model
-        if not name or (model.startswith("claude") and is_openai_wire(settings, name)):
+        if not name or not wire_safe_model(settings, name, model):
             continue
         candidates.append(TurnModelChoice(value=f"{name}:{model}", label=f"{model} ({name})"))
 
@@ -1511,7 +1510,7 @@ def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
         # provider name that isn't a lowercase slug).
         if choice.value in seen or not TURN_MODEL_RE.match(choice.value):
             continue
-        if choice.value and voice_turn_unusable_reason(settings, choice.value) is not None:
+        if choice.value and plan_voice_turn(settings, choice.value).unusable is not None:
             continue
         seen.add(choice.value)
         choices.append(choice)
@@ -1519,15 +1518,15 @@ def _turn_model_choices(settings: Any) -> list[TurnModelChoice]:
 
 
 def _voice_config(settings: Any, current: str) -> VoiceConfig:
-    from pincer.llm.router import effective_voice_turn
+    from pincer.llm.router import plan_voice_turn
 
-    provider, model = effective_voice_turn(settings, current)
+    plan = plan_voice_turn(settings, current)
     return VoiceConfig(
         voice_turn_model=current,
         default_model=str(getattr(settings, "default_model", "") or ""),
         choices=_turn_model_choices(settings),
-        effective_provider=provider,
-        effective_model=model,
+        effective_provider=plan.provider,
+        effective_model=plan.effective_model,
     )
 
 
@@ -1564,9 +1563,10 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
     model = body.voice_turn_model.strip()
     if not TURN_MODEL_RE.match(model):
         raise HTTPException(status_code=422, detail=f"Invalid turn model format: {model!r}")
-    from pincer.llm.router import voice_turn_unusable_reason
+    from pincer.llm.router import plan_voice_turn
 
-    reason = await asyncio.to_thread(voice_turn_unusable_reason, get_settings_relaxed(), model)
+    plan = await asyncio.to_thread(plan_voice_turn, get_settings_relaxed(), model)
+    reason = plan.unusable
     if reason is not None:
         raise HTTPException(status_code=422, detail=f"Turn model {model!r} can't be used here: {reason}")
 

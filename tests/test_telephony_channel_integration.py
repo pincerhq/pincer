@@ -164,7 +164,9 @@ class _ScriptedProvider:
         raise AssertionError("voice turns must not use stream()")
         yield ""
 
-    async def stream_turn(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def stream_turn(
+        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, reasoning_effort=None
+    ):
         for event in self.turns.pop(0):
             yield event
 

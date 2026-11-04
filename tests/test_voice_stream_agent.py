@@ -34,7 +34,7 @@ class ScriptedProvider(BaseLLMProvider):
         yield ""  # pragma: no cover
 
     async def stream_turn(
-        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, **extra
+        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, reasoning_effort=None
     ):
         self.calls.append(
             {
@@ -43,7 +43,7 @@ class ScriptedProvider(BaseLLMProvider):
                 "max_tokens": max_tokens,
                 "system": system,
                 "messages": list(messages),
-                **extra,
+                "reasoning_effort": reasoning_effort,
             }
         )
         for event in self.turns.pop(0):
@@ -262,7 +262,7 @@ class TestStreamVoiceTurn:
 
         class RejectsOnceProvider(ScriptedProvider):
             async def stream_turn(
-                self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None
+                self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, **extra
             ):
                 if not self.calls:
                     self.calls.append({"messages": list(messages)})
@@ -288,6 +288,15 @@ class TestStreamVoiceTurn:
         assert not any(m.tool_calls for m in retried)
 
 
+def _init_router_memos(router) -> None:
+    """What ``LLMRouter.__init__`` sets up, for routers built with ``__new__``."""
+    from pincer.core.log_once import LogOncePerKey
+    from pincer.llm import router as router_mod
+
+    router._on_demand = {}
+    router._voice_log = LogOncePerKey(router_mod.logger)
+
+
 class TestCrossProviderVoiceModel:
     async def test_provider_prefixed_model_routes_to_that_provider(
         self, settings, session_manager, cost_tracker, tool_registry
@@ -302,7 +311,7 @@ class TestCrossProviderVoiceModel:
         router = LLMRouter.__new__(LLMRouter)  # skip __init__ (env-based)
         router._settings = settings
         router._pool = {"anthropic": ScriptedProvider([])}
-        router._unavailable, router._voice_warned = set(), set()
+        _init_router_memos(router)
 
         def fake_get_provider(name, model_hint=""):
             assert name == "openai"
@@ -328,7 +337,7 @@ class TestCrossProviderVoiceModel:
         router = LLMRouter.__new__(LLMRouter)
         router._settings = settings
         router._pool = {"anthropic": default_provider}
-        router._unavailable, router._voice_warned = set(), set()
+        _init_router_memos(router)
         router.get_provider = lambda name, model_hint="": None  # type: ignore[method-assign]
         router.stream_turn = default_provider.stream_turn  # type: ignore[method-assign]
         router.is_free = lambda p: False  # type: ignore[method-assign]
@@ -356,7 +365,7 @@ class TestCrossProviderVoiceModel:
         router = LLMRouter.__new__(LLMRouter)
         router._settings = settings
         router._pool = {"anthropic": default_provider}
-        router._unavailable, router._voice_warned = set(), set()
+        _init_router_memos(router)
         router.stream_turn = default_provider.stream_turn  # type: ignore[method-assign]
         router.is_free = lambda p: False  # type: ignore[method-assign]
 
@@ -366,7 +375,8 @@ class TestCrossProviderVoiceModel:
         await _collect(agent, user_id="u1", channel="voice", text="Again")
 
         assert [c["model"] for c in default_provider.calls] == [None, None]
-        assert router._unavailable == {("openai", "gpt-5-mini")}
+        assert router._on_demand.keys() == {("openai", "gpt-5-mini")}
+        assert isinstance(router._on_demand["openai", "gpt-5-mini"], str)  # remembered as unbuildable
         warnings = [r.getMessage() for r in caplog.records if r.name == "pincer.llm.router"]
         assert len([w for w in warnings if "per-call override" in w]) == 1
         assert len([w for w in warnings if "voice_turn_model" in w]) == 1
@@ -379,7 +389,7 @@ class TestVoiceReasoningEffort:
         await _collect(agent, user_id="u1", channel="voice", text="Hi")
         settings.voice_reasoning_effort = "low"
         await _collect(agent, user_id="u1", channel="voice", text="Again")
-        assert "reasoning_effort" not in provider.calls[0]
+        assert provider.calls[0]["reasoning_effort"] is None
         assert provider.calls[1]["reasoning_effort"] == "low"
 
     async def test_router_passes_effort_through(self, settings):
@@ -389,12 +399,12 @@ class TestVoiceReasoningEffort:
         router = LLMRouter.__new__(LLMRouter)
         router._settings = settings
         router._pool = {settings.default_provider: leaf}  # whatever the env made the default
-        router._unavailable, router._voice_warned = set(), set()
+        _init_router_memos(router)
         settings.fallback_providers = []
         [e async for e in router.stream_turn([], reasoning_effort="high")]
         [e async for e in router.stream_turn([])]
         assert leaf.calls[0]["reasoning_effort"] == "high"
-        assert "reasoning_effort" not in leaf.calls[1]
+        assert leaf.calls[1]["reasoning_effort"] is None
 
 
 class TestVoiceToolCap:

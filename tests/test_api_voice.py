@@ -531,11 +531,41 @@ class TestVoiceConfig:
         assert client.put("/api/voice/config", json={"voice_turn_model": ""}).status_code == 200
         assert client.get("/api/voice/config").json()["voice_turn_model"] == ""
 
-    @pytest.mark.parametrize("value", ["", "claude-haiku-4-5", "openai:gpt-5-mini", "ollama:llama3.2:latest"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "claude-haiku-4-5",
+            "openai:gpt-5-mini",
+            "ollama:llama3.2:latest",  # ':' inside a provider-qualified model
+            "gateway:meta/llama-3",  # '/' in a provider-qualified model
+            "anthropic/claude-haiku-4.5",  # '/' in a bare (vendor-prefixed) model
+            "openai:" + "m" * 80,  # longest model part
+        ],
+    )
     def test_turn_model_re_accepts(self, value):
         from pincer.voice.runtime_config import TURN_MODEL_RE
 
         assert TURN_MODEL_RE.match(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "a:b",  # one-letter provider: reads as a bare model with a colon
+            "/gpt-5-mini",  # leading '/'
+            "openai:/gpt-5-mini",  # leading '/' after the provider
+            "openai::gpt-5-mini",  # empty model start
+            "-gpt",  # leading '-'
+            "m" * 81,  # over-long bare id
+            "openai:" + "m" * 81,  # over-long qualified id
+            "x" * 33 + ":gpt",  # over-long provider
+            "Azure:gpt-5-mini",  # provider names are lowercase slugs
+        ],
+    )
+    def test_turn_model_re_rejects(self, value):
+        from pincer.voice.runtime_config import TURN_MODEL_RE
+
+        assert not TURN_MODEL_RE.match(value)
 
     @pytest.mark.parametrize("bad", ["has spaces", "UPPER:case-provider:x", "a:b:c:d$"])
     def test_put_config_rejects_garbage(self, client, bad):
@@ -655,12 +685,12 @@ class TestApplyOverrides:
 
     def test_with_the_router_check(self, tmp_path):
         from pincer.config import Settings
-        from pincer.llm.router import voice_turn_unusable_reason
+        from pincer.llm.router import plan_voice_turn
         from pincer.voice.runtime_config import apply_overrides
 
         live = Settings(openai_api_key="", data_dir=tmp_path)  # type: ignore[arg-type]
         (tmp_path / "voice_runtime.json").write_text('{"voice_turn_model": "openai:gpt-5-mini"}')
-        apply_overrides(live, unusable_reason=lambda m: voice_turn_unusable_reason(live, m))
+        apply_overrides(live, unusable_reason=lambda m: plan_voice_turn(live, m).unusable)
         assert live.voice_turn_model == ""
 
 

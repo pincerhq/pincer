@@ -7,7 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError
+from pincer.llm import router as router_mod
 from pincer.llm.base import BaseLLMProvider, LLMResponse
 from pincer.llm.router import LLMRouter
 
@@ -61,8 +63,8 @@ def _router_with_pool(default, failovers, pool, *, summary_provider=None, summar
         anthropic_compatible_provider="",
     )
     r._pool = pool
-    r._unavailable = set()
-    r._voice_warned = set()
+    r._on_demand = {}
+    r._voice_log = LogOncePerKey(router_mod.logger)
     return r
 
 

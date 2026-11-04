@@ -219,6 +219,20 @@ def parse_switch_token(response: str) -> tuple[str | None, str]:
     return code, stripped
 
 
+def log_switch_token(call_sid: str, where: str, requested: str | None) -> None:
+    """Language-switch diagnostics: a parsed ``[SWITCH_LANGUAGE:xx]`` token at
+    INFO, the common no-token case only at DEBUG. Every voice turn also logs
+    one INFO "Voice turn" line, so a turn without a "Switch token" line at INFO
+    carried no token."""
+    logger.log(
+        logging.INFO if requested else logging.DEBUG,
+        "Switch token in %s [%s]: %s",
+        where,
+        call_sid,
+        requested or "none",
+    )
+
+
 def language_policy(language: str, settings: Any) -> str:
     """The call's LANGUAGE_POLICY block, offering exactly the configured languages.
 
@@ -325,14 +339,7 @@ async def check_and_fix(
     formality = de_formality(settings)
 
     requested, stripped = parse_switch_token(response)
-    # A parsed token at INFO; the common no-token case only at DEBUG. With the
-    # per-turn "Voice turn" line, a turn without this line had no token.
-    logger.log(
-        logging.INFO if requested else logging.DEBUG,
-        "Switch token in reply [%s]: %s",
-        state.call_sid,
-        requested or "none",
-    )
+    log_switch_token(state.call_sid, "reply", requested)
     if requested is not None:
         if requested == call_lang:
             return stripped or response, False

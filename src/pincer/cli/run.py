@@ -1489,14 +1489,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
                     )
         try:
             from pincer.channels.phone_calls import VoiceChannel
-            from pincer.llm.router import voice_turn_unusable_reason
+            from pincer.llm.router import plan_voice_turn
             from pincer.voice.engine import get_voice_engine
 
             # Dashboard-set runtime overrides (voice turn model) survive restarts
             from pincer.voice.runtime_config import apply_overrides
             from pincer.voice.twiml_server import init_voice_routes
 
-            apply_overrides(settings, unusable_reason=lambda m: voice_turn_unusable_reason(settings, m))
+            apply_overrides(settings, unusable_reason=lambda m: plan_voice_turn(settings, m).unusable)
 
             # Telephony telemetry: start the bounded exporter before the first
             # call can arrive. Failing to start it must never stop voice from

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pincer.config import get_settings
+from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, StreamTurnEvent
@@ -27,6 +28,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from pincer.config import Settings
+
+    # (provider name, model hint) → the provider, or why it can't be built
+    BuildFn = Callable[[str, str], BaseLLMProvider | str]
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +118,10 @@ def provider_default_model(settings: Settings, name: str) -> str:
     return settings.default_model
 
 
-def _wire_safe_model(settings: Settings, name: str, model: str) -> str:
-    """``""`` (the provider's default) when ``model`` is an Anthropic id bound for an OpenAI-wire provider."""
+def wire_safe_model(settings: Settings, name: str, model: str) -> str:
+    """``model``, or ``""`` (the provider's own default) when it is an Anthropic
+    id bound for an OpenAI-wire provider, which would reject it. The one rule
+    the summarizer, the voice turn and the dashboard choices share."""
     if model.startswith("claude") and is_openai_wire(settings, name):
         return ""
     return model
@@ -137,65 +143,60 @@ def _build_leaf_for(settings: Settings, name: str, model_hint: str = "") -> Base
     return _build_leaf(settings, name)
 
 
-@dataclass(frozen=True)
+def try_build_provider(settings: Settings, name: str, model_hint: str = "") -> BaseLLMProvider | str:
+    """The leaf for ``name`` built from the configured credentials, or why it
+    can't be. Nothing is sent over the network."""
+    try:
+        return _build_leaf_for(settings, name, model_hint)
+    except Exception as e:
+        return str(e)
+
+
+@dataclass(frozen=True, eq=False)
 class VoiceTurnPlan:
     """What a voice turn runs on — the one answer the agent, the startup check
-    and the dashboard all read, so they can't disagree."""
+    and the dashboard all read."""
 
     requested: str  # the voice_turn_model value, stripped
     provider: str  # provider the turn runs on
     model: str  # model to request; "" = that provider's own default
+    effective_model: str  # the model that really answers (``model`` or the provider's default)
+    leaf: BaseLLMProvider | None  # the built provider when it isn't the default one
     unusable: str | None  # why the requested provider can't run (the turn fell back to the default)
     wire_adjusted: bool  # a claude-* id was dropped for an OpenAI-wire provider
 
 
-def _static_build_check(settings: Settings) -> Callable[[str, str], str | None]:
-    """Build check without a router: construct the leaf, keep only the error."""
-
-    def check(name: str, model_hint: str) -> str | None:
-        try:
-            _build_leaf_for(settings, name, model_hint)
-        except Exception as e:
-            return str(e)
-        return None
-
-    return check
-
-
-def plan_voice_turn(
-    settings: Settings,
-    value: str | None = None,
-    *,
-    build_check: Callable[[str, str], str | None] | None = None,
-) -> VoiceTurnPlan:
+def plan_voice_turn(settings: Settings, value: str | None = None, *, build: BuildFn | None = None) -> VoiceTurnPlan:
     """Resolve a voice turn model (see ``voice_turn_target``) to what really runs.
 
-    The default provider is always usable (the pool is validated at startup).
-    Any other provider must build from the configured credentials — nothing is
-    sent over the network. ``build_check(name, model_hint)`` returns why it
-    can't (``None`` when it can); the router passes its memoised one.
+    The default provider is always usable (the pool is validated at startup);
+    any other provider must build. ``build`` defaults to ``try_build_provider``;
+    the router passes its memoised one, which builds the same way, so the
+    dashboard and the call get the same answer.
     """
     raw = str(getattr(settings, "voice_turn_model", "") if value is None else value).strip()
     name, model = voice_turn_target(settings, raw)
-    safe = _wire_safe_model(settings, name, model)
+    safe = wire_safe_model(settings, name, model)
+    leaf: BaseLLMProvider | None = None
     unusable: str | None = None
     if name != settings.default_provider:
-        unusable = (build_check or _static_build_check(settings))(name, safe)
+        built = (build or (lambda n, h: try_build_provider(settings, n, h)))(name, safe)
+        if isinstance(built, str):
+            unusable = built
+        else:
+            leaf = built
     if unusable is not None:
         # A foreign model id would 404 on the default provider: use its own model.
-        return VoiceTurnPlan(raw, settings.default_provider, "", unusable, wire_adjusted=False)
-    return VoiceTurnPlan(raw, name, safe, None, wire_adjusted=safe != model)
-
-
-def voice_turn_unusable_reason(settings: Settings, value: str | None = None) -> str | None:
-    """Why a voice turn model can't run here, or ``None`` when it can."""
-    return plan_voice_turn(settings, value).unusable
-
-
-def effective_voice_turn(settings: Settings, value: str | None = None) -> tuple[str, str]:
-    """(provider, model) a voice turn really runs on — the default when the override can't."""
-    plan = plan_voice_turn(settings, value)
-    return plan.provider, plan.model or provider_default_model(settings, plan.provider)
+        name, safe = settings.default_provider, ""
+    return VoiceTurnPlan(
+        requested=raw,
+        provider=name,
+        model=safe,
+        effective_model=safe or provider_default_model(settings, name),
+        leaf=leaf,
+        unusable=unusable,
+        wire_adjusted=unusable is None and safe != model,
+    )
 
 
 class LLMRouter(BaseLLMProvider):
@@ -204,13 +205,14 @@ class LLMRouter(BaseLLMProvider):
     def __init__(self) -> None:
         self._settings = get_settings()
         self._pool: dict[str, BaseLLMProvider] | None = None
-        # (provider, model_hint) pairs that failed to build on demand: never
-        # rebuilt (or re-logged) per call. Credentials don't change while the
-        # process runs, but the hint does decide whether an OpenAI-wire leaf
-        # with no model of its own builds, so it is part of the key.
-        self._unavailable: set[tuple[str, str]] = set()
-        # voice_turn_model values already warned about (one line per value, not per turn)
-        self._voice_warned: set[str] = set()
+        # Providers outside the configured pool, built on demand per
+        # (provider, model_hint): the leaf, or why it can't be built. Never
+        # rebuilt (or re-logged) per call — credentials don't change while the
+        # process runs, and the hint decides whether an OpenAI-wire leaf with
+        # no model of its own builds, so it is part of the key.
+        self._on_demand: dict[tuple[str, str], BaseLLMProvider | str] = {}
+        # One line per voice_turn_model value, not per turn
+        self._voice_log = LogOncePerKey(logger)
 
     # ── Construction ─────────────────────────────────────
 
@@ -253,7 +255,7 @@ class LLMRouter(BaseLLMProvider):
         """
         self._build_pool()
         name, model = summary_target(self._settings)
-        if model.startswith("claude") and is_openai_wire(self._settings, name):
+        if not wire_safe_model(self._settings, name, model):
             # Typically the claude-haiku summary_model default on an OpenAI setup:
             # an OpenAI-wire endpoint would reject it, so use the provider's own model.
             logger.warning(
@@ -269,40 +271,47 @@ class LLMRouter(BaseLLMProvider):
         return provider, model or None
 
     def get_provider(self, name: str, model_hint: str = "") -> BaseLLMProvider | None:
-        """Provider by name — from the active pool, or built on demand when
-        its credentials exist. Used by the voice turn-model override (e.g.
-        voice_turn_model="openai:gpt-5-mini" while the default provider stays
-        anthropic). Returns None when unavailable; a failure is logged and
-        remembered once, never rebuilt per call.
+        """Provider by name — from the configured pool, or built on demand when
+        its credentials exist (memoised per ``model_hint``, see ``_on_demand``).
+        Used by the voice turn-model override (e.g. "openai:gpt-5-mini" while the
+        default provider stays anthropic) and the summarizer. Returns None when
+        unavailable; a failure is logged once, never rebuilt per call.
 
         ``model_hint``: the model the caller will request (see ``_build_leaf_for``).
         """
         pool = self._build_pool()
         if name in pool:
             return pool[name]
-        if (name, model_hint) in self._unavailable:
-            return None
-        try:
-            provider = _build_leaf_for(self._settings, name, model_hint)
-        except Exception as e:
-            logger.warning("Provider %r unavailable for per-call override: %s", name, e)
-            self._unavailable.add((name, model_hint))
-            return None
-        pool[name] = provider  # memoise alongside the configured pool
-        return provider
+        key = (name, model_hint)
+        if key not in self._on_demand:
+            built = try_build_provider(self._settings, name, model_hint)
+            if isinstance(built, str):
+                logger.warning("Provider %r unavailable for per-call override: %s", name, built)
+            self._on_demand[key] = built
+        found = self._on_demand[key]
+        return None if isinstance(found, str) else found
 
-    def resolve_voice_turn(self) -> tuple[BaseLLMProvider, str | None]:
-        """Provider and model for one voice turn (see ``plan_voice_turn``).
+    def _provider_or_reason(self, name: str, model_hint: str) -> BaseLLMProvider | str:
+        """``plan_voice_turn``'s build step through ``get_provider``."""
+        provider = self.get_provider(name, model_hint=model_hint)
+        if provider is not None:
+            return provider
+        reason = self._on_demand.get((name, model_hint))
+        return reason if isinstance(reason, str) else f"provider {name!r} is unavailable"
 
+    def resolve_voice_turn(self, value: str | None = None) -> tuple[BaseLLMProvider, VoiceTurnPlan]:
+        """Provider to stream one voice turn on, and the plan behind it.
+
+        ``value`` is the caller's ``voice_turn_model`` (the agent passes its own
+        live settings, which the dashboard updates); ``None`` reads the router's.
         The default provider is served by the router itself, so a voice turn
-        keeps failover. An override whose provider can't be built falls back
-        to the default provider with its own model (``None``). Each fallback
-        is logged once per distinct ``voice_turn_model`` value.
+        keeps failover. An override whose provider can't be built falls back to
+        the default provider with its own model. Each fallback is logged once
+        per distinct value.
         """
-        s = self._settings
-        plan = plan_voice_turn(s, build_check=self._build_check)
+        plan = plan_voice_turn(self._settings, value, build=self._provider_or_reason)
         if plan.wire_adjusted:
-            self._warn_voice_once(
+            self._voice_log.log(
                 f"{plan.requested}#wire",
                 "voice_turn_model %r is an Anthropic model id but provider %r is OpenAI-wire — "
                 "using that provider's default model instead",
@@ -310,32 +319,17 @@ class LLMRouter(BaseLLMProvider):
                 plan.provider,
             )
         if plan.unusable is not None:
-            self._warn_voice_once(
+            self._voice_log.log(
                 plan.requested,
                 "voice_turn_model %r is unavailable (%s) — using the default provider %r and its model",
                 plan.requested,
                 plan.unusable,
-                s.default_provider,
+                plan.provider,
             )
-        if plan.provider == s.default_provider:
+        if plan.leaf is None:
             self._build_pool()
-            return self, plan.model or None
-        provider = self.get_provider(plan.provider, model_hint=plan.model)
-        if provider is None:  # can't happen: plan_voice_turn just built it through the same memo
-            return self, None
-        return provider, plan.model or None
-
-    def _build_check(self, name: str, model_hint: str) -> str | None:
-        """``plan_voice_turn``'s build check through the memoised pool."""
-        if self.get_provider(name, model_hint=model_hint) is not None:
-            return None
-        return f"provider {name!r} could not be built (see the earlier warning)"
-
-    def _warn_voice_once(self, key: str, msg: str, *args: object) -> None:
-        if key in self._voice_warned:
-            return
-        self._voice_warned.add(key)
-        logger.warning(msg, *args)
+            return self, plan
+        return plan.leaf, plan
 
     def is_free(self, provider: str) -> bool:
         """A provider is free when it has no API key (e.g. a local Ollama endpoint)."""
@@ -359,6 +353,8 @@ class LLMRouter(BaseLLMProvider):
         temperature: float | None = None,
         system: str | None = None,
     ) -> LLMResponse:
+        """Primary first, then failovers in random order. An explicit ``model``
+        goes to the primary only: failovers use their own model (see ``stream_turn``)."""
         primary, failovers = self._primary_and_failovers()
         try:
             return await primary.complete(
@@ -370,7 +366,7 @@ class LLMRouter(BaseLLMProvider):
                     return await provider.complete(
                         messages,
                         tools=tools,
-                        model=model,
+                        model=None,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         system=system,
@@ -389,6 +385,7 @@ class LLMRouter(BaseLLMProvider):
         temperature: float | None = None,
         system: str | None = None,
     ) -> AsyncIterator[str]:
+        """Failover until the first token; an explicit ``model`` goes to the primary only."""
         primary, failovers = self._primary_and_failovers()
         ordered = [primary, *random.sample(failovers, len(failovers))]
         primary_err: Exception | None = None
@@ -396,7 +393,12 @@ class LLMRouter(BaseLLMProvider):
             started = False
             try:
                 async for token in provider.stream(
-                    messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, system=system
+                    messages,
+                    tools=tools,
+                    model=model if index == 0 else None,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system,
                 ):
                     started = True
                     yield token
@@ -422,23 +424,25 @@ class LLMRouter(BaseLLMProvider):
         reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """Same failover discipline as stream(): providers are tried in order
-        until one produces its first event; a mid-stream failure propagates."""
+        until one produces its first event; a mid-stream failure propagates.
+
+        An explicit ``model`` is the primary's id (e.g. a voice turn's
+        ``azure:gpt-5-mini`` on an azure default): a failover leaf of another
+        vendor would 404 on it, so failovers get ``None`` — their own model."""
         primary, failovers = self._primary_and_failovers()
         ordered = [primary, *random.sample(failovers, len(failovers))]
         primary_err: Exception | None = None
-        # Passed on only when set, so a leaf without the knob keeps its signature.
-        extra: dict[str, Any] = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
         for index, provider in enumerate(ordered):
             started = False
             try:
                 async for event in provider.stream_turn(
                     messages,
                     tools=tools,
-                    model=model,
+                    model=model if index == 0 else None,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     system=system,
-                    **extra,
+                    reasoning_effort=reasoning_effort,
                 ):
                     started = True
                     yield event
@@ -457,3 +461,6 @@ class LLMRouter(BaseLLMProvider):
         if self._pool:
             for leaf in self._pool.values():
                 await leaf.close()
+        for built in self._on_demand.values():
+            if not isinstance(built, str):
+                await built.close()
