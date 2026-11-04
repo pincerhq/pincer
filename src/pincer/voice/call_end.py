@@ -108,20 +108,33 @@ _NOT_PLAYED = frozenset({"undelivered", "cancelled"})
 
 
 def last_agent_said_farewell(transcript: Any, language: str) -> bool:
-    """Did the agent's last utterance the caller heard contain a goodbye?
+    """Did the agent's reply to the latest caller turn contain a goodbye the
+    caller heard?
 
     Lines that never played (failed or cancelled) are skipped: a goodbye the
-    caller did not hear is not one the agent has said.
+    caller did not hear is not one the agent has said. The search stops at
+    the previous caller line, so a goodbye from earlier in the call — before
+    the caller asked something else — does not count.
     """
     entries = list(getattr(transcript, "entries", None) or [])
+    if entries and _is_caller(entries[-1]):
+        entries.pop()  # the caller's own goodbye, already logged
     for entry in reversed(entries):
-        speaker = getattr(entry, "speaker", "")
-        name = str(getattr(speaker, "value", speaker)).lower()
-        if name.endswith("agent"):
-            if str(getattr(entry, "state", "") or "") in _NOT_PLAYED:
-                continue
-            return contains_farewell(str(getattr(entry, "text", "") or ""), language)
+        if _is_caller(entry):
+            return False
+        if not _speaker(entry).endswith("agent") or str(getattr(entry, "state", "") or "") in _NOT_PLAYED:
+            continue
+        return contains_farewell(str(getattr(entry, "text", "") or ""), language)
     return False
+
+
+def _speaker(entry: Any) -> str:
+    speaker = getattr(entry, "speaker", "")
+    return str(getattr(speaker, "value", speaker)).lower()
+
+
+def _is_caller(entry: Any) -> bool:
+    return _speaker(entry).endswith("caller")
 
 
 def estimate_speech_seconds(text: str) -> float:

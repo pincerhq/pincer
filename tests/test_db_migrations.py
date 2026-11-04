@@ -51,6 +51,9 @@ EXPECTED_TABLES = {
     "pincer_phone_contacts",
 }
 
+#: Columns migrations after 0018 add on purpose to the tables 0017/0018 rebuild.
+_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0026
+
 
 def _tables(db_path: Path) -> set[str]:
     con = sqlite3.connect(str(db_path))
@@ -1276,9 +1279,6 @@ def test_0017_stamps_each_id_with_the_row_s_own_creation_time(migration_url, tmp
 
 #: What 0018 rebuilds on SQLite to drop the `''` default, besides `voice_calls`.
 _REBUILT_BY_0018 = ["telephony_events", "telephony_spans"]
-
-#: Columns later migrations add on purpose to the tables compared below.
-_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0026
 
 
 def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(migration_url, tmp_path):

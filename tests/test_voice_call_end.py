@@ -92,6 +92,28 @@ def test_a_cut_off_farewell_still_counts_as_said():
     assert call_end.last_agent_said_farewell(transcript, "de")
 
 
+def test_an_earlier_goodbye_before_a_new_question_does_not_count():
+    """The goodbye was heard, but the caller asked again and the answer was cut
+    before any audio: the agent has not said goodbye to the latest turn."""
+    from pincer.voice.transcript import Speaker, TranscriptLogger
+
+    transcript = TranscriptLogger("CA_t")
+    transcript.log_utterance(Speaker.CALLER, "Danke schön.")
+    transcript.log_utterance(Speaker.AGENT, "Schönen Tag noch!", state="freeform")
+    transcript.log_utterance(Speaker.CALLER, "Moment, noch eine Frage zu den Öffnungszeiten.")
+    transcript.log_utterance(Speaker.AGENT, "Wir haben montags", state="cancelled")
+    transcript.log_utterance(Speaker.CALLER, "Okay, tschüss.")
+    assert not call_end.last_agent_said_farewell(transcript, "de")
+
+
+def test_the_callers_own_goodbye_line_is_skipped():
+    transcript = _transcript_with(("Einen schönen Tag noch!", "freeform"))
+    from pincer.voice.transcript import Speaker
+
+    transcript.log_utterance(Speaker.CALLER, "Tschüss.")
+    assert call_end.last_agent_said_farewell(transcript, "de")
+
+
 def test_estimate_speech_seconds():
     assert _REAL_ESTIMATE("") == 0.0
     assert 0.7 < _REAL_ESTIMATE("Goodbye!") < 1.0

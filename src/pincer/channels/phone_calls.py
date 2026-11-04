@@ -38,6 +38,7 @@ from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.transcript import (
     CANCELLED,
     INTERRUPTED,
+    NOT_PLAYED_STATES,
     UNDELIVERED,
     Speaker,
     TranscriptLogger,
@@ -2055,11 +2056,18 @@ class VoiceChannel(BaseChannel):
 
     @staticmethod
     def _call_was_silent(transcript: TranscriptLogger) -> bool:
-        """True when the agent produced turns but every one was undelivered."""
+        """True when no agent turn played and at least one failed to.
+
+        A caller talking into the dead air cancels lines too, so cancelled
+        lines count as unplayed; only an all-cancelled call (every line
+        barged in, nothing failed) is not silent.
+        """
         agent_entries = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.is_final]
         if not agent_entries:
             return False
-        return all(e.state == UNDELIVERED for e in agent_entries)
+        return all(e.state in NOT_PLAYED_STATES for e in agent_entries) and any(
+            e.state == UNDELIVERED for e in agent_entries
+        )
 
     async def _record_call_telemetry(
         self,
