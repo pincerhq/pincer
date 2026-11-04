@@ -19,8 +19,8 @@ from pincer.core.agent import (
     StreamChunk,
     StreamEventType,
     _is_tool_pair_error,
+    _placed_call_sid,
     _sanitize_tool_pairs,
-    placed_call_sid,
 )
 from pincer.core.session import SessionManager
 from pincer.exceptions import BudgetExceededError, LLMError
@@ -430,19 +430,13 @@ async def test_tool_context_carries_the_users_identity_timezone(settings, mock_l
 
 
 @pytest.mark.parametrize(
-    ("name", "content", "is_error", "sid"),
-    [
-        ("make_phone_call", "Call initiated successfully.\nCall SID: CA1\nTo: +4930123\nPurpose: x\n", False, "CA1"),
-        ("make_phone_call", "Call placed and already finished.\nCall SID: CA2\nTo: +4930123\n", False, "CA2"),
-        # A dial that ended before Twilio confirmed it names its SID, but no report follows.
-        ("make_phone_call", "Error: the call to +4930123 was placed (CA3) but already ended: busy.", False, ""),
-        ("make_phone_call", "Error: Daily outbound call limit reached (10). Try again tomorrow.", False, ""),
-        ("make_phone_call", "Call SID: CA4", True, ""),
-        ("whoami", "Call SID: CA5", False, ""),
-    ],
+    ("name", "is_error", "sid"),
+    [("make_phone_call", False, "CA9"), ("make_phone_call", True, ""), ("whoami", False, "")],
 )
-def test_placed_call_sid_only_names_a_placed_call(name, content, is_error, sid):
-    assert placed_call_sid(name, ToolResult(tool_call_id="tc1", content=content, is_error=is_error)) == sid
+def test_only_a_make_phone_call_result_names_a_placed_call(name, is_error, sid):
+    # The result format itself is tested against the real dial paths (test_voice_briefing.py).
+    result = ToolResult(tool_call_id="tc1", content=_DIAL_RESULTS[1], is_error=is_error)
+    assert _placed_call_sid(name, result) == sid
 
 
 def _dialing_registry(results: list[str]) -> ToolRegistry:
@@ -493,6 +487,30 @@ async def test_a_turn_returns_the_calls_it_placed(settings, mock_llm, session_ma
     result = await agent.handle_message("user1", "test", "call them")
 
     assert result.call_sids == ["CA9"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_fails_after_placing_a_call_still_returns_it(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """An error response would hide the ringing call from web chat, which then
+    never waits for its report; the turn ends with a reply instead."""
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError("overloaded 529")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    result = await agent.handle_message("user1", "test", "call them")
+
+    assert result.call_sids == ["CA9"]
+    assert "placed the call" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_fails_before_placing_a_call_still_raises(settings, mock_llm, session_manager, cost_tracker):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError("overloaded 529")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
+
+    with pytest.raises(LLMError):
+        await agent.handle_message("user1", "test", "call them")
 
 
 @pytest.mark.asyncio

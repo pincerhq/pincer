@@ -28,7 +28,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
@@ -1434,13 +1433,11 @@ _ERROR_STATUS: list[tuple[str, int]] = [
     ("Purpose too long", 422),
 ]
 
-_CALL_SID_RE = re.compile(r"Call SID: (\S+)")
-
 
 @router.post("/calls", response_model=InitiateCallOut, status_code=201)
 async def initiate_call(body: InitiateCallIn) -> InitiateCallOut:
     from pincer.voice.briefing import SOURCE_DASHBOARD, BriefingError, validate_task
-    from pincer.voice.outbound import make_phone_call
+    from pincer.voice.outbound import make_phone_call, placed_call_sid
 
     # Validated here as well as inside make_phone_call so the dashboard gets a
     # 422 with the actionable message before anything is attempted.
@@ -1469,9 +1466,8 @@ async def initiate_call(body: InitiateCallIn) -> InitiateCallOut:
         code = next((c for marker, c in _ERROR_STATUS if marker in detail), 502)
         raise HTTPException(status_code=code, detail=detail)
 
-    match = _CALL_SID_RE.search(result)
     return InitiateCallOut(
-        call_sid=match.group(1) if match else "",
+        call_sid=placed_call_sid(result),
         status="initiated",
         message=result,
     )

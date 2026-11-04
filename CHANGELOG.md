@@ -398,7 +398,8 @@ agent's history ended at "now ringing".
 - Web chat learns which calls a turn placed, so a page waits only for those
   reports. The `make_phone_call` tool `done` frame of `/api/chat/stream` carries
   `call_sid` when the dial was placed (not when it was refused or failed), and
-  `/api/chat/message` returns `call_sids`.
+  `/api/chat/message` returns `call_sids`. A turn whose model fails after it
+  placed a call ends with a reply saying so (and its `call_sids`), not an error.
 - A restart no longer loses a call's report. Calls still waiting for one are
   reloaded at startup and checked with Twilio: one that ended unanswered gets
   the usual report, and one that was connected when Pincer stopped gets an

@@ -542,6 +542,7 @@ async def test_a_claimed_call_that_ended_before_the_timeout_is_a_placed_call(voi
 
     result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
     assert result.startswith("Call placed and already finished.\nCall SID: CA_done\n"), result
+    assert outbound.placed_call_sid(result) == "CA_done", "its report follows: web chat waits for it"
     assert status_notify.get_call_info("CA_done") is not None
     assert dialing_notices == [], "no 'ringing' notice for a call that is over"
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
@@ -620,6 +621,7 @@ async def test_twilio_refusing_the_dial_is_still_a_rejection(voice, dial_outcome
 
     result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
     assert result.startswith("Error placing call")
+    assert outbound.placed_call_sid(result) == ""
     assert len(dial_outcomes["rejected"]) == 1 and dial_outcomes["unknown"] == []
     assert voice.engine._pending_outbound == {}
     assert sum(outbound._daily_outbound_counts.get("u1", {}).values()) == 0
@@ -653,6 +655,7 @@ async def test_timed_out_dial_that_already_ended_is_not_promoted(voice):
 
     result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
     assert result.startswith("Error") and "CA_done" in result and "already ended" in result
+    assert outbound.placed_call_sid(result) == "", "no report follows: nothing waits for it"
     assert voice.engine.get_call_state("CA_done") is None
     assert voice.engine._pending_outbound == {}
     assert status_notify.get_call_info("CA_done") is None, "no 'ringing' notification for an ended call"
@@ -892,6 +895,7 @@ async def test_make_phone_call_binds_and_logs_the_briefing(voice, caplog):
             TARGET, TASK, target_name="Dr. Müller", context={"user_id": "u1"}, source="dashboard"
         )
     assert "Call SID: CA_1" in result
+    assert outbound.placed_call_sid(result) == "CA_1"
     assert any("BRIEFING_BOUND" in r.message and "source=dashboard" in r.message for r in caplog.records)
 
 
