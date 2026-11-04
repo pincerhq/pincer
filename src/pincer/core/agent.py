@@ -32,7 +32,7 @@ from pincer.core.onboarding import (
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.db.ids import new_id
-from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
+from pincer.exceptions import BudgetExceededError, LLMError, LLMOutputTruncatedError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_CONSECUTIVE_ERRORS = 3
+_HEADLESS_LLM_ERROR_TEXT = "Sorry, I couldn't complete this scheduled action due to an LLM error."
 # A call turn whose model repeats this many tool calls it already made ends
 # with TOOL_NO_PROGRESS instead of another round (issue #300).
 _MAX_DUPLICATE_TOOL_CALLS = 2
@@ -330,6 +331,23 @@ def _placed_call_sid(tool_name: str, result: ToolResult) -> str:
 
 def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
+
+
+def _refuse_truncated_tool_calls(response: LLMResponse, max_tokens: int) -> None:
+    """Raise instead of running tool calls from a response cut off by max_tokens.
+
+    The last tool call's input may be incomplete, so none of them run and the
+    assistant turn is not saved. The log names the tools, never their arguments.
+    """
+    if not (response.truncated and response.has_tool_calls):
+        return
+    logger.warning(
+        "LLM output cut off at max_tokens (%d of %d tokens); not running tool calls: %s",
+        response.output_tokens,
+        max_tokens,
+        [tc.name for tc in response.tool_calls],
+    )
+    raise LLMOutputTruncatedError(response.output_tokens, max_tokens)
 
 
 class _RepeatedCallGuard:
@@ -808,6 +826,8 @@ class Agent:
                 final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
                 break
 
+            _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+
             # If the LLM wants to use tools
             if response.has_tool_calls:
                 logger.info(
@@ -1004,7 +1024,7 @@ class Agent:
                 )
             except LLMError:
                 logger.exception("run_headless: LLM call failed")
-                return "Sorry, I couldn't complete this scheduled action due to an LLM error."
+                return _HEADLESS_LLM_ERROR_TEXT
 
             try:
                 provider = response.provider or self._settings.default_provider
@@ -1019,6 +1039,12 @@ class Agent:
                 )
             except BudgetExceededError as e:
                 return f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
+
+            try:
+                _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+            except LLMOutputTruncatedError:
+                # Already logged by the guard; keep this method's no-raise contract.
+                return _HEADLESS_LLM_ERROR_TEXT
 
             if response.has_tool_calls:
                 messages.append(
@@ -1205,6 +1231,8 @@ class Agent:
                     yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
                     return
                 raise
+
+            _refuse_truncated_tool_calls(response, self._settings.max_tokens)
 
             if not response.has_tool_calls:
                 break
@@ -1538,6 +1566,8 @@ class Agent:
                 )
             except BudgetExceededError:
                 pass  # this turn already ran; the next turn hits the budget gate
+
+            _refuse_truncated_tool_calls(response, max_tokens)
 
             if not response.has_tool_calls:
                 break

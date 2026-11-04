@@ -17,7 +17,15 @@ from openai import AsyncOpenAI
 
 from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
+from pincer.llm.base import (
+    STOP_REASON_MAX_TOKENS,
+    BaseLLMProvider,
+    LLMMessage,
+    LLMResponse,
+    MessageRole,
+    StreamTurnEvent,
+    ToolCall,
+)
 from pincer.llm.model_params import openai_accepts_reasoning_effort, openai_is_reasoning_model
 
 if TYPE_CHECKING:
@@ -39,6 +47,8 @@ _effort_skipped = LogOncePerKey(logger, logging.INFO)
 # array_above_max_length) — Anthropic has no such cap, so callers sized for
 # the full registry must be truncated here rather than fail every request.
 OPENAI_MAX_TOOLS = 128
+# OpenAI's finish_reason when the output hit the token limit
+_FINISH_REASON_LENGTH = "length"
 
 
 def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -127,6 +137,14 @@ def convert_messages_to_openai(
     return result
 
 
+def _normalize_finish_reason(finish_reason: str | None) -> str:
+    """Report OpenAI's ``length`` as ``max_tokens``, like Anthropic, so one
+    truncation check covers both wires; other reasons pass through."""
+    if finish_reason == _FINISH_REASON_LENGTH:
+        return STOP_REASON_MAX_TOKENS
+    return finish_reason or ""
+
+
 def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     """Parse OpenAI ChatCompletion into unified LLMResponse."""
     choice = response.choices[0]
@@ -149,7 +167,7 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
         model=response.model,
         input_tokens=response.usage.prompt_tokens if response.usage else 0,
         output_tokens=response.usage.completion_tokens if response.usage else 0,
-        stop_reason=choice.finish_reason or "",
+        stop_reason=_normalize_finish_reason(choice.finish_reason),
     )
 
 
@@ -355,7 +373,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 provider=self._provider_name,
                 input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                stop_reason=finish_reason,
+                stop_reason=_normalize_finish_reason(finish_reason),
             )
         )
 

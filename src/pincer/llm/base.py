@@ -16,6 +16,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+# The stop reason every provider reports when the output hit max_tokens
+STOP_REASON_MAX_TOKENS = "max_tokens"
+
 
 class MessageRole(StrEnum):
     SYSTEM = "system"
@@ -109,6 +112,11 @@ class LLMResponse:
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
+
+    @property
+    def truncated(self) -> bool:
+        """The output stopped on max_tokens: its last block may be incomplete."""
+        return self.stop_reason == STOP_REASON_MAX_TOKENS
 
 
 @dataclass(frozen=True, slots=True)

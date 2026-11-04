@@ -294,6 +294,26 @@ async def test_complete_parses_tool_calls(openai_settings):
 
 
 @pytest.mark.asyncio
+async def test_complete_reports_length_stop_as_max_tokens(openai_settings):
+    """OpenAI's `length` is the same cut-off as Anthropic's `max_tokens` (issue #345)."""
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    fake_response = _make_chat_completion("A long answer that got cut o")
+    fake_response.choices[0].finish_reason = "length"
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=fake_response)
+        mock_cls.return_value = mock_client
+
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
+        result = await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.stop_reason == "max_tokens"
+    assert result.truncated
+
+
+@pytest.mark.asyncio
 async def test_connection_error_includes_provider_name(openai_settings):
     import openai
 

@@ -21,6 +21,15 @@ class LLMRateLimitError(LLMError):
         super().__init__(f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited.")
 
 
+class LLMOutputTruncatedError(LLMError):
+    """The response stopped on max_tokens, so its tool calls may be cut off."""
+
+    def __init__(self, output_tokens: int, max_tokens: int):
+        self.output_tokens = output_tokens
+        self.max_tokens = max_tokens
+        super().__init__(f"LLM output cut off at max_tokens ({output_tokens} of {max_tokens} tokens)")
+
+
 class BudgetExceededError(PincerError):
     """Daily cost budget exceeded."""
 
