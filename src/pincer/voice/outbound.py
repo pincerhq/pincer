@@ -20,6 +20,21 @@ from pincer.voice.engine import CLAIMED_SID_KEY
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
 from pincer.voice.twilio_rest import DialOutcomeUnknown
 
+TOOL_NAME = "make_phone_call"
+# The line a placed call's result names it on. Only a placed call's result has
+# it; an "Error..." result may name a SID in passing, but no report follows it.
+_CALL_SID_LINE = "Call SID: {}"
+_CALL_SID_LINE_RE = re.compile(r"^Call SID: (\S+)$", re.MULTILINE)
+
+
+def placed_call_sid(result: str) -> str:
+    """The SID of the call a make_phone_call result placed, or "" when none was."""
+    if result.startswith("Error"):
+        return ""
+    match = _CALL_SID_LINE_RE.search(result)
+    return match.group(1) if match else ""
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,7 +135,7 @@ async def _audit_block(decision: Any, number: str, user_id: str, channel: str) -
             AuditEntry(
                 user_id=user_id or "unknown",
                 action=AuditAction.VOICE_CALL_BLOCKED,
-                tool="make_phone_call",
+                tool=TOOL_NAME,
                 input_summary=f"blocked: {decision.reason}",
                 output_summary=mask_phone_number(number),
                 approved=False,
@@ -572,7 +587,10 @@ async def make_phone_call(
         )
         if finished:
             logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)
-            return f"Call placed and already finished.\nCall SID: {call_sid}\nTo: {validated}\nThe call report follows."
+            return (
+                f"Call placed and already finished.\n{_CALL_SID_LINE.format(call_sid)}\n"
+                f"To: {validated}\nThe call report follows."
+            )
         await notify_dialing(call_sid)
 
         logger.info(
@@ -590,7 +608,10 @@ async def make_phone_call(
                 "The call is now ringing. I'll update you when it connects, "
                 "and the result will appear in this chat when the call ends."
             )
-        return f"Call initiated successfully.\nCall SID: {call_sid}\nTo: {validated}\nPurpose: {purpose}\n{progress}"
+        return (
+            f"Call initiated successfully.\n{_CALL_SID_LINE.format(call_sid)}\n"
+            f"To: {validated}\nPurpose: {purpose}\n{progress}"
+        )
 
     except ImportError:
         logger.info("make_phone_call aborted: Twilio SDK not installed")

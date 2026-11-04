@@ -17,7 +17,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +51,8 @@ from pincer.memory.profile import get_preferred_language
 from pincer.tools.builtin.language_pref import TOOL_NAME as LANGUAGE_TOOL_NAME
 from pincer.tools.path_sandbox import SandboxDenied
 from pincer.voice.localtime import get_voice_timezone
+from pincer.voice.outbound import TOOL_NAME as CALL_TOOL_NAME
+from pincer.voice.outbound import placed_call_sid
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -85,8 +87,13 @@ _RECENT_TOOL_MESSAGES = 20
 # Chars of the previous assistant message / a loaded skill added to the tool-ranking query.
 _SELECTION_EXTRA_CHARS = 500
 _LOAD_SKILL_TOOL = "load_skill"
+_CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
+_CALL_PLACED_THEN_FAILED_TEXT = (
+    "I placed the call, but then hit an error and could not finish my reply. "
+    "The call's result will follow when it ends."
+)
 # Onboarding: a question still unanswered after this long is closed, empty,
 # by the user's next message; and this many replies with no profile in them
 # close it too.
@@ -246,10 +253,13 @@ class StreamEventType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class StreamChunk:
-    """A single event in a streaming agent response."""
+    """A single event in a streaming agent response. A TOOL_DONE of a dial
+    that was placed carries its ``call_sid``, so web chat can wait for that
+    call's report."""
 
     type: StreamEventType
     content: str
+    call_sid: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +287,8 @@ class AgentResponse:
     cost_usd: float = 0.0
     tool_calls_made: int = 0
     model: str = ""
+    # Calls this turn placed, each of which reports back later.
+    call_sids: list[str] = field(default_factory=list)
 
 
 def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
@@ -307,6 +319,13 @@ def _loaded_skill(tool_call: ToolCall, result: ToolResult) -> str | None:
     if tool_call.name != _LOAD_SKILL_TOOL or result.is_error or result.content.startswith("Error"):
         return None
     return result.content
+
+
+def _placed_call_sid(tool_name: str, result: ToolResult) -> str:
+    """The SID of the call this tool result placed, or "" when none was."""
+    if tool_name != _CALL_TOOL or result.is_error:
+        return ""
+    return placed_call_sid(result.content)
 
 
 def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
@@ -721,6 +740,7 @@ class Agent:
 
         total_cost = 0.0
         tool_calls_count = 0
+        call_sids: list[str] = []
         final_text = ""
         last_response: LLMResponse | None = None
         consecutive_errors = 0
@@ -760,6 +780,12 @@ class Agent:
                     continue
                 if recovery is _PairRecovery.CLEARED:
                     final_text = _SESSION_CLEARED_TEXT
+                    break
+                if call_sids:
+                    # A call is already ringing: an error response would hide
+                    # it from the channel, which then never waits for its report.
+                    logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
+                    final_text = _CALL_PLACED_THEN_FAILED_TEXT
                     break
                 raise
 
@@ -828,6 +854,8 @@ class Agent:
                         tool_call_id=result.tool_call_id,
                     )
                     await self._sessions.add_message(session, result_msg)
+                    if (sid := _placed_call_sid(tool_call.name, result)) and sid not in call_sids:
+                        call_sids.append(sid)
 
                     if result.is_error:
                         iteration_had_error = True
@@ -917,6 +945,7 @@ class Agent:
             cost_usd=total_cost,
             tool_calls_made=tool_calls_count,
             model=last_response.model if last_response else "",
+            call_sids=call_sids,
         )
 
     async def run_headless(
@@ -1204,7 +1233,7 @@ class Agent:
                     tool_call_id=result.tool_call_id,
                 )
                 await self._sessions.add_message(session, result_msg)
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
+                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, _placed_call_sid(tool_call.name, result))
                 if result.is_error:
                     iteration_had_error = True
                 elif (skill := _loaded_skill(tool_call, result)) is not None:
@@ -1686,7 +1715,7 @@ class Agent:
             tool_names = self._tools.list_tools()
 
         # Phone-call guidance when make_phone_call tool is available
-        if "make_phone_call" in tool_names:
+        if _CALL_TOOL in tool_names:
             base_prompt += (
                 "\n\nWhen the user asks you to call a phone number, you MUST use the "
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
@@ -2103,7 +2132,7 @@ class Agent:
                         **({"session_key": turn.session_key} if turn.session_key else {}),
                     },
                 )
-                if tool_call.name == "make_phone_call":
+                if tool_call.name == _CALL_TOOL:
                     logger.info(
                         "make_phone_call result: %s",
                         (result_text[:200] + "..." if len(result_text) > 200 else result_text)

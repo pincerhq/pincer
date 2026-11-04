@@ -165,7 +165,7 @@ async def post_message(
         raise HTTPException(402, str(e)) from e
     except LLMError as e:
         raise HTTPException(502, str(e)) from e
-    return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model}
+    return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model, "call_sids": resp.call_sids}
 
 
 @router.post("/stream")
@@ -202,7 +202,11 @@ async def post_stream(
                         elif chunk.type == StreamEventType.TOOL_START:
                             await queue.put(("tool", {"phase": "start", "name": chunk.content}))
                         elif chunk.type == StreamEventType.TOOL_DONE:
-                            await queue.put(("tool", {"phase": "done", "name": chunk.content}))
+                            done: dict[str, Any] = {"phase": "done", "name": chunk.content}
+                            # A placed call: its report comes later from /call-reports.
+                            if chunk.call_sid:
+                                done["call_sid"] = chunk.call_sid
+                            await queue.put(("tool", done))
                         elif chunk.type == StreamEventType.DONE:
                             await queue.put(("done", {"text": chunk.content}))
             except BudgetExceededError as e:

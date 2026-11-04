@@ -281,6 +281,31 @@ def test_chat_stream_ok():
     assert "event: done" in body
 
 
+def test_chat_message_returns_the_calls_the_turn_placed():
+    client = _make_client()
+    client.app.state.agent.handle_message.return_value = AgentResponse(text="ringing", call_sids=["CA1"])
+    r = client.post("/api/chat/message", json={"text": "call"}, headers={"X-Pincer-User": UUID})
+    assert r.json()["call_sids"] == ["CA1"]
+
+
+def test_a_placed_call_is_named_on_its_tool_done_frame():
+    client = _make_client()
+
+    async def _stream(*args, **kwargs):
+        yield StreamChunk(StreamEventType.TOOL_DONE, "make_phone_call", "CA1")
+        yield StreamChunk(StreamEventType.TOOL_DONE, "make_phone_call")
+        yield StreamChunk(StreamEventType.DONE, "ringing")
+
+    client.app.state.agent.handle_message_stream = _stream
+    with client.stream("POST", "/api/chat/stream", json={"text": "call"}, headers={"X-Pincer-User": UUID}) as r:
+        body = b"".join(r.iter_raw()).decode()
+    frames = [line.removeprefix("data: ") for line in body.splitlines() if '"phase"' in line]
+    assert frames == [
+        '{"phase": "done", "name": "make_phone_call", "call_sid": "CA1"}',
+        '{"phase": "done", "name": "make_phone_call"}',
+    ]
+
+
 def test_chat_returns_503_without_agent():
     client = _make_client()
     client.app.state.agent = None

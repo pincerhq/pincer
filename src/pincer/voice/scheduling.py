@@ -470,7 +470,7 @@ async def _place_call(task: AppointmentTask, settings: Any) -> str:
     it as a `retry` rather than fragmenting one booking across N threads.
     """
     from pincer.voice.briefing import SOURCE_CHAT, SOURCE_SCHEDULER
-    from pincer.voice.outbound import make_phone_call
+    from pincer.voice.outbound import make_phone_call, placed_call_sid
     from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, KIND_RETRY, get_thread_manager
 
     purpose = f"Schedule appointment with {task.contact_name or task.target_number}: {task.topic}"
@@ -494,12 +494,12 @@ async def _place_call(task: AppointmentTask, settings: Any) -> str:
     if result.startswith("Error"):
         return result
     task.attempts += 1
-    sid_match = re.search(r"Call SID: (\S+)", result)
-    if sid_match:
-        register_appointment(sid_match.group(1), task)
+    call_sid = placed_call_sid(result)
+    if call_sid:
+        register_appointment(call_sid, task)
         if not task.thread_id:
             with contextlib.suppress(Exception):
-                task.thread_id = await get_thread_manager(settings).thread_for_call(sid_match.group(1))
+                task.thread_id = await get_thread_manager(settings).thread_for_call(call_sid)
     else:  # pragma: no cover — make_phone_call always reports the SID on success
         logger.error("Appointment call placed but no Call SID parsed — context not attached")
     return result

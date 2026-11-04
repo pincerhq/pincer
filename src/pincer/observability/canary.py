@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -47,8 +46,6 @@ logger = logging.getLogger(__name__)
 
 CANARY_USER_ID = "pincer-canary"
 CANARY_PURPOSE = "Automated health check — please confirm you can hear this and say a short sentence back."
-
-_CALL_SID_RE = re.compile(r"Call SID: (\S+)")
 
 # How often the canary polls the engine while waiting for the call to progress.
 _POLL_INTERVAL_S = 2.0
@@ -143,7 +140,7 @@ async def run_canary(settings: Settings | Any) -> CanaryResult:
     min_turns = int(getattr(settings, "voice_canary_min_turns", 1))
     started = time.monotonic()
 
-    from pincer.voice.outbound import make_phone_call
+    from pincer.voice.outbound import make_phone_call, placed_call_sid
 
     result = await make_phone_call(
         target_number=target,
@@ -155,8 +152,7 @@ async def run_canary(settings: Settings | Any) -> CanaryResult:
     if result.startswith("Error"):
         return _finish(settings, CanaryResult(ok=False, reason=result.removeprefix("Error:").strip()), started)
 
-    match = _CALL_SID_RE.search(result)
-    call_sid = match.group(1) if match else ""
+    call_sid = placed_call_sid(result)
     if not call_sid:
         return _finish(settings, CanaryResult(ok=False, reason="call placed but no Call SID returned"), started)
 
