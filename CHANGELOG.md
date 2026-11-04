@@ -517,7 +517,7 @@ mounting a directory. Install the new `remote-skills` extra
 - **Voice: an interrupted line is no longer reported as a delivery failure,
   and a German "Na, das war's. Tschüss." ends the call (#301).** Every agent
   transcript line now records its delivery outcome and the reason in the new
-  `delivery_reason` column (migration 0026). `undelivered` now means only a
+  `delivery_reason` column (migration 0027). `undelivered` now means only a
   failure: `send_speech` returned False, and the engine records why
   (`send_error`, `no_websocket`, `tts_failed`, …). A line the caller talked
   over, or one the call ended on, before any of it played is the new

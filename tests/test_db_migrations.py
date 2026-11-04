@@ -52,7 +52,7 @@ EXPECTED_TABLES = {
 }
 
 #: Columns migrations after 0018 add on purpose to the tables 0017/0018 rebuild.
-_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0026
+_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0027
 
 
 def _tables(db_path: Path) -> set[str]:
