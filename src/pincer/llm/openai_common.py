@@ -26,7 +26,7 @@ from pincer.llm.base import (
     StreamTurnEvent,
     ToolCall,
 )
-from pincer.llm.model_params import openai_accepts_reasoning_effort, openai_is_reasoning_model
+from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_reasoning
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -37,10 +37,8 @@ if TYPE_CHECKING:
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
-# One INFO line per model id that a configured reasoning_effort can't apply to
-_effort_skipped = LogOncePerKey(logger, logging.INFO)
-# The #344 levels; xhigh/max wait for the per-model mapping (slice 8 of #345)
-_OPENAI_VOICE_EFFORTS = frozenset({"low", "medium", "high"})
+# An effort/thinking setting a model can't take: one WARNING per model and value
+_reasoning_dropped = LogOncePerKey(logger, logging.WARNING)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -213,6 +211,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
+        # Read once: every request of a turn sends the same effort/thinking
+        self._reasoning_effort = settings.reasoning_effort
+        self._thinking = settings.thinking
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
@@ -232,16 +233,36 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None,
         temperature: float | None,
         system: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> dict[str, Any]:
         """Request kwargs shared by complete / stream / stream_turn."""
+        model = model or self._default_model
         kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
+            "model": model,
             "max_tokens": max_tokens or self._default_max_tokens,
             "temperature": temperature if temperature is not None else self._default_temperature,
             "messages": convert_messages_to_openai(messages, system),
         }
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
+        # A per-call value (voice, summary) replaces the global setting; None keeps it.
+        reasoning = resolve_reasoning(
+            ReasoningWire.OPENAI,
+            model,
+            self._reasoning_effort if reasoning_effort is None else reasoning_effort,
+            self._thinking if thinking is None else thinking,
+        )
+        kwargs.update(reasoning.fragment)
+        for dropped in reasoning.dropped:
+            _reasoning_dropped.log(
+                f"{model}|{dropped.setting}|{dropped.value}",
+                "Not sending %s=%s to %s: %s",
+                dropped.setting,
+                dropped.value,
+                model,
+                dropped.reason,
+            )
         return self._normalize_kwargs(kwargs)
 
     async def complete(
@@ -255,7 +276,16 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs = self._build_kwargs(
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+        )
 
         try:
             response = await self._call_with_retry(kwargs)
@@ -279,7 +309,16 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs = self._build_kwargs(
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+        )
         kwargs["stream"] = True
 
         try:
@@ -307,31 +346,17 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         """True single-generation streaming (Sprint 5): content deltas are
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
-        Anthropic implementation, so the voice pipeline can run either.
-        ``reasoning_effort`` is sent only to models known to take it
-        (``openai_accepts_reasoning_effort``), and only low/medium/high.
-        ``thinking`` is ignored. Slice 8 of #345 replaces both with the
-        per-model mapping in ``model_params.resolve_reasoning``."""
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
-        if reasoning_effort:
-            request_model = str(kwargs["model"])
-            if reasoning_effort not in _OPENAI_VOICE_EFFORTS:
-                _effort_skipped.log(
-                    f"{request_model}|{reasoning_effort}",
-                    "reasoning_effort %r not sent to %r: only low/medium/high are sent to OpenAI models for now",
-                    reasoning_effort,
-                    request_model,
-                )
-            elif openai_accepts_reasoning_effort(request_model):
-                kwargs["reasoning_effort"] = reasoning_effort
-            else:
-                _effort_skipped.log(
-                    request_model,
-                    "reasoning_effort %r not sent: %r is not a known OpenAI reasoning model id "
-                    "(on Azure the deployment name must look like one, e.g. gpt-5-mini)",
-                    reasoning_effort,
-                    request_model,
-                )
+        Anthropic implementation, so the voice pipeline can run either."""
+        kwargs = self._build_kwargs(
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+        )
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 

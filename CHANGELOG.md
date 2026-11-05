@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-#### LLM: cut-off responses never run tool calls; cut-off voice turns recover (#345)
+#### LLM: effort and thinking settings, thinking kept within a turn, cut-off responses handled safely (#345)
 
 A model response that stops on its output limit (`max_tokens`) may end in a
 tool call whose input is incomplete. Such a call is never run, on any channel.
@@ -49,8 +49,8 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   dropped before the next request.
 - New `PINCER_REASONING_EFFORT` (`low` | `medium` | `high` | `xhigh` | `max`)
   and `PINCER_THINKING` (`adaptive` | `disabled`) set effort and thinking for
-  every request to a Claude model. Empty (the default) sends nothing, so the
-  model runs on its own defaults as before. Each value is translated for the
+  every request. Empty (the default) sends nothing, so the model runs on its
+  own defaults as before. Each value is translated for the
   model requested: `xhigh` steps down to `high` on Opus 4.5 and 4.6, and `max`
   on Opus 4.5. `adaptive` drops `PINCER_TEMPERATURE` on the models that
   otherwise take it (Opus and Sonnet 4.6). `disabled` is sent only where the
@@ -61,8 +61,7 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
 - `PINCER_VOICE_REASONING_EFFORT` now applies to Claude models too and takes
   the same five values; empty inherits `PINCER_REASONING_EFFORT`. New
   `PINCER_VOICE_THINKING` does the same for `PINCER_THINKING`. The call's
-  language-guard regeneration uses the global values. On OpenAI-wire providers
-  only a set voice value is sent, still only `low` / `medium` / `high`.
+  language-guard regeneration uses the global values.
 - New `PINCER_SUMMARY_REASONING_EFFORT` and `PINCER_SUMMARY_THINKING` do the
   same for conversation summaries, translated for the summary model; empty
   inherits the global value. `low` is the suggested value, on a summary model
@@ -72,6 +71,16 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   may use up to 2048 output tokens (was 500), the onboarding answer extraction
   1024 (was 200), the call-thread summary merge 2048 (was 700) and the call
   outcome extraction 2048 (was 1000). Only generated tokens are billed.
+- On OpenAI reasoning models these settings become `reasoning_effort`, on every
+  call, mapped per model: o-series `low` to `high`; gpt-5 adds `minimal` for
+  `disabled`; gpt-5.1 sends `none` for `disabled`; gpt-5.2+ also takes `xhigh`
+  (`max` steps down to it). `disabled` is dropped on the o-series and codex
+  models, which have no level that turns reasoning off. Pro models (o1-pro,
+  o3-pro, gpt-5-pro, gpt-5.2-pro) are Responses-API-only, so Pincer can't
+  serve them, and no longer sends them `reasoning_effort` (#344 did).
+  `adaptive` is ignored on OpenAI. As before, only model ids on #344's list get
+  the parameter; for any other, a set value is now logged once at WARNING
+  (was INFO).
 
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 

@@ -28,6 +28,11 @@ class _ClaudeReasoningRule(NamedTuple):
     thinks_by_default: bool  # False: thinking is already off, so "disabled" needs nothing sent
 
 
+class _OpenAIReasoningRule(NamedTuple):
+    efforts: tuple[str, ...]  # reasoning_effort levels the model accepts
+    disabled: str | None  # the level `disabled` sends; None: reasoning can't be turned off
+
+
 # claude-<family>-<major>[-<minor>][-<date>], optionally behind a vendor prefix
 # (e.g. "us.anthropic.claude-haiku-5-5-v1:0"). Gateways write the minor with a
 # dot ("anthropic/claude-opus-4.7"). The pre-4 naming
@@ -81,6 +86,45 @@ _CLAUDE_REASONING_RULES: dict[str, tuple[tuple[tuple[int, int], _ClaudeReasoning
 # Mythos has Fable's API surface and thinking rules.
 _CLAUDE_FAMILY_ALIASES = {"mythos": "fable"}
 
+# ── Effort on OpenAI (issue #345) ──
+# OpenAI models known to take `reasoning_effort`, optionally dated. A strict
+# allow-list, unlike the temperature rule above: here a false positive ADDS a
+# parameter, and a model that rejects it fails every request. Left out on
+# purpose: o1-mini / o1-preview and gpt-5-chat-* (no reasoning knob), and every
+# pro model (o1-pro, o3-pro, gpt-5.x-pro): Responses API only, which this
+# Chat Completions provider can't serve. Unknown or later names get no effort
+# (the API default) until added. The groups pick the gpt-5 row: the dotted
+# minor (a date is not one) and the variant.
+_OPENAI_EFFORT_RE = re.compile(
+    r"(?:o1|o3(?:-mini)?|o4-mini"
+    r"|(?P<gpt5>gpt-5)(?:\.(?P<minor>\d+))?(?:-(?P<variant>mini|nano|codex(?:-mini)?))?)"
+    r"(?:-\d{4}-\d{2}-\d{2})?$"
+)
+# Per-model levels, checked 2026-11-05. The API reference
+# (https://platform.openai.com/docs/api-reference/chat/create) returned 403; sources used:
+# - https://developers.openai.com/api/docs/models/gpt-5: "minimal, low, medium, and high"
+# - https://developers.openai.com/api/docs/models/gpt-5.1: "none (default), low, medium, and high"
+# - https://developers.openai.com/api/docs/models/gpt-5.2: "none (default), low, medium, high and xhigh"
+# - o1-pro, o3-pro, gpt-5-pro, gpt-5.2-pro: Responses API only (v1/chat/completions not
+#   supported), per their model pages, checked 2026-11-05:
+#   https://developers.openai.com/api/docs/models/o1-pro
+#   https://developers.openai.com/api/docs/models/o3-pro
+#   https://developers.openai.com/api/docs/models/gpt-5-pro
+#   https://developers.openai.com/api/docs/models/gpt-5.2-pro
+# - the openai SDK's docstring generated from the API spec (openai 2.32.0,
+#   types/chat/completion_create_params.py): models before gpt-5.1 "do not
+#   support none"; xhigh only after gpt-5.1-codex-max.
+# `disabled` sends the level that turns reasoning (nearly) off. The o-series
+# and codex (no page confirms none/minimal there) get no such level.
+_OPENAI_O_SERIES_RULE = _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled=None)
+_EFFORT_TO_XHIGH = ("low", "medium", "high", "xhigh")
+# gpt-5 rows by first minor version, ascending; a model uses the highest at or below its own.
+_OPENAI_GPT5_RULES: tuple[tuple[int, _OpenAIReasoningRule], ...] = (
+    (0, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="minimal")),
+    (1, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="none")),
+    (2, _OpenAIReasoningRule(_EFFORT_TO_XHIGH, disabled="none")),
+)
+
 # How `disabled` is sent to a model that thinks by default, by exact version:
 # a later version may not allow thinking off, so it gets nothing (the
 # restrictive side). Opus 5.5 and Fable/Mythos can't turn thinking off at all.
@@ -125,17 +169,6 @@ def openai_is_reasoning_model(model: str) -> bool:
     return _OPENAI_MODEL_RE.match(bare) is not None
 
 
-# OpenAI models known to take `reasoning_effort` (low/medium/high), optionally
-# dated. A strict allow-list, unlike the temperature rule above: here a false
-# positive ADDS a parameter, and a model that rejects it fails every request.
-# Left out on purpose: o1-mini / o1-preview and gpt-5-chat-* (no reasoning
-# knob). Unknown or later names get no effort — the API default — until added.
-_OPENAI_EFFORT_RE = re.compile(
-    r"(?:o1(?:-pro)?|o3(?:-mini|-pro)?|o4-mini|gpt-5(?:\.\d+)?(?:-(?:mini|nano|pro|codex(?:-mini)?))?)"
-    r"(?:-\d{4}-\d{2}-\d{2})?$"
-)
-
-
 def openai_accepts_reasoning_effort(model: str) -> bool:
     """Whether `reasoning_effort` may be sent to this OpenAI-wire model.
 
@@ -143,10 +176,15 @@ def openai_accepts_reasoning_effort(model: str) -> bool:
     deployment name, so a deployment called e.g. ``voice-fast`` never gets it.
     A fine-tune ``ft:<base>:…`` or gateway ``vendor/`` prefix is stripped.
     """
+    return _openai_effort_match(model) is not None
+
+
+def _openai_effort_match(model: str) -> re.Match[str] | None:
+    """The allow-list match for a model id, with any ``ft:`` / ``vendor/`` prefix stripped."""
     bare = model.lower().rsplit("/", 1)[-1]
     if bare.startswith("ft:"):
         bare = bare.removeprefix("ft:").split(":", 1)[0]
-    return _OPENAI_EFFORT_RE.match(bare) is not None
+    return _OPENAI_EFFORT_RE.match(bare)
 
 
 # ── Effort and thinking (issue #345) ──────────────────────────────────────────
@@ -189,8 +227,10 @@ def resolve_reasoning(
     recognised, is dropped and listed in `dropped` with the reason; logging it
     is the caller's job. Empty settings always resolve to nothing.
     """
-    if wire is not ReasoningWire.ANTHROPIC or not (effort or thinking):
-        return ReasoningParams()  # the OpenAI mapping is slice 8 of #345
+    if not (effort or thinking):
+        return ReasoningParams()
+    if wire is ReasoningWire.OPENAI:
+        return _resolve_openai(model, effort, thinking)
     version = _claude_version(model)
     rule = _claude_reasoning_rule(version) if version else None
     if version is None or rule is None:
@@ -222,6 +262,54 @@ def resolve_reasoning(
         else:
             fragment["thinking"] = dict(disabled)
     return ReasoningParams(fragment=fragment, drop_temperature=drop_temperature, dropped=tuple(dropped))
+
+
+def _resolve_openai(model: str, effort: ReasoningEffort, thinking: ThinkingMode) -> ReasoningParams:
+    """The OpenAI-wire half of `resolve_reasoning`: one `reasoning_effort` knob.
+
+    `adaptive` has no OpenAI form and is ignored. `disabled` sends the row's
+    off level, which replaces any effort; it is dropped at effort xhigh/max.
+    """
+    if thinking == "adaptive":
+        logger.debug("Thinking adaptive ignored for %s: OpenAI models have no such setting", model)
+    off = "disabled" if thinking == "disabled" else ""
+    rule = _openai_reasoning_rule(model)
+    if rule is None:
+        return ReasoningParams(dropped=_all_dropped(effort, off, DropReason.UNRECOGNISED_MODEL))
+
+    fragment: dict[str, Any] = {}
+    dropped: list[DroppedSetting] = []
+    sent_effort = _step_down(effort, rule.efforts) if effort else ""
+    if effort and not sent_effort:
+        dropped.append(DroppedSetting("reasoning_effort", effort, DropReason.UNSUPPORTED_BY_MODEL))
+    elif sent_effort:
+        if sent_effort != effort:
+            logger.debug("Effort %s stepped down to %s for %s", effort, sent_effort, model)
+        fragment["reasoning_effort"] = sent_effort
+    if off:
+        if rule.disabled is None:
+            dropped.append(DroppedSetting("thinking", off, DropReason.UNSUPPORTED_BY_MODEL))
+        elif sent_effort in _EFFORTS_THAT_KEEP_THINKING:
+            dropped.append(DroppedSetting("thinking", off, DropReason.INVALID_COMBINATION))
+        else:
+            if sent_effort:
+                logger.debug("Effort %s replaced by %s (thinking disabled) for %s", sent_effort, rule.disabled, model)
+            fragment["reasoning_effort"] = rule.disabled
+    return ReasoningParams(fragment=fragment, dropped=tuple(dropped))
+
+
+def _openai_reasoning_rule(model: str) -> _OpenAIReasoningRule | None:
+    """The table row for an allow-listed model; None off the allow-list."""
+    match = _openai_effort_match(model)
+    if match is None:
+        return None
+    if match.group("gpt5") is None:
+        return _OPENAI_O_SERIES_RULE
+    minor = int(match.group("minor") or 0)
+    rule = next(rule for since, rule in reversed(_OPENAI_GPT5_RULES) if minor >= since)
+    if (match.group("variant") or "").startswith("codex"):
+        return rule._replace(disabled=None)
+    return rule
 
 
 def _claude_version(model: str) -> tuple[str, int, int] | None:

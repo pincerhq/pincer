@@ -214,6 +214,104 @@ def test_resolve_reasoning_drops_everything_for_an_unrecognised_model(model):
     )
 
 
-def test_resolve_reasoning_leaves_the_openai_wire_alone_for_now():
-    """The OpenAI mapping arrives in slice 8 of #345; until then nothing is sent or reported."""
-    assert resolve_reasoning(ReasoningWire.OPENAI, "gpt-5.2", "high", "disabled") == ReasoningParams()
+# ── OpenAI reasoning_effort ───────────────────────────────────────────────────
+
+_UP_TO_XHIGH = ("low", "medium", "high", "xhigh", "xhigh")  # gpt-5.2+: max becomes xhigh
+
+# model: (reasoning_effort sent for low..max, what `disabled` sends)
+_OPENAI_TABLE: dict[str, tuple[tuple[str | None, ...], str]] = {
+    "o1": (_UP_TO_HIGH, _DROP),  # reasoning can't be turned off
+    "o3-mini": (_UP_TO_HIGH, _DROP),
+    "o4-mini": (_UP_TO_HIGH, _DROP),
+    "gpt-5": (_UP_TO_HIGH, "minimal"),
+    "gpt-5-mini": (_UP_TO_HIGH, "minimal"),
+    "gpt-5-codex": (_UP_TO_HIGH, _DROP),  # no page confirms minimal/none for codex
+    "gpt-5.1": (_UP_TO_HIGH, "none"),
+    "gpt-5.1-codex-mini": (_UP_TO_HIGH, _DROP),
+    "gpt-5.2": (_UP_TO_XHIGH, "none"),
+    "gpt-5.4-mini": (_UP_TO_XHIGH, "none"),
+    # Pro models are Responses API only: not served over Chat Completions
+    "o3-pro": (_NO_EFFORT, _UNRECOGNISED),
+    "gpt-5-pro": (_NO_EFFORT, _UNRECOGNISED),
+    "gpt-5.1-pro": (_NO_EFFORT, _UNRECOGNISED),
+    "gpt-5.2-pro": (_NO_EFFORT, _UNRECOGNISED),
+    "gpt-5-chat-latest": (_NO_EFFORT, _UNRECOGNISED),  # off the allow-list
+    "gpt-4o-mini": (_NO_EFFORT, _UNRECOGNISED),
+    "voice-fast": (_NO_EFFORT, _UNRECOGNISED),  # an Azure deployment name
+}
+
+
+def _expected_openai(model: str, effort: str, thinking: str) -> ReasoningParams:
+    """What the table above says `resolve_reasoning` returns on the OpenAI wire.
+    `adaptive` is never sent and never reported."""
+    efforts, disabled = _OPENAI_TABLE[model]
+    dropped = []
+    if disabled == _UNRECOGNISED:
+        if effort:
+            dropped.append(DroppedSetting("reasoning_effort", effort, DropReason.UNRECOGNISED_MODEL))
+        if thinking == "disabled":
+            dropped.append(DroppedSetting("thinking", "disabled", DropReason.UNRECOGNISED_MODEL))
+        return ReasoningParams(dropped=tuple(dropped))
+
+    fragment: dict = {}
+    sent_effort = efforts[_EFFORTS.index(effort)] if effort else None
+    if effort and sent_effort is None:
+        dropped.append(DroppedSetting("reasoning_effort", effort, DropReason.UNSUPPORTED_BY_MODEL))
+    elif sent_effort:
+        fragment["reasoning_effort"] = sent_effort
+    if thinking == "disabled":
+        if disabled == _DROP:
+            dropped.append(DroppedSetting("thinking", "disabled", DropReason.UNSUPPORTED_BY_MODEL))
+        elif sent_effort in ("xhigh", "max"):
+            dropped.append(DroppedSetting("thinking", "disabled", DropReason.INVALID_COMBINATION))
+        else:
+            fragment["reasoning_effort"] = disabled  # one knob: disabled replaces the effort
+    return ReasoningParams(fragment=fragment, dropped=tuple(dropped))
+
+
+@pytest.mark.parametrize("thinking", ["", "adaptive", "disabled"])
+@pytest.mark.parametrize("effort", ["", *_EFFORTS])
+@pytest.mark.parametrize("model", list(_OPENAI_TABLE))
+def test_resolve_reasoning_per_openai_model(model, effort, thinking):
+    result = resolve_reasoning(ReasoningWire.OPENAI, model, effort, thinking)
+    assert result == _expected_openai(model, effort, thinking)
+
+
+@pytest.mark.parametrize(
+    ("model", "bare"),
+    [
+        ("openai/gpt-5.2", "gpt-5.2"),  # gateway
+        ("ft:gpt-5.1:org::x", "gpt-5.1"),  # fine-tune
+        ("gpt-5-2025-08-07", "gpt-5"),  # a date is not a minor version
+        ("GPT-5.2", "gpt-5.2"),
+    ],
+)
+def test_resolve_reasoning_recognises_openai_id_forms(model, bare):
+    result = resolve_reasoning(ReasoningWire.OPENAI, model, "low", "disabled")
+    assert result.fragment  # the bare id's row applied, not the unrecognised path
+    assert result == resolve_reasoning(ReasoningWire.OPENAI, bare, "low", "disabled")
+
+
+def test_adaptive_is_ignored_on_openai_with_a_debug_line(caplog):
+    """OpenAI has no adaptive setting: nothing sent, nothing reported, one DEBUG line."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="pincer.llm.model_params")
+
+    assert resolve_reasoning(ReasoningWire.OPENAI, "gpt-5.2", "", "adaptive") == ReasoningParams()
+
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert lines == [(logging.DEBUG, "Thinking adaptive ignored for gpt-5.2: OpenAI models have no such setting")]
+
+
+def test_disabled_replacing_an_effort_on_openai_is_a_debug_line(caplog):
+    """One knob: `disabled` wins over the effort without a warning (the doctor shows what is sent)."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="pincer.llm.model_params")
+
+    result = resolve_reasoning(ReasoningWire.OPENAI, "gpt-5.1", "low", "disabled")
+
+    assert result == ReasoningParams(fragment={"reasoning_effort": "none"})
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert lines == [(logging.DEBUG, "Effort low replaced by none (thinking disabled) for gpt-5.1")]

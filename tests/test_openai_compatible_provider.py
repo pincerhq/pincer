@@ -640,3 +640,130 @@ def test_history_conversion_ignores_thinking_blocks():
 
     assert converted == convert_messages_to_openai(history([]), system="sys")
     assert "7f3a" not in repr(converted)
+
+
+# ── Effort and thinking settings (issue #345) ─────────────────────
+
+_HI = [LLMMessage(role=MessageRole.USER, content="hi")]
+_COMPLETION = {
+    "id": "c",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "x",
+    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+}
+_CHUNK = {
+    "id": "c",
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "x",
+    "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+}
+
+
+def _reasoning_settings(model: str, **update):
+    """OpenAI settings with the effort/thinking fields pinned (the developer's env never leaks in)."""
+    from pincer.config import Settings
+
+    base = Settings(
+        openai_api_key="sk-test",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="openai",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    return base.model_copy(update={"openai_model": model, "reasoning_effort": "", "thinking": "", **update})
+
+
+async def _sent_body(settings, method: str = "complete", **call_kwargs) -> dict:
+    """The request body the provider really sends for one call of `method`."""
+    import json
+
+    import httpx
+    from openai import AsyncOpenAI
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    bodies: list[dict] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body.get("stream"):
+            sse = f"data: {json.dumps(_CHUNK)}\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
+        return httpx.Response(200, json=_COMPLETION)
+
+    provider = OpenAICompatibleProvider(settings, "openai")
+    await provider._client.close()
+    provider._client = AsyncOpenAI(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    try:
+        if method == "complete":
+            await provider.complete(_HI, **call_kwargs)
+        else:
+            _ = [e async for e in getattr(provider, method)(_HI, **call_kwargs)]
+    finally:
+        await provider.close()
+    assert len(bodies) == 1
+    return bodies[0]
+
+
+class TestReasoningSettings:
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_global_effort_reaches_the_request(self, method):
+        body = await _sent_body(_reasoning_settings("gpt-5.4-mini", reasoning_effort="low"), method)
+
+        assert body["model"] == "gpt-5.4-mini"
+        assert body.get("reasoning_effort") == "low"
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_per_call_effort_replaces_the_global_one_and_none_keeps_it(self, method):
+        settings = _reasoning_settings("gpt-5.4-mini", reasoning_effort="high")
+
+        replaced = await _sent_body(settings, method, reasoning_effort="low")
+        kept = await _sent_body(settings, method, reasoning_effort=None)
+
+        assert (replaced.get("reasoning_effort"), kept.get("reasoning_effort")) == ("low", "high")
+
+    async def test_an_empty_per_call_effort_sends_nothing(self):
+        """`""` is a value (send nothing), unlike None (use the global setting)."""
+        settings = _reasoning_settings("gpt-5.4-mini", reasoning_effort="high", thinking="disabled")
+
+        body = await _sent_body(settings, "stream_turn", reasoning_effort="", thinking="")
+
+        assert body["model"] == "gpt-5.4-mini"
+        assert "reasoning_effort" not in body
+
+    async def test_disabled_turns_reasoning_off_on_gpt_5_1(self):
+        body = await _sent_body(_reasoning_settings("gpt-5.1", thinking="disabled"), "complete")
+
+        assert body.get("reasoning_effort") == "none"
+
+    async def test_a_dropped_setting_warns_once_per_model_and_value(self, caplog):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger=MODULE)
+        settings = _reasoning_settings("deploy-warn-once-345", reasoning_effort="low")  # unique: the log is global
+
+        for _ in range(2):
+            assert "reasoning_effort" not in await _sent_body(settings, "complete")
+
+        lines = [
+            r.levelno
+            for r in caplog.records
+            if r.getMessage() == "Not sending reasoning_effort=low to deploy-warn-once-345: unrecognised model"
+        ]
+        assert lines == [logging.WARNING, logging.DEBUG]
+
+    async def test_empty_settings_on_an_unrecognised_model_log_nothing(self, caplog):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger=MODULE)
+
+        body = await _sent_body(_reasoning_settings("deploy-benign-345"), "complete")
+
+        assert body["model"] == "deploy-benign-345"
+        assert "reasoning_effort" not in body
+        assert not [r for r in caplog.records if "Not sending" in r.getMessage()]
