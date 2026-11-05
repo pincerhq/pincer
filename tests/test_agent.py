@@ -53,11 +53,11 @@ async def test_turns_on_same_session_wait_and_other_sessions_continue(
     release = asyncio.Event()
     original = agent._handle_message
 
-    async def blocked(user_id, channel, text, *args):
+    async def blocked(user_id, channel, text, *args, **kwargs):
         if text == "first":
             entered.set()
             await release.wait()
-        return await original(user_id, channel, text, *args)
+        return await original(user_id, channel, text, *args, **kwargs)
 
     with patch.object(agent, "_handle_message", side_effect=blocked):
         first = asyncio.create_task(agent.handle_message("user", "chat", "first", memory=False))

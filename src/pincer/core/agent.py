@@ -667,9 +667,18 @@ class Agent:
         session_key: str | None = None,
         memory: bool = True,
     ) -> AgentResponse:
-        async with self._sessions.turn(user_id, channel, session_key):
+        async with self._sessions.turn(user_id, channel, session_key) as session:
             return await self._handle_message(
-                user_id, channel, text, images, channel_user_id, channel_name, extra_system, session_key, memory
+                user_id,
+                channel,
+                text,
+                images,
+                channel_user_id,
+                channel_name,
+                extra_system,
+                session_key,
+                memory,
+                session=session,
             )
 
     async def _handle_message(
@@ -683,6 +692,8 @@ class Agent:
         extra_system: str | None = None,
         session_key: str | None = None,
         memory: bool = True,
+        *,
+        session: Session,
     ) -> AgentResponse:
         """
         Main entry point: process a user message and return agent's response.
@@ -722,7 +733,6 @@ class Agent:
                 not count toward the user being known to onboarding.
         """
         self._last_active = (user_id, channel_name or channel)
-        session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
         memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
@@ -1168,9 +1178,11 @@ class Agent:
         from contextlib import aclosing
 
         async with (
-            self._sessions.turn(user_id, channel, session_key),
+            self._sessions.turn(user_id, channel, session_key) as session,
             aclosing(
-                self._handle_message_stream(user_id, channel, text, images, channel_user_id, session_key, memory)
+                self._handle_message_stream(
+                    user_id, channel, text, images, channel_user_id, session_key, memory, session=session
+                )
             ) as stream,
         ):
             async for chunk in stream:
@@ -1185,6 +1197,8 @@ class Agent:
         channel_user_id: str | None = None,
         session_key: str | None = None,
         memory: bool = True,
+        *,
+        session: Session,
     ) -> AsyncGenerator[StreamChunk]:
         """
         Process a user message, yielding StreamChunks as the response is generated.
@@ -1199,7 +1213,6 @@ class Agent:
         ``session_key`` and ``memory``.
         """
         self._last_active = (user_id, channel)
-        session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
         memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
@@ -1405,7 +1418,7 @@ class Agent:
         from contextlib import aclosing
 
         async with (
-            self._sessions.turn(user_id, channel, session_key),
+            self._sessions.turn(user_id, channel, session_key) as session,
             aclosing(
                 self._stream_voice_turn(
                     user_id,
@@ -1415,6 +1428,7 @@ class Agent:
                     channel_user_id=channel_user_id,
                     timings=timings,
                     session_key=session_key,
+                    session=session,
                 )
             ) as stream,
         ):
@@ -1431,6 +1445,7 @@ class Agent:
         channel_user_id: str | None = None,
         timings: dict[str, Any] | None = None,
         session_key: str | None = None,
+        session: Session,
     ) -> AsyncGenerator[StreamChunk]:
         """One live phone-call turn, streamed (Sprint 5, T5.2).
 
@@ -1460,7 +1475,6 @@ class Agent:
 
         turn_started = time.monotonic()
         self._last_active = (user_id, channel)
-        session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
         user_msg = LLMMessage(role=MessageRole.USER, content=text)
         await self._sessions.add_message(session, user_msg)
         # NOTE: no summarizer here — it is an LLM call on the voice critical

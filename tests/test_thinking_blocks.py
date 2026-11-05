@@ -271,6 +271,53 @@ async def test_voice_cut_off_retry_never_sends_the_discarded_thinking(settings, 
     assert provider.sent == [[], [], _THINKING]
 
 
+@pytest.mark.parametrize("entry", ["chat", "stream", "voice"])
+async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
+    settings, mock_llm, session_manager, cost_tracker, tools, entry
+):
+    """turn() yields the session; the inner method must use it, not look the key up again."""
+    mock_llm.complete.return_value = _DONE
+
+    async def stream(messages, **kwargs):
+        yield "done"
+
+    mock_llm.stream = stream
+    provider = _ScriptedVoice([[StreamTurnEvent(text="done"), StreamTurnEvent(response=_DONE)]])
+    agent = (
+        _voice_agent(settings, provider, session_manager, cost_tracker, tools)
+        if entry == "voice"
+        else Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
+    )
+    lookups: list[Any] = []
+    ended: list[Any] = []
+    real_get, real_end = session_manager.get_or_create, session_manager.end_turn
+
+    async def get_or_create(*args, **kwargs):
+        session = await real_get(*args, **kwargs)
+        lookups.append(session)
+        return session
+
+    async def end_turn(session):
+        ended.append(session)
+        await real_end(session)
+
+    with (
+        patch.object(session_manager, "get_or_create", get_or_create),
+        patch.object(session_manager, "end_turn", end_turn),
+    ):
+        if entry == "chat":
+            await agent.handle_message("user1", "test", "hi", memory=False)
+        elif entry == "stream":
+            _chunks = [c async for c in agent.handle_message_stream("user1", "web", "hi", memory=False)]
+        else:
+            _chunks = [c async for c in agent.stream_voice_turn("+4930111222", "voice", "hi")]
+
+    assert len(lookups) == 1
+    assert len(ended) == 1
+    assert ended[0] is lookups[0]
+    assert any(m.role is MessageRole.ASSISTANT and m.content == "done" for m in ended[0].messages)  # it holds the reply
+
+
 async def test_chat_turn_strips_thinking_when_it_fails(settings, mock_llm, session_manager, cost_tracker, tools):
     mock_llm.complete.side_effect = [_thinking_tool_response(), LLMError("Anthropic API error: 500 overloaded"), _DONE]
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
