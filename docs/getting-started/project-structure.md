@@ -47,9 +47,10 @@
 ### Cross-Channel Identity (`core/identity.py`)
 - Unified `pincer_user_id` across all channels — tell the agent something on WhatsApp, ask about it on Telegram, it remembers
 - Two-table normalized schema: `identity_profiles` (one row per user) + `channel_identities` (many-to-many channel links)
-- Config-driven identity seeding at startup via `PINCER_IDENTITY_MAP`; supports N channels per identity: `name@ch1:id1=ch2:id2=ch3:id3`
-- Named canonical IDs (`john@telegram:...`) make memory tags human-readable and portable across DB rebuilds
-- Hash-based fallback ID (`usr_abc123...`) auto-generated when no name is configured — backward-compatible
+- Config-driven identity seeding at startup from the `[identity]` section of `pincer.toml`, applied as `PINCER_IDENTITY_MANAGEMENT` says (`update` by default, `sync`, or `clionly`); N channels per identity
+- Identities can also be created, linked, edited, deactivated and reactivated with `pincer identity …` in every mode; a deactivated identity is a guest everywhere at once
+- Named canonical IDs (the `[identity.<key>]` key) make memory tags human-readable and portable across DB rebuilds
+- Hash-based ID (`usr_abc123...`) auto-generated for an unknown sender while the guest gate is off
 - Per-channel ID resolution: phone numbers, email addresses, and @usernames in config are resolved to the channel's real internal ID by each channel driver before being stored (`resolve_internal_user_id()` on `BaseChannel`)
 - Automatic conflict merging when multiple identities are unified by a new config entry
 - Legacy `identity_map` table automatically migrated to the new schema on first boot
@@ -498,7 +499,7 @@ enables random failover.
 
 | Variable | Purpose |
 |----------|---------|
-| `PINCER_TELEGRAM_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`; no-op if no identity map is configured) |
+| `PINCER_TELEGRAM_GUESTS_ALLOWED` | Once identities are configured, allow unknown senders through as disposable guests (default `false`; no-op while the guest gate is off) |
 | `PINCER_TELEGRAM_GROUP_TRIGGER` | In group chats, only reply when a trigger word appears, a message replies to the bot, or the bot is @mentioned (the last two have their own switches). Trigger words are comma-separated words/phrases, whole-word and case-insensitive; `@name` entries require the `@` (default: `pincer`). With BotFather privacy mode on (the default) the bot only receives commands and replies in groups; disable it (`/setprivacy` → Disable, then re-add the bot) or make the bot an admin for trigger words to work. `/cmd@PincerBot` always reaches the bot and always triggers it |
 | `PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION` | Also reply in groups when the bot is @mentioned (`@PincerBot`); trigger words and `/cmd@PincerBot` commands keep working either way (default: `false`) |
 | `PINCER_TELEGRAM_GROUP_TRIGGER_ON_REPLY` | Also reply in groups when a message replies to one of the bot's messages; trigger words keep working either way (default: `true`) |
@@ -508,7 +509,7 @@ enables random failover.
 | Variable | Purpose |
 |----------|---------|
 | `PINCER_WHATSAPP_ENABLED` | Enable WhatsApp channel (`true`/`false`) |
-| `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`). No-op if no identity map is configured for group mentions; for DMs, unlike Telegram/Signal, this is NOT a no-op — DMs are rejected by default with no identity map configured, and this flag overrides that |
+| `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once identities are configured, allow unknown senders through as disposable guests (default `false`). No-op for group mentions while the guest gate is off; for DMs, unlike Telegram/Signal, this is NOT a no-op — DMs are rejected by default with the gate off, and this flag overrides that |
 | `PINCER_WHATSAPP_GROUP_TRIGGER` | Comma-separated trigger words/phrases for group messages, whole-word and case-insensitive (default: `pincer`). A literal `@pincer` entry only helps when typed by hand |
 | `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION` | Also reply in groups when the bot is picked in WhatsApp's @-picker (phone number or LID); trigger words keep working either way (default: `false`). On a shared personal number, @-mentions of the person count too |
 | `PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY` | Also reply in groups when a message quotes a message Pincer sent, matched on message id (the last 1000, in memory, so after a restart replies to older messages need a trigger word); trigger words keep working either way (default: `true`). On a shared personal number, replies to the person's own messages never count, and neither do the person's own replies |
@@ -519,7 +520,7 @@ enables random failover.
 |----------|---------|
 | `PINCER_EMAIL_USERNAME` | Gmail address |
 | `PINCER_EMAIL_PASSWORD` | Gmail App Password (not regular password) |
-| `PINCER_IDENTITY_MAP` | Cross-channel identity mapping — format: `[name@]ch1:id1=ch2:id2[=ch3:id3]`, multiple entries comma-separated. Also gates guest access on Telegram/WhatsApp/Signal — see `*_GUESTS_ALLOWED` above and [Guest access control](../reference/cli.md#guest-access-control) |
+| `PINCER_IDENTITY_MANAGEMENT` | How the `[identity]` section of `pincer.toml` is applied at start: `update` (default; adds and updates, never removes), `sync` (also removes config identities the TOML no longer lists), `clionly` (ignored; `pincer identity …` only). See [Identities](../reference/cli.md#identities). The old `PINCER_IDENTITY_MAP` is no longer read and stops `pincer run` while set |
 | `PINCER_MEMORY_BACKEND` | Memory storage engine: `sqlite` (default, local DB) or `mcp` (external MCP server) |
 | `PINCER_MEMORY_MCP_SERVER` | MCP server name when `PINCER_MEMORY_BACKEND=mcp` (default: `sqlite-vec-memory`) |
 | `PINCER_OPENWEATHERMAP_API_KEY` | Weather for morning briefings |

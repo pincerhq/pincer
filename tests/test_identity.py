@@ -4,9 +4,10 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from support import identity_entries
 
 from pincer.channels.base import ChannelType
-from pincer.core.identity import IdentityProfile, IdentityResolver
+from pincer.core.identity import IdentityResolver
 
 TOM_PHONE = "4917612345678"
 TOM_LID = "207855026221128"
@@ -35,7 +36,7 @@ class _StubChannel:
 @pytest_asyncio.fixture
 async def resolver(tmp_path):
     db_path = tmp_path / "pincer.db"
-    r = IdentityResolver(db_path, identity_map_config="")
+    r = IdentityResolver(db_path)
     await r.ensure_table()
     yield r
 
@@ -80,7 +81,7 @@ class TestIdentityResolver:
         db_path = tmp_path / "link_test.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="telegram:12345=whatsapp:491234567890",
+            identity_entries("john@telegram:12345=whatsapp:491234567890"),
         )
         await r.ensure_table()
 
@@ -92,7 +93,7 @@ class TestIdentityResolver:
         """A single channel:id pair (no linking) resolves via _check_config_mapping,
         without needing seed_from_config() to run first."""
         db_path = tmp_path / "single_pair.db"
-        r = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
+        r = IdentityResolver(db_path, identity_entries("johndoe@telegram:100100"))
         await r.ensure_table()
 
         uid = await r.resolve(ChannelType.TELEGRAM, 100100)
@@ -161,8 +162,8 @@ class TestIdentityResolver:
 @pytest.mark.asyncio
 class TestIsGuest:
     async def test_is_guest_false_when_no_config(self, resolver):
-        """No identity map configured at all → never a guest (no-op)."""
-        assert resolver.has_config is False
+        """No roster at all → the gate is off, never a guest (no-op)."""
+        assert await resolver.gated() is False
         resolver.mark_seeding_complete()
         assert await resolver.is_guest(ChannelType.TELEGRAM, 12345) is False
 
@@ -170,9 +171,9 @@ class TestIsGuest:
         """Identity map configured but seeding hasn't run yet → is_guest() blocks
         rather than failing open; it only resolves once mark_seeding_complete() runs."""
         db_path = tmp_path / "guest_seeding.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"))
         await r.ensure_table()
-        assert r.has_config is True
+        assert await r.gated() is True
 
         task = asyncio.create_task(r.is_guest(ChannelType.TELEGRAM, 99999))
         await asyncio.sleep(0)
@@ -186,14 +187,14 @@ class TestIsGuest:
         """If mark_seeding_complete() is never called, is_guest() fails open after
         the bounded timeout rather than hanging forever."""
         db_path = tmp_path / "guest_seeding_timeout.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"))
         await r.ensure_table()
         monkeypatch.setattr(IdentityResolver, "_SEEDING_WAIT_TIMEOUT", 0.05)
         assert await r.is_guest(ChannelType.TELEGRAM, 99999) is False
 
     async def test_is_guest_true_when_configured_and_not_found(self, tmp_path):
         db_path = tmp_path / "guest_notfound.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"))
         await r.ensure_table()
         r.mark_seeding_complete()
         assert await r.is_guest(ChannelType.TELEGRAM, 99999) is True
@@ -202,14 +203,14 @@ class TestIsGuest:
         # Named single-channel entry resolves live via _check_config_mapping,
         # same as test_single_channel_named_config_resolves_live above.
         db_path = tmp_path / "guest_found.db"
-        r = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
+        r = IdentityResolver(db_path, identity_entries("johndoe@telegram:100100"))
         await r.ensure_table()
         r.mark_seeding_complete()
         assert await r.is_guest(ChannelType.TELEGRAM, 100100) is False
 
     async def test_mark_seeding_complete_idempotent(self, tmp_path):
         db_path = tmp_path / "guest_idempotent.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"))
         await r.ensure_table()
         r.mark_seeding_complete()
         r.mark_seeding_complete()
@@ -411,12 +412,12 @@ class TestSeedFromConfig:
         db_path = tmp_path / "seed_test.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="telegram:12345=whatsapp:491234567890",
+            identity_entries("john@telegram:12345=whatsapp:491234567890"),
         )
         await r.ensure_table()
         await r.seed_from_config()
 
-        expected_uid = IdentityResolver._generate_user_id(ChannelType.TELEGRAM, "12345")
+        expected_uid = "john"
         ch_type, chat_id = await r.get_preferred_channel(expected_uid)
         assert ch_type == ChannelType.TELEGRAM
         assert chat_id == "12345"
@@ -430,13 +431,13 @@ class TestSeedFromConfig:
         db_path = tmp_path / "seed_idem.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="telegram:99999=whatsapp:491111111111",
+            identity_entries("john@telegram:99999=whatsapp:491111111111"),
         )
         await r.ensure_table()
         await r.seed_from_config()
         await r.seed_from_config()
 
-        expected_uid = IdentityResolver._generate_user_id(ChannelType.TELEGRAM, "99999")
+        expected_uid = "john"
         channels = await r.get_all_channels(expected_uid)
         assert ChannelType.TELEGRAM in channels
         assert ChannelType.WHATSAPP in channels
@@ -446,7 +447,7 @@ class TestSeedFromConfig:
         db_path = tmp_path / "seed_update.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="telegram:55555=whatsapp:492222222222",
+            identity_entries("john@telegram:55555=whatsapp:492222222222"),
         )
         await r.ensure_table()
 
@@ -463,7 +464,7 @@ class TestSeedFromConfig:
         """Both channels had separate identities — merge both into the configured name."""
         db_path = tmp_path / "conflict_merge.db"
 
-        r_init = IdentityResolver(db_path, identity_map_config="")
+        r_init = IdentityResolver(db_path)
         await r_init.ensure_table()
         tg_uid = await r_init.resolve(ChannelType.TELEGRAM, 12345)
         wa_uid = await r_init.resolve(ChannelType.WHATSAPP, "491234567890")
@@ -471,33 +472,12 @@ class TestSeedFromConfig:
 
         r = IdentityResolver(
             db_path,
-            identity_map_config="john@telegram:12345=whatsapp:491234567890",
+            identity_entries("john@telegram:12345=whatsapp:491234567890"),
         )
         await r.seed_from_config()
 
         assert await r.resolve(ChannelType.TELEGRAM, 12345) == "john"
         assert await r.resolve(ChannelType.WHATSAPP, "491234567890") == "john"
-
-    async def test_conflict_merged_unnamed(self, tmp_path):
-        """When both channels have separate identities and no name, merge right into left."""
-        db_path = tmp_path / "conflict_unnamed.db"
-
-        r_init = IdentityResolver(db_path, identity_map_config="")
-        await r_init.ensure_table()
-        tg_uid = await r_init.resolve(ChannelType.TELEGRAM, 12345)
-        wa_uid = await r_init.resolve(ChannelType.WHATSAPP, "491234567890")
-        assert tg_uid != wa_uid
-
-        r = IdentityResolver(
-            db_path,
-            identity_map_config="telegram:12345=whatsapp:491234567890",
-        )
-        await r.seed_from_config()
-
-        tg_uid_new = await r.resolve(ChannelType.TELEGRAM, 12345)
-        wa_uid_new = await r.resolve(ChannelType.WHATSAPP, "491234567890")
-        assert tg_uid_new == wa_uid_new
-        assert tg_uid_new == tg_uid  # telegram (left) side preserved as canonical
 
     async def test_empty_config(self, resolver):
         """seed_from_config with empty config should be a no-op."""
@@ -507,14 +487,12 @@ class TestSeedFromConfig:
         db_path = tmp_path / "seed_multi.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config=("telegram:11111=whatsapp:490000000001,telegram:22222=whatsapp:490000000002"),
+            identity_entries("john@telegram:11111=whatsapp:490000000001", "jane@telegram:22222=whatsapp:490000000002"),
         )
         await r.ensure_table()
         await r.seed_from_config()
 
-        uid1 = IdentityResolver._generate_user_id(ChannelType.TELEGRAM, "11111")
-        uid2 = IdentityResolver._generate_user_id(ChannelType.TELEGRAM, "22222")
-        assert uid1 != uid2
+        uid1, uid2 = "john", "jane"
 
         ch1 = await r.get_all_channels(uid1)
         ch2 = await r.get_all_channels(uid2)
@@ -526,7 +504,7 @@ class TestSeedFromConfig:
         db_path = tmp_path / "three_ch.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="john@telegram:12345=whatsapp:491234567890=signal:491234567890",
+            identity_entries("john@telegram:12345=whatsapp:491234567890=signal:491234567890"),
         )
         await r.ensure_table()
         await r.seed_from_config()
@@ -546,7 +524,7 @@ class TestSeedFromConfig:
         db_path = tmp_path / "seed_right.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="telegram:12345=whatsapp:491234567890",
+            identity_entries("john@telegram:12345=whatsapp:491234567890"),
         )
         await r.ensure_table()
 
@@ -559,41 +537,12 @@ class TestSeedFromConfig:
         tg_uid = await r.resolve(ChannelType.TELEGRAM, 12345)
         assert tg_uid == wa_uid
 
-    async def test_entries_sharing_a_pair_seed_one_identity(self, tmp_path):
-        """A pair two entries share joins them: every link is written after the loop,
-        so the second entry has to find the first one's pairs before they are stored."""
-        r = IdentityResolver(
-            tmp_path / "chained.db",
-            identity_map_config="telegram:111=whatsapp:222,whatsapp:222=slack:333",
-        )
-        await r.ensure_table()
-        await r.seed_from_config()
-
-        uids = {
-            await r.resolve(ChannelType.TELEGRAM, 111),
-            await r.resolve(ChannelType.WHATSAPP, "222"),
-            await r.resolve(ChannelType.SLACK, "333"),
-        }
-        assert len(uids) == 1
-
-    async def test_a_later_name_renames_a_pending_identity(self, tmp_path):
-        """A named entry that shares a pair with an unnamed earlier one names them both."""
-        r = IdentityResolver(
-            tmp_path / "renamed.db",
-            identity_map_config="telegram:111=whatsapp:222,jane@whatsapp:222=slack:333",
-        )
-        await r.ensure_table()
-        await r.seed_from_config()
-
-        assert await r.resolve(ChannelType.TELEGRAM, 111) == "jane"
-        assert await r.resolve(ChannelType.SLACK, "333") == "jane"
-
     async def test_empty_resolved_ids_are_left_out(self, tmp_path, caplog):
         """A channel that resolves unknown contacts to "" must not fold them into one identity."""
 
         r = IdentityResolver(
             tmp_path / "empty_lid.db",
-            identity_map_config="alice@telegram:111=whatsapp:490000000001,bob@telegram:222=whatsapp:490000000002",
+            identity_entries("alice@telegram:111=whatsapp:490000000001", "bob@telegram:222=whatsapp:490000000002"),
         )
         await r.ensure_table()
         channels = {ChannelType.WHATSAPP: _StubChannel("")}
@@ -613,7 +562,7 @@ class TestSeedFromConfig:
     async def test_failed_resolution_leaves_the_pair_out(self, tmp_path, caplog):
         """A channel lookup that raises drops only that pair; the entry keeps its other channels."""
 
-        r = IdentityResolver(tmp_path / "broken.db", identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        r = IdentityResolver(tmp_path / "broken.db", identity_entries("alice@telegram:111=whatsapp:490000000001"))
         await r.ensure_table()
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r.seed_from_config({ChannelType.WHATSAPP: _StubChannel(error=RuntimeError("not connected"))})
@@ -627,7 +576,7 @@ class TestSeedFromConfig:
 
         r = IdentityResolver(
             tmp_path / "collide.db",
-            identity_map_config="telegram:111=whatsapp:490000000001,telegram:222=whatsapp:490000000002",
+            identity_entries("alice@telegram:111=whatsapp:490000000001", "bob@telegram:222=whatsapp:490000000002"),
         )
         await r.ensure_table()
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
@@ -635,58 +584,10 @@ class TestSeedFromConfig:
 
         first = await r.find(ChannelType.TELEGRAM, 111)
         second = await r.find(ChannelType.TELEGRAM, 222)
-        assert first and second and first != second
+        assert (first, second) == ("alice", "bob")
         assert await r.get_all_channels(first) == {ChannelType.TELEGRAM: "111", ChannelType.WHATSAPP: "999"}
         assert await r.get_all_channels(second) == {ChannelType.TELEGRAM: "222"}
         assert any("both resolve to whatsapp:999" in rec.message for rec in caplog.records)
-
-    async def test_config_id_equal_to_a_resolved_id_is_a_shared_pair(self, tmp_path):
-        """A phone in one entry and the LID it resolves to in another name the
-        same account: the pair is shared, not dropped as a lookup error."""
-
-        r = IdentityResolver(
-            tmp_path / "phone_and_lid.db",
-            identity_map_config="alice@telegram:111=whatsapp:490000000001,whatsapp:123456789012345=slack:U1",
-        )
-        await r.ensure_table()
-        await r.seed_from_config({ChannelType.WHATSAPP: _StubChannel("123456789012345")})
-
-        assert await r.find(ChannelType.WHATSAPP, "123456789012345") == "alice"
-        assert await r.find(ChannelType.SLACK, "U1") == "alice"
-
-    async def test_unnamed_entry_joining_a_named_identity_warns(self, tmp_path, caplog):
-        """A shared pair folds an unnamed entry into a named person; a wrong lookup
-        looks the same, so the join is logged when it happens, not on every boot."""
-        r = IdentityResolver(
-            tmp_path / "join.db",
-            identity_map_config="alice@whatsapp:123456789012345,telegram:222=whatsapp:490000000002",
-        )
-        await r.ensure_table()
-        channels = {ChannelType.WHATSAPP: _StubChannel("123456789012345")}
-        with caplog.at_level("WARNING", logger="pincer.core.identity"):
-            await r.seed_from_config(channels)
-
-        assert await r.find(ChannelType.TELEGRAM, 222) == "alice"
-        assert "unnamed entry telegram:222=whatsapp:123456789012345 joins 'alice'" in caplog.text
-
-        caplog.clear()
-        with caplog.at_level("WARNING", logger="pincer.core.identity"):
-            await r.seed_from_config(channels)
-        assert "joins" not in caplog.text
-
-    async def test_unnamed_entry_does_not_merge_two_named_identities(self, tmp_path):
-        """An unnamed entry spanning pairs of two named identities keeps them apart."""
-        db_path = tmp_path / "bridge.db"
-        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111,bob@telegram:222")
-        await r1.ensure_table()
-        await r1.seed_from_config()
-
-        r2 = IdentityResolver(db_path, identity_map_config="telegram:111=telegram:222=whatsapp:490000000001")
-        await r2.seed_from_config()
-
-        assert await r2.find(ChannelType.TELEGRAM, 111) == "alice"
-        assert await r2.find(ChannelType.TELEGRAM, 222) == "bob"
-        assert await r2.find(ChannelType.WHATSAPP, "490000000001") == "alice"
 
 
 @pytest.mark.asyncio
@@ -694,7 +595,7 @@ class TestNamedCanonicalId:
     async def test_named_id_used_on_seed(self, tmp_path):
         """seed_from_config with name@ prefix should use the name as canonical ID."""
         db_path = tmp_path / "named.db"
-        r = IdentityResolver(db_path, identity_map_config="john@telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"))
         await r.ensure_table()
         await r.seed_from_config()
 
@@ -706,7 +607,7 @@ class TestNamedCanonicalId:
     async def test_named_id_used_on_first_resolve(self, tmp_path):
         """resolve() should use the named canonical ID even without seed_from_config."""
         db_path = tmp_path / "named_resolve.db"
-        r = IdentityResolver(db_path, identity_map_config="alice@telegram:999=whatsapp:491000000001")
+        r = IdentityResolver(db_path, identity_entries("alice@telegram:999=whatsapp:491000000001"))
         await r.ensure_table()
 
         # Telegram messages first — no seed, name should still apply
@@ -720,7 +621,7 @@ class TestNamedCanonicalId:
     async def test_named_id_whatsapp_first(self, tmp_path):
         """Named ID works when the right-hand channel messages first."""
         db_path = tmp_path / "named_wa_first.db"
-        r = IdentityResolver(db_path, identity_map_config="bob@telegram:111=whatsapp:491000000002")
+        r = IdentityResolver(db_path, identity_entries("bob@telegram:111=whatsapp:491000000002"))
         await r.ensure_table()
 
         wa_uid = await r.resolve(ChannelType.WHATSAPP, "491000000002")
@@ -734,13 +635,13 @@ class TestNamedCanonicalId:
         db_path = tmp_path / "named_existing.db"
 
         # First: identity created with no config — gets hash-based ID
-        r_no_config = IdentityResolver(db_path, identity_map_config="")
+        r_no_config = IdentityResolver(db_path)
         await r_no_config.ensure_table()
         original_uid = await r_no_config.resolve(ChannelType.TELEGRAM, 222)
         assert original_uid.startswith("usr_")
 
         # Later: admin adds a name to the config and restarts (seed is called on startup)
-        r_with_name = IdentityResolver(db_path, identity_map_config="carol@telegram:222=whatsapp:491000000003")
+        r_with_name = IdentityResolver(db_path, identity_entries("carol@telegram:222=whatsapp:491000000003"))
         await r_with_name.seed_from_config()
 
         # Hash identity should now be renamed to "carol"
@@ -760,13 +661,13 @@ class TestNamedCanonicalId:
         db_path = tmp_path / "double_name.db"
 
         # First boot: identity created as "dave"
-        r1 = IdentityResolver(db_path, identity_map_config="dave@telegram:333=whatsapp:491000000007")
+        r1 = IdentityResolver(db_path, identity_entries("dave@telegram:333=whatsapp:491000000007"))
         await r1.ensure_table()
         await r1.seed_from_config()
         assert await r1.resolve(ChannelType.TELEGRAM, 333) == "dave"
 
         # Config accidentally changed to "david"
-        r2 = IdentityResolver(db_path, identity_map_config="david@telegram:333=whatsapp:491000000007")
+        r2 = IdentityResolver(db_path, identity_entries("david@telegram:333=whatsapp:491000000007"))
         await r2.seed_from_config()  # warns, keeps "dave"
         assert await r2.resolve(ChannelType.TELEGRAM, 333) == "dave"
 
@@ -774,11 +675,11 @@ class TestNamedCanonicalId:
         """Renaming an entry while adding a channel is a rename, not a second
         person: the new channel joins the existing identity."""
         db_path = tmp_path / "rename_add.db"
-        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111")
+        r1 = IdentityResolver(db_path, identity_entries("alice@telegram:111"))
         await r1.ensure_table()
         await r1.seed_from_config()
 
-        r2 = IdentityResolver(db_path, identity_map_config="alicia@telegram:111=slack:U1")
+        r2 = IdentityResolver(db_path, identity_entries("alicia@telegram:111=slack:U1"))
         with caplog.at_level("WARNING", logger="pincer.core.identity"):
             await r2.seed_from_config()
 
@@ -789,14 +690,15 @@ class TestNamedCanonicalId:
     async def test_renamed_entry_seeds_the_profile_configured_under_the_new_name(self, tmp_path):
         """A rename keeps the old identity, but the profile is configured under the new name."""
         db_path = tmp_path / "rename_profile.db"
-        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111")
+        r1 = IdentityResolver(db_path, identity_entries("alice@telegram:111"))
         await r1.ensure_table()
         await r1.seed_from_config()
 
         r2 = IdentityResolver(
             db_path,
-            identity_map_config="alicia@telegram:111=slack:U1",
-            profiles={"alicia": IdentityProfile(display_name="Alicia", timezone="Europe/Berlin")},
+            identity_entries(
+                "alicia@telegram:111=slack:U1", alicia={"display_name": "Alicia", "timezone": "Europe/Berlin"}
+            ),
         )
         await r2.seed_from_config()
 
@@ -810,11 +712,13 @@ class TestNamedCanonicalId:
         rename: neither seeds into it, so they are not folded into one person."""
 
         db_path = tmp_path / "rename_twice.db"
-        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:123456789012345")
+        r1 = IdentityResolver(db_path, identity_entries("alice@telegram:111=whatsapp:123456789012345"))
         await r1.ensure_table()
         await r1.seed_from_config()
 
-        r2 = IdentityResolver(db_path, identity_map_config="alicia@telegram:111,bob@telegram:222=whatsapp:490000000002")
+        r2 = IdentityResolver(
+            db_path, identity_entries("alicia@telegram:111", "bob@telegram:222=whatsapp:490000000002")
+        )
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r2.seed_from_config({ChannelType.WHATSAPP: _StubChannel("123456789012345")})
 
@@ -826,13 +730,13 @@ class TestNamedCanonicalId:
         """A named entry claiming a pair another named identity owns keeps its own
         channels instead of being folded into that identity."""
         db_path = tmp_path / "named_conflict.db"
-        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        r1 = IdentityResolver(db_path, identity_entries("alice@telegram:111=whatsapp:490000000001"))
         await r1.ensure_table()
         await r1.seed_from_config()
 
         r2 = IdentityResolver(
             db_path,
-            identity_map_config="alice@telegram:111,bob@telegram:222=whatsapp:490000000001",
+            identity_entries("alice@telegram:111", "bob@telegram:222=whatsapp:490000000001"),
         )
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r2.seed_from_config()
@@ -848,7 +752,7 @@ class TestNamedCanonicalId:
     async def test_single_channel_named_entry_seeds_identity(self, tmp_path):
         """A single channel:id pair — no linking partner needed — seeds a named identity."""
         db_path = tmp_path / "single_seed.db"
-        r = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
+        r = IdentityResolver(db_path, identity_entries("johndoe@telegram:100100"))
         await r.ensure_table()
         await r.seed_from_config()
 
@@ -864,15 +768,15 @@ class TestNamedCanonicalId:
         db_path = tmp_path / "profile.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="johndoe@telegram:100100=whatsapp:491234567890",
-            profiles={
-                "johndoe": IdentityProfile(
-                    display_name="John Doe",
-                    preferred_channel="whatsapp",
-                    email="johndoe@example.com",
-                    timezone="Europe/Berlin",
-                )
-            },
+            identity_entries(
+                "johndoe@telegram:100100=whatsapp:491234567890",
+                johndoe={
+                    "display_name": "John Doe",
+                    "preferred_channel": "whatsapp",
+                    "email": "johndoe@example.com",
+                    "timezone": "Europe/Berlin",
+                },
+            ),
         )
         await r.ensure_table()
         await r.seed_from_config()
@@ -892,8 +796,7 @@ class TestNamedCanonicalId:
         db_path = tmp_path / "profile_no_preferred.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="johndoe@telegram:100100=whatsapp:491234567890",
-            profiles={"johndoe": IdentityProfile(display_name="John Doe")},
+            identity_entries("johndoe@telegram:100100=whatsapp:491234567890", johndoe={"display_name": "John Doe"}),
         )
         await r.ensure_table()
         await r.seed_from_config()
@@ -905,99 +808,35 @@ class TestNamedCanonicalId:
             row = await cursor.fetchone()
         assert row == ("telegram",)
 
-    async def test_profile_backfilled_onto_existing_identity(self, tmp_path):
-        """Profile fields are backfilled via COALESCE even if the identity row already existed."""
-        import aiosqlite
-
-        db_path = tmp_path / "profile_backfill.db"
-        r_first = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
+    async def test_profile_overwrites_an_existing_identity_where_the_toml_states_a_field(self, tmp_path):
+        """#348: what the TOML states wins over the database; what it leaves out is kept."""
+        db_path = tmp_path / "profile_overwrite.db"
+        r_first = IdentityResolver(db_path, identity_entries("johndoe@telegram:100100"))
         await r_first.ensure_table()
         await r_first.resolve(ChannelType.TELEGRAM, 100100)  # creates the identity with no profile
+        await r_first._store.update_profile("johndoe", {"email": "old@example.com", "display_name": "Johnny"})
 
         r_second = IdentityResolver(
-            db_path,
-            identity_map_config="johndoe@telegram:100100",
-            profiles={"johndoe": IdentityProfile(email="johndoe@example.com")},
+            db_path, identity_entries("johndoe@telegram:100100", johndoe={"email": "johndoe@example.com"})
         )
         await r_second.seed_from_config()
 
-        async with aiosqlite.connect(str(db_path)) as db:
-            cursor = await db.execute(
-                "SELECT email, timezone FROM pincer_identity_profiles WHERE pincer_user_id = 'johndoe'",
-            )
-            row = await cursor.fetchone()
-        assert row == ("johndoe@example.com", None)
-
-    async def test_unnamed_entry_still_works(self, tmp_path):
-        """Entries without a name@ prefix keep the auto-generated hash behavior."""
-        db_path = tmp_path / "unnamed.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:333=whatsapp:491000000004")
-        await r.ensure_table()
-        await r.seed_from_config()
-
-        expected = IdentityResolver._generate_user_id(ChannelType.TELEGRAM, "333")
-        tg_uid = await r.resolve(ChannelType.TELEGRAM, 333)
-        assert tg_uid == expected
-
-    async def test_parse_mapping_named(self):
-        name, pairs = IdentityResolver._parse_mapping("john@telegram:12345=whatsapp:491234567890")
-        assert name == "john"
-        assert pairs[0] == ("telegram", "12345")
-        assert pairs[1] == ("whatsapp", "491234567890")
-
-    async def test_parse_mapping_unnamed(self):
-        name, pairs = IdentityResolver._parse_mapping("telegram:12345=whatsapp:491234567890")
-        assert name is None
-        assert pairs[0] == ("telegram", "12345")
-
-    async def test_parse_mapping_single_pair(self):
-        name, pairs = IdentityResolver._parse_mapping("johndoe@telegram:100100")
-        assert name == "johndoe"
-        assert pairs == [("telegram", "100100")]
-
-    async def test_parse_mapping_empty_raises(self):
-        with pytest.raises(ValueError, match="at least 1 channel:id pair"):
-            IdentityResolver._parse_mapping("justaname@")
-
-    @pytest.mark.parametrize("entry", ["me@telegram:12345", "ME@telegram:12345=whatsapp:491234567890"])
-    async def test_parse_mapping_rejects_the_reserved_name(self, entry):
-        # `/api/identity/me` is the caller's own identity; nobody may be called that.
-        with pytest.raises(ValueError, match="reserved"):
-            IdentityResolver._parse_mapping(entry)
-
-    async def test_parse_mapping_three_channels(self):
-        name, pairs = IdentityResolver._parse_mapping("john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890")
-        assert name == "john"
-        assert len(pairs) == 3
-        assert pairs[0] == ("telegram", "johnDoe")
-        assert pairs[1] == ("whatsapp", "491234567890")
-        assert pairs[2] == ("signal", "491234567890")
-
-    async def test_mixed_named_and_unnamed(self, tmp_path):
-        """Config can mix named and unnamed entries."""
-        db_path = tmp_path / "mixed.db"
-        r = IdentityResolver(
-            db_path,
-            identity_map_config="dave@telegram:444=whatsapp:491000000005,telegram:555=whatsapp:491000000006",
+        profile = await r_second._store.profile("johndoe")
+        assert (profile["email"], profile["display_name"], profile["timezone"]) == (
+            "johndoe@example.com",
+            "Johnny",
+            None,
         )
-        await r.ensure_table()
-        await r.seed_from_config()
-
-        assert await r.resolve(ChannelType.TELEGRAM, 444) == "dave"
-
-        uid555 = await r.resolve(ChannelType.TELEGRAM, 555)
-        assert uid555 == IdentityResolver._generate_user_id(ChannelType.TELEGRAM, "555")
-        assert uid555 != "dave"
 
 
 @pytest.mark.asyncio
 class TestCleanup:
     async def test_cleanup_no_op_without_config(self, tmp_path):
-        """cleanup() with no identity_map_config is a no-op — nothing to enforce."""
+        """cleanup() with no TOML entries is a no-op — nothing to enforce."""
         import aiosqlite
 
         db_path = tmp_path / "no_config.db"
-        r = IdentityResolver(db_path, identity_map_config="")
+        r = IdentityResolver(db_path)
         await r.ensure_table()
         uid = await r.resolve(ChannelType.TELEGRAM, 12345)
         await r.cleanup()
@@ -1015,7 +854,7 @@ class TestCleanup:
         import aiosqlite
 
         db_path = tmp_path / "cleanup_listed.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"), mode="sync")
         await r.ensure_table()
         await r.seed_from_config()
 
@@ -1048,7 +887,7 @@ class TestCleanup:
 
         db_path = tmp_path / "channelless.db"
         # Config only covers telegram:12345; the whatsapp-only identity has no listed channels
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"), mode="sync")
         await r.ensure_table()
 
         # Create an identity linked only to an unlisted channel
@@ -1079,40 +918,8 @@ class TestCleanup:
             await db.execute("CREATE TABLE unrelated (x INTEGER)")
             await db.commit()
 
-        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        r = IdentityResolver(db_path, identity_entries("john@telegram:12345=whatsapp:491234567890"))
         await r.cleanup()  # must not raise
-
-    @pytest.mark.parametrize("bad_entry", ["me@telegram:999", "jane@telegram:", "not-an-entry"])
-    async def test_cleanup_prunes_nothing_when_an_entry_does_not_parse(self, tmp_path, bad_entry, caplog):
-        """An entry the parser rejects contributes no pairs, so the whitelist
-        has a hole exactly where that person's channels are. Enforcing it
-        would unlink them; one bad entry must stop the whole sweep."""
-        import logging
-
-        db_path = tmp_path / "bad_entry.db"
-        good = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
-        await good.ensure_table()
-        await good.seed_from_config()
-        unlisted = await good.resolve(ChannelType.TELEGRAM, 999)
-
-        async def links() -> int:
-            async with (
-                _rows(good) as db,
-                db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '999'") as cur,
-            ):
-                return (await cur.fetchone())[0]
-
-        r = IdentityResolver(db_path, identity_map_config=f"telegram:12345=whatsapp:491234567890,{bad_entry}")
-        with caplog.at_level(logging.ERROR, logger="pincer.core.identity"):
-            await r.cleanup()
-
-        assert "skipping cleanup" in caplog.text
-        assert await r.resolve(ChannelType.TELEGRAM, 999) == unlisted
-        assert await links() == 1
-
-        # Blank entries (a trailing comma) are not entries at all: the sweep runs.
-        await IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890, ,").cleanup()
-        assert await links() == 0
 
     async def test_cleanup_keeps_the_entry_links_of_a_pair_that_does_not_resolve(self, tmp_path, caplog):
         """A pair whose lookup fails stands for a stored link that is unknown
@@ -1122,13 +929,14 @@ class TestCleanup:
         db_path = tmp_path / "unresolved.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="alice@telegram:111=whatsapp:490000000001,bob@telegram:222=whatsapp:490000000002",
+            identity_entries("alice@telegram:111=whatsapp:490000000001", "bob@telegram:222=whatsapp:490000000002"),
+            mode="sync",
         )
         await r.ensure_table()
         await r.seed_from_config()
         await r.link_if_new("alice", ChannelType.WHATSAPP, "123456789012345")  # LID learned at runtime
 
-        r2 = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        r2 = IdentityResolver(db_path, identity_entries("alice@telegram:111=whatsapp:490000000001"), mode="sync")
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r2.cleanup({ChannelType.WHATSAPP: _StubChannel(error=RuntimeError("not connected"))})
 
@@ -1145,16 +953,18 @@ class TestCleanup:
         stored link on the channel: that channel is not pruned, the others are."""
 
         db_path = tmp_path / "unresolved_unknown.db"
-        r = IdentityResolver(db_path, identity_map_config="telegram:111=slack:U1,bob@telegram:222")
+        r = IdentityResolver(db_path, identity_entries("bob@telegram:222"))
         await r.ensure_table()
         await r.seed_from_config()
+        stranger = await r.resolve(ChannelType.SLACK, "U1")  # an auto usr_ identity
+        await r.link_if_new(stranger, ChannelType.TELEGRAM, 111)
 
-        r2 = IdentityResolver(db_path, identity_map_config="slack:carol")
+        r2 = IdentityResolver(db_path, identity_entries("carol@slack:carol"), mode="sync")
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r2.cleanup({ChannelType.SLACK: _StubChannel(error=RuntimeError("users_not_found"))})
 
         assert "keeping the slack links of unnamed and configured identities" in caplog.text
-        assert await r2.find(ChannelType.SLACK, "U1")
+        assert await r2.find(ChannelType.SLACK, "U1") == stranger
         assert await r2.find(ChannelType.TELEGRAM, 111) is None
         assert await r2.find(ChannelType.TELEGRAM, 222) is None
 
@@ -1162,13 +972,13 @@ class TestCleanup:
         """An entry with no stored identity keeps only unnamed and configured
         identities' links on the unresolved channel: a removed person is pruned."""
         db_path = tmp_path / "unresolved_removed.db"
-        r = IdentityResolver(db_path, identity_map_config="bob@whatsapp:4911,carol@telegram:333")
+        r = IdentityResolver(db_path, identity_entries("bob@whatsapp:4911", "carol@telegram:333"), mode="sync")
         await r.ensure_table()
         await r.seed_from_config()
         await r.link_if_new("carol", ChannelType.WHATSAPP, "123456789012345")
         stranger = await r.resolve(ChannelType.WHATSAPP, "4933")  # unnamed, maybe dan's LID
 
-        r2 = IdentityResolver(db_path, identity_map_config="carol@telegram:333,dan@whatsapp:4922")
+        r2 = IdentityResolver(db_path, identity_entries("carol@telegram:333", "dan@whatsapp:4922"), mode="sync")
         channels = {ChannelType.WHATSAPP: _StubChannel(error=RuntimeError("not connected"))}
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r2.seed_from_config(channels)
@@ -1184,11 +994,13 @@ class TestCleanup:
         """A named identity whose pair the entry was refused is not the entry's
         identity: its links on the unresolved channel are pruned once it is removed."""
         db_path = tmp_path / "unresolved_refused.db"
-        r = IdentityResolver(db_path, identity_map_config="mallory@telegram:111=whatsapp:4911,alice@slack:U1")
+        r = IdentityResolver(
+            db_path, identity_entries("mallory@telegram:111=whatsapp:4911", "alice@slack:U1"), mode="sync"
+        )
         await r.ensure_table()
         await r.seed_from_config()
 
-        r2 = IdentityResolver(db_path, identity_map_config="alice@slack:U1=telegram:111=whatsapp:4922")
+        r2 = IdentityResolver(db_path, identity_entries("alice@slack:U1=telegram:111=whatsapp:4922"), mode="sync")
         channels = {ChannelType.WHATSAPP: _StubChannel(error=RuntimeError("not connected"))}
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             await r2.seed_from_config(channels)
@@ -1199,47 +1011,19 @@ class TestCleanup:
         r2.mark_seeding_complete()
         assert await r2.is_guest(ChannelType.WHATSAPP, "4911")
 
-    @pytest.mark.parametrize(
-        "config",
-        ["alice@telegram:111=WhatsApp:4911", "alice@WhatsApp:4911,bob@telegram:222"],
-        ids=["typo-beside-a-real-channel", "typo-is-the-only-channel"],
-    )
-    async def test_cleanup_skips_when_an_entry_names_an_unknown_channel(self, tmp_path, caplog, config):
-        """A channel typo (`WhatsApp:`) leaves a hole in the whitelist: enforcing it
-        would prune the person's real link, or delete a one-channel identity."""
-        db_path = tmp_path / "unknown_channel.db"
-        r = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:4911,bob@telegram:222")
+    async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path, caplog):
+        """Entries whose every pair fails to resolve, with nothing stored to keep
+        for them, give an empty whitelist; enforcing it would delete every identity."""
+        db_path = tmp_path / "no_usable_pairs.db"
+        r = IdentityResolver(db_path, identity_entries("jane@telegram:555"), mode="sync")
         await r.ensure_table()
-        await r.seed_from_config()
+        uid = await r.resolve(ChannelType.WHATSAPP, "4912345")
 
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
-            await IdentityResolver(db_path, identity_map_config=config).cleanup()
+            await r.cleanup({ChannelType.TELEGRAM: _StubChannel(error=RuntimeError("not connected"))})
 
-        assert "names an unknown channel — skipping cleanup" in caplog.text
-        assert await r.find(ChannelType.WHATSAPP, "4911") == "alice"
-        assert await r.find(ChannelType.TELEGRAM, 111) == "alice"
-        assert await r.find(ChannelType.TELEGRAM, 222) == "bob"
-        assert await r._store.profile("alice") is not None
-
-    async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
-        """A config string that's non-empty but parses to zero usable pairs (e.g. an
-        empty channel_user_id, as in 'jane@telegram:') must not be treated as an
-        authoritative empty whitelist — that would delete every pre-existing identity."""
-        import aiosqlite
-
-        db_path = tmp_path / "no_usable_pairs.db"
-        r = IdentityResolver(db_path, identity_map_config="jane@telegram:")
-        await r.ensure_table()
-        uid = await r.resolve(ChannelType.TELEGRAM, 12345)
-
-        await r.cleanup()
-
-        async with (
-            aiosqlite.connect(str(db_path)) as db,
-            db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '12345'") as cur,
-        ):
-            assert (await cur.fetchone())[0] == 1
-        assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
+        assert "skipping cleanup" in caplog.text
+        assert await r.resolve(ChannelType.WHATSAPP, "4912345") == uid
 
 
 @pytest.mark.asyncio
@@ -1247,8 +1031,9 @@ class TestPromoteChannelId:
     """A phone stored as a placeholder (LID unknown at seeding) is swapped for
     the LID once a message reveals it."""
 
-    async def _seeded(self, tmp_path, config=f"tom@whatsapp:{TOM_PHONE}=telegram:111"):
-        r = IdentityResolver(tmp_path / "promote.db", identity_map_config=config)
+    async def _seeded(self, tmp_path, *people: str):
+        people = people or (f"tom@whatsapp:{TOM_PHONE}=telegram:111",)
+        r = IdentityResolver(tmp_path / "promote.db", identity_entries(*people))
         await r.ensure_table()
         # whatsmeow has never seen the phone: the lookup keeps it as is.
         await r.seed_from_config({ChannelType.WHATSAPP: _StubChannel()})
@@ -1283,7 +1068,7 @@ class TestPromoteChannelId:
         assert await r.get_preferred_channel("tom") == (ChannelType.WHATSAPP, TOM_LID)
 
     async def test_refuses_a_lid_owned_by_someone_else(self, tmp_path, caplog):
-        r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE},jane@whatsapp:{TOM_LID}")
+        r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE}", f"jane@whatsapp:{TOM_LID}")
 
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
             owner = await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE])
@@ -1320,7 +1105,7 @@ class TestPromoteChannelId:
     async def test_refuses_a_lid_linked_to_someone_else_mid_rekey(self, tmp_path, caplog):
         """The LID gets an owner between the resolver's check and the transaction:
         the store re-checks, so Tom keeps his phone instead of losing both."""
-        r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE},jane@telegram:222")
+        r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE}", "jane@telegram:222")
         replace = r._store.replace_channel_links
 
         async def racing_replace(*args):
@@ -1336,7 +1121,7 @@ class TestPromoteChannelId:
 
     async def test_raises_when_seeding_never_completes(self, tmp_path):
         """A timeout must not look like "no placeholder": the caller retries."""
-        r = IdentityResolver(tmp_path / "promote.db", identity_map_config=f"tom@whatsapp:{TOM_PHONE}")
+        r = IdentityResolver(tmp_path / "promote.db", identity_entries(f"tom@whatsapp:{TOM_PHONE}"))
         await r.ensure_table()
         r._SEEDING_WAIT_TIMEOUT = 0.01
 
@@ -1411,8 +1196,7 @@ class TestIdentityTimezone:
         db_path = tmp_path / "tz.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config="kyivuser@telegram:222333",
-            profiles={"kyivuser": IdentityProfile(timezone="Europe/Kyiv")},
+            identity_entries("kyivuser@telegram:222333", kyivuser={"timezone": "Europe/Kyiv"}),
         )
         await r.ensure_table()
         await r.seed_from_config()
@@ -1439,3 +1223,208 @@ class TestIdentityCredentialsStayOutOfTheProfile:
         for view in (await store.profile(uid), await store.profile_with_channels(uid), *await store.list_profiles()):
             assert not any("password" in key or "api_key" in key or "token" in key for key in view)
             assert "secret" not in repr(view)
+
+
+# ── PINCER_IDENTITY_MANAGEMENT (#348) ────────────────────────────────
+
+
+async def _boot(db_path, *people: str, mode: str = "update", **profiles) -> IdentityResolver:
+    """One start of the app: seed and clean up the way `rebuild_identity_map` does."""
+    r = IdentityResolver(db_path, identity_entries(*people, **profiles), mode)
+    await r.ensure_table()
+    await r.cleanup_phones()
+    await r.seed_from_config()
+    await r.cleanup()
+    await r.refresh_gate()
+    r.mark_seeding_complete()
+    return r
+
+
+@pytest.mark.asyncio
+class TestUpdateMode:
+    async def test_a_person_removed_from_the_toml_survives_a_restart(self, tmp_path):
+        db = tmp_path / "update.db"
+        await _boot(db, "alice@telegram:1", "bob@telegram:2")
+
+        r = await _boot(db, "alice@telegram:1")
+
+        assert await r.find(ChannelType.TELEGRAM, 2) == "bob"
+        assert not await r.is_guest(ChannelType.TELEGRAM, 2)
+        assert (await r._store.profile("bob"))["source"] == "config"
+
+    async def test_changed_fields_are_overwritten_and_omitted_ones_kept(self, tmp_path):
+        db = tmp_path / "update_fields.db"
+        await _boot(
+            db, "alice@telegram:1", alice={"display_name": "Alice", "email": "a@example.com", "timezone": "UTC"}
+        )
+
+        r = await _boot(db, "alice@telegram:1", alice={"display_name": "Alice B.", "email": "b@example.com"})
+
+        profile = await r._store.profile("alice")
+        assert (profile["display_name"], profile["email"], profile["timezone"]) == ("Alice B.", "b@example.com", "UTC")
+
+    async def test_a_removed_channel_is_unlinked_and_a_new_one_linked(self, tmp_path):
+        db = tmp_path / "update_channels.db"
+        await _boot(db, "alice@telegram:1=slack:U1", "bob@telegram:2")
+
+        r = await _boot(db, "alice@telegram:1=signal:4911")
+
+        assert await r.get_all_channels("alice") == {ChannelType.TELEGRAM: "1", ChannelType.SIGNAL: "4911"}
+        assert await r.find(ChannelType.SLACK, "U1") is None
+        assert await r.find(ChannelType.TELEGRAM, 2) == "bob"  # not listed: untouched
+
+    async def test_a_lid_learned_at_runtime_is_kept(self, tmp_path):
+        db = tmp_path / "update_lid.db"
+        r = await _boot(db, f"tom@whatsapp:{TOM_PHONE}")
+        await r.link_if_new("tom", ChannelType.WHATSAPP, TOM_LID)
+
+        down = {ChannelType.WHATSAPP: _StubChannel(error=RuntimeError("not connected"))}
+        r2 = IdentityResolver(db, identity_entries(f"tom@whatsapp:{TOM_PHONE}"), "update")
+        await r2.seed_from_config(down)
+        await r2.cleanup(down)
+
+        assert await r2.find(ChannelType.WHATSAPP, TOM_LID) == "tom"
+
+    async def test_cli_identities_and_unlisted_links_are_untouched(self, tmp_path):
+        db = tmp_path / "update_cli.db"
+        r = await _boot(db, "alice@telegram:1")
+        await r._store.create_profile("carol", channels=[("telegram", "3")])
+
+        r = await _boot(db, "alice@telegram:1")
+
+        assert await r.find(ChannelType.TELEGRAM, 3) == "carol"
+
+
+@pytest.mark.asyncio
+class TestSyncMode:
+    async def test_a_person_removed_from_the_toml_is_deleted(self, tmp_path):
+        db = tmp_path / "sync.db"
+        await _boot(db, "alice@telegram:1", "bob@telegram:2", mode="sync")
+
+        r = await _boot(db, "alice@telegram:1", mode="sync")
+
+        assert await r._store.profile("bob") is None
+        assert await r.is_guest(ChannelType.TELEGRAM, 2)
+
+    async def test_a_cli_identity_is_kept(self, tmp_path):
+        db = tmp_path / "sync_cli.db"
+        r = await _boot(db, "alice@telegram:1", mode="sync")
+        await r._store.create_profile("carol", channels=[("telegram", "3")])
+
+        r = await _boot(db, "alice@telegram:1", mode="sync")
+
+        assert await r.find(ChannelType.TELEGRAM, 3) == "carol"
+        assert (await r._store.profile("carol"))["source"] == "cli"
+
+    async def test_a_cli_identity_the_toml_lists_becomes_a_config_one(self, tmp_path):
+        db = tmp_path / "sync_adopt.db"
+        r = await _boot(db, "alice@telegram:1", mode="sync")
+        await r._store.create_profile("carol", channels=[("telegram", "3")])
+
+        r = await _boot(db, "alice@telegram:1", "carol@telegram:3", mode="sync")
+        assert (await r._store.profile("carol"))["source"] == "config"
+
+        r = await _boot(db, "alice@telegram:1", mode="sync")
+        assert await r._store.profile("carol") is None
+
+
+@pytest.mark.asyncio
+class TestClionlyMode:
+    async def test_the_gate_is_on_with_an_empty_database(self, tmp_path):
+        r = await _boot(tmp_path / "clionly.db", mode="clionly")
+        assert await r.gated()
+        assert await r.is_guest(ChannelType.TELEGRAM, 1)
+
+    async def test_seeding_and_cleanup_do_nothing(self, tmp_path):
+        db = tmp_path / "clionly_noop.db"
+        r = await _boot(db, "alice@telegram:1", mode="update")
+        await r._store.update_profile("alice", {"display_name": "Changed by hand"})
+
+        # clionly hands the resolver no entries (see load_identity_map).
+        r = await _boot(db, mode="clionly")
+
+        assert await r.find(ChannelType.TELEGRAM, 1) == "alice"
+        assert (await r._store.profile("alice"))["display_name"] == "Changed by hand"
+
+
+@pytest.mark.asyncio
+class TestDatabaseRosterGate:
+    async def test_a_database_roster_gates_without_a_toml(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(IdentityResolver, "_ROSTER_TTL", 0.0)
+        r = await _boot(tmp_path / "roster.db")
+        assert not await r.gated()
+        await r.resolve(ChannelType.TELEGRAM, 99)  # an auto identity is no roster
+        assert not await r.gated()
+
+        await r._store.create_profile("alice", channels=[("telegram", "1")])
+
+        assert await r.gated()  # no restart
+        assert await r.is_guest(ChannelType.TELEGRAM, 2)
+        assert not await r.is_guest(ChannelType.TELEGRAM, 1)
+
+        await r._store.set_active("alice", False)
+        assert not await r.gated()
+
+    async def test_the_answer_is_cached_for_a_few_seconds(self, tmp_path):
+        r = await _boot(tmp_path / "roster_cache.db")
+        await r._store.create_profile("alice", channels=[("telegram", "1")])
+        assert not await r.gated()  # still the answer from the boot
+        await r.refresh_gate()
+        assert await r.gated()
+
+
+@pytest.mark.asyncio
+class TestDeactivation:
+    async def test_find_and_is_guest_flip_at_once(self, tmp_path):
+        r = await _boot(tmp_path / "deactivate.db", "alice@telegram:1=whatsapp:4911")
+        assert await r.find(ChannelType.TELEGRAM, 1) == "alice"
+
+        await r._store.set_active("alice", False)
+
+        assert await r.find(ChannelType.TELEGRAM, 1) is None
+        assert await r.find(ChannelType.WHATSAPP, "4911") is None
+        assert await r.is_guest(ChannelType.TELEGRAM, 1)
+        assert not await r.is_active("alice")
+
+        await r._store.set_active("alice", True)
+        assert await r.find(ChannelType.TELEGRAM, 1) == "alice"
+        assert not await r.is_guest(ChannelType.TELEGRAM, 1)
+
+    async def test_resolve_does_not_recreate_or_relink(self, tmp_path):
+        db = tmp_path / "deactivate_resolve.db"
+        r = IdentityResolver(db)
+        await r.ensure_table()
+        uid = await r.resolve(ChannelType.TELEGRAM, 1)
+        await r._store.set_active(uid, False)
+
+        assert await r.resolve(ChannelType.TELEGRAM, 1) == "telegram:1"
+        await r.link_if_new("someone_else", ChannelType.TELEGRAM, 1)
+        assert await r._store.owner_any("telegram", "1") == (uid, False)
+        assert len(await r._store.list_profiles()) == 1
+
+    async def test_a_listed_but_unstored_channel_of_an_inactive_person_is_not_linked(self, tmp_path):
+        db = tmp_path / "deactivate_config.db"
+        r = await _boot(db, "alice@telegram:1")
+        await r._store.set_active("alice", False)
+
+        r = IdentityResolver(db, identity_entries("alice@telegram:1=slack:U1"))
+        assert await r.find(ChannelType.SLACK, "U1") is None
+        assert await r._store.owner_any("slack", "U1") is None
+
+    async def test_seeding_does_not_reactivate(self, tmp_path):
+        db = tmp_path / "deactivate_seed.db"
+        r = await _boot(db, "alice@telegram:1", alice={"display_name": "Alice"})
+        await r._store.set_active("alice", False)
+
+        r = await _boot(db, "alice@telegram:1=slack:U1", alice={"display_name": "Alice B."})
+
+        profile = await r._store.profile("alice")
+        assert (profile["active"], profile["display_name"]) == (False, "Alice B.")
+        assert await r.is_guest(ChannelType.TELEGRAM, 1)
+        assert await r._store.owner_any("slack", "U1") == ("alice", False)
+
+    async def test_no_proactive_channel_for_an_inactive_identity(self, tmp_path):
+        r = await _boot(tmp_path / "deactivate_proactive.db", "alice@telegram:1")
+        await r._store.set_active("alice", False)
+        with pytest.raises(ValueError, match="deactivated"):
+            await r.get_preferred_channel("alice")

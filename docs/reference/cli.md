@@ -177,8 +177,13 @@ API access. See [REST API → Authentication](rest-api.md#authentication).
 
 | Command | Description |
 |---------|-------------|
-| `pincer identity list` | Identities with email, channels, whether a password is set, and the masked API key |
-| `pincer identity create <name> [password] [--api-key] [--email EMAIL] [--display-name NAME]` | Create an identity together with what it signs in with: a password (prompted for, hidden and confirmed, when omitted), or with `--api-key` an API key that is printed once. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved |
+| `pincer identity list` | Identities with status (active/inactive), source (config/cli/auto), email, channels, whether a password is set, and the masked API key |
+| `pincer identity create <name> [password] [--api-key \| --no-password] [--channel CH:ID …] [--email EMAIL] [--display-name NAME] [--timezone TZ]` | Create an identity with its channels and what it signs in with: a password (prompted for, hidden and confirmed, when omitted), `--api-key` (printed once), or `--no-password` (chat only; needs a `--channel`). Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved |
+| `pincer identity add-channel <name> <channel> <id>` | Link a channel id. Telegram ids must be numeric; a WhatsApp phone is swapped for its LID on the first message. A channel id that belongs to another identity is refused |
+| `pincer identity remove-channel <name> <channel> <id>` | Unlink a channel id |
+| `pincer identity set <name> [--display-name] [--email] [--timezone] [--preferred-channel] [--add-phone +E164 …] [--remove-phone +E164 …]` | Set profile fields and confirmed phones |
+| `pincer identity deactivate <name>` | Switch an identity off without deleting it: its messages are handled as a guest's, its phones no longer identify it on calls, it gets no proactive messages, and it cannot sign in. Its sessions end; its password and API key are kept. A running app sees it at once |
+| `pincer identity activate <name>` | Switch it back on |
 | `pincer identity set-password <name> [password]` | Reset a password, or give one to an identity that has none (8–256 characters). Prompts, hidden and confirmed, when the password is omitted — which keeps it out of the shell history. Signs the identity out everywhere |
 | `pincer identity api-key <name> [--force]` | Generate an API key (`pnc_…`) and print it once; afterwards only a masked form is shown. `--force` replaces an existing key, which stops working immediately |
 | `pincer identity revoke <name>` | Remove the identity's password and API key and end its sessions. The identity, its channels and its history stay |
@@ -187,16 +192,24 @@ API access. See [REST API → Authentication](rest-api.md#authentication).
 pincer identity create alice --email alice@example.com   # prompts for the password; sign in as "alice" or the email
 pincer identity api-key alice                            # for the web chat widget / scripts
 pincer identity create widget --api-key                  # a key-only identity
+pincer identity create bob --no-password --channel telegram:123456 --channel whatsapp:+4915100000001
+pincer identity set bob --add-phone +4915100000001 --timezone Europe/Berlin
+pincer identity deactivate bob                           # bob's next message is a guest's; `activate` restores him
 ```
 
 A forgotten password is reset with `set-password`. An email signs in for one
 identity only: `create` refuses an email that already belongs to another.
 
-With an [identity map](#identity-map) configured, identities that have no
-channel link are deleted at startup — unless they hold a password or an API
-key, so an identity made only for the dashboard or for a script survives.
-Removing someone from the map therefore does not take their API access away;
-`pincer identity revoke <name>` does.
+These commands work in every `PINCER_IDENTITY_MANAGEMENT` mode (see
+[Identities](#identities)), and what they make is a `cli` identity, which no
+sync of the `[identity]` TOML removes. For a person the TOML lists, the next
+start puts back what the TOML states; the command warns when that applies.
+
+In `sync` mode, config identities left with no channel link are deleted at
+startup — unless they hold a password or an API key, so an identity made only
+for the dashboard or for a script survives. Removing someone from the TOML
+therefore does not take their API access away; `pincer identity revoke <name>`
+or `deactivate` does.
 
 ## Skills
 
@@ -386,33 +399,9 @@ complete list. Key variables added in Sprint 5:
 
 See [Background Tasks](../core-components/background-tasks.md) for details.
 
-### Identity map
+### Identities
 
-| Variable | Format | Description |
-|----------|--------|-------------|
-| `PINCER_IDENTITY_MAP` | See below | Cross-channel user identity mappings |
-
-**Format:** `[name@]channel1:id1=channel2:id2[=channel3:id3...]` — multiple identities separated by commas.
-
-```bash
-# Two channels, named canonical ID (recommended)
-PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890
-
-# Three channels in one identity
-PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890
-
-# Multiple people
-PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890,jane@telegram:janeAustin=whatsapp:491111111111
-
-# Hash-based ID (auto-generated, backward-compatible)
-PINCER_IDENTITY_MAP=telegram:12345=whatsapp:491234567890
-```
-
-The optional `name@` prefix sets the `pincer_user_id` used as the memory tag (e.g. `user:john`). Named IDs are stable across DB rebuilds; hash IDs (`usr_abc123...`) are auto-generated and opaque. Channel-specific identifiers (email addresses for Slack, phone numbers for WhatsApp, @usernames for Telegram) are resolved to internal IDs by each channel driver at startup before being stored.
-
-#### TOML alternative for large rosters
-
-For a roster too large to comfortably manage as one `PINCER_IDENTITY_MAP` string, the same mapping can be expressed as an `[identity]` section in `pincer.toml` / `pincer.local.toml` instead — one table per person, keyed by their `pincer_user_id`:
+Identities are configured in an `[identity]` section of `pincer.toml` / `pincer.local.toml` — one table per person, keyed by their `pincer_user_id` — and with [`pincer identity …`](#identity-api-access):
 
 ```toml
 [identity.johndoe]
@@ -439,15 +428,28 @@ channel         = "whatsapp"
 channel_user_id = "491111111111"
 ```
 
-Unlike `PINCER_IDENTITY_MAP`, a person may have just one `[[...channels]]` entry — useful for pre-registering a roster incrementally as new channel IDs become known. `pincer.local.toml`'s `[identity]` section merges into `pincer.toml`'s per person, per field, appending new person keys and leaving unspecified fields inherited from the base entry — see [Local overrides — pincer.local.toml](../guides/mcp-guide.md#local-overrides--pincerlocaltoml) for the same merge pattern applied to `[[mcp.servers]]`. As with those entries, `channels` is replaced wholesale by an override rather than merged per-channel.
+The key sets the `pincer_user_id` used as the memory tag (e.g. `user:johndoe`), stable across DB rebuilds. Channel-specific identifiers (email addresses for Slack, phone numbers for WhatsApp, @usernames for Telegram) are resolved to internal IDs by each channel driver at startup before being stored. A person may have just one `[[...channels]]` entry — useful for pre-registering a roster incrementally as new channel IDs become known. `pincer.local.toml`'s `[identity]` section merges into `pincer.toml`'s per person, per field, appending new person keys and leaving unspecified fields inherited from the base entry — see [Local overrides — pincer.local.toml](../guides/mcp-guide.md#local-overrides--pincerlocaltoml) for the same merge pattern applied to `[[mcp.servers]]`. As with those entries, `channels` is replaced wholesale by an override rather than merged per-channel.
 
-`phones` lists the person's own numbers in E.164 (spaces, dashes and brackets are dropped). They are stored as **confirmed** phones of the identity: a voice call with one of these numbers — inbound or outbound — is that person's call, with every calendar tool and the standard `PINCER_APPROVAL_POLICY`, instead of a guest's (see [Voice calling](../core-components/voice-calling.md#registered-users-and-guests)). A number may belong to one person only; listing it twice is a startup error. A number removed from the config stops identifying its person at the next start. `/api/identity` returns each identity's `phones` as `[{"phone", "confirmed"}]`. `PINCER_IDENTITY_MAP` has no slot for phones.
+`phones` lists the person's own numbers in E.164 (spaces, dashes and brackets are dropped). They are stored as **confirmed** phones of the identity: a voice call with one of these numbers — inbound or outbound — is that person's call, with every calendar tool and the standard `PINCER_APPROVAL_POLICY`, instead of a guest's (see [Voice calling](../core-components/voice-calling.md#registered-users-and-guests)). A number may belong to one person only; listing it twice is a startup error. `/api/identity` returns each identity's `phones` as `[{"phone", "confirmed"}]`, along with `active` and `source`.
 
-**`PINCER_IDENTITY_MAP`, when set (non-empty), always fully overrides the TOML `[identity]` section** — the two are not merged; the TOML section is simply ignored while the env var is set.
+#### `PINCER_IDENTITY_MANAGEMENT`
+
+| Value | Adds new people | Updates fields / channels | Removes people missing from the TOML |
+|---|---|---|---|
+| `update` (default) | yes | yes, for the people the TOML lists | no |
+| `sync` | yes | yes | yes — the ones that came from the config (and auto `usr_` ones); identities made with the CLI are kept |
+| `clionly` | — the `[identity]` section is ignored (a warning is logged) | — | no |
+
+- Fields the TOML states overwrite the database; fields it leaves out keep what the database has.
+- In `update`, a channel removed from a person's list is unlinked from that person only; a WhatsApp LID learned at runtime is kept. A phone removed from a listed person stops identifying them at the next start.
+- A deactivated identity (`pincer identity deactivate`) stays off across restarts — seeding never switches it back on.
+
+!!! warning "`PINCER_IDENTITY_MAP` was removed"
+    The env-var string (`name@telegram:123=whatsapp:4912…`) is no longer read. `pincer run` refuses to start while it is set (in the environment or `.env`) and prints the equivalent `[identity.<name>]` TOML; `pincer doctor` reports it as critical. Move the printed TOML into `pincer.local.toml` and remove the variable. Unnamed entries come out as `person_1`, `person_2`, … — rename them.
 
 #### Guest access control
 
-Once an identity map (`PINCER_IDENTITY_MAP` or TOML `[identity]`) is configured, senders on Telegram, WhatsApp, and Signal whose `channel:user_id` is *not* in the map are treated as guests:
+The guest gate is on when the TOML `[identity]` section lists anyone, the database has an active identity (from the config or the CLI) with a channel, or `PINCER_IDENTITY_MANAGEMENT=clionly`. With it on, senders on Telegram, WhatsApp, and Signal who are not a known, active identity are treated as guests:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -455,9 +457,9 @@ Once an identity map (`PINCER_IDENTITY_MAP` or TOML `[identity]`) is configured,
 | `PINCER_WHATSAPP_GUESTS_ALLOWED` | `false` | Same, for WhatsApp DMs |
 | `PINCER_SIGNAL_GUESTS_ALLOWED` | `false` | Same, for Signal DMs |
 
-For Telegram and Signal, these flags are a no-op — everyone is allowed, matching today's default — if no identity map is configured at all for the deployment. WhatsApp group mentions behave the same way. WhatsApp DMs are the one exception: with no identity map configured, DMs are rejected by default regardless of `PINCER_WHATSAPP_GUESTS_ALLOWED` (matching the pre-#182 default of the removed `PINCER_WHATSAPP_DM_ALLOWLIST`, which rejected all DMs when empty) — set `PINCER_WHATSAPP_GUESTS_ALLOWED=true` to accept WhatsApp DMs from anyone even without a map. `pincer doctor` warns if a channel is configured (bot token set, or WhatsApp enabled without self-chat-only mode) but no identity map exists at all, since that means the channel has no access control whatsoever.
+For Telegram and Signal, these flags are a no-op — everyone is allowed — while the gate is off. WhatsApp group mentions behave the same way. WhatsApp DMs are the one exception: with the gate off, DMs are rejected by default regardless of `PINCER_WHATSAPP_GUESTS_ALLOWED` (matching the pre-#182 default of the removed `PINCER_WHATSAPP_DM_ALLOWLIST`, which rejected all DMs when empty) — set `PINCER_WHATSAPP_GUESTS_ALLOWED=true` to accept WhatsApp DMs from anyone. `pincer doctor` warns if a channel is configured (bot token set, or WhatsApp enabled without self-chat-only mode) but the gate is off, since that means the channel has no access control whatsoever.
 
-`PINCER_IDENTITY_MAP` + these flags are now the *only* access-control mechanism for Telegram, WhatsApp, and Signal — the older `PINCER_TELEGRAM_ALLOWED_USERS`, `PINCER_WHATSAPP_DM_ALLOWLIST`, and `PINCER_SIGNAL_ALLOWLIST` settings have been removed. Slack's equivalent (`PINCER_SLACK_USER_ALLOWLIST`) has also been removed — Slack access relies entirely on native workspace/app-install membership. Microsoft Teams keeps its own `PINCER_TEAMS_USER_ALLOWLIST`, unaffected by this change.
+Identities + these flags are now the *only* access-control mechanism for Telegram, WhatsApp, and Signal — the older `PINCER_TELEGRAM_ALLOWED_USERS`, `PINCER_WHATSAPP_DM_ALLOWLIST`, and `PINCER_SIGNAL_ALLOWLIST` settings have been removed. Slack's equivalent (`PINCER_SLACK_USER_ALLOWLIST`) has also been removed — Slack access relies entirely on native workspace/app-install membership. Microsoft Teams keeps its own `PINCER_TEAMS_USER_ALLOWLIST`, unaffected by this change.
 
 ## API Endpoints
 

@@ -393,7 +393,7 @@ def test_doctor_warns_when_no_identity_has_phones(tmp_path):
     from pincer.security.doctor import CheckStatus
 
     doc = _doctor(tmp_path)
-    voice = _settings(voice_enabled=True, identity_map="")
+    voice = _settings(voice_enabled=True, identity_management="update")
     assert doc._check_voice_registered_phones(_settings(voice_enabled=False)).status == CheckStatus.SKIPPED
     assert doc._check_voice_registered_phones(voice).status == CheckStatus.WARNING
     (tmp_path / "pincer.toml").write_text(

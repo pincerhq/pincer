@@ -34,7 +34,7 @@ from pincer.repositories.identity import (
     IdentityProfileRepository,
 )
 from pincer.security import credentials as creds
-from pincer.services.base import DatabaseService
+from pincer.services.base import DatabaseService, query_sync
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -194,6 +194,20 @@ class AuthService(DatabaseService):
             )
         return self._pair(pincer_user_id, token_version, session_id, refresh_jti)
 
+    @staticmethod
+    async def _is_active(session: Any, pincer_user_id: str) -> bool:
+        """False for a deactivated identity (or one with no profile left)."""
+        profile = await IdentityProfileRepository(session).get(pincer_user_id)
+        return profile is not None and bool(profile.active)
+
+    async def _ensure_active(self, session: Any, pincer_user_id: str, error: type[AuthError]) -> None:
+        """Refuse a deactivated identity, inside the caller's unit of work.
+
+        Deactivating keeps the credentials, so every way in checks this.
+        """
+        if not await self._is_active(session, pincer_user_id):
+            raise error
+
     async def _credential(self, pincer_user_id: str) -> IdentityCredential | None:
         async with session_scope(self._url) as session:
             return await IdentityCredentialRepository(session).get(pincer_user_id)
@@ -245,6 +259,9 @@ class AuthService(DatabaseService):
             raise InvalidCredentialsError
         if not await creds.verify_password(row.password_hash, password):
             raise InvalidCredentialsError
+        async with session_scope(self._url) as session:
+            # After the hashing, so the timing does not tell a deactivated identity apart.
+            await self._ensure_active(session, row.pincer_user_id, InvalidCredentialsError)
 
         if creds.needs_rehash(row.password_hash):
             # The parameters were raised since this hash was made; the clear
@@ -299,6 +316,7 @@ class AuthService(DatabaseService):
         now, new_jti = time.time(), creds.new_token_id()
         current_jti: str | None = None
         async with session_scope(self._url) as session:
+            await self._ensure_active(session, credential.pincer_user_id, InvalidTokenError)
             sessions = AuthSessionRepository(session)
             row = await self._live_session(sessions, claims)
             if claims.jti is not None and claims.jti == row.refresh_jti:
@@ -336,14 +354,16 @@ class AuthService(DatabaseService):
         if creds.looks_like_api_key(value):
             async with session_scope(self._url) as session:
                 row = await IdentityCredentialRepository(session).by_api_key_hash(creds.hash_api_key(value))
-            if row is None:
-                raise InvalidTokenError
+                if row is None:
+                    raise InvalidTokenError
+                await self._ensure_active(session, row.pincer_user_id, InvalidTokenError)
             return AuthIdentity(row.pincer_user_id, "api_key")
         claims = self._decode(value, "access")
         async with session_scope(self._url) as session:
             credential = await IdentityCredentialRepository(session).get(claims.sub)
             if credential is None or credential.token_version != claims.ver:
                 raise TokenStaleError
+            await self._ensure_active(session, credential.pincer_user_id, InvalidTokenError)
             live = await self._live_session(AuthSessionRepository(session), claims)
         return AuthIdentity(credential.pincer_user_id, "jwt", session_id=live.id)
 
@@ -449,6 +469,7 @@ class AuthService(DatabaseService):
             raise InvalidTokenError
         row = await self._current(claims)
         async with session_scope(self._url) as session:
+            await self._ensure_active(session, row.pincer_user_id, InvalidTokenError)
             # Signing out kills the tickets the session still has outstanding.
             live = await self._live_session(AuthSessionRepository(session), claims)
         self._spend_ticket(claims.jti, claims.exp)
@@ -487,36 +508,8 @@ class AuthService(DatabaseService):
 
 def count_identities_with_credentials(db_path: Path) -> int | None:
     """How many identities can sign in, for the synchronous health checks
-    (`pincer doctor`, the pilot preflight). None when there is no database yet.
-
-    Those checks also run inside a running loop (`GET /api/doctor`), where
-    `asyncio.run` refuses to start, so the query gets a loop of its own on a
-    worker thread there.
-    """
-    import asyncio
-    import concurrent.futures
-
-    from pincer.db.engine import _database_file, dispose_engines, get_sync_url
-
-    # Opening a SQLite file that isn't there creates it; a fresh install has
-    # no identities, so don't leave an empty database behind.
-    database = _database_file(get_sync_url(db_path))
-    if database is not None and not database.exists():
-        return None
-
-    async def count() -> int:
-        try:
-            async with session_scope(get_database_url(db_path)) as session:
-                return await IdentityCredentialRepository(session).count_usable()
-        finally:
-            await dispose_engines()
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(count())
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, count()).result()
+    (`pincer doctor`, the pilot preflight). None when there is no database yet."""
+    return query_sync(db_path, lambda session: IdentityCredentialRepository(session).count_usable())
 
 
 @lru_cache(maxsize=8)

@@ -83,8 +83,8 @@ agent calls `schedule_create(name="daily-digest", prompt="...", cron_expr="0 8 *
   user as a cost/abuse guard.
 - **Identity resolution.** `schedule_create` rejects creation up front if the
   caller's `pincer_user_id` looks like `IdentityMiddleware`'s synthetic
-  fallback ID (`"{channel}:{native_id}"`, handed out when `PINCER_IDENTITY_MAP`
-  is configured but the sender isn't listed in it). That fallback is never
+  fallback ID (`"{channel}:{native_id}"`, handed out when the guest gate is on
+  but the sender isn't a known, active identity). That fallback is never
   persisted to the identity tables, so a schedule stored under it could never
   be delivered later — better to fail at creation time than fail silently at
   fire time.

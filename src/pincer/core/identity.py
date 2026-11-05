@@ -7,40 +7,28 @@ all channels.
 
 Schema
 ------
-identity_profiles     — one row per pincer user (preferred channel, display name)
+identity_profiles  — one row per pincer user (preferred channel, display name,
+                     `active`, `source`)
 channel_identities — many-to-many: (channel, channel_user_id) → pincer_user_id
 
-Config mapping (.env)
----------------------
-Named canonical ID (recommended — human-readable, stable across environments):
-    PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890
+Where identities come from
+--------------------------
+- The `[identity]` section of pincer.toml / pincer.local.toml (see
+  `pincer.config.identity` for the schema). Each `[identity.<key>]` names one
+  person; `<key>` is the pincer_user_id. How the section is applied at start
+  is `PINCER_IDENTITY_MANAGEMENT` (`sync`, `update`, `clionly`); see
+  `seed_from_config` and `cleanup`.
+- `pincer identity …`, in every mode.
+- `resolve()`, which makes an auto `usr_…` identity for an unknown sender when
+  the guest gate is off.
 
-Auto-generated hash ID (backward-compatible, opaque):
-    PINCER_IDENTITY_MAP=telegram:johnDoe=whatsapp:491234567890
+A deactivated identity (`active` false) is not recognised anywhere: its
+channel ids and phones identify nobody, so its senders are guests. Every
+lookup reads the database, so (de)activating takes effect in a running app.
 
-Single channel — no linking needed, just registers one identity explicitly
-(useful to name/allowlist a user without requiring a second channel):
-    PINCER_IDENTITY_MAP=john@telegram:johnDoe
-
-Multiple channels per identity and multiple identities separated by commas:
-    PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890,jane@telegram:janeAustin=whatsapp:491111111111
-
-The optional name prefix sets the pincer_user_id directly (e.g. "user:john" in
-memory tags) instead of the auto-generated "user:usr_abc123..." hash.
-Memory stored under a named ID is portable across DB rebuilds as long as the
-config entry stays the same.
-
-Config mapping (pincer.toml / pincer.local.toml)
--------------------------------------------------
-For rosters too large to comfortably manage as one PINCER_IDENTITY_MAP
-string, the same mapping can be expressed as a `[identity]` TOML section
-instead — see `pincer.config.identity` for the schema. PINCER_IDENTITY_MAP,
-when set, always takes full precedence over the TOML section (no merging
-between the two). `pincer.config.identity.resolve_identity_map_config`
-converts TOML entries into two things: this module's own string grammar
-(channel-linking, same as PINCER_IDENTITY_MAP) and a `pincer_user_id ->
-IdentityProfile` dict for the fields that string grammar has no room for
-(display_name, preferred_channel, email, timezone) — see `IdentityProfile`.
+The guest gate (`gated`) is on when the mode is `clionly`, the TOML lists
+anyone, or the database has an active configured or hand-made identity with
+a channel.
 """
 
 from __future__ import annotations
@@ -49,17 +37,20 @@ import asyncio
 import dataclasses
 import hashlib
 import logging
-from dataclasses import dataclass
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import ChannelType
 from pincer.db.engine import get_database_url
-from pincer.services.identity import IdentityService, SeedEntry
+from pincer.services.identity import SOURCE_CONFIG, IdentityService, SeedEntry
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pincer.channels.base import BaseChannel
+    from pincer.config.identity import IdentityTomlEntry
 
 logger = logging.getLogger(__name__)
 
@@ -69,41 +60,32 @@ RESERVED_IDENTITY_NAMES = frozenset({"me"})
 # Channels whose IDs are phone numbers — leading "+" is stripped for storage
 _PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
 
-_CHANNEL_VALUES = frozenset(c.value for c in ChannelType)
-
-
-@dataclass(frozen=True)
-class IdentityProfile:
-    """Optional profile fields sourced from the [identity] TOML section (see
-    `pincer.config.identity`) — PINCER_IDENTITY_MAP's string grammar has no
-    field for any of these, so entries seeded from the env var never get a
-    profile and these all stay unset. All fields are optional; a profile
-    with everything None is valid (e.g. a TOML person entry that only sets
-    channels).
-    """
-
-    display_name: str | None = None
-    preferred_channel: str | None = None
-    email: str | None = None
-    timezone: str | None = None
-    # `+E.164` numbers, stored as confirmed phones of the identity.
-    phones: tuple[str, ...] = ()
+# A resolved config pair: (channel value, channel type, normalized internal id).
+_Pair = tuple[str, ChannelType, str]
 
 
 class IdentityResolver:
-    """Resolves channel-specific user IDs to a unified Pincer user ID."""
+    """Resolves channel-specific user IDs to a unified Pincer user ID.
+
+    `entries` are the `[identity]` TOML people (`pincer.config.identity.
+    load_identity_map`), already empty in `clionly`; `mode` is
+    `PINCER_IDENTITY_MANAGEMENT`.
+    """
 
     def __init__(
         self,
         db_path: Path,
-        identity_map_config: str = "",
-        profiles: dict[str, IdentityProfile] | None = None,
+        entries: Mapping[str, IdentityTomlEntry] | None = None,
+        mode: str = "update",
     ) -> None:
         self._db_path = str(db_path)
-        self._identity_map_config = identity_map_config
-        self._profiles = profiles or {}
+        self._entries: dict[str, IdentityTomlEntry] = dict(entries or {})
+        self._mode = mode
         self._seeded = asyncio.Event()
         self._service: IdentityService | None = None
+        # Whether the database holds a roster (see `gated`), and when it was last asked.
+        self._roster = False
+        self._roster_checked: float | None = None
 
     # Bounded wait for mark_seeding_complete() in is_guest(), so a future
     # caller of rebuild_identity_map() that doesn't guarantee it eventually
@@ -111,9 +93,41 @@ class IdentityResolver:
     # this long instead of forever. Generous vs. the observed ~1-3s startup gap.
     _SEEDING_WAIT_TIMEOUT = 30.0
 
+    # How long `gated` trusts its last look at the database. Short, so the
+    # first `pincer identity create … --channel` closes the gate in a running
+    # app within seconds; long enough that a busy channel does not ask per message.
+    _ROSTER_TTL = 5.0
+
     @property
-    def has_config(self) -> bool:
-        return bool(self._identity_map_config)
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def entries(self) -> Mapping[str, IdentityTomlEntry]:
+        return self._entries
+
+    async def gated(self) -> bool:
+        """True when unknown senders are guests (the guest gate is on).
+
+        That is when the mode is `clionly`, the TOML lists anyone, or the
+        database has an active configured or hand-made identity with a
+        channel — so a roster kept only in the database still gates.
+        """
+        if self._mode == "clionly" or self._entries:
+            return True
+        now = time.monotonic()
+        if self._roster_checked is None or now - self._roster_checked >= self._ROSTER_TTL:
+            await self.refresh_gate()
+        return self._roster
+
+    async def refresh_gate(self) -> None:
+        """Ask the database again whether it holds a roster (see `gated`)."""
+        try:
+            self._roster = await self._store.has_roster()
+        except Exception:
+            # No identity tables yet: nothing to gate on. Keep what was known.
+            logger.debug("Identity roster check failed", exc_info=True)
+        self._roster_checked = time.monotonic()
 
     def mark_seeding_complete(self) -> None:
         """Signal that startup identity-map seeding (see seed_from_config) has finished.
@@ -150,8 +164,8 @@ class IdentityResolver:
     ) -> str | None:
         """Look up an existing identity without creating one.
 
-        Returns the pincer_user_id if found via DB or config mapping, else None.
-        Unlike resolve(), this never writes to the database.
+        Returns the pincer_user_id if found via DB or config mapping, else
+        None. A deactivated identity is never found.
         """
         normalized = self._normalize_id(channel, channel_user_id)
         existing = await self._find_existing(channel, normalized)
@@ -160,15 +174,15 @@ class IdentityResolver:
         return await self._check_config_mapping(channel, normalized)
 
     async def is_guest(self, channel: ChannelType, channel_user_id: str | int) -> bool:
-        """True if an identity map is configured and this sender is not in it.
+        """True if the guest gate is on (see `gated`) and this sender is not a known, active identity.
 
-        No-op (always False) when no identity map is configured for the deployment.
+        No-op (always False) when the gate is off.
         Blocks until startup seeding completes (see mark_seeding_complete) before
         evaluating, so a message arriving before seeding finishes is held rather
         than treated as trusted. Falls open after _SEEDING_WAIT_TIMEOUT if seeding
         never completes, so a stuck caller doesn't hang a channel handler forever.
         """
-        if not self.has_config:
+        if not await self.gated():
             return False
         if not await self._wait_for_seeding():
             return False
@@ -198,13 +212,19 @@ class IdentityResolver:
 
         Lookup order:
         1. Existing mapping in channel_identities
-        2. Pre-configured cross-channel link from PINCER_IDENTITY_MAP
+        2. Pre-configured cross-channel link from the [identity] TOML
         3. Create new identity
+
+        A channel id that belongs to a deactivated identity resolves to the
+        channel-scoped id (`telegram:123`), the same as an unknown sender
+        behind the guest gate, and nothing is created or linked for it.
         """
         normalized = self._normalize_id(channel, channel_user_id)
         existing = await self._find_existing(channel, normalized)
         if existing:
             return existing
+        if await self._store.owner_any(channel.value, normalized) is not None:
+            return f"{channel.value}:{normalized}"
 
         mapped = await self._check_config_mapping(channel, normalized)
         if mapped:
@@ -222,7 +242,7 @@ class IdentityResolver:
     ) -> None:
         """Link channel_user_id to an existing pincer_user_id if not already linked."""
         normalized = self._normalize_id(channel, channel_user_id)
-        if not await self._find_existing(channel, normalized):
+        if await self._store.owner_any(channel.value, normalized) is None:
             await self._link_channel(pincer_user_id, channel, normalized)
 
     async def promote_channel_id(
@@ -246,7 +266,7 @@ class IdentityResolver:
         Waits for startup seeding first, like `is_guest`: the placeholder may
         not be stored yet, so a timeout raises rather than finding nothing.
         """
-        if self.has_config and not await self._wait_for_seeding():
+        if await self.gated() and not await self._wait_for_seeding():
             raise TimeoutError("identity seeding not complete")
         real = self._normalize_id(channel, real_id)
         real_owner = await self._find_existing(channel, real)
@@ -297,7 +317,19 @@ class IdentityResolver:
         return owner
 
     async def _find_existing(self, channel: ChannelType, normalized_id: str) -> str | None:
+        """The active identity this id is linked to."""
         return await self._store.user_for_channel(channel.value, normalized_id)
+
+    async def _find_owner(self, channel: ChannelType, normalized_id: str) -> str | None:
+        """The identity this id is linked to, active or not — for seeding and
+        cleanup, which must not take a deactivated person's link for a free one."""
+        owner = await self._store.owner_any(channel.value, normalized_id)
+        return owner[0] if owner else None
+
+    async def is_active(self, pincer_user_id: str) -> bool:
+        """True for an existing identity that is not deactivated."""
+        profile = await self._store.profile(pincer_user_id)
+        return bool(profile and profile.get("active"))
 
     async def _create_identity(
         self,
@@ -305,12 +337,14 @@ class IdentityResolver:
         channel: ChannelType,
         normalized_id: str,
         display_name: str | None = None,
+        source: str | None = None,
     ) -> None:
         await self._store.create_identity(
             pincer_user_id,
             channel=channel.value,
             channel_user_id=normalized_id,
             display_name=display_name,
+            source=source,
         )
         logger.info("Identity created: %s (%s:%s)", pincer_user_id, channel.value, normalized_id)
 
@@ -334,40 +368,43 @@ class IdentityResolver:
         )
 
     async def _check_config_mapping(self, channel: ChannelType, normalized_id: str) -> str | None:
-        """Check PINCER_IDENTITY_MAP for a pre-configured identity or cross-channel link."""
-        if not self._identity_map_config:
+        """Check the [identity] TOML for a pre-configured identity or cross-channel link.
+
+        Nothing is linked or created for a deactivated person: when the id,
+        the entry's name or another of its channels belongs to one, the
+        sender stays unknown.
+        """
+        if not self._entries:
+            return None
+        current = (channel.value, normalized_id)
+        if await self._store.owner_any(*current) is not None:
+            # Linked, but not to an active identity (that one `_find_existing` found).
             return None
 
-        current_key = f"{channel.value}:{normalized_id}"
-
-        for raw_entry in self._identity_map_config.split(","):
-            if ":" not in raw_entry:
+        for name, entry in self._entries.items():
+            norm_pairs = [(ch, self._normalize_id(ch, cid)) for ch, cid in entry.channels]
+            if current not in norm_pairs:
                 continue
-            try:
-                name, pairs = self._parse_mapping(raw_entry)
-            except ValueError:
-                continue
-
-            norm_pairs = [(ch, self._normalize_id(ChannelType(ch), cid)) for ch, cid in pairs]
-
-            # Check if the incoming channel:id is in this entry
-            entry_keys = {f"{ch}:{cid}" for ch, cid in norm_pairs}
-            if current_key not in entry_keys:
-                continue
+            profile = await self._store.profile(name)
+            if profile is not None and not profile.get("active"):
+                return None
 
             # Look for an existing identity among the other channels in this entry
             for ch, cid in norm_pairs:
-                if f"{ch}:{cid}" == current_key:
+                if (ch, cid) == current:
                     continue
-                uid = await self._find_existing(ChannelType(ch), cid)
-                if uid:
-                    await self._link_channel(uid, channel, normalized_id)
-                    return uid
+                owner = await self._store.owner_any(ch, cid)
+                if owner is None:
+                    continue
+                uid, active = owner
+                if not active:
+                    return None
+                await self._link_channel(uid, channel, normalized_id)
+                return uid
 
-            # No other side exists yet — establish a named identity now if configured
-            if name:
-                await self._create_identity(name, channel, normalized_id)
-                return name
+            # No other side exists yet — establish the named identity now
+            await self._create_identity(name, channel, normalized_id, source=SOURCE_CONFIG)
+            return name
 
         return None
 
@@ -410,11 +447,11 @@ class IdentityResolver:
 
     async def _resolve_entry(
         self,
-        raw_entry: str,
+        name: str,
         pairs: list[tuple[str, str]],
         channels: dict[ChannelType, BaseChannel] | None,
         resolved_from: dict[tuple[str, str], str],
-    ) -> tuple[list[tuple[str, ChannelType, str]], list[tuple[str, str]]]:
+    ) -> tuple[list[_Pair], list[tuple[str, str]]]:
         """Resolve an entry's config IDs to internal IDs (phone → LID, etc.).
 
         Returns (resolved pairs, unresolved (channel, config ID) pairs). A
@@ -425,13 +462,13 @@ class IdentityResolver:
         same account, so it counts as shared. `resolved_from` maps each
         resolved pair to the config ID that claimed it, across entries.
         """
-        resolved: list[tuple[str, ChannelType, str]] = []
+        resolved: list[_Pair] = []
         unresolved: list[tuple[str, str]] = []
         for ch_str, cid in pairs:
             try:
                 ch_type = ChannelType(ch_str)
             except ValueError:
-                logger.warning("Unknown channel %r in identity map entry %r", ch_str, raw_entry.strip())
+                logger.warning("Unknown channel %r in identity.%s", ch_str, name)
                 continue
             config_id = self._normalize_id(ch_type, cid)
             norm = config_id
@@ -458,10 +495,7 @@ class IdentityResolver:
             resolved.append((ch_str, ch_type, norm))
         return resolved, unresolved
 
-    async def _rename_targets(
-        self,
-        resolved_entries: list[tuple[str | None, list[tuple[str, ChannelType, str]]]],
-    ) -> set[str]:
+    async def _rename_targets(self, resolved_entries: list[tuple[str, list[_Pair]]]) -> set[str]:
         """Named identities a renamed config entry may keep seeding into.
 
         That is a stored named identity whose name the config no longer
@@ -469,12 +503,12 @@ class IdentityResolver:
         the same old identity cannot both be its rename, and picking one
         would fold the other person into it.
         """
-        configured_names = {name for name, _ in resolved_entries if name}
+        configured_names = {name for name, _ in resolved_entries}
         touched_by: dict[str, int] = {}
         for _name, resolved in resolved_entries:
             owners: set[str] = set()
             for _ch_str, ch_type, norm in resolved:
-                uid = await self._find_existing(ch_type, norm)
+                uid = await self._find_owner(ch_type, norm)
                 if uid and not uid.startswith("usr_") and uid not in configured_names:
                     owners.add(uid)
             for uid in owners:
@@ -483,40 +517,37 @@ class IdentityResolver:
 
     async def _entry_owners(
         self,
-        name: str | None,
-        resolved: list[tuple[str, ChannelType, str]],
+        name: str,
+        resolved: list[_Pair],
         pending: dict[tuple[str, str], str],
         rename_targets: set[str],
-    ) -> tuple[list[tuple[tuple[str, ChannelType, str], str | None]], str | None]:
+    ) -> tuple[list[tuple[_Pair, str | None]], str]:
         """Each resolved pair with its current owner, and the entry's keeper.
 
         The keeper is the one named identity the entry seeds into: its own
         name; or, when the name owns none of the pairs and they all belong to
         one named identity in `rename_targets`, that identity (a rename keeps
-        the existing identity, as it always has); or, for an unnamed entry,
-        the first named owner.
+        the existing identity, as it always has).
         """
-        owned: list[tuple[tuple[str, ChannelType, str], str | None]] = []
+        owned: list[tuple[_Pair, str | None]] = []
         for pair in resolved:
             _ch_str, ch_type, norm = pair
-            uid = await self._find_existing(ch_type, norm) or pending.get((ch_type.value, norm))
+            uid = await self._find_owner(ch_type, norm) or pending.get((ch_type.value, norm))
             owned.append((pair, uid))
         named = list(dict.fromkeys(uid for _, uid in owned if uid and not uid.startswith("usr_")))
 
         keeper = name
-        if (not name and named) or (
-            name and len(named) == 1 and named[0] in rename_targets and await self._store.profile(name) is None
-        ):
+        if len(named) == 1 and named[0] in rename_targets and await self._store.profile(name) is None:
             keeper = named[0]
         return owned, keeper
 
     async def _claim_pairs(
         self,
-        name: str | None,
-        resolved: list[tuple[str, ChannelType, str]],
+        name: str,
+        resolved: list[_Pair],
         pending: dict[tuple[str, str], str],
         rename_targets: set[str],
-    ) -> tuple[list[tuple[str, ChannelType, str]], str | None, list[str]]:
+    ) -> tuple[list[_Pair], str, list[str]]:
         """Decide which identity an entry seeds into and which pairs it keeps.
 
         Returns (kept pairs, keeper, existing owners of the kept pairs); see
@@ -526,12 +557,11 @@ class IdentityResolver:
         kept and merged.
         """
         owned, keeper = await self._entry_owners(name, resolved, pending, rename_targets)
-        if name and keeper != name:
+        if keeper != name:
             logger.warning("Named canonical ID %r ignored: identity already has name %r", name, keeper)
 
-        kept: list[tuple[str, ChannelType, str]] = []
+        kept: list[_Pair] = []
         existing_uids: list[str] = []
-        joined = False
         for pair, uid in owned:
             ch_str, _ch_type, norm = pair
             if uid and not uid.startswith("usr_") and uid != keeper:
@@ -545,69 +575,48 @@ class IdentityResolver:
                 )
                 continue
             kept.append(pair)
-            joined = joined or uid != keeper
             if uid and uid not in existing_uids:
                 existing_uids.append(uid)
-        if not name and keeper and joined:
-            # Only a shared pair ties this entry to the keeper; a wrong lookup
-            # landing on a pair the keeper lists looks the same, so say so.
-            logger.warning(
-                "Identity map: unnamed entry %s joins %r through a pair they share — "
-                "give the entry a name if this is a different person",
-                "=".join(f"{ch_str}:{norm}" for ch_str, _ch_type, norm in kept),
-                keeper,
-            )
         return kept, keeper, existing_uids
+
+    async def _resolved_entries(
+        self, channels: dict[ChannelType, BaseChannel] | None
+    ) -> list[tuple[str, list[_Pair], list[tuple[str, str]]]]:
+        """Every entry as (name, resolved pairs, unresolved pairs); see `_resolve_entry`."""
+        resolved_from: dict[tuple[str, str], str] = {}
+        entries: list[tuple[str, list[_Pair], list[tuple[str, str]]]] = []
+        for name, entry in self._entries.items():
+            resolved, unresolved = await self._resolve_entry(name, list(entry.channels), channels, resolved_from)
+            entries.append((name, resolved, unresolved))
+        return entries
 
     async def cleanup(
         self,
         channels: dict[ChannelType, BaseChannel] | None = None,
     ) -> None:
-        """Remove stale rows from the identity tables.
+        """Remove the links and identities the TOML no longer has, as the mode says.
 
-        If PINCER_IDENTITY_MAP is configured, the resolved internal IDs for
-        every channel pair are the authoritative whitelist. Any
-        channel_identities row whose (channel, channel_user_id) is NOT in the
-        whitelist is deleted, and any identity_profiles row left with no channels is
-        deleted with it. Passing ``channels`` allows config IDs to be translated
-        to real internal IDs before the whitelist is built, the same way
-        seed_from_config does (see `_resolve_entry`).
+        The resolved internal IDs of every TOML channel pair form a
+        whitelist. Passing ``channels`` translates config IDs to real
+        internal IDs first, the same way seed_from_config does (see
+        `_resolve_entry`); a pair whose lookup fails is filled in by
+        `_unresolved_keep`.
 
-        When no config is set the method is a no-op (nothing to enforce), and
-        so it is when any entry does not parse or names an unknown channel: a
-        whitelist with a hole in it must not be enforced. A pair whose lookup fails is a smaller hole,
-        filled by `_unresolved_keep`.
+        - `sync`: a link outside the whitelist is removed when its owner came
+          from the config or is an auto `usr_` identity, and such identities
+          left with no channel are deleted. Identities made with the CLI keep
+          everything.
+        - `update`: only the TOML-listed identities lose the links the TOML
+          no longer gives them. Nobody else is touched, and nobody is deleted.
+        - `clionly`, or no entries: nothing to enforce.
 
         Phones are not handled here but by `cleanup_phones`, which startup
         runs on its own so a failure in seeding or here cannot skip it.
         """
-        if not self._identity_map_config:
+        if self._mode == "clionly" or not self._entries:
             return
 
-        parsed: list[tuple[str, str | None, list[tuple[str, str]]]] = []
-        for raw_entry in self._identity_map_config.split(","):
-            if not raw_entry.strip():
-                continue
-            try:
-                name, pairs = self._parse_mapping(raw_entry)
-            except ValueError as e:
-                # Its channels are unknown, so the whitelist is incomplete:
-                # pruning against it would delete the very identity the
-                # entry was meant to keep.
-                logger.error("Identity map entry %r is invalid (%s) — skipping cleanup", raw_entry.strip(), e)
-                return
-            if any(ch not in _CHANNEL_VALUES for ch, _cid in pairs):
-                # Likely a typo for a real channel (`WhatsApp:4911`): the pair's
-                # stored link would be pruned, and with it a one-channel identity.
-                logger.error("Identity map entry %r names an unknown channel — skipping cleanup", raw_entry.strip())
-                return
-            parsed.append((raw_entry, name, pairs))
-
-        resolved_from: dict[tuple[str, str], str] = {}
-        entries: list[tuple[str | None, list[tuple[str, ChannelType, str]], list[tuple[str, str]]]] = []
-        for raw_entry, name, pairs in parsed:
-            resolved, unresolved = await self._resolve_entry(raw_entry, pairs, channels, resolved_from)
-            entries.append((name, resolved, unresolved))
+        entries = await self._resolved_entries(channels)
         allowed = {(ch_str, norm) for _name, resolved, _unresolved in entries for ch_str, _ch_type, norm in resolved}
         if any(unresolved for _name, _resolved, unresolved in entries):
             allowed |= await self._unresolved_keep(entries)
@@ -620,7 +629,8 @@ class IdentityResolver:
             return
 
         try:
-            unlisted, channelless = await self._store.prune(allowed)
+            listed = None if self._mode == "sync" else await self._listed_identities(entries)
+            unlisted, channelless = await self._store.prune(allowed, listed=listed)
         except Exception:
             # A database without the identity tables has nothing to clean.
             logger.debug("Identity cleanup skipped: tables unavailable", exc_info=True)
@@ -628,21 +638,37 @@ class IdentityResolver:
 
         if unlisted or channelless:
             logger.info(
-                "Identity cleanup: removed %d unlisted channel link(s), %d channelless identity/identities",
+                "Identity cleanup (%s): removed %d unlisted channel link(s), %d channelless identity/identities",
+                self._mode,
                 unlisted,
                 channelless,
             )
 
+    async def _listed_identities(self, entries: list[tuple[str, list[_Pair], list[tuple[str, str]]]]) -> set[str]:
+        """The identities the TOML lists: each entry's keeper (see `_entry_owners`)."""
+        rename_targets = await self._rename_targets([(name, resolved) for name, resolved, _ in entries])
+        listed: set[str] = set()
+        for name, resolved, _unresolved in entries:
+            _owned, keeper = await self._entry_owners(name, resolved, {}, rename_targets)
+            listed.add(keeper)
+        return listed
+
     async def cleanup_phones(self) -> None:
         """Remove the phones the config once listed and no longer does.
+
+        `sync` drops every config-sourced number the TOML does not list;
+        `update` only those of the people it lists; `clionly` none.
 
         A number that leaves the config must stop identifying its old owner on
         a call, whatever else fails at startup, so this never raises. The
         configured numbers are known without resolving any channel.
         """
-        keep = {phone for profile in self._profiles.values() for phone in profile.phones}
+        if self._mode == "clionly":
+            return
+        keep = {phone for entry in self._entries.values() for phone in entry.phones}
+        owners = None if self._mode == "sync" else set(self._entries)
         try:
-            removed = await self._store.prune_config_phones(keep)
+            removed = await self._store.prune_config_phones(keep, owners=owners)
         except Exception:
             logger.debug("Identity phone cleanup skipped: table unavailable", exc_info=True)
             return
@@ -651,7 +677,7 @@ class IdentityResolver:
 
     async def _unresolved_keep(
         self,
-        entries: list[tuple[str | None, list[tuple[str, ChannelType, str]], list[tuple[str, str]]]],
+        entries: list[tuple[str, list[_Pair], list[tuple[str, str]]]],
     ) -> set[tuple[str, str]]:
         """Stored pairs cleanup must keep for the entries' unresolved pairs.
 
@@ -670,10 +696,10 @@ class IdentityResolver:
         identities: list[set[str]] = []
         for name, resolved, _unresolved in entries:
             owned, keeper = await self._entry_owners(name, resolved, {}, rename_targets)
-            identity = {keeper} if keeper else set()
+            identity = {keeper}
             identity.update(uid for _pair, uid in owned if uid and uid.startswith("usr_"))
             identities.append(identity)
-        configured = {name for name, _resolved, _unresolved in entries if name}.union(*identities)
+        configured = {name for name, _resolved, _unresolved in entries}.union(*identities)
 
         keep: set[tuple[str, str]] = set()
         for (_name, _resolved, unresolved), identity in zip(entries, identities, strict=True):
@@ -711,25 +737,26 @@ class IdentityResolver:
         self,
         channels: dict[ChannelType, BaseChannel] | None = None,
     ) -> None:
-        """Pre-create identity rows from PINCER_IDENTITY_MAP on startup.
+        """Pre-create identity rows from the [identity] TOML on startup.
 
-        Each config entry may contain N channel:id pairs separated by '='.
-        All pairs in one entry share a single pincer_user_id. Passing
-        ``channels`` causes each config ID to be translated to the channel's
-        real internal ID (e.g. WhatsApp phone → LID, Telegram @username →
-        numeric user_id) before being stored.
+        Each entry's channel pairs share one pincer_user_id, its name.
+        Passing ``channels`` causes each config ID to be translated to the
+        channel's real internal ID (e.g. WhatsApp phone → LID, Telegram
+        @username → numeric user_id) before being stored.
+
+        In `sync` and `update` alike, the profile fields the TOML states
+        overwrite the database and the ones it leaves out are kept; an
+        existing identity keeps its `active` flag (see `IdentityService.seed`).
+        In `clionly` there are no entries, so nothing happens.
         """
-        if not self._identity_map_config:
+        if not self._entries:
             return
 
         entries: list[SeedEntry] = []
         # Every link is written in one transaction after the loop, so an entry
         # cannot find the pairs an earlier entry claimed in the database; it
-        # finds them here instead, or one person sharing a channel pair across
-        # two entries would be split into two identities.
+        # finds them here instead.
         pending: dict[tuple[str, str], str] = {}
-        # Resolved pair → the config ID it came from (see _resolve_entry).
-        resolved_from: dict[tuple[str, str], str] = {}
 
         async def rename(old_uid: str, new_uid: str) -> None:
             await self._rename_identity(old_uid, new_uid)
@@ -741,27 +768,14 @@ class IdentityResolver:
                 for entry in entries
             ]
 
-        parsed: list[tuple[str, str | None, list[tuple[str, str]]]] = []
-        for raw_entry in self._identity_map_config.split(","):
-            if ":" not in raw_entry:
-                continue
-            try:
-                name, pairs = self._parse_mapping(raw_entry)
-            except ValueError:
-                logger.warning("Invalid identity map entry: %r", raw_entry.strip())
-                continue
-            parsed.append((raw_entry, name, pairs))
-        resolved_entries = [
-            (name, (await self._resolve_entry(raw_entry, pairs, channels, resolved_from))[0])
-            for raw_entry, name, pairs in parsed
-        ]
+        resolved_entries = [(name, resolved) for name, resolved, _ in await self._resolved_entries(channels)]
         rename_targets = await self._rename_targets(resolved_entries)
 
         for name, resolved in resolved_entries:
+            config = self._entries[name]
             resolved, keeper, existing_uids = await self._claim_pairs(name, resolved, pending, rename_targets)
             if not resolved:
-                skipped = self._profiles.get(name or "")
-                if skipped is not None and skipped.phones:
+                if config.phones:
                     logger.warning(
                         "Identity %s: no channel resolved, so its phone(s) are not stored yet — "
                         "calls from or to them count as guests until a restart where a channel resolves",
@@ -769,47 +783,34 @@ class IdentityResolver:
                     )
                 continue
 
-            # Determine or create the canonical pincer_user_id. Every existing
-            # identity but the keeper is unnamed (see _claim_pairs) and is
-            # renamed/merged into it.
-            if existing_uids:
-                pincer_uid = keeper or existing_uids[0]
-                for uid in existing_uids:
-                    if uid != pincer_uid:
-                        if len(existing_uids) > 1:
-                            logger.info("Identity conflict resolved: merging %s into %s", uid, pincer_uid)
-                        await rename(uid, pincer_uid)
-            elif keeper:
-                pincer_uid = keeper
-            else:
-                _first_ch_str, first_ch_type, first_norm = resolved[0]
-                pincer_uid = self._generate_user_id(first_ch_type, first_norm)
+            # Every existing identity but the keeper is unnamed (see
+            # _claim_pairs) and is merged into it. A renamed entry seeds into
+            # the old identity, configured under the new name.
+            for uid in existing_uids:
+                if uid != keeper:
+                    logger.info("Identity conflict resolved: merging %s into %s", uid, keeper)
+                    await rename(uid, keeper)
 
-            first_channel = resolved[0][0]
-            # A renamed entry seeds into the old identity, configured under the new name.
-            profile = self._profiles.get(pincer_uid) or self._profiles.get(name or "") or IdentityProfile()
-            # `preferred_channel` is write-once at creation; day-to-day channel
-            # use is tracked by `active_channel` (see touch_active_channel).
             config_fields: dict[str, Any] = {
-                "display_name": profile.display_name,
-                "preferred_channel": profile.preferred_channel,
-                "email": profile.email,
-                "timezone": profile.timezone,
+                "display_name": config.display_name,
+                "preferred_channel": config.preferred_channel,
+                "email": config.email,
+                "timezone": config.timezone,
             }
             entries.append(
                 SeedEntry(
-                    pincer_user_id=pincer_uid,
+                    pincer_user_id=keeper,
                     channels=[(ch_str, norm) for ch_str, _ch_type, norm in resolved],
-                    insert={**config_fields, "preferred_channel": profile.preferred_channel or first_channel},
-                    backfill=config_fields,
-                    phones=profile.phones,
+                    insert={**config_fields, "preferred_channel": config.preferred_channel or resolved[0][0]},
+                    overwrite=config_fields,
+                    phones=config.phones,
                 )
             )
             for _ch_str, ch_type, norm in resolved:
-                pending.setdefault((ch_type.value, norm), pincer_uid)
+                pending.setdefault((ch_type.value, norm), keeper)
 
         await self._store.seed(entries)
-        logger.info("Identity config seeded")
+        logger.info("Identity config seeded (%s)", self._mode)
 
     async def touch_active_channel(self, pincer_user_id: str, channel: ChannelType) -> None:
         """Record `channel` as this identity's most-recently-active channel.
@@ -847,7 +848,7 @@ class IdentityResolver:
         Prefers `active_channel` (the channel that most recently sent a
         message for this identity — see `touch_active_channel`) over the
         write-once `preferred_channel` set at identity creation, since for a
-        multi-channel identity (linked via PINCER_IDENTITY_MAP) the latter
+        multi-channel identity (linked via the [identity] TOML) the latter
         goes stale the moment the user messages from a different linked
         channel than the one that originally created the identity row.
 
@@ -862,6 +863,8 @@ class IdentityResolver:
         meta = await self._store.profile(pincer_user_id)
         if not meta:
             raise ValueError(f"Unknown user: {pincer_user_id}")
+        if not meta.get("active"):
+            raise ValueError(f"Identity is deactivated: {pincer_user_id}")
 
         active = meta["active_channel"]
         preferred = meta["preferred_channel"]
@@ -907,49 +910,6 @@ class IdentityResolver:
         for channel, channel_user_id in await self._store.channels_for(pincer_user_id):
             result.setdefault(channel, channel_user_id)
         return result
-
-    @staticmethod
-    def _parse_mapping(
-        entry: str,
-    ) -> tuple[str | None, list[tuple[str, str]]]:
-        """Parse one config entry into (name, [(channel, id), ...]).
-
-        Formats accepted:
-            name@ch1:id1                    (named canonical ID, single channel)
-            name@ch1:id1=ch2:id2=ch3:id3   (named canonical ID, N channels)
-            ch1:id1=ch2:id2                 (hash-based, backward compat)
-
-        Raises ValueError if no channel:id pairs are found, or if the name is
-        reserved (see RESERVED_IDENTITY_NAMES).
-        """
-        entry = entry.strip()
-        name: str | None = None
-
-        eq_pos = entry.find("=")
-        at_pos = entry.find("@")
-        if 0 < at_pos < (eq_pos if eq_pos >= 0 else len(entry)):
-            raw_name = entry[:at_pos].strip()
-            if raw_name.lower() in RESERVED_IDENTITY_NAMES:
-                raise ValueError(f"Identity name {raw_name!r} is reserved")
-            if raw_name:
-                name = raw_name
-            entry = entry[at_pos + 1 :]
-
-        pairs: list[tuple[str, str]] = []
-        for part in entry.split("="):
-            part = part.strip()
-            if not part or ":" not in part:
-                continue
-            ch, cid = part.split(":", 1)
-            ch = ch.strip()
-            cid = cid.strip()
-            if ch and cid:
-                pairs.append((ch, cid))
-
-        if not pairs:
-            raise ValueError(f"Entry must have at least 1 channel:id pair: {entry!r}")
-
-        return name, pairs
 
     @staticmethod
     def _generate_user_id(channel: ChannelType, channel_user_id: str | int) -> str:

@@ -1135,7 +1135,7 @@ class WhatsAppChannel(BaseChannel):
                     return
                 await self._promote_sender(client, source)
                 if not self._settings.whatsapp_guests_allowed:
-                    if self._identity is None or not self._identity.has_config:
+                    if self._identity is None or not await self._identity.gated():
                         # Unlike Telegram/Signal, WhatsApp DMs fail CLOSED without a
                         # map: pre-PR the removed PINCER_WHATSAPP_DM_ALLOWLIST rejected
                         # all DMs by default when empty, so a no-op-without-config guest

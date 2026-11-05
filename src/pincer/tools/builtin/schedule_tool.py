@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 def _is_unresolved_identity(pincer_user_id: str) -> bool:
     """True if `pincer_user_id` looks like IdentityMiddleware's synthetic fallback.
 
-    When PINCER_IDENTITY_MAP is configured and a sender isn't listed in it,
+    When the guest gate is on and a sender is not a known, active identity,
     the middleware hands downstream code a "{channel}:{native_id}" pseudo-id
     (see channels/middleware.py) purely so nothing sees an empty string —
     it's never persisted to identity_profiles/channel_identities, so a schedule

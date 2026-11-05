@@ -32,7 +32,8 @@ def test_run_all_returns_report(doctor_env):
     # + 3 in-call tool execution (Sprint 11, #299) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
-    assert len(report.checks) == 64
+    # + 1 identity management (issue #348)
+    assert len(report.checks) == 65
 
     assert 0 <= report.score <= 100
 
@@ -366,13 +367,12 @@ def test_no_stale_shared_tokens_passes(tmp_path, monkeypatch):
 
 
 def test_telegram_access_control_pass_from_dotenv_only(tmp_path, monkeypatch):
-    """Telegram identity map configured only in .env must show as configured."""
+    """A Telegram token configured only in .env must show as configured."""
     from pincer.config import get_settings_relaxed
     from pincer.config.main import _RelaxedSettings
 
-    (tmp_path / ".env").write_text(
-        "PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_IDENTITY_MAP=telegram:111=whatsapp:491111111111\n"
-    )
+    (tmp_path / ".env").write_text("PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\n")
+    _toml_identity(tmp_path)
     monkeypatch.chdir(tmp_path)
     # Opt back in to dotenv reading, which conftest turns off for every test.
     monkeypatch.setitem(_RelaxedSettings.model_config, "env_file", tmp_path / ".env")
@@ -391,12 +391,26 @@ def test_telegram_access_control_pass_from_dotenv_only(tmp_path, monkeypatch):
 # ── Additional coverage: access control checks ────────────────────────────────
 
 
-def test_telegram_access_control_critical_no_identity_map(tmp_path):
+def _toml_identity(config_dir, channel: str = "telegram", channel_user_id: str = "111") -> None:
+    (config_dir / "pincer.toml").write_text(
+        f'[identity.alice]\n\n[[identity.alice.channels]]\nchannel = "{channel}"\n'
+        f'channel_user_id = "{channel_user_id}"\n'
+    )
+
+
+def _access_cfg(tmp_path, mode: str = "update"):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
-    cfg.identity_map = ""
+    cfg.identity_management = mode
+    cfg.db_path = tmp_path / "no-such.db"
+    cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
+    return cfg
+
+
+def test_telegram_access_control_critical_no_identity_map(tmp_path):
+    doc = SecurityDoctor(config_dir=tmp_path)
+    cfg = _access_cfg(tmp_path)
     cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
     result = doc._check_telegram_access_control(cfg)
     assert result.status == CheckStatus.CRITICAL
@@ -407,47 +421,93 @@ def test_telegram_access_control_critical_no_identity_map(tmp_path):
 )
 def test_access_control_reports_an_identity_map_that_does_not_load(tmp_path, check):
     """`pincer run` refuses to start on it; the doctor must say so, not crash."""
-    from unittest.mock import MagicMock
-
-    cfg = MagicMock()
-    cfg.identity_map = "me@telegram:111"
-    cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
+    cfg = _access_cfg(tmp_path)
     cfg.whatsapp_enabled = True
     cfg.signal_enabled = True
 
-    result = getattr(SecurityDoctor(config_dir=tmp_path), check)(cfg)
-
-    assert result.status == CheckStatus.CRITICAL
-    assert "identity key 'me' is reserved" in result.message
-
-    # The same for a broken [identity] section, which already raised before.
     (tmp_path / "pincer.toml").write_text("""
 [identity.me]
 [[identity.me.channels]]
 channel = "telegram"
 channel_user_id = 1
 """)
-    cfg.identity_map = ""
-    assert getattr(SecurityDoctor(config_dir=tmp_path), check)(cfg).status == CheckStatus.CRITICAL
+    result = getattr(SecurityDoctor(config_dir=tmp_path), check)(cfg)
+    assert result.status == CheckStatus.CRITICAL
+    assert "identity key 'me' is reserved" in result.message
+
+
+@pytest.mark.parametrize(
+    "check", ["_check_telegram_access_control", "_check_whatsapp_access_control", "_check_signal_access_control"]
+)
+def test_access_control_counts_clionly_and_a_database_roster(tmp_path, check):
+    """#348: the gate is on in clionly, and with identities kept only in the database."""
+    from pincer.services.identity import IdentityService
+
+    cfg = _access_cfg(tmp_path, mode="clionly")
+    cfg.whatsapp_enabled = True
+    cfg.signal_enabled = True
+    doc = SecurityDoctor(config_dir=tmp_path)
+    clionly = getattr(doc, check)(cfg)
+    assert clionly.status == CheckStatus.PASS
+    assert "clionly" in clionly.message
+
+    cfg.identity_management = "update"
+    cfg.db_path = tmp_path / "pincer.db"
+    assert getattr(doc, check)(cfg).status != CheckStatus.PASS
+
+    async def add_roster() -> None:
+        from pincer.db.engine import dispose_engines
+
+        try:
+            service = await IdentityService.for_path(cfg.db_path)
+            await service.create_profile("alice", channels=[("telegram", "111")])
+        finally:
+            await dispose_engines()
+
+    asyncio.run(add_roster())
+    from_db = getattr(doc, check)(cfg)
+    assert from_db.status == CheckStatus.PASS
+    assert "database" in from_db.message
+
+
+def test_identity_management_is_critical_while_the_old_env_var_is_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("PINCER_IDENTITY_MAP", "john@telegram:1=whatsapp:+4911,telegram:2")
+    result = SecurityDoctor(config_dir=tmp_path)._check_identity_management(_access_cfg(tmp_path))
+    assert result.status == CheckStatus.CRITICAL
+    assert "no longer read" in result.message
+    assert "[identity.john]" in result.fix_hint
+    assert "[identity.person_1]" in result.fix_hint
+
+    monkeypatch.delenv("PINCER_IDENTITY_MAP")
+    (tmp_path / ".env").write_text("PINCER_IDENTITY_MAP=jane@telegram:3\n")
+    from_dotenv = SecurityDoctor(config_dir=tmp_path)._check_identity_management(_access_cfg(tmp_path))
+    assert from_dotenv.status == CheckStatus.CRITICAL
+    assert "[identity.jane]" in from_dotenv.fix_hint
+
+
+def test_identity_management_warns_when_clionly_ignores_the_toml(tmp_path, monkeypatch):
+    monkeypatch.delenv("PINCER_IDENTITY_MAP", raising=False)
+    doc = SecurityDoctor(config_dir=tmp_path)
+    assert doc._check_identity_management(_access_cfg(tmp_path, "clionly")).status == CheckStatus.PASS
+    _toml_identity(tmp_path)
+    ignored = doc._check_identity_management(_access_cfg(tmp_path, "clionly"))
+    assert ignored.status == CheckStatus.WARNING
+    assert "ignored" in ignored.message
+    assert doc._check_identity_management(_access_cfg(tmp_path, "update")).status == CheckStatus.PASS
 
 
 def test_telegram_access_control_pass_with_identity_map(tmp_path):
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
-    cfg.identity_map = "telegram:111=whatsapp:491111111111"
+    cfg = _access_cfg(tmp_path)
+    _toml_identity(tmp_path)
     cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
     result = doc._check_telegram_access_control(cfg)
     assert result.status == CheckStatus.PASS
 
 
 def test_telegram_access_control_skipped_not_configured(tmp_path):
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
-    cfg.identity_map = ""
+    cfg = _access_cfg(tmp_path)
     cfg.telegram_bot_token.get_secret_value.return_value = ""
     result = doc._check_telegram_access_control(cfg)
     assert result.status == CheckStatus.SKIPPED
@@ -456,52 +516,42 @@ def test_telegram_access_control_skipped_not_configured(tmp_path):
 def test_whatsapp_access_control_warning_self_chat_only_no_identity_map(tmp_path):
     """self-chat-only alone doesn't gate group mentions, so without an identity
     map this should warn rather than pass."""
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = True
     cfg.whatsapp_guests_allowed = False
-    cfg.identity_map = ""
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.WARNING
 
 
 def test_whatsapp_access_control_pass_self_chat_only_with_identity_map(tmp_path):
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = True
-    cfg.identity_map = "telegram:111=whatsapp:491111111111"
+    _toml_identity(tmp_path)
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.PASS
 
 
 def test_whatsapp_access_control_pass_with_identity_map(tmp_path):
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = False
-    cfg.identity_map = "telegram:111=whatsapp:491111111111"
+    _toml_identity(tmp_path)
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.PASS
 
 
 def test_whatsapp_access_control_critical_open_to_anyone(tmp_path):
     """guests_allowed=true overrides the fail-closed-without-map DM default."""
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = False
     cfg.whatsapp_guests_allowed = True
-    cfg.identity_map = ""
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.CRITICAL
 
@@ -509,14 +559,11 @@ def test_whatsapp_access_control_critical_open_to_anyone(tmp_path):
 def test_whatsapp_access_control_warning_no_map_dm_fail_closed(tmp_path):
     """No map, self_chat_only=False, guests not allowed → DMs fail closed by
     default now, so this is a WARNING (ungated group mentions remain), not CRITICAL."""
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = False
     cfg.whatsapp_guests_allowed = False
-    cfg.identity_map = ""
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.WARNING
 
@@ -1200,23 +1247,18 @@ def test_signal_access_control_skipped(tmp_path):
 
 
 def test_signal_access_control_pass_with_identity_map(tmp_path):
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.signal_enabled = True
-    cfg.identity_map = "telegram:111=signal:+1234567890"
+    _toml_identity(tmp_path, "signal", "+1234567890")
     result = doc._check_signal_access_control(cfg)
     assert result.status == CheckStatus.PASS
 
 
 def test_signal_access_control_warning_no_identity_map(tmp_path):
-    from unittest.mock import MagicMock
-
     doc = SecurityDoctor(config_dir=tmp_path)
-    cfg = MagicMock()
+    cfg = _access_cfg(tmp_path)
     cfg.signal_enabled = True
-    cfg.identity_map = ""
     result = doc._check_signal_access_control(cfg)
     assert result.status == CheckStatus.WARNING
 

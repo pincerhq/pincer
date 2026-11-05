@@ -2120,3 +2120,56 @@ def test_0024_preserves_existing_onboarding_closures(migration_url, tmp_path):
         command.upgrade(cfg, "head")
     finally:
         engine_.dispose()
+
+
+def test_identity_status_backfills_the_source(tmp_path: Path) -> None:
+    """0028 (#348): `usr_` ids are auto, a credential without a channel is a CLI
+    identity, the rest came from the config; everyone starts active."""
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+    command.upgrade(cfg, "0027")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.executemany(
+            "INSERT INTO pincer_identity_profiles (pincer_user_id) VALUES (?)",
+            [("usr_0123abcd",), ("alice",), ("dashboard",), ("revoked",)],
+        )
+        con.executemany(
+            "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
+            [("telegram", "1", "usr_0123abcd"), ("telegram", "2", "alice")],
+        )
+        con.executemany(
+            "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash, token_version) VALUES (?, ?, 0)",
+            [("dashboard", "hash"), ("alice", "hash"), ("revoked", None)],
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    command.upgrade(cfg, "0028")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        rows = dict(
+            (uid, (source, active))
+            for uid, source, active in con.execute(
+                "SELECT pincer_user_id, source, active FROM pincer_identity_profiles"
+            ).fetchall()
+        )
+    finally:
+        con.close()
+    assert rows == {
+        "usr_0123abcd": ("auto", 1),
+        "alice": ("config", 1),
+        "dashboard": ("cli", 1),
+        "revoked": ("config", 1),
+    }
+
+    command.downgrade(cfg, "0027")
+    con = sqlite3.connect(str(db_path))
+    try:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(pincer_identity_profiles)").fetchall()}
+    finally:
+        con.close()
+    assert not {"active", "source"} & columns

@@ -325,7 +325,7 @@ async def identity_resolver(tmp_path: Path):
     from pincer.core.identity import IdentityResolver
 
     db_path = tmp_path / "identity.db"
-    resolver = IdentityResolver(db_path, identity_map_config="")
+    resolver = IdentityResolver(db_path)
     await resolver.ensure_table()
     return resolver
 
@@ -337,7 +337,7 @@ async def channel_router(tmp_path: Path):
     from pincer.core.identity import IdentityResolver
 
     db_path = tmp_path / "router.db"
-    identity = IdentityResolver(db_path, identity_map_config="")
+    identity = IdentityResolver(db_path)
     await identity.ensure_table()
     return ChannelRouter(identity)
 

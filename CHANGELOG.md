@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
+
+Identities used to be pruned against the config at every start: removing a
+person from `pincer.toml` deleted them, and nothing kept in the database
+outside the config survived a restart. Now the `[identity]` section is applied
+as `PINCER_IDENTITY_MANAGEMENT` says, the CLI manages identities in every mode,
+and an identity can be switched off without deleting it.
+
+> **Breaking — action required after upgrading.**
+>
+> 1. `PINCER_IDENTITY_MAP` is no longer read. `pincer run` refuses to start
+>    while it is set (environment or `.env`) and prints the equivalent
+>    `[identity.<name>]` TOML; `pincer doctor` reports it as critical. Move
+>    that TOML into `pincer.local.toml`, rename any `person_N` placeholders
+>    (unnamed entries), and remove the variable. Settings ignore unknown
+>    variables, which is why it is refused instead of dropped silently: a
+>    deployment that relied on it to gate its channels would otherwise open.
+> 2. **The default changes from prune to `update`:** removing a person from
+>    the TOML no longer deletes them. Set `PINCER_IDENTITY_MANAGEMENT=sync` to
+>    keep the old behaviour.
+> 3. Migration `0028` is applied at startup (or with `pincer db upgrade`).
+
+- **`PINCER_IDENTITY_MANAGEMENT`** — `update` (default): adds new people and
+  updates the people the TOML lists; a channel removed from a listed person is
+  unlinked (a WhatsApp LID learned at runtime is kept); nobody is removed.
+  `sync`: the TOML is the source of truth; config identities it no longer
+  lists are removed, and identities made with the CLI are kept. `clionly`: the
+  `[identity]` section is ignored (a warning is logged). In `sync` and
+  `update`, the profile fields the TOML states overwrite the database, and
+  the ones it leaves out are kept. Config phones are pruned the same way: all
+  of them in `sync`, those of listed people in `update`, none in `clionly`.
+- **Status and source** — migration `0028` adds `active` and `source`
+  (`config` | `cli` | `auto`, backfilled) to `pincer_identity_profiles`.
+  `/api/identity` and `pincer identity list` show both.
+- **Deactivation** — `pincer identity deactivate <name>` takes effect in a
+  running app at once: the identity's channels and phones identify nobody (its
+  senders are guests, its calls guest calls), it gets no proactive messages,
+  and it cannot sign in by password, API key, refresh token or listen-in
+  ticket. Its sessions end; its credentials are kept. Restarts and seeding
+  never switch it back on; `pincer identity activate <name>` does.
+- **CLI** — `pincer identity create` takes `--channel ch:id` (repeatable),
+  `--timezone` and `--no-password`; it needs a channel or a credential. New:
+  `add-channel`, `remove-channel`, `set` (display name, email, timezone,
+  preferred channel, `--add-phone` / `--remove-phone`), `activate`,
+  `deactivate`. A change to an identity the TOML still governs is warned about.
+- **Guest gate** — on when the TOML lists anyone, the database has an active
+  configured or hand-made identity with a channel, or the mode is `clionly`.
+  A roster kept only in the database therefore still gates unknown senders,
+  and the first `pincer identity create … --channel` closes the gate within
+  seconds, without a restart.
+- **Doctor** — the Telegram, WhatsApp and Signal access checks use that rule;
+  a new `identity_management` check flags a leftover `PINCER_IDENTITY_MAP`
+  and a TOML that `clionly` ignores.
+
 #### Voice: turns use the default provider and model unless the override can really run (#305)
 
 A voice turn model whose provider can't be built here (its key or base URL is

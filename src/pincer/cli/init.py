@@ -58,8 +58,8 @@ def init() -> None:
         token = Prompt.ask("Telegram bot token", password=True)
         env_lines.append(f"PINCER_TELEGRAM_BOT_TOKEN={token}")
         console.print(
-            "  Access is controlled by PINCER_IDENTITY_MAP — set it after setup to restrict "
-            "who can message the bot (unset = anyone can message it)."
+            "  Access is controlled by identities — add them to [identity] in pincer.toml or with "
+            "`pincer identity create` after setup (none = anyone can message the bot)."
         )
 
     if Confirm.ask("Enable Discord?", default=False):
@@ -75,8 +75,8 @@ def init() -> None:
         phone = Prompt.ask("Signal phone number (E.164, e.g. +491234567890)")
         env_lines.append(f"PINCER_SIGNAL_PHONE_NUMBER={phone}")
         console.print(
-            "  Access is controlled by PINCER_IDENTITY_MAP — set it after setup to restrict "
-            "who can DM the bot (unset = anyone can DM it)."
+            "  Access is controlled by identities — add them to [identity] in pincer.toml or with "
+            "`pincer identity create` after setup (none = anyone can DM the bot)."
         )
         api_url = Prompt.ask(
             "signal-cli-rest-api URL (for Docker: http://signal-api:8080)",

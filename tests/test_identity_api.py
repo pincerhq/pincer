@@ -22,7 +22,7 @@ ME = "/api/identity/me"
 @pytest_asyncio.fixture
 async def resolver(tmp_path: Path) -> AsyncIterator[IdentityResolver]:
     db_path = tmp_path / "pincer.db"
-    r = IdentityResolver(db_path, identity_map_config="")
+    r = IdentityResolver(db_path)
     await r.ensure_table()
     yield r
 
@@ -124,6 +124,15 @@ class TestIdentityApi:
         data = resp.json()
         entry = next(i for i in data["identities"] if i["pincer_user_id"] == uid)
         assert entry["email"] == "jane@example.com"
+
+    async def test_list_and_get_include_status_and_source(self, client: TestClient, resolver: IdentityResolver) -> None:
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 79798)
+        await resolver._store.set_active(uid, False)
+
+        entry = next(i for i in client.get("/api/identity").json()["identities"] if i["pincer_user_id"] == uid)
+        assert (entry["active"], entry["source"]) == (False, "auto")
+        single = client.get(f"/api/identity/{uid}").json()
+        assert (single["active"], single["source"]) == (False, "auto")
 
     async def test_get_single_identity_includes_email(self, client: TestClient, resolver: IdentityResolver) -> None:
         import aiosqlite

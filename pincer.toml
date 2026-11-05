@@ -215,15 +215,26 @@ approval_required = ["!*"]
 timeout = 120
 
 # ── Cross-channel identity ─────────────────────────────────────────────────
-# Alternative to PINCER_IDENTITY_MAP for rosters too large for one env-var
-# string — one [identity.<key>] table per person, <key> becomes their
-# pincer_user_id. PINCER_IDENTITY_MAP, if set, fully overrides this section.
+# One [identity.<key>] table per person; <key> becomes their pincer_user_id.
 # Put real names/IDs in pincer.local.toml (gitignored), not here.
+# (PINCER_IDENTITY_MAP is no longer read; `pincer run` refuses to start while
+# it is set and prints the equivalent TOML.)
 #
-# Once any identity map is configured (here or via PINCER_IDENTITY_MAP),
-# Telegram/WhatsApp/Signal senders not listed below are "guests" and are
-# rejected by default — set PINCER_TELEGRAM_GUESTS_ALLOWED / _WHATSAPP_ / _SIGNAL_
-# to true per channel to let them through with a disposable identity instead.
+# PINCER_IDENTITY_MANAGEMENT decides how this section reaches the database:
+#   update  (default) adds new people and updates the fields and channels of the
+#           people listed here; removing someone here does not delete them
+#   sync    this section is the source of truth: people removed here are deleted
+#           at the next start (identities made with `pincer identity create` are kept)
+#   clionly this section is ignored; manage identities with `pincer identity …`
+# Fields set here overwrite the database; fields left out keep what it has.
+# `pincer identity deactivate <key>` switches a person off; this section never
+# switches them back on (`pincer identity activate <key>`).
+#
+# Once anyone is listed here (or the database has an active identity with a
+# channel, or the mode is clionly), Telegram/WhatsApp/Signal senders who are not
+# a known identity are "guests" and are rejected by default — set
+# PINCER_TELEGRAM_GUESTS_ALLOWED / _WHATSAPP_ / _SIGNAL_ to true per channel to
+# let them through with a disposable identity instead.
 #
 # [identity.johndoe]
 # display_name      = "John Doe"

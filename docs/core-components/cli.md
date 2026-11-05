@@ -420,11 +420,18 @@ pincer identity create widget --api-key
 
 `pincer doctor` warns while no identity has a password or a key.
 
-**Identity map:** when an identity map (`PINCER_IDENTITY_MAP` or `[identity]`
-in `pincer.toml`) is configured, identities without a channel link are deleted
-at startup — unless they hold a password or an API key, so a dashboard-only or
-service identity survives. Removing someone from the map does not revoke their
-API access; use `pincer identity revoke <name>`.
+**Managing the roster:** `pincer identity create … --channel telegram:123`,
+`add-channel`, `remove-channel`, `set` (profile fields and phones),
+`deactivate` and `activate` work in every `PINCER_IDENTITY_MANAGEMENT` mode.
+A deactivated identity is a guest at once, also in a running app, and cannot
+sign in; its credentials are kept.
+
+**Identity TOML:** with `PINCER_IDENTITY_MANAGEMENT=sync`, config identities
+without a channel link are deleted at startup — unless they hold a password or
+an API key, so a dashboard-only or service identity survives; identities made
+with the CLI are never deleted. With `update` (the default) nobody is deleted.
+Removing someone from the TOML does not revoke their API access; use
+`pincer identity revoke <name>` or `deactivate`.
 
 ---
 

@@ -30,14 +30,21 @@ from pincer.services.onboarding import forget_user
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
 from collections.abc import Sequence  # noqa: TC003 - dataclass field annotation
 
 logger = logging.getLogger(__name__)
 
-#: Profile fields a caller may backfill; `preferred_channel` is write-once,
-#: and day-to-day channel use is tracked by `active_channel` instead.
-BACKFILL_FIELDS = ("display_name", "preferred_channel", "email", "timezone")
+#: Where an identity came from: the [identity] TOML, `pincer identity …`, or
+#: a `usr_` id made for an unknown sender.
+SOURCE_CONFIG = "config"
+SOURCE_CLI = "cli"
+SOURCE_AUTO = "auto"
+
+#: Sources a sync of the TOML may delete: what the TOML made, and the `usr_`
+#: ids nobody made on purpose. Identities made by hand are never pruned.
+PRUNABLE_SOURCES = (SOURCE_CONFIG, SOURCE_AUTO)
 
 
 @dataclass(frozen=True)
@@ -45,16 +52,33 @@ class SeedEntry:
     """One identity from the configured map.
 
     `insert` is what a brand-new profile gets (its `preferred_channel` falls
-    back to the entry's first channel). `backfill` is only what the config
-    states, so an identity that already exists keeps what it has. `phones`
-    (`+E.164`) are stored confirmed: the config is trusted.
+    back to the entry's first channel). `overwrite` is only what the config
+    states; it replaces what an existing identity has, and a field the config
+    leaves out (None) is kept. `phones` (`+E.164`) are stored confirmed: the
+    config is trusted.
     """
 
     pincer_user_id: str
     channels: Sequence[tuple[str, str]]
     insert: dict[str, Any]
-    backfill: dict[str, Any]
+    overwrite: dict[str, Any]
     phones: Sequence[str] = ()
+
+
+class ChannelTakenError(Exception):
+    """The channel id is linked to another identity already."""
+
+    def __init__(self, channel: str, channel_user_id: str, owner: str) -> None:
+        super().__init__(f"{channel}:{channel_user_id} already belongs to '{owner}'")
+        self.channel, self.channel_user_id, self.owner = channel, channel_user_id, owner
+
+
+class PhoneTakenError(Exception):
+    """The number belongs to another identity already."""
+
+    def __init__(self, phone: str, owner: str) -> None:
+        super().__init__(f"{phone} already belongs to '{owner}'")
+        self.phone, self.owner = phone, owner
 
 
 @dataclass(frozen=True)
@@ -80,6 +104,8 @@ def _with_channels(
         "timezone": profile.timezone,
         "email": profile.email,
         "created_at": profile.created_at,
+        "active": bool(profile.active),
+        "source": profile.source,
         "channels": [
             {"channel": channel, "channel_user_id": channel_user_id, "linked_at": linked_at}
             for channel, channel_user_id, linked_at in links
@@ -97,8 +123,23 @@ class IdentityService(DatabaseService):
     # ── lookups ──────────────────────────────────────────────────────
 
     async def user_for_channel(self, channel: str, channel_user_id: str) -> str | None:
+        """The active identity this channel id is linked to; a deactivated one counts as none."""
         async with session_scope(self._url) as session:
-            return await ChannelIdentityRepository(session).user_for(channel, channel_user_id)
+            return await ChannelIdentityRepository(session).user_for(channel, channel_user_id, active_only=True)
+
+    async def owner_any(self, channel: str, channel_user_id: str) -> tuple[str, bool] | None:
+        """(owner, active) of this channel id whatever the owner's status, if linked."""
+        async with session_scope(self._url) as session:
+            return await ChannelIdentityRepository(session).owner(channel, channel_user_id)
+
+    async def has_roster(self) -> bool:
+        """True when an active configured or hand-made identity has a channel (see the guest gate)."""
+        async with session_scope(self._url) as session:
+            return await IdentityProfileRepository(session).has_roster()
+
+    async def ids_by_source(self, source: str) -> Sequence[str]:
+        async with session_scope(self._url) as session:
+            return await IdentityProfileRepository(session).ids_by_source(source)
 
     async def user_for_confirmed_phone(self, phone: str) -> str | None:
         """The identity this number is a confirmed phone of, if any.
@@ -156,14 +197,21 @@ class IdentityService(DatabaseService):
         channel_user_id: str,
         display_name: str | None = None,
         preferred_channel: str | None = None,
+        source: str | None = None,
     ) -> None:
-        """A new profile and its first channel link, together."""
+        """A new profile and its first channel link, together.
+
+        `source` defaults to "auto" for a `usr_` id and "config" otherwise.
+        """
+        if source is None:
+            source = SOURCE_AUTO if pincer_user_id.startswith("usr_") else SOURCE_CONFIG
         async with session_scope(self._url) as session:
             await IdentityProfileRepository(session).add_if_new(
                 {
                     "pincer_user_id": pincer_user_id,
                     "preferred_channel": preferred_channel or channel,
                     "display_name": display_name,
+                    "source": source,
                 }
             )
             await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
@@ -174,22 +222,40 @@ class IdentityService(DatabaseService):
         *,
         email: str | None = None,
         display_name: str | None = None,
+        timezone: str | None = None,
         password_hash: str | None = None,
         api_key: NewApiKey | None = None,
+        channels: Sequence[tuple[str, str]] = (),
+        source: str = SOURCE_CLI,
     ) -> bool:
-        """A profile with no channel yet, for an identity made by hand
-        (`pincer identity create`). False when the id is already taken.
+        """A profile made by hand (`pincer identity create`), with its
+        channels and credential. False when the id is already taken; raises
+        `ChannelTakenError` when a channel id belongs to someone else.
 
-        The credential goes in with the profile, in one transaction: a
-        channel-less identity that cannot sign in is what `prune` removes at
-        the next start.
+        All in one transaction, so a refused channel leaves no profile behind.
         """
         now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
             if await profiles.get(pincer_user_id) is not None:
                 return False
-            await profiles.add_if_new({"pincer_user_id": pincer_user_id, "email": email, "display_name": display_name})
+            links = ChannelIdentityRepository(session)
+            for channel, channel_user_id in channels:
+                owner = await links.user_for(channel, channel_user_id)
+                if owner is not None:
+                    raise ChannelTakenError(channel, channel_user_id, owner)
+            await profiles.add_if_new(
+                {
+                    "pincer_user_id": pincer_user_id,
+                    "email": email,
+                    "display_name": display_name,
+                    "timezone": timezone,
+                    "preferred_channel": channels[0][0] if channels else None,
+                    "source": source,
+                }
+            )
+            for channel, channel_user_id in channels:
+                await links.link(channel, channel_user_id, pincer_user_id)
             credentials = IdentityCredentialRepository(session)
             if password_hash is not None:
                 await credentials.set_password(pincer_user_id, password_hash, now=now)
@@ -207,6 +273,72 @@ class IdentityService(DatabaseService):
     async def link_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> None:
         async with session_scope(self._url) as session:
             await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
+
+    async def add_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> bool:
+        """Link a channel id to an existing identity. False when it is already
+        linked to it; raises `ChannelTakenError` when it belongs to another
+        and `LookupError` when the identity does not exist."""
+        async with session_scope(self._url) as session:
+            if await IdentityProfileRepository(session).get(pincer_user_id) is None:
+                raise LookupError(pincer_user_id)
+            links = ChannelIdentityRepository(session)
+            owner = await links.user_for(channel, channel_user_id)
+            if owner == pincer_user_id:
+                return False
+            if owner is not None:
+                raise ChannelTakenError(channel, channel_user_id, owner)
+            await links.link(channel, channel_user_id, pincer_user_id)
+        return True
+
+    async def unlink_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> bool:
+        """Remove one channel id from this identity. False when it was not linked to it."""
+        async with session_scope(self._url) as session:
+            links = ChannelIdentityRepository(session)
+            if await links.user_for(channel, channel_user_id) != pincer_user_id:
+                return False
+            await links.unlink(channel, channel_user_id)
+        return True
+
+    async def update_profile(self, pincer_user_id: str, values: dict[str, Any]) -> bool:
+        """Set the given profile fields (None ones are left alone). False for an unknown identity."""
+        async with session_scope(self._url) as session:
+            profiles = IdentityProfileRepository(session)
+            if await profiles.get(pincer_user_id) is None:
+                return False
+            await profiles.overwrite(pincer_user_id, values)
+        return True
+
+    async def set_active(self, pincer_user_id: str, active: bool) -> bool:
+        """Switch an identity on or off. False for an unknown identity.
+
+        Switching it off also ends its signed-in sessions, in the same
+        transaction; its password and API key are kept for when it is back.
+        """
+        async with session_scope(self._url) as session:
+            if not await IdentityProfileRepository(session).set_active(pincer_user_id, active):
+                return False
+            if not active:
+                await AuthSessionRepository(session).delete_for_user(pincer_user_id)
+        return True
+
+    async def add_phone(self, pincer_user_id: str, phone: str, *, source: str = SOURCE_CLI) -> None:
+        """Store a confirmed `+E.164` number for this identity. Raises
+        `PhoneTakenError` when another identity holds it and `LookupError`
+        when the identity does not exist."""
+        now = datetime.now(UTC).isoformat()
+        async with session_scope(self._url) as session:
+            if await IdentityProfileRepository(session).get(pincer_user_id) is None:
+                raise LookupError(pincer_user_id)
+            phones = IdentityPhoneRepository(session)
+            owner = await phones.owner_of(phone)
+            if owner is not None and owner != pincer_user_id:
+                raise PhoneTakenError(phone, owner)
+            await phones.upsert(phone, pincer_user_id, confirmed=True, source=source, now=now)
+
+    async def remove_phone(self, pincer_user_id: str, phone: str) -> bool:
+        """Drop one of this identity's numbers. False when it has no such number."""
+        async with session_scope(self._url) as session:
+            return bool(await IdentityPhoneRepository(session).delete_for(phone, pincer_user_id))
 
     async def replace_channel_links(
         self, pincer_user_id: str, channel: str, new_id: str, old_ids: Iterable[str]
@@ -263,8 +395,14 @@ class IdentityService(DatabaseService):
 
     async def seed(self, identities: Iterable[SeedEntry]) -> None:
         """Apply the configured identity map: one profile per entry, with its
-        channels linked and its profile fields backfilled. One transaction, so
-        a failure part-way leaves no half-seeded identity.
+        channels linked and the profile fields the config states written over
+        what is stored. One transaction, so a failure part-way leaves no
+        half-seeded identity.
+
+        A new profile is active; an existing one keeps its `active` flag, so
+        the config never switches a deactivated identity back on. Every
+        seeded profile becomes `source="config"`, including one made with the
+        CLI that the config now lists.
         """
         now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
@@ -272,49 +410,76 @@ class IdentityService(DatabaseService):
             links = ChannelIdentityRepository(session)
             phones = IdentityPhoneRepository(session)
             for entry in identities:
-                await profiles.add_if_new({"pincer_user_id": entry.pincer_user_id, **entry.insert})
-                if any(value is not None for value in entry.backfill.values()):
-                    # The insert above was a no-op for an identity that already
-                    # existed (e.g. created by resolve()); this fills in what is
-                    # still empty without clobbering what is not.
-                    await profiles.backfill(entry.pincer_user_id, entry.backfill)
+                await profiles.add_if_new(
+                    {"pincer_user_id": entry.pincer_user_id, **entry.insert, "source": SOURCE_CONFIG}
+                )
+                # A no-op on the row just inserted; on an existing one (e.g.
+                # made by resolve() or the CLI) the config wins per field.
+                await profiles.overwrite(entry.pincer_user_id, {**entry.overwrite, "source": SOURCE_CONFIG})
                 for channel, channel_user_id in entry.channels:
                     await links.link(channel, channel_user_id, entry.pincer_user_id)
                 for phone in entry.phones:
                     await phones.upsert(phone, entry.pincer_user_id, confirmed=True, source="config", now=now)
 
-    async def prune(self, keep: Iterable[tuple[str, str]]) -> tuple[int, int]:
-        """Unlink every channel pair outside `keep`, then drop profiles left
-        with no channels. Returns (links removed, profiles removed).
+    async def prune(self, keep: Iterable[tuple[str, str]], *, listed: Iterable[str] | None = None) -> tuple[int, int]:
+        """Unlink channel pairs outside `keep`. Returns (links removed, profiles removed).
+
+        Without `listed` (sync): a pair goes when its owner came from the
+        config or is an auto `usr_` id; then such profiles left with no
+        channel are dropped too. Identities made with the CLI are not touched.
+
+        With `listed` (update): only pairs owned by these identities go, and
+        no profile is dropped.
 
         An identity that holds a password or an API key is kept even with no
         channel: it was made to sign in, not to chat. Taking its access away
         is `pincer identity revoke`, not a side effect of editing the map.
         """
         allowed = set(keep)
+        scope = None if listed is None else set(listed)
         async with session_scope(self._url) as session:
             links = ChannelIdentityRepository(session)
             removed = 0
-            for pair in await links.pairs():
-                if pair not in allowed:
-                    removed += await links.unlink(*pair)
+            for channel, channel_user_id, owner, source in await links.pairs_with_owner():
+                if (channel, channel_user_id) in allowed:
+                    continue
+                if scope is None and source is not None and source not in PRUNABLE_SOURCES:
+                    continue
+                if scope is not None and owner not in scope:
+                    continue
+                removed += await links.unlink(channel, channel_user_id)
+            if scope is not None:
+                return removed, 0
             # Children first: SQLite runs with foreign keys off, so nothing
             # cascades there, and Postgres wants the child rows gone anyway.
-            await IdentityCredentialRepository(session).delete_unlinked_empty()
+            await IdentityCredentialRepository(session).delete_unlinked_empty(PRUNABLE_SOURCES)
             await AuthSessionRepository(session).delete_orphaned()
-            orphaned = await IdentityProfileRepository(session).delete_unlinked()
+            orphaned = await IdentityProfileRepository(session).delete_unlinked(PRUNABLE_SOURCES)
             # After the profiles: a phone does not keep its identity alive, and
             # on SQLite nothing cascades to the numbers of a deleted profile.
             await IdentityPhoneRepository(session).delete_orphaned()
         return removed, orphaned
 
-    async def prune_config_phones(self, keep: Iterable[str]) -> int:
-        """Drop the numbers the config once listed but no longer does.
+    async def prune_config_phones(self, keep: Iterable[str], *, owners: Iterable[str] | None = None) -> int:
+        """Drop the numbers the config once listed but no longer does; with
+        `owners`, only those of these identities.
 
         Numbers stored any other way are left alone.
         """
         async with session_scope(self._url) as session:
-            return await IdentityPhoneRepository(session).delete_config_phones_not_in(keep)
+            return await IdentityPhoneRepository(session).delete_config_phones_not_in(keep, owners)
+
+
+def roster_summary(db_path: Path) -> tuple[bool, list[str]] | None:
+    """(whether the database holds a roster that gates guests, ids of CLI-made
+    identities), for `pincer doctor`. None when there is no database yet."""
+    from pincer.services.base import query_sync
+
+    async def read(session: Any) -> tuple[bool, list[str]]:
+        profiles = IdentityProfileRepository(session)
+        return await profiles.has_roster(), sorted(await profiles.ids_by_source(SOURCE_CLI))
+
+    return query_sync(db_path, read)
 
 
 async def get_identity_service() -> IdentityService:

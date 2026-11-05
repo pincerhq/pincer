@@ -12,6 +12,9 @@ from pincer.channels.router import ChannelRouter
 
 def _router_with_channel(channel_type: ChannelType, send_result: bool = True) -> tuple[ChannelRouter, MagicMock]:
     identity = MagicMock()
+    identity.is_active = AsyncMock(return_value=True)
+    identity.cleanup_phones = AsyncMock()
+    identity.refresh_gate = AsyncMock()
     router = ChannelRouter(identity)
     channel = MagicMock()
     channel.send = AsyncMock(return_value=None) if send_result else AsyncMock(side_effect=RuntimeError("fail"))
@@ -44,6 +47,15 @@ class TestSendToUser:
         sent = await router.send_to_user("usr_abc", "hello")
         assert sent is False
 
+    async def test_a_deactivated_identity_gets_nothing(self) -> None:
+        router, channel = _router_with_channel(ChannelType.TELEGRAM)
+        router._identity.is_active = AsyncMock(return_value=False)
+        router._identity.get_all_channels = AsyncMock(return_value={ChannelType.TELEGRAM: "12345"})
+        router._identity.get_preferred_channel = AsyncMock(return_value=(ChannelType.TELEGRAM, "12345"))
+
+        assert await router.send_to_user("alice", "hello", prefer=ChannelType.TELEGRAM) is False
+        channel.send.assert_not_called()
+
 
 @pytest.mark.asyncio
 class TestRebuildIdentityMap:
@@ -56,6 +68,7 @@ class TestRebuildIdentityMap:
         await router.rebuild_identity_map()
 
         router._identity.mark_seeding_complete.assert_called_once()
+        router._identity.refresh_gate.assert_awaited_once()
 
     async def test_mark_seeding_complete_called_even_on_seed_failure(self) -> None:
         router, _channel = _router_with_channel(ChannelType.TELEGRAM)

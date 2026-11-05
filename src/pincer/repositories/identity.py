@@ -31,20 +31,19 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
             upsert(dialect_of(self.session), IdentityProfile, values, index_elements=["pincer_user_id"])
         )
 
-    async def backfill(self, pincer_user_id: str, values: dict[str, Any]) -> int:
-        """Fill in the given fields where they are still empty.
-
-        `COALESCE(new, stored)`: a field the caller left unset must not
-        overwrite one the profile already has.
-        """
-        assignments = {name: func.coalesce(value, getattr(IdentityProfile, name)) for name, value in values.items()}
+    async def overwrite(self, pincer_user_id: str, values: dict[str, Any]) -> int:
+        """Set the given fields, replacing what is stored. A None value is left
+        out: the caller did not state that field, so it keeps what it has."""
+        assignments = {name: value for name, value in values.items() if value is not None}
+        if not assignments:
+            return 0
         stmt = (
             update(IdentityProfile).where(col(IdentityProfile.pincer_user_id) == pincer_user_id).values(**assignments)
         )
         return int((await self.session.exec(stmt)).rowcount)
 
     async def copy_to(self, old_id: str, new_id: str) -> None:
-        """Give `new_id` a profile carrying `old_id`'s channel and name."""
+        """Give `new_id` a profile carrying `old_id`'s channel, name, status and source."""
         existing = await self.get(old_id)
         if existing is None:
             return
@@ -53,8 +52,33 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
                 "pincer_user_id": new_id,
                 "preferred_channel": existing.preferred_channel,
                 "display_name": existing.display_name,
+                "active": existing.active,
+                "source": existing.source,
             }
         )
+
+    async def set_active(self, pincer_user_id: str, active: bool) -> int:
+        stmt = (
+            update(IdentityProfile).where(col(IdentityProfile.pincer_user_id) == pincer_user_id).values(active=active)
+        )
+        return int((await self.session.exec(stmt)).rowcount)
+
+    async def has_roster(self) -> bool:
+        """True when an active identity that was configured or made by hand
+        has a channel. `auto` identities do not count: they are the unknown
+        senders an ungated deployment lets in, and counting them would close
+        the gate on everyone after the first message."""
+        stmt = (
+            select(IdentityProfile.pincer_user_id)
+            .join(ChannelIdentity, col(ChannelIdentity.pincer_user_id) == col(IdentityProfile.pincer_user_id))
+            .where(col(IdentityProfile.active).is_(True), col(IdentityProfile.source) != "auto")
+            .limit(1)
+        )
+        return (await self.session.exec(stmt)).first() is not None
+
+    async def ids_by_source(self, source: str) -> Sequence[str]:
+        stmt = select(IdentityProfile.pincer_user_id).where(col(IdentityProfile.source) == source)
+        return (await self.session.exec(stmt)).all()
 
     async def set_active_channel(self, pincer_user_id: str, channel: str, *, now: str) -> int:
         stmt = (
@@ -88,8 +112,8 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
         stmt = stmt.distinct().order_by(col(IdentityProfile.created_at)).limit(limit)
         return (await self.session.exec(stmt)).all()
 
-    async def delete_unlinked(self) -> int:
-        """Drop profiles no channel points at any more.
+    async def delete_unlinked(self, sources: Iterable[str]) -> int:
+        """Drop profiles of the given sources that no channel points at any more.
 
         Except the ones that can sign in: an identity made for the dashboard
         or for an API key has no channel by design, and pruning it would lock
@@ -97,6 +121,7 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
         """
         linked = select(col(ChannelIdentity.pincer_user_id))
         stmt = delete(IdentityProfile).where(
+            col(IdentityProfile.source).in_(list(sources)),
             col(IdentityProfile.pincer_user_id).notin_(linked),
             col(IdentityProfile.pincer_user_id).notin_(_can_sign_in()),
         )
@@ -106,11 +131,27 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
 class ChannelIdentityRepository(BaseRepository[ChannelIdentity, tuple[str, str]]):
     model = ChannelIdentity
 
-    async def user_for(self, channel: str, channel_user_id: str) -> str | None:
+    async def user_for(self, channel: str, channel_user_id: str, *, active_only: bool = False) -> str | None:
+        """The identity this channel id is linked to. With `active_only`, a
+        deactivated owner counts as none."""
         stmt = select(ChannelIdentity.pincer_user_id).where(
             col(ChannelIdentity.channel) == channel, col(ChannelIdentity.channel_user_id) == channel_user_id
         )
+        if active_only:
+            stmt = stmt.join(
+                IdentityProfile, col(IdentityProfile.pincer_user_id) == col(ChannelIdentity.pincer_user_id)
+            ).where(col(IdentityProfile.active).is_(True))
         return (await self.session.exec(stmt)).first()
+
+    async def owner(self, channel: str, channel_user_id: str) -> tuple[str, bool] | None:
+        """(owning identity, whether it is active) of this channel id, if linked."""
+        stmt = (
+            select(ChannelIdentity.pincer_user_id, IdentityProfile.active)
+            .join(IdentityProfile, col(IdentityProfile.pincer_user_id) == col(ChannelIdentity.pincer_user_id))
+            .where(col(ChannelIdentity.channel) == channel, col(ChannelIdentity.channel_user_id) == channel_user_id)
+        )
+        row = (await self.session.exec(stmt)).first()
+        return None if row is None else (row[0], bool(row[1]))
 
     async def link(self, channel: str, channel_user_id: str, pincer_user_id: str) -> None:
         """Point a channel id at a profile, leaving an existing link alone."""
@@ -130,9 +171,20 @@ class ChannelIdentityRepository(BaseRepository[ChannelIdentity, tuple[str, str]]
         return int((await self.session.exec(stmt)).rowcount)
 
     async def pairs(self) -> Sequence[tuple[str, str]]:
-        """Every (channel, channel user id) pair, for the cleanup sweep."""
+        """Every (channel, channel user id) pair."""
         stmt = select(ChannelIdentity.channel, ChannelIdentity.channel_user_id)
         return [(channel, cid) for channel, cid in (await self.session.exec(stmt)).all()]
+
+    async def pairs_with_owner(self) -> Sequence[tuple[str, str, str, str | None]]:
+        """Every (channel, channel user id, owner, owner's source), for the
+        cleanup sweep. The source is None for a link whose profile is gone."""
+        stmt = select(
+            ChannelIdentity.channel,
+            ChannelIdentity.channel_user_id,
+            ChannelIdentity.pincer_user_id,
+            IdentityProfile.source,
+        ).outerjoin(IdentityProfile, col(IdentityProfile.pincer_user_id) == col(ChannelIdentity.pincer_user_id))
+        return [(channel, cid, uid, source) for channel, cid, uid, source in (await self.session.exec(stmt)).all()]
 
     async def owners_on(self, channel: str) -> Sequence[tuple[str, str]]:
         """(channel user id, owning identity) of every link on one channel."""
@@ -169,11 +221,28 @@ class IdentityPhoneRepository(BaseRepository[IdentityPhone, str]):
     model = IdentityPhone
 
     async def owner_of_confirmed(self, phone: str) -> str | None:
-        """The identity whose confirmed number this is; None for an unknown or unconfirmed one."""
-        stmt = select(IdentityPhone.pincer_user_id).where(
-            col(IdentityPhone.phone) == phone, col(IdentityPhone.confirmed).is_(True)
+        """The active identity whose confirmed number this is; None for an
+        unknown or unconfirmed one, or one whose identity is deactivated."""
+        stmt = (
+            select(IdentityPhone.pincer_user_id)
+            .join(IdentityProfile, col(IdentityProfile.pincer_user_id) == col(IdentityPhone.pincer_user_id))
+            .where(
+                col(IdentityPhone.phone) == phone,
+                col(IdentityPhone.confirmed).is_(True),
+                col(IdentityProfile.active).is_(True),
+            )
         )
         return (await self.session.exec(stmt)).first()
+
+    async def owner_of(self, phone: str) -> str | None:
+        """Whoever holds this number, confirmed or not."""
+        stmt = select(IdentityPhone.pincer_user_id).where(col(IdentityPhone.phone) == phone)
+        return (await self.session.exec(stmt)).first()
+
+    async def delete_for(self, phone: str, pincer_user_id: str) -> int:
+        return await self.delete_where(
+            col(IdentityPhone.phone) == phone, col(IdentityPhone.pincer_user_id) == pincer_user_id
+        )
 
     async def phones_for(self, pincer_user_id: str) -> Sequence[tuple[str, bool]]:
         """(phone, confirmed) of this identity, oldest first."""
@@ -226,12 +295,18 @@ class IdentityPhoneRepository(BaseRepository[IdentityPhone, str]):
         stmt = update(IdentityPhone).where(col(IdentityPhone.pincer_user_id) == old_id).values(pincer_user_id=new_id)
         return int((await self.session.exec(stmt)).rowcount)
 
-    async def delete_config_phones_not_in(self, keep: Iterable[str]) -> int:
-        """Drop the config-sourced numbers the config no longer lists."""
+    async def delete_config_phones_not_in(self, keep: Iterable[str], owners: Iterable[str] | None = None) -> int:
+        """Drop the config-sourced numbers the config no longer lists; with
+        `owners`, only those of these identities."""
         conditions = [col(IdentityPhone.source) == "config"]
         kept = list(keep)
         if kept:
             conditions.append(col(IdentityPhone.phone).notin_(kept))
+        if owners is not None:
+            scoped = list(owners)
+            if not scoped:
+                return 0
+            conditions.append(col(IdentityPhone.pincer_user_id).in_(scoped))
         return await self.delete_where(*conditions)
 
     async def delete_orphaned(self) -> int:
@@ -334,11 +409,13 @@ class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
     async def delete_by_id(self, pincer_user_id: str) -> int:
         return await self.delete_where(col(IdentityCredential.pincer_user_id) == pincer_user_id)
 
-    async def delete_unlinked_empty(self) -> int:
-        """Drop the rows of channel-less identities that hold no credential,
-        so the profile sweep that follows can take those identities."""
+    async def delete_unlinked_empty(self, sources: Iterable[str]) -> int:
+        """Drop the rows of channel-less identities of the given sources that
+        hold no credential, so the profile sweep that follows can take them."""
         linked = select(col(ChannelIdentity.pincer_user_id))
+        of_sources = select(col(IdentityProfile.pincer_user_id)).where(col(IdentityProfile.source).in_(list(sources)))
         stmt = delete(IdentityCredential).where(
+            col(IdentityCredential.pincer_user_id).in_(of_sources),
             col(IdentityCredential.pincer_user_id).notin_(linked),
             col(IdentityCredential.password_hash).is_(None),
             col(IdentityCredential.api_key_hash).is_(None),
