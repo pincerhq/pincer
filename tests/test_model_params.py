@@ -403,6 +403,8 @@ def test_resolve_and_warn_stays_quiet_when_nothing_is_dropped(caplog):
         ("claude-opus-4-5-20251101", 64_000),
         ("claude-opus-4-5", 64_000),
         ("claude-haiku-4-5", 64_000),
+        ("claude-sonnet-4-5", 64_000),
+        ("claude-sonnet-4-5-20250929", 64_000),
         ("claude-haiku-4-5-20251001", 64_000),
         ("us.anthropic.claude-haiku-5-5-v1:0", 128_000),
         ("anthropic/claude-opus-4.7", 128_000),
@@ -432,7 +434,7 @@ def test_known_output_limits(model, limit):
         "voice-fast",  # an Azure deployment name
         "claude-3-5-haiku-20241022",
         "claude-opus-4-1",  # below the first confirmed row of its family
-        "claude-sonnet-4-5",
+        "claude-sonnet-4-20250514",  # below the first confirmed row of its family
         "gpt-4o-2024-05-13",  # a dated snapshot: limits differ per snapshot
         "gpt-4.1-nano",
         "gpt-3.5-turbo",

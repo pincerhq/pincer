@@ -85,11 +85,32 @@ def test_no_retry_when_the_request_already_asks_for_the_models_limit():
 
 @pytest.mark.parametrize(
     ("streamed_text", "tool_calls", "expected"),
-    [(False, False, RAISE), (False, True, RAISE), (True, False, CONTINUE), (True, True, RAISE)],
+    [
+        (False, False, TruncationDecision(RETRY, 880)),
+        (False, True, TruncationDecision(RETRY, 880)),
+        (True, False, TruncationDecision(CONTINUE)),
+        (True, True, TruncationDecision(RAISE)),
+    ],
 )
-def test_no_silent_retry_for_a_model_whose_limit_is_unknown(streamed_text, tool_calls, expected):
-    """A retry above a limit we cannot see risks a 400 and the brain-error apology."""
+def test_a_model_whose_limit_is_unknown_is_retried_at_a_conservative_cap(streamed_text, tool_calls, expected):
+    """Azure deployment names and dated snapshots must not lose the silent retry (review round 2)."""
     decision = decide_voice_truncation(
         streamed_text=streamed_text, tool_calls=tool_calls, max_tokens=220, retried=False, model_limit=None
     )
-    assert decision == TruncationDecision(expected)
+    assert decision == expected
+
+
+@pytest.mark.parametrize(
+    ("max_tokens", "retried", "expected"),
+    [
+        (1024, False, TruncationDecision(RETRY, 4096)),
+        (4096, False, TruncationDecision(RETRY, 8192)),  # 4x would be 16384: capped at 8192
+        (8192, False, TruncationDecision(RAISE)),  # the cap is not above the request
+        (1024, True, TruncationDecision(RAISE)),  # a retry is not retried
+    ],
+)
+def test_the_conservative_cap_for_an_unknown_limit(max_tokens, retried, expected):
+    decision = decide_voice_truncation(
+        streamed_text=False, tool_calls=False, max_tokens=max_tokens, retried=retried, model_limit=None
+    )
+    assert decision == expected
