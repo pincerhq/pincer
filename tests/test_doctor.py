@@ -1919,7 +1919,7 @@ def test_llm_reasoning_with_nothing_set_says_so():
     result = SecurityDoctor()._check_llm_reasoning_default(_llm_cfg())
 
     assert result.status == CheckStatus.PASS
-    assert result.message == "anthropic claude-haiku-5-5: nothing set; the model runs on its own defaults"
+    assert result.message == "anthropic claude-haiku-5-5: nothing set; model default"
 
 
 def test_llm_reasoning_shows_a_step_down():
@@ -2001,8 +2001,8 @@ def test_llm_reasoning_voice_uses_the_voice_settings(update, message):
 @pytest.mark.parametrize(
     ("check", "update"),
     [
-        ("_check_llm_reasoning_voice", {"voice_reasoning_effort": "none", "voice_thinking": "none"}),
-        ("_check_llm_reasoning_summary", {"summary_reasoning_effort": "none", "summary_thinking": "none"}),
+        ("_check_llm_reasoning_voice", {"voice_reasoning_effort": "default", "voice_thinking": "default"}),
+        ("_check_llm_reasoning_summary", {"summary_reasoning_effort": "default", "summary_thinking": "default"}),
     ],
     ids=["voice", "summary"],
 )
@@ -2012,15 +2012,15 @@ def test_llm_reasoning_none_opts_out_of_the_global_settings(check, update):
     result = getattr(SecurityDoctor(), check)(cfg)
 
     assert result.status == CheckStatus.PASS
-    assert result.message == "anthropic claude-haiku-5-5: nothing set; the model runs on its own defaults"
+    assert result.message == "anthropic claude-haiku-5-5: nothing set; model default"
 
 
-def test_voice_thinking_token_limit_check_honours_none():
-    """Opus 4.7 thinks only when asked: the global `adaptive` would make it think, a `none` voice value doesn't."""
+def test_voice_thinking_token_limit_check_honours_default():
+    """Opus 4.7 thinks only when asked: the global `adaptive` would make it think, a `default` voice value doesn't."""
     base = {"voice_turn_model": "claude-opus-4-7", "thinking": "adaptive", "voice_max_response_tokens": 150}
 
     inherits = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(**base))
-    opts_out = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(voice_thinking="none", **base))
+    opts_out = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(voice_thinking="default", **base))
 
     assert inherits.status == CheckStatus.WARNING  # precondition: the global setting does make it think
     assert opts_out.status == CheckStatus.PASS

@@ -74,14 +74,16 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   Pincer doesn't recognise (e.g. a custom deployment name), is dropped, with
   one WARNING per model and value. Thinking counts toward the output limit.
 - `PINCER_VOICE_REASONING_EFFORT` now applies to Claude models too and takes
-  the same five values; empty inherits `PINCER_REASONING_EFFORT`, and `none`
+  the same five values; empty inherits `PINCER_REASONING_EFFORT`, and `default`
   sends nothing (the model's own default) even when the global setting is set.
   New `PINCER_VOICE_THINKING` does the same for `PINCER_THINKING` (`adaptive`
-  | `disabled` | `none`). The call's language-guard regeneration uses the
-  global values.
+  | `disabled` | `default`). The call's language-guard regeneration uses the
+  global values. `none` is rejected for these four settings with an error that
+  names `default`: on OpenAI `none` is itself a reasoning level, so it would not
+  mean "send nothing".
 - New `PINCER_SUMMARY_REASONING_EFFORT` and `PINCER_SUMMARY_THINKING` do the
   same for conversation summaries, translated for the summary model; empty
-  inherits the global value and `none` sends nothing. `low` is the suggested value, on a summary model
+  inherits the global value and `default` sends nothing. `low` is the suggested value, on a summary model
   that takes effort (e.g. `claude-haiku-5-5`; the default `claude-haiku-4-5`
   drops it with a warning).
 - Internal calls leave room for a model that thinks: the conversation summary
@@ -116,8 +118,8 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   including step-downs. It warns, naming the setting to change, when a value is
   dropped (not supported, unrecognised model, or not allowed at effort `xhigh` /
   `max`), and when the voice model thinks while
-  `PINCER_VOICE_MAX_RESPONSE_TOKENS` is below 512. A voice or summary `none`
-  is reported as nothing sent, whatever the global setting. The checks make no
+  `PINCER_VOICE_MAX_RESPONSE_TOKENS` is below 512. A voice or summary `default`
+  is reported as nothing sent ("model default"), whatever the global setting. The checks make no
   API call and never report CRITICAL.
 
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)

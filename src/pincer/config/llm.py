@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validator
 from pydantic_settings import NoDecode
 
 # "" = not set: nothing is sent and the model runs on its own default.
@@ -11,11 +11,26 @@ ReasoningEffort = Literal["", "low", "medium", "high", "xhigh", "max"]
 ThinkingMode = Literal["", "adaptive", "disabled"]
 
 
-# The voice and summary overrides. "" inherits the global setting; "none" sends nothing, so the
-# model runs on its own default even when the global setting is set.
-ReasoningEffortOverride = Literal["", "none", "low", "medium", "high", "xhigh", "max"]
-ThinkingOverride = Literal["", "none", "adaptive", "disabled"]
-NO_SETTING = "none"
+# The voice and summary overrides. "" inherits the global setting; "default" sends nothing, so the
+# model runs on its own default even when the global setting is set. "none" is refused: on OpenAI
+# it is itself a reasoning level (no reasoning), so it would be read as "off" and mean the opposite.
+NO_SETTING = "default"
+_NONE_REJECTED = (
+    f"'none' is not accepted: use '{NO_SETTING}' to send nothing (the model's own default), "
+    "or 'disabled' to turn thinking off."
+)
+
+
+def _reject_none(value: object) -> object:
+    if isinstance(value, str) and value.strip().lower() == "none":
+        raise ValueError(_NONE_REJECTED)
+    return value
+
+
+ReasoningEffortOverride = Annotated[
+    Literal["", "default", "low", "medium", "high", "xhigh", "max"], BeforeValidator(_reject_none)
+]
+ThinkingOverride = Annotated[Literal["", "default", "adaptive", "disabled"], BeforeValidator(_reject_none)]
 
 
 def call_effort(override: ReasoningEffortOverride) -> ReasoningEffort | None:

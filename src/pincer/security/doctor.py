@@ -2932,7 +2932,7 @@ def _reasoning_report(
         return CheckResult(
             check,
             CheckStatus.PASS,
-            f"{provider} {model}: nothing set; the model runs on its own defaults",
+            f"{provider} {model}: nothing set; model default",
             category="llm",
         )
     wire = _reasoning_wire(cfg, provider)

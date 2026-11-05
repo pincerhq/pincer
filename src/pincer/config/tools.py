@@ -105,12 +105,12 @@ class ToolSettings(BaseModel):
     # PINCER_REASONING_EFFORT / PINCER_THINKING, which an empty value inherits.
     summary_reasoning_effort: ReasoningEffortOverride = Field(
         default="",
-        description="Effort for conversation summaries ('' = PINCER_REASONING_EFFORT, 'none' = send nothing)",
+        description="Effort for conversation summaries ('' = PINCER_REASONING_EFFORT, 'default' = send nothing)",
     )
     summary_thinking: ThinkingOverride = Field(
         default="",
         description="Thinking for conversation summaries: adaptive | disabled "
-        "('' = PINCER_THINKING, 'none' = send nothing)",
+        "('' = PINCER_THINKING, 'default' = send nothing)",
     )
     summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
 

@@ -513,8 +513,8 @@ async def test_build_core_passes_none_summary_settings_as_send_nothing(
     settings = _mock_settings_for_build_core(tmp_path)
     settings.memory_enabled = True
     settings.summary_threshold = 10
-    settings.summary_reasoning_effort = "none"
-    settings.summary_thinking = "none"
+    settings.summary_reasoning_effort = "default"
+    settings.summary_thinking = "default"
 
     mock_router = MagicMock()
     mock_router.get_llm.return_value = AsyncMock()

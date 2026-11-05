@@ -276,11 +276,11 @@ class ChannelSettings(BaseModel):
     # language-guard regeneration, which runs on the chat settings (Q15c).
     voice_reasoning_effort: ReasoningEffortOverride = Field(
         default="",
-        description="Effort for voice turns ('' = PINCER_REASONING_EFFORT, 'none' = send nothing)",
+        description="Effort for voice turns ('' = PINCER_REASONING_EFFORT, 'default' = send nothing)",
     )
     voice_thinking: ThinkingOverride = Field(
         default="",
-        description="Thinking for voice turns: adaptive | disabled ('' = PINCER_THINKING, 'none' = send nothing)",
+        description="Thinking for voice turns: adaptive | disabled ('' = PINCER_THINKING, 'default' = send nothing)",
     )
     voice_stt_endpointing_ms: int = Field(
         default=0,
