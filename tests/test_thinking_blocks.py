@@ -485,6 +485,61 @@ async def test_streaming_chat_turn_keeps_its_images_on_every_request(settings, s
     assert all(not m.images for m in session.messages)
 
 
+_TOOL_THEN_TEXT_NO_THINKING = [
+    ([tool_use("toolu_1", "create_event", {"title": "Dentist"})], "tool_use"),
+    ([text("Erledigt.")], "end_turn"),
+]
+
+
+async def test_chat_turn_without_thinking_drops_its_image_after_the_first_request(
+    settings, session_manager, cost_tracker, tools
+):
+    async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT_NO_THINKING) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
+        await agent.handle_message("user1", "test", "Book what's on this card", images=[_IMAGE], memory=False)
+
+    assert len(llm.requests) == 2
+    assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
+    assert _image_blocks(llm.requests[1]) == []  # no thinking to keep stable: it is not billed again
+
+
+async def test_streaming_chat_turn_without_thinking_drops_its_image_after_the_first_request(
+    settings, session_manager, cost_tracker, tools
+):
+    script = [*_TOOL_THEN_TEXT_NO_THINKING, ([text("Erledigt.")], "end_turn")]
+    async with ScriptedAnthropic(settings, script) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
+        _chunks = [
+            c
+            async for c in agent.handle_message_stream(
+                "user1", "web", "Book what's on this card", images=[_IMAGE], memory=False
+            )
+        ]
+
+    assert len(llm.requests) == 3
+    assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
+    assert _image_blocks(llm.requests[1]) == []
+    assert _image_blocks(llm.requests[2]) == []
+
+
+async def test_a_turn_whose_first_reply_has_no_thinking_drops_its_image_even_if_later_ones_think(
+    settings, session_manager, cost_tracker, tools
+):
+    script = [
+        ([tool_use("toolu_1", "create_event", {"title": "Dentist"})], "tool_use"),
+        ([thinking(_THOUGHT, _SIGNATURE), tool_use("toolu_2", "create_event", {"title": "Vet"})], "tool_use"),
+        ([text("Erledigt.")], "end_turn"),
+    ]
+    async with ScriptedAnthropic(settings, script) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
+        await agent.handle_message("user1", "test", "Book what's on this card", images=[_IMAGE], memory=False)
+
+    assert len(llm.requests) == 3
+    assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
+    assert _image_blocks(llm.requests[1]) == []  # dropped before any thinking existed
+    _assert_extends(llm.requests[1], llm.requests[2])  # and the thinking that came later is stable
+
+
 class _Selector(ToolSelector):
     """Keeps the tool names in ``keeps``, one set per call (the last repeats)."""
 

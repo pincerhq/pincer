@@ -50,8 +50,9 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   keeps its reasoning across tool calls. It is dropped when the turn ends and
   is never saved in the session, shown, spoken or logged.
 - Within a turn, the history sent before that thinking no longer changes: a
-  failover passes it on unchanged, images stay on every request of the turn,
-  and the session is trimmed to `PINCER_MAX_SESSION_MESSAGES` when the turn
+  failover passes it on unchanged, images stay on every request of a turn that
+  has thinking (a turn without thinking drops its image after the first
+  request, as before), and the session is trimmed to `PINCER_MAX_SESSION_MESSAGES` when the turn
   ends (it may exceed the cap by one turn's messages until then). When a turn
   does change its tools or history (a skill load re-selects tools, a tool-pair
   repair, the streaming chat's final text request), the turn's thinking is
