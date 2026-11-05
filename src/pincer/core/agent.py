@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
@@ -2086,6 +2087,8 @@ class Agent:
                 messages=[extraction_msg],
                 max_tokens=_ONBOARDING_EXTRACTION_MAX_TOKENS,
                 temperature=0,
+                reasoning_effort=STRUCTURED_CALL_EFFORT,
+                thinking=STRUCTURED_CALL_THINKING,
             )
         except Exception as e:
             logger.warning("Onboarding extraction failed; the gate is left as it was: %s", e)

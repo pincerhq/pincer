@@ -316,7 +316,17 @@ class _CountingLLM:
         self.content = content
         self.calls = 0
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         self.calls += 1
         self.last_user = messages[0].content
         return SimpleNamespace(content=self.content)
@@ -517,7 +527,17 @@ class _PipelineLLM:
         self.calls = 0
         self.prompts: list[str] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         self.calls += 1
         self.prompts.append(messages[0].content)
         return SimpleNamespace(content=self.payload)

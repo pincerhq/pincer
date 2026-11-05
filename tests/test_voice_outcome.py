@@ -30,7 +30,17 @@ class FakeLLM:
         self._raises = raises
         self.calls: list[dict] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         self.calls.append(
             {"messages": messages, "system": system, "temperature": temperature, "max_tokens": max_tokens}
         )

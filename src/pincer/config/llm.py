@@ -10,6 +10,12 @@ from pydantic_settings import NoDecode
 ReasoningEffort = Literal["", "low", "medium", "high", "xhigh", "max"]
 ThinkingMode = Literal["", "adaptive", "disabled"]
 
+# Internal JSON-extraction calls (call outcome, thread summary merge, onboarding answer) pin
+# these whatever the global settings are: their output limit is small and fixed, so a model
+# that thinks past it would cut the JSON off. The resolver drops what a model can't take.
+STRUCTURED_CALL_EFFORT: ReasoningEffort = "low"
+STRUCTURED_CALL_THINKING: ThinkingMode = "disabled"
+
 
 class LLMProvider(StrEnum):
     """The two well-known provider names. Any other name is resolved as a

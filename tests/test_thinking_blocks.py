@@ -182,7 +182,17 @@ class _ScriptedVoice(BaseLLMProvider):
         self.turns = list(turns)
         self.sent: list[list[ThinkingBlock]] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         raise AssertionError("voice turns must not use complete()")
 
     async def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):

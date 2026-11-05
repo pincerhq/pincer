@@ -249,6 +249,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             model,
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
+            global_effort=self._reasoning_effort,
+            global_thinking=self._thinking,
         )
         kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)

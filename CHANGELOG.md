@@ -85,6 +85,14 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   may use up to 2048 output tokens (was 500), the onboarding answer extraction
   1024 (was 200), the call-thread summary merge 2048 (was 700) and the call
   outcome extraction 2048 (was 1000). Only generated tokens are billed.
+- The internal JSON-extraction calls (call outcome, call-thread summary merge,
+  onboarding answer extraction) always use effort `low` and thinking
+  `disabled`, whatever `PINCER_REASONING_EFFORT` / `PINCER_THINKING` say, so a
+  model that thinks can't use up their small output limit and lose the result.
+  Each model still gets only what it accepts (Opus 5.5 can't turn thinking off;
+  `low` still applies). If a model takes neither, nothing is sent and, while
+  the global settings are empty, nothing is warned about. Conversation
+  summaries keep `PINCER_SUMMARY_*`.
 - On OpenAI reasoning models these settings become `reasoning_effort`, on every
   call, mapped per model: o-series `low` to `high`; gpt-5 adds `minimal` for
   `disabled`; gpt-5.1 sends `none` for `disabled`; gpt-5.2+ also takes `xhigh`

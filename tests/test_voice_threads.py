@@ -84,7 +84,17 @@ class FakeLLM:
         self.calls = 0
         self.max_tokens: list[int | None] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         self.calls += 1
         self.max_tokens.append(max_tokens)
         if self._raises:

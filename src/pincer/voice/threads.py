@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from pincer.llm.base import BaseLLMProvider
 
+from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
 from pincer.db.engine import get_database_url
 from pincer.db.ids import new_id
 from pincer.services.voice import CallsService, ThreadsService
@@ -352,6 +353,8 @@ async def merge_summary(
             system=MERGE_SYSTEM_PROMPT,
             temperature=0.0,
             max_tokens=_MERGE_MAX_TOKENS,
+            reasoning_effort=STRUCTURED_CALL_EFFORT,
+            thinking=STRUCTURED_CALL_THINKING,
         )
         data = _parse_json_object(response.content or "")
         summary = str((data or {}).get("summary", "")).strip()

@@ -27,7 +27,17 @@ class ScriptedProvider(BaseLLMProvider):
         self.turns = list(turns)
         self.calls: list[dict[str, Any]] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         raise AssertionError("voice turns must not use complete()")
 
     async def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
@@ -193,7 +203,17 @@ class TestStreamVoiceTurn:
         and the fresh per-call session must not trigger the onboarding question."""
 
         class BlockingProvider(ScriptedProvider):
-            async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+            async def complete(
+                self,
+                messages,
+                tools=None,
+                model=None,
+                max_tokens=None,
+                temperature=None,
+                system=None,
+                reasoning_effort=None,
+                thinking=None,
+            ):
                 self.calls.append({"messages": list(messages)})
                 return LLMResponse(content="Gern auf Deutsch.", model="m", input_tokens=1, output_tokens=1)
 
