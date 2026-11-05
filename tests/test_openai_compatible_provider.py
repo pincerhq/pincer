@@ -744,7 +744,7 @@ class TestReasoningSettings:
     async def test_a_dropped_setting_warns_once_per_model_and_value(self, caplog):
         import logging
 
-        caplog.set_level(logging.DEBUG, logger=MODULE)
+        caplog.set_level(logging.DEBUG, logger="pincer.llm.model_params")
         settings = _reasoning_settings("deploy-warn-once-345", reasoning_effort="low")  # unique: the log is global
 
         for _ in range(2):
@@ -760,7 +760,7 @@ class TestReasoningSettings:
     async def test_empty_settings_on_an_unrecognised_model_log_nothing(self, caplog):
         import logging
 
-        caplog.set_level(logging.DEBUG, logger=MODULE)
+        caplog.set_level(logging.DEBUG, logger="pincer.llm.model_params")
 
         body = await _sent_body(_reasoning_settings("deploy-benign-345"), "complete")
 

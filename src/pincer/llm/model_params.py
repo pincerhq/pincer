@@ -16,10 +16,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from pincer.core.log_once import LogOncePerKey
+
 if TYPE_CHECKING:
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
+
+# An effort/thinking setting a model can't take: one WARNING per wire, model and value
+_reasoning_dropped = LogOncePerKey(logger, logging.WARNING)
 
 
 class _ClaudeReasoningRule(NamedTuple):
@@ -270,6 +275,23 @@ def resolve_reasoning(
         else:
             fragment["thinking"] = dict(disabled)
     return ReasoningParams(fragment=fragment, drop_temperature=drop_temperature, dropped=tuple(dropped))
+
+
+def resolve_and_warn(
+    wire: ReasoningWire, model: str, effort: ReasoningEffort, thinking: ThinkingMode
+) -> ReasoningParams:
+    """`resolve_reasoning`, plus one WARNING per wire, model and dropped value (repeats at DEBUG)."""
+    params = resolve_reasoning(wire, model, effort, thinking)
+    for dropped in params.dropped:
+        _reasoning_dropped.log(
+            f"{wire}|{model}|{dropped.setting}|{dropped.value}",
+            "Not sending %s=%s to %s: %s",
+            dropped.setting,
+            dropped.value,
+            model,
+            dropped.reason,
+        )
+    return params
 
 
 def model_thinks(wire: ReasoningWire, model: str, params: ReasoningParams) -> bool | None:

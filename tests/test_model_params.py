@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from pincer.llm.model_params import (
@@ -11,6 +13,7 @@ from pincer.llm.model_params import (
     ReasoningWire,
     anthropic_accepts_sampling,
     openai_is_reasoning_model,
+    resolve_and_warn,
     resolve_reasoning,
 )
 
@@ -315,3 +318,44 @@ def test_disabled_replacing_an_effort_on_openai_is_a_debug_line(caplog):
     assert result == ReasoningParams(fragment={"reasoning_effort": "none"})
     lines = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert lines == [(logging.DEBUG, "Effort low replaced by none (thinking disabled) for gpt-5.1")]
+
+
+# ── resolve_and_warn: what both providers use ──────────────────────────────
+
+
+def _dropped_warnings(caplog: pytest.LogCaptureFixture, model: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "Not sending" in r.getMessage() and model in r.getMessage()]
+
+
+def test_resolve_and_warn_returns_what_resolve_reasoning_does_and_warns_once_per_model_and_value(caplog):
+    caplog.set_level(logging.DEBUG)
+    model = "acme-warn-once-1"
+
+    first = resolve_and_warn(ReasoningWire.ANTHROPIC, model, "high", "")
+    second = resolve_and_warn(ReasoningWire.ANTHROPIC, model, "high", "")
+
+    assert first == resolve_reasoning(ReasoningWire.ANTHROPIC, model, "high", "")
+    assert first.dropped and second == first
+    records = _dropped_warnings(caplog, model)
+    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG]
+    assert "reasoning_effort=high" in records[0].getMessage()
+    assert first.dropped[0].reason in records[0].getMessage()
+
+
+def test_resolve_and_warn_keeps_the_two_wires_apart(caplog):
+    caplog.set_level(logging.DEBUG)
+    model = "acme-warn-once-2"
+
+    resolve_and_warn(ReasoningWire.ANTHROPIC, model, "high", "")
+    resolve_and_warn(ReasoningWire.OPENAI, model, "high", "")
+
+    assert [r.levelno for r in _dropped_warnings(caplog, model)] == [logging.WARNING, logging.WARNING]
+
+
+def test_resolve_and_warn_stays_quiet_when_nothing_is_dropped(caplog):
+    caplog.set_level(logging.DEBUG)
+
+    params = resolve_and_warn(ReasoningWire.ANTHROPIC, "claude-opus-4-7", "high", "")
+
+    assert params.fragment == {"output_config": {"effort": "high"}}
+    assert not [r for r in caplog.records if "Not sending" in r.getMessage()]

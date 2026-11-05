@@ -21,7 +21,6 @@ from anthropic.types import (
 from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
 from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
-from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
     BaseLLMProvider,
@@ -32,7 +31,7 @@ from pincer.llm.base import (
     ThinkingBlock,
     ToolCall,
 )
-from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_reasoning
+from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -44,8 +43,6 @@ logger = logging.getLogger(__name__)
 
 # Content block types that carry a response's thinking
 _THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
-# An effort/thinking setting a model can't take: one WARNING per model and value
-_reasoning_dropped = LogOncePerKey(logger, logging.WARNING)
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -112,7 +109,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             "messages": self._convert_messages(messages),
         }
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
-        reasoning = resolve_reasoning(
+        reasoning = resolve_and_warn(
             ReasoningWire.ANTHROPIC,
             model,
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
@@ -129,15 +126,6 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         if tools:
             kwargs["tools"] = self._maybe_cache_tools(tools)
         kwargs.update(reasoning.fragment)
-        for dropped in reasoning.dropped:
-            _reasoning_dropped.log(
-                f"{model}|{dropped.setting}|{dropped.value}",
-                "Not sending %s=%s to %s: %s",
-                dropped.setting,
-                dropped.value,
-                model,
-                dropped.reason,
-            )
         return kwargs
 
     async def complete(

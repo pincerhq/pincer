@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 import openai
 from openai import AsyncOpenAI
 
-from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
     STOP_REASON_MAX_TOKENS,
@@ -26,7 +25,7 @@ from pincer.llm.base import (
     StreamTurnEvent,
     ToolCall,
 )
-from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_reasoning
+from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -37,8 +36,6 @@ if TYPE_CHECKING:
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
-# An effort/thinking setting a model can't take: one WARNING per model and value
-_reasoning_dropped = LogOncePerKey(logger, logging.WARNING)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -247,22 +244,13 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
-        reasoning = resolve_reasoning(
+        reasoning = resolve_and_warn(
             ReasoningWire.OPENAI,
             model,
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
         )
         kwargs.update(reasoning.fragment)
-        for dropped in reasoning.dropped:
-            _reasoning_dropped.log(
-                f"{model}|{dropped.setting}|{dropped.value}",
-                "Not sending %s=%s to %s: %s",
-                dropped.setting,
-                dropped.value,
-                model,
-                dropped.reason,
-            )
         return self._normalize_kwargs(kwargs)
 
     async def complete(
