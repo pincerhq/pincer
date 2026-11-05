@@ -2184,6 +2184,7 @@ class SecurityDoctor:
     def _check_llm_reasoning_voice(self, cfg: Settings | None = None) -> CheckResult:
         """The same for voice turns: the provider and model the call really runs on, and the
         voice settings, of which an empty one inherits the global setting."""
+        from pincer.config.llm import effective_effort, effective_thinking
         from pincer.llm.router import plan_voice_turn
 
         cfg = self._cfg(cfg)
@@ -2195,14 +2196,15 @@ class SecurityDoctor:
             cfg,
             plan.provider,
             plan.effective_model,
-            cfg.voice_reasoning_effort or cfg.reasoning_effort,
-            cfg.voice_thinking or cfg.thinking,
+            effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort),
+            effective_thinking(cfg.voice_thinking, cfg.thinking),
             ("PINCER_VOICE_REASONING_EFFORT", "PINCER_VOICE_THINKING"),
         )
 
     def _check_llm_reasoning_summary(self, cfg: Settings | None = None) -> CheckResult:
         """The same for conversation summaries, on the model the summarizer asks for
         (as `LLMRouter.get_summarizer` picks it)."""
+        from pincer.config.llm import effective_effort, effective_thinking
         from pincer.llm.router import provider_default_model, summary_target, wire_safe_model
 
         cfg = self._cfg(cfg)
@@ -2212,14 +2214,15 @@ class SecurityDoctor:
             cfg,
             name,
             wire_safe_model(cfg, name, model) or provider_default_model(cfg, name),
-            cfg.summary_reasoning_effort or cfg.reasoning_effort,
-            cfg.summary_thinking or cfg.thinking,
+            effective_effort(cfg.summary_reasoning_effort, cfg.reasoning_effort),
+            effective_thinking(cfg.summary_thinking, cfg.thinking),
             ("PINCER_SUMMARY_REASONING_EFFORT", "PINCER_SUMMARY_THINKING"),
         )
 
     def _check_voice_thinking_token_limit(self, cfg: Settings | None = None) -> CheckResult:
         """Thinking and speech share the voice token limit: a model that thinks
         can spend a small limit before saying a word."""
+        from pincer.config.llm import effective_effort, effective_thinking
         from pincer.llm.model_params import model_thinks, resolve_reasoning
         from pincer.llm.router import plan_voice_turn
 
@@ -2232,8 +2235,8 @@ class SecurityDoctor:
         wire = _reasoning_wire(cfg, plan.provider)
         thinks = None
         if wire is not None:
-            effort = cfg.voice_reasoning_effort or cfg.reasoning_effort
-            params = resolve_reasoning(wire, model, effort, cfg.voice_thinking or cfg.thinking)
+            effort = effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort)
+            params = resolve_reasoning(wire, model, effort, effective_thinking(cfg.voice_thinking, cfg.thinking))
             thinks = model_thinks(wire, model, params)
         limit = cfg.voice_max_response_tokens
         if thinks is None:

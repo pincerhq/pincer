@@ -242,6 +242,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
     summarizer: Summarizer | None = None
 
     # Create LLM provider (primary + optional random failover)
+    from pincer.config.llm import call_effort, call_thinking
     from pincer.llm.router import LLMRouter
 
     llm_router = LLMRouter()
@@ -257,9 +258,9 @@ async def _build_core(settings: Settings) -> CoreComponents:
             session_manager=session_mgr,
             summary_model=summary_model,
             threshold=settings.summary_threshold,
-            # Empty means the global setting: the provider reads None that way
-            reasoning_effort=settings.summary_reasoning_effort or None,
-            thinking=settings.summary_thinking or None,
+            # Empty means the global setting (the provider reads None that way), `none` sends nothing
+            reasoning_effort=call_effort(settings.summary_reasoning_effort),
+            thinking=call_thinking(settings.summary_thinking),
         )
         console.print("[green]Memory system enabled[/green]")
 

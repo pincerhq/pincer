@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import NoDecode
@@ -9,6 +9,41 @@ from pydantic_settings import NoDecode
 # "" = not set: nothing is sent and the model runs on its own default.
 ReasoningEffort = Literal["", "low", "medium", "high", "xhigh", "max"]
 ThinkingMode = Literal["", "adaptive", "disabled"]
+
+
+# The voice and summary overrides. "" inherits the global setting; "none" sends nothing, so the
+# model runs on its own default even when the global setting is set.
+ReasoningEffortOverride = Literal["", "none", "low", "medium", "high", "xhigh", "max"]
+ThinkingOverride = Literal["", "none", "adaptive", "disabled"]
+NO_SETTING = "none"
+
+
+def call_effort(override: ReasoningEffortOverride) -> ReasoningEffort | None:
+    """The `reasoning_effort` argument of one call: None = the provider's global setting,
+    "" = send nothing."""
+    if override == "":
+        return None
+    return "" if override == NO_SETTING else cast("ReasoningEffort", override)
+
+
+def call_thinking(override: ThinkingOverride) -> ThinkingMode | None:
+    """The `thinking` argument of one call, as `call_effort`."""
+    if override == "":
+        return None
+    return "" if override == NO_SETTING else cast("ThinkingMode", override)
+
+
+def effective_effort(override: ReasoningEffortOverride, global_: ReasoningEffort) -> ReasoningEffort:
+    """The effort a call carries: what `call_effort` says, with the global setting for None."""
+    value = call_effort(override)
+    return global_ if value is None else value
+
+
+def effective_thinking(override: ThinkingOverride, global_: ThinkingMode) -> ThinkingMode:
+    """The thinking a call carries, as `effective_effort`."""
+    value = call_thinking(override)
+    return global_ if value is None else value
+
 
 # Internal JSON-extraction calls (call outcome, thread summary merge, onboarding answer) pin
 # these whatever the global settings are: their output limit is small and fixed, so a model

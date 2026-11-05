@@ -502,6 +502,47 @@ async def test_build_core_gives_the_summarizer_the_summary_settings(
 
 
 @pytest.mark.asyncio
+async def test_build_core_passes_none_summary_settings_as_send_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`none` is passed as "" (send nothing), not None (the global setting) (issue #345)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _build_core
+
+    settings = _mock_settings_for_build_core(tmp_path)
+    settings.memory_enabled = True
+    settings.summary_threshold = 10
+    settings.summary_reasoning_effort = "none"
+    settings.summary_thinking = "none"
+
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = AsyncMock()
+    mock_router.get_summarizer.return_value = (AsyncMock(), "test-model")
+    built: list[dict] = []
+
+    def _capture_summarizer(**kwargs):  # type: ignore[no-untyped-def]
+        built.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
+    monkeypatch.setattr("pincer.cli.run._create_memory_backend", lambda _s: AsyncMock())
+    monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _capture_summarizer)
+    monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
+    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(side_effect=RuntimeError("no config in test env")))
+
+    await _build_core(settings)
+
+    assert len(built) == 1, "the Summarizer must be built (memory on)"
+    sent = {key: built[0].get(key, "<not passed>") for key in ("reasoning_effort", "thinking")}
+    assert sent == {"reasoning_effort": "", "thinking": ""}
+
+
+@pytest.mark.asyncio
 async def test_build_core_enables_audit_logging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, MagicMock
 

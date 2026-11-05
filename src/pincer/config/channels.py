@@ -4,7 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
-from pincer.config.llm import ReasoningEffort, ThinkingMode  # noqa: TC001 (pydantic resolves them at runtime)
+from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtime)
+    ReasoningEffortOverride,
+    ThinkingOverride,
+)
 
 # The largest output a voice request may ask for: the 5.5 models' output limit
 VOICE_MAX_RESPONSE_TOKENS_CEILING = 128_000
@@ -271,13 +274,13 @@ class ChannelSettings(BaseModel):
     # Voice turns only (issue #345): translated per model like PINCER_REASONING_EFFORT /
     # PINCER_THINKING, which an empty value inherits. Not used by the call's
     # language-guard regeneration, which runs on the chat settings (Q15c).
-    voice_reasoning_effort: ReasoningEffort = Field(
+    voice_reasoning_effort: ReasoningEffortOverride = Field(
         default="",
-        description="Effort for voice turns ('' = PINCER_REASONING_EFFORT)",
+        description="Effort for voice turns ('' = PINCER_REASONING_EFFORT, 'none' = send nothing)",
     )
-    voice_thinking: ThinkingMode = Field(
+    voice_thinking: ThinkingOverride = Field(
         default="",
-        description="Thinking for voice turns: adaptive | disabled ('' = PINCER_THINKING)",
+        description="Thinking for voice turns: adaptive | disabled ('' = PINCER_THINKING, 'none' = send nothing)",
     )
     voice_stt_endpointing_ms: int = Field(
         default=0,

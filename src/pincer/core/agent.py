@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
+from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
@@ -1497,8 +1497,8 @@ class Agent:
         # Thinking shares that budget. Read once per turn, so every request of
         # the turn (the silent retry too) sends the same values. An empty voice
         # setting passes None, which the provider reads as the global setting.
-        reasoning_effort: ReasoningEffort | None = self._settings.voice_reasoning_effort or None
-        thinking: ThinkingMode | None = self._settings.voice_thinking or None
+        reasoning_effort: ReasoningEffort | None = call_effort(self._settings.voice_reasoning_effort)
+        thinking: ThinkingMode | None = call_thinking(self._settings.voice_thinking)
 
         # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
         # "<model>" = default provider, that model; "openai:gpt-5-mini" = that
