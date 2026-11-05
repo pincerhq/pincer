@@ -401,3 +401,72 @@ async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, ca
     assert len(warnings) == 1
     assert session.session_id in warnings[0].getMessage()
     assert "SECRET-THOUGHT" not in warnings[0].getMessage()
+
+
+_THOUGHT = [ThinkingBlock("thinking", thinking="SECRET-THOUGHT", signature="SIG")]
+
+
+async def _fill_past_the_cap(session_manager: SessionManager, session) -> None:
+    """25 messages, past the fixture's cap of 20; the last carries an image, assistant ones a thought."""
+    for index in range(25):
+        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
+        await session_manager.add_message(
+            session,
+            LLMMessage(
+                role=role,
+                content=f"message {index}",
+                images=[ImageContent(data="aW1n", media_type="image/png")] if index == 24 else [],
+                thinking_blocks=list(_THOUGHT) if role is MessageRole.ASSISTANT else [],
+            ),
+        )
+
+
+async def test_a_turn_keeps_its_history_whole_and_ends_by_dropping_thinking_and_trimming(session_manager):
+    async with session_manager.turn("user1", "test") as session:
+        await _fill_past_the_cap(session_manager, session)
+        assert len(session.messages) == 25  # nothing is trimmed while the turn runs
+        assert any(m.thinking_blocks for m in session.messages)
+
+    assert len(session.messages) == 20
+    assert all(not m.thinking_blocks and not m.images for m in session.messages)
+
+
+async def test_a_turn_that_fails_still_ends(session_manager):
+    with pytest.raises(RuntimeError, match="boom"):
+        async with session_manager.turn("user1", "test") as session:
+            await _fill_past_the_cap(session_manager, session)
+            raise RuntimeError("boom")
+
+    assert len(session.messages) == 20
+    assert all(not m.thinking_blocks and not m.images for m in session.messages)
+    assert session._turn_open is False
+
+
+async def test_a_cancelled_turn_still_ends(session_manager):
+    import asyncio
+
+    inside = asyncio.Event()
+    holder: list = []
+
+    async def run() -> None:
+        async with session_manager.turn("user1", "test") as session:
+            holder.append(session)
+            await _fill_past_the_cap(session_manager, session)
+            inside.set()
+            await asyncio.sleep(60)
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(inside.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    session = holder[0]
+    assert len(session.messages) == 20
+    assert all(not m.thinking_blocks and not m.images for m in session.messages)
+
+
+async def test_a_turn_yields_the_cached_session(session_manager):
+    async with session_manager.turn("user1", "test") as session:
+        assert await session_manager.get_or_create("user1", "test") is session
+        assert session.session_id in session_manager._turn_locks

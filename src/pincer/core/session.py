@@ -121,14 +121,22 @@ class SessionManager:
     @asynccontextmanager
     async def turn(
         self, user_id: str, channel: str, session_key: str | None = None, pincer_user_id: str = ""
-    ) -> AsyncIterator[None]:
-        """Serialize turns and pin their session while they are active or queued."""
+    ) -> AsyncIterator[Session]:
+        """Run one agent turn on the session: serialize turns, pin the session while they are
+        active or queued, and yield it. The turn opens on entry and ends on exit (see
+        `begin_turn` / `end_turn`), so an entry point cannot forget either."""
         key = _resolve_session_key(user_id, channel, pincer_user_id, session_key)
         lock, users = self._turn_locks.get(key, (asyncio.Lock(), 0))
         self._turn_locks[key] = (lock, users + 1)
         try:
             async with lock:
-                yield
+                session = await self.get_or_create(user_id, channel, pincer_user_id, session_key)
+                self.begin_turn(session)
+                try:
+                    yield session
+                finally:
+                    # However the turn ended: drop its thinking and images, trim, save
+                    await self.end_turn(session)
         finally:
             current_lock, users = self._turn_locks[key]
             if users == 1:
@@ -235,8 +243,7 @@ class SessionManager:
         A trailing assistant message is fine: the Anthropic serializer merges
         consecutive same-role messages, and OpenAI accepts them as they are.
         """
-        async with self.turn(user_id, channel, session_key=session_key):
-            session = await self.get_or_create(user_id, channel, session_key=session_key)
+        async with self.turn(user_id, channel, session_key=session_key) as session:
             await self.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
 
     def begin_turn(self, session: Session) -> None:
