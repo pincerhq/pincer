@@ -43,6 +43,7 @@ from pincer.llm.base import (
     ToolResult,
     strip_thinking,
 )
+from pincer.llm.model_params import model_max_output_tokens
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
     PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
@@ -1513,6 +1514,8 @@ class Agent:
             voice_llm = self._llm
             plan = plan_voice_turn(self._settings, turn_model, build=_no_router_build)
         voice_model = plan.model or None
+        # What the silent retry may ask for: None for a model whose limit is not known
+        model_limit = model_max_output_tokens(plan.effective_model)
         if session_key and session_key not in self._voice_model_logged:
             self._voice_model_logged.add(session_key)
             logger.info(
@@ -1641,6 +1644,7 @@ class Agent:
                     tool_calls=response.has_tool_calls,
                     max_tokens=request_max_tokens,
                     retried=retried,
+                    model_limit=model_limit,
                 )
                 if decision.action is TruncationAction.RETRY and decision.max_tokens is not None:
                     # The cut-off response is dropped: nothing saved, no tool run,

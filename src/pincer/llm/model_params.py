@@ -92,6 +92,36 @@ _CLAUDE_REASONING_RULES: dict[str, tuple[tuple[tuple[int, int], _ClaudeReasoning
 # Mythos has Fable's API surface and thinking rules.
 _CLAUDE_FAMILY_ALIASES = {"mythos": "fable"}
 
+# ── Output limits (issue #345, review round 1) ──
+# Synchronous Messages API "Max output", per family and first version, ascending; a model
+# uses the row of the highest version at or below its own. Read off each model's page,
+# checked 2026-11-05 (https://platform.claude.com/docs/en/models/<model>/overview):
+# opus-4-5 and haiku-4-5 64K; opus-4-6, 4-7, 4-8, 5, 5-5, sonnet-4-6, 5, 5-5, haiku-5-5,
+# fable-5-1 128K (models overview). Versions below the first row of a family (Opus 4 / 4.1,
+# Sonnet 4 / 4.5, the pre-4 names) were not confirmed: unknown.
+_CLAUDE_MAX_OUTPUT_TOKENS: dict[str, tuple[tuple[tuple[int, int], int], ...]] = {
+    "opus": (((4, 5), 64_000), ((4, 6), 128_000)),
+    "sonnet": (((4, 6), 128_000),),
+    "haiku": (((4, 5), 64_000), ((5, 5), 128_000)),
+    "fable": (((5, 0), 128_000),),
+}
+# OpenAI "max output tokens" by exact model name, from https://developers.openai.com/api/docs/models/<name>
+# (checked 2026-11-05). Dated snapshots are left out: their limits differ (gpt-4o-2024-05-13 is lower).
+_OPENAI_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "gpt-4o": 16_384,
+    "gpt-4o-mini": 16_384,
+    "gpt-4.1": 32_768,
+    "gpt-4.1-mini": 32_768,
+    "o1": 100_000,
+    "o3": 100_000,
+    "o4-mini": 100_000,
+    "gpt-5": 128_000,
+    "gpt-5-mini": 128_000,
+    "gpt-5-nano": 128_000,
+    "gpt-5.1": 128_000,
+    "gpt-5.2": 128_000,
+}
+
 # ── Effort on OpenAI (issue #345) ──
 # OpenAI models known to take `reasoning_effort`, optionally dated. A strict
 # allow-list, unlike the temperature rule above: here a false positive ADDS a
@@ -148,6 +178,27 @@ _CLAUDE_DISABLED_FORMS: dict[tuple[str, int, int], dict[str, str]] = {
     ("sonnet", 5, 5): {"type": "between_tools"},
     ("opus", 5, 0): {"type": "disabled"},
 }
+
+
+def model_max_output_tokens(model: str) -> int | None:
+    """The model's own limit on `max_tokens` (its synchronous output limit), or None when
+    it isn't known. Only rows read off a model page are listed, so an unrecognised model,
+    an Azure deployment name or a dated OpenAI snapshot is None, and a caller must not ask
+    such a model for more than it already asks. An `ft:` or gateway `vendor/` prefix is
+    stripped."""
+    version = _claude_version(model)
+    if version is not None:
+        family, major, minor = version
+        rows = _CLAUDE_MAX_OUTPUT_TOKENS.get(_CLAUDE_FAMILY_ALIASES.get(family, family), ())
+        found = None
+        for since, limit in rows:
+            if (major, minor) >= since:
+                found = limit
+        return found
+    bare = model.lower().rsplit("/", 1)[-1]
+    if bare.startswith("ft:"):
+        bare = bare.removeprefix("ft:").split(":", 1)[0]
+    return _OPENAI_MAX_OUTPUT_TOKENS.get(bare)
 
 
 def anthropic_accepts_sampling(model: str) -> bool:

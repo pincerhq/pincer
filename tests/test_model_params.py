@@ -12,6 +12,7 @@ from pincer.llm.model_params import (
     ReasoningParams,
     ReasoningWire,
     anthropic_accepts_sampling,
+    model_max_output_tokens,
     openai_is_reasoning_model,
     resolve_and_warn,
     resolve_reasoning,
@@ -359,3 +360,64 @@ def test_resolve_and_warn_stays_quiet_when_nothing_is_dropped(caplog):
 
     assert params.fragment == {"output_config": {"effort": "high"}}
     assert not [r for r in caplog.records if "Not sending" in r.getMessage()]
+
+
+# ── Output limits (review round 1) ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model", "limit"),
+    [
+        ("claude-opus-5-5", 128_000),
+        ("claude-sonnet-5-5", 128_000),
+        ("claude-haiku-5-5", 128_000),
+        ("claude-fable-5-1", 128_000),
+        ("claude-mythos-5-1", 128_000),
+        ("claude-opus-5", 128_000),
+        ("claude-opus-4-8", 128_000),
+        ("claude-opus-4-7", 128_000),
+        ("claude-opus-4-6", 128_000),
+        ("claude-sonnet-4-6", 128_000),
+        ("claude-sonnet-5", 128_000),
+        ("claude-opus-4-5-20251101", 64_000),
+        ("claude-opus-4-5", 64_000),
+        ("claude-haiku-4-5", 64_000),
+        ("claude-haiku-4-5-20251001", 64_000),
+        ("us.anthropic.claude-haiku-5-5-v1:0", 128_000),
+        ("anthropic/claude-opus-4.7", 128_000),
+        ("gpt-4o", 16_384),
+        ("gpt-4o-mini", 16_384),
+        ("gpt-4.1", 32_768),
+        ("gpt-4.1-mini", 32_768),
+        ("o1", 100_000),
+        ("o3", 100_000),
+        ("o4-mini", 100_000),
+        ("gpt-5", 128_000),
+        ("gpt-5-mini", 128_000),
+        ("gpt-5-nano", 128_000),
+        ("gpt-5.1", 128_000),
+        ("gpt-5.2", 128_000),
+        ("openai/gpt-4o-mini", 16_384),
+        ("ft:gpt-4o-mini:acme::abc123", 16_384),
+    ],
+)
+def test_known_output_limits(model, limit):
+    assert model_max_output_tokens(model) == limit
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "voice-fast",  # an Azure deployment name
+        "claude-3-5-haiku-20241022",
+        "claude-opus-4-1",  # below the first confirmed row of its family
+        "claude-sonnet-4-5",
+        "gpt-4o-2024-05-13",  # a dated snapshot: limits differ per snapshot
+        "gpt-4.1-nano",
+        "gpt-3.5-turbo",
+        "llama-3.3-70b",
+        "",
+    ],
+)
+def test_an_unrecognised_model_has_no_known_output_limit(model):
+    assert model_max_output_tokens(model) is None

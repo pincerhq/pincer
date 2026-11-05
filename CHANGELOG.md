@@ -32,9 +32,12 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   Anthropic, so the same protection applies there. A streamed tool call whose
   arguments were cut off is no longer run with empty arguments.
 - On a phone call, a request cut off before it said anything is retried once,
-  silently, with four times the voice limit (at most 128000). If that doesn't
-  help, the caller hears the "could you say that again?" line and the call
-  continues. A reply cut off mid-sentence ends the turn with what was said.
+  silently, with four times the voice limit, capped at the voice model's own
+  output limit (at most 128000). A voice model whose output limit Pincer does
+  not know (a custom deployment name, a model not on its list) is no longer
+  retried silently, since a request above its limit would fail outright. If
+  the retry doesn't help, or there is none, the caller hears the "could you say
+  that again?" line and the call continues. A reply cut off mid-sentence ends the turn with what was said.
 - Cut-off voice turns have their own counter: the third in a row plays the
   goodbye line and ends the call (reason `repeated_llm_truncations`). A good
   turn resets it. Other errors keep their own two-in-a-row rule, and the two

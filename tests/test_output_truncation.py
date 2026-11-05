@@ -349,6 +349,31 @@ async def test_voice_cut_off_at_the_ceiling_is_not_retried(settings, session_man
     assert recording.runs == []
 
 
+async def test_voice_retry_never_exceeds_the_models_own_output_limit(
+    settings, session_manager, cost_tracker, recording
+):
+    settings.anthropic_model = "claude-opus-4-5"  # 64K output
+    agent, provider = _voice_agent(
+        settings, session_manager, cost_tracker, recording, [_voice_cut_off_tool(), _voice_text("Gerne.")], limit=20_000
+    )
+
+    await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [20_000, 64_000]  # 4x would be 80000
+
+
+async def test_voice_cut_off_on_a_model_with_an_unknown_limit_is_not_retried(
+    settings, session_manager, cost_tracker, recording
+):
+    settings.anthropic_model = "my-voice-deployment"
+    agent, provider = _voice_agent(settings, session_manager, cost_tracker, recording, [_voice_cut_off_tool()])
+
+    with pytest.raises(LLMOutputTruncatedError):
+        await _voice_chunks(agent)
+
+    assert [r["max_tokens"] for r in provider.requests] == [220]
+
+
 async def test_voice_only_the_retried_request_gets_the_bigger_limit(settings, session_manager, cost_tracker, recording):
     agent, provider = _voice_agent(
         settings,

@@ -6,6 +6,8 @@ import pytest
 
 from pincer.voice.truncation import TruncationAction, TruncationDecision, decide_voice_truncation
 
+# A model whose output limit is the 5.5 models' 128000
+_BIG = 128_000
 RETRY = TruncationAction.RETRY
 RAISE = TruncationAction.RAISE
 CONTINUE = TruncationAction.CONTINUE
@@ -26,7 +28,7 @@ _BELOW_CAP = [
 @pytest.mark.parametrize(("streamed_text", "tool_calls", "retried", "expected"), _BELOW_CAP)
 def test_decision_below_the_cap(streamed_text, tool_calls, retried, expected):
     decision = decide_voice_truncation(
-        streamed_text=streamed_text, tool_calls=tool_calls, max_tokens=220, retried=retried
+        streamed_text=streamed_text, tool_calls=tool_calls, max_tokens=220, retried=retried, model_limit=_BIG
     )
     assert decision == expected
 
@@ -36,7 +38,9 @@ def test_decision_below_the_cap(streamed_text, tool_calls, retried, expected):
     [(32, 128), (220, 880), (1024, 4096), (31_999, 127_996), (32_000, 128_000), (40_000, 128_000)],
 )
 def test_retry_limit_is_four_times_the_configured_limit_capped(configured, retry_limit):
-    decision = decide_voice_truncation(streamed_text=False, tool_calls=False, max_tokens=configured, retried=False)
+    decision = decide_voice_truncation(
+        streamed_text=False, tool_calls=False, max_tokens=configured, retried=False, model_limit=_BIG
+    )
     assert decision == TruncationDecision(RETRY, retry_limit)
 
 
@@ -56,6 +60,36 @@ _AT_CAP = [
 @pytest.mark.parametrize(("streamed_text", "tool_calls", "retried", "expected"), _AT_CAP)
 def test_decision_at_the_cap(streamed_text, tool_calls, retried, expected):
     decision = decide_voice_truncation(
-        streamed_text=streamed_text, tool_calls=tool_calls, max_tokens=128_000, retried=retried
+        streamed_text=streamed_text, tool_calls=tool_calls, max_tokens=128_000, retried=retried, model_limit=_BIG
     )
     assert decision == expected
+
+
+# ── The retry never asks for more than the model can output (review round 1) ──
+
+
+def test_retry_is_capped_at_the_models_own_output_limit():
+    """8192 on a 16k-output model: 4x would be 32768, which the API rejects with a 400."""
+    decision = decide_voice_truncation(
+        streamed_text=False, tool_calls=False, max_tokens=8192, retried=False, model_limit=16_384
+    )
+    assert decision == TruncationDecision(RETRY, 16_384)
+
+
+def test_no_retry_when_the_request_already_asks_for_the_models_limit():
+    decision = decide_voice_truncation(
+        streamed_text=False, tool_calls=False, max_tokens=16_384, retried=False, model_limit=16_384
+    )
+    assert decision == TruncationDecision(RAISE)
+
+
+@pytest.mark.parametrize(
+    ("streamed_text", "tool_calls", "expected"),
+    [(False, False, RAISE), (False, True, RAISE), (True, False, CONTINUE), (True, True, RAISE)],
+)
+def test_no_silent_retry_for_a_model_whose_limit_is_unknown(streamed_text, tool_calls, expected):
+    """A retry above a limit we cannot see risks a 400 and the brain-error apology."""
+    decision = decide_voice_truncation(
+        streamed_text=streamed_text, tool_calls=tool_calls, max_tokens=220, retried=False, model_limit=None
+    )
+    assert decision == TruncationDecision(expected)
