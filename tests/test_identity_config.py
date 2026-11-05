@@ -355,6 +355,22 @@ def test_legacy_string_becomes_toml_that_loads_back(tmp_path: Path) -> None:
     assert entries["person_1"].channels == [("telegram", "999"), ("signal", "+4911")]
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("john@telegram:1,john@whatsapp:2", {"john": [("telegram", "1"), ("whatsapp", "2")]}),
+        ("john@telegram:1=whatsapp:2,john@whatsapp:2", {"john": [("telegram", "1"), ("whatsapp", "2")]}),
+        ("person_1@telegram:1,telegram:2", {"person_1": [("telegram", "1")], "person_2": [("telegram", "2")]}),
+        ("telegram:2,person_1@telegram:1", {"person_2": [("telegram", "2")], "person_1": [("telegram", "1")]}),
+    ],
+)
+def test_legacy_toml_loads_when_names_repeat_or_collide(tmp_path: Path, value: str, expected: dict) -> None:
+    """One table per name: TOML refuses `[identity.john]` declared twice."""
+    (tmp_path / "pincer.toml").write_text(legacy_identity_map_toml(value))
+    entries = load_identity_config(tmp_path)
+    assert {name: entry.channels for name, entry in entries.items()} == expected
+
+
 def test_parse_legacy_entry() -> None:
     assert _parse_legacy_entry("john@telegram:johnDoe=whatsapp:491234567890=signal:4912") == (
         "john",
@@ -386,6 +402,8 @@ def test_run_refuses_to_start_while_the_legacy_env_var_is_set(
     out = capsys.readouterr().out
     assert "PINCER_IDENTITY_MAP is no longer read" in out
     assert "[identity.john]" in out
+    assert "[red]" not in out  # styled, not printed as raw markup
+    assert out.startswith("Configuration error:")
 
 
 def test_reserved_person_key_raises(tmp_path: Path) -> None:

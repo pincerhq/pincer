@@ -270,23 +270,43 @@ def _toml_string(value: str) -> str:
 
 def legacy_identity_map_toml(value: str) -> str:
     """The `[identity.<name>]` TOML that says what a `PINCER_IDENTITY_MAP`
-    string said. An unnamed entry gets a placeholder name (`person_1`, …) to
-    rename; an entry that does not parse is left as a comment."""
-    blocks: list[str] = []
-    unnamed = 0
+    string said, ready to paste: it loads as written.
+
+    Entries with the same name become one person with their channels merged,
+    since TOML refuses a table declared twice. An unnamed entry (or one whose
+    name is not a valid key) gets a placeholder (`person_1`, …) to rename,
+    never one an entry already uses. An entry that does not parse is left as
+    a comment.
+    """
+    parsed: list[tuple[str | None, list[tuple[str, str]]]] = []
+    comments: list[str] = []
     for raw_entry in value.split(","):
         if not raw_entry.strip():
             continue
         try:
             name, pairs = _parse_legacy_entry(raw_entry)
         except ValueError:
-            blocks.append(f"# could not convert: {raw_entry.strip()}")
+            comments.append(f"# could not convert: {raw_entry.strip()}")
             continue
-        if name is None or not _KEY_PATTERN.match(name):
+        parsed.append((name if name is not None and _KEY_PATTERN.match(name) else None, pairs))
+
+    taken = {name for name, _pairs in parsed if name is not None}
+    people: dict[str, list[tuple[str, str]]] = {}
+    unnamed = 0
+    for name, pairs in parsed:
+        if name is None:
             unnamed += 1
+            while f"person_{unnamed}" in taken:
+                unnamed += 1
             name = f"person_{unnamed}"
+            taken.add(name)
+        channels = people.setdefault(name, [])
+        channels.extend(pair for pair in pairs if pair not in channels)
+
+    blocks: list[str] = []
+    for name, channels in people.items():
         lines = [f"[identity.{name}]"]
-        for channel, channel_user_id in pairs:
+        for channel, channel_user_id in channels:
             lines += [
                 "",
                 f"[[identity.{name}.channels]]",
@@ -294,7 +314,7 @@ def legacy_identity_map_toml(value: str) -> str:
                 f"channel_user_id = {_toml_string(channel_user_id)}",
             ]
         blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks + comments)
 
 
 def legacy_identity_map_error(value: str) -> str:

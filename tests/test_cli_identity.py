@@ -108,8 +108,7 @@ def test_create_makes_nothing_when_the_credential_is_refused() -> None:
 
 
 def test_a_created_identity_survives_the_startup_pruning(tmp_path: Path) -> None:
-    """With an identity map, identities without a channel are swept at every
-    start — except the ones that can sign in. `create` must make one of those."""
+    """`create` makes a CLI identity, which no sync of the TOML prunes."""
     import asyncio
 
     assert _run("create", "tamias", PASSWORD).exit_code == 0
@@ -118,16 +117,37 @@ def test_a_created_identity_survives_the_startup_pruning(tmp_path: Path) -> None
     async def restart() -> list[str]:
         try:
             identities = IdentityService(get_database_url(tmp_path / "pincer.db"))
-            # what `create` used to leave behind, had it come from the config
-            await identities.create_profile("bare", source="config")
+            await identities.prune(set())
+            return sorted(row["pincer_user_id"] for row in await identities.list_profiles())
+        finally:
+            await dispose_engines()
+
+    assert asyncio.run(restart()) == ["tamias", "widget"]
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+
+
+def test_a_config_identity_that_can_sign_in_survives_the_startup_pruning(tmp_path: Path) -> None:
+    """Config identities without a channel are swept at every sync start —
+    except the ones that hold a password or an API key."""
+    import asyncio
+
+    async def restart() -> list[str]:
+        try:
+            identities = IdentityService(get_database_url(tmp_path / "pincer.db"))
+            auth = build_auth_service()
+            for name in ("with_password", "with_key", "bare"):
+                await identities.create_profile(name, source="config")
+            await auth.set_password("with_password", PASSWORD)
+            await auth.generate_api_key("with_key")
             await identities.create_identity("mapped", channel="telegram", channel_user_id="1")
             await identities.prune({("telegram", "1")})
             return sorted(row["pincer_user_id"] for row in await identities.list_profiles())
         finally:
             await dispose_engines()
 
-    assert asyncio.run(restart()) == ["mapped", "tamias", "widget"]
-    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+    _run("list")  # brings the database to head
+    assert asyncio.run(restart()) == ["mapped", "with_key", "with_password"]
+    assert asyncio.run(_login("with_password", PASSWORD)).pincer_user_id == "with_password"
 
 
 def test_set_password_resets_and_prompts_hidden_when_omitted() -> None:
@@ -453,21 +473,51 @@ def test_deactivate_blocks_sign_in_and_activate_restores_it(tmp_path: Path) -> N
     assert _run("deactivate", "ghost").exit_code == 1
 
 
-def test_a_change_to_a_toml_listed_identity_is_warned_about(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / "pincer.toml").write_text(
-        '[identity.alice]\n\n[[identity.alice.channels]]\nchannel = "telegram"\nchannel_user_id = "1"\n'
-    )
-    monkeypatch.setenv("PINCER_IDENTITY_MANAGEMENT", "sync")
+_ALICE_TOML = '[identity.alice]\n\n[[identity.alice.channels]]\nchannel = "telegram"\nchannel_user_id = "1"\n'
+
+
+def _mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setenv("PINCER_IDENTITY_MANAGEMENT", mode)
     get_settings_relaxed.cache_clear()
+
+
+@pytest.mark.parametrize("mode", ["sync", "update"])
+def test_a_change_to_a_toml_listed_identity_is_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    (tmp_path / "pincer.toml").write_text(_ALICE_TOML)
+    _mode(monkeypatch, mode)
     created = _run("create", "alice", "--no-password", "--channel", "telegram:1")
     assert created.exit_code == 0, created.output
     assert "the next start resets what the TOML states" in created.output
 
-    monkeypatch.setenv("PINCER_IDENTITY_MANAGEMENT", "clionly")
-    get_settings_relaxed.cache_clear()
-    quiet = _run("set", "alice", "--display-name", "Alice")
-    assert quiet.exit_code == 0, quiet.output
-    assert "next start" not in quiet.output
+
+def test_sync_warns_about_a_config_identity_the_toml_no_longer_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _query(tmp_path, lambda s: s.for_path(tmp_path / "pincer.db"))  # schema at head
+    _query(tmp_path, lambda s: s.create_identity("gone", channel="telegram", channel_user_id="9"))
+    (tmp_path / "pincer.toml").write_text(_ALICE_TOML)  # lists alice only
+
+    _mode(monkeypatch, "sync")
+    result = _run("set", "gone", "--display-name", "Gone")
+    assert result.exit_code == 0, result.output
+    assert "the next start removes it" in result.output
+
+    _mode(monkeypatch, "update")  # update removes nobody
+    assert "next start" not in _run("set", "gone", "--display-name", "Gone").output
+
+
+def test_sync_does_not_warn_about_a_cli_identity_the_toml_does_not_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pincer.toml").write_text(_ALICE_TOML)
+    _mode(monkeypatch, "sync")
+    created = _run("create", "carol", "--no-password", "--channel", "telegram:3")
+    assert created.exit_code == 0, created.output
+    result = _run("set", "carol", "--display-name", "Carol")
+    assert result.exit_code == 0, result.output
+    assert "next start" not in created.output + result.output
 
 
 def test_remove_channel_refuses_a_channel_the_toml_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

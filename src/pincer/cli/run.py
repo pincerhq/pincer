@@ -194,7 +194,11 @@ def _refuse_legacy_identity_map() -> None:
     value = legacy_identity_map()
     if value is None:
         return
-    console.print("[red]Configuration error:[/red]", legacy_identity_map_error(value), soft_wrap=True, markup=False)
+    from rich.text import Text
+
+    # Text, not markup: the TOML in the message is full of `[identity.<name>]`,
+    # which markup would swallow as style tags.
+    console.print(Text("Configuration error:", style="red"), Text(legacy_identity_map_error(value)), soft_wrap=True)
     raise typer.Exit(1)
 
 
@@ -1282,15 +1286,17 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     await identity.ensure_table()
     if (
         getattr(settings, "voice_enabled", False)
-        and settings.identity_management != "clionly"
         and not any(entry.phones for entry in identity_entries.values())
+        and not await identity.store.confirmed_phone_owners()
     ):
         # #299: without a confirmed phone every call party is a guest, and a
-        # guest gets no calendar writes on a generic call by default.
+        # guest gets no calendar writes on a generic call by default. Phones
+        # come from the TOML (seeded later this start) or `pincer identity set`.
         logger.warning(
-            "Voice is enabled but no identity lists `phones`: everyone on a call is a guest, so the agent "
-            "cannot create calendar events on a generic call. Add your number as `phones` to your "
-            "[identity.<key>] in pincer.toml, or allow guests via PINCER_VOICE_GUESTS_TOOLS_ALLOWED."
+            "Voice is enabled but no identity has a confirmed phone: everyone on a call is a guest, so the "
+            "agent cannot create calendar events on a generic call. Add your number as `phones` to your "
+            "[identity.<key>] in pincer.toml or with `pincer identity set <name> --add-phone`, or allow "
+            "guests via PINCER_VOICE_GUESTS_TOOLS_ALLOWED."
         )
     # Lets the per-turn clock in the system prompt read in each user's own
     # timezone instead of the deployment-wide one (see core/clock.py).

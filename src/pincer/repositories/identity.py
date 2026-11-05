@@ -240,6 +240,17 @@ class IdentityPhoneRepository(BaseRepository[IdentityPhone, str]):
         )
         return (await self.session.exec(stmt)).first()
 
+    async def confirmed_owners(self) -> Sequence[str]:
+        """Active identities with at least one confirmed phone, however it was added."""
+        stmt = (
+            select(IdentityPhone.pincer_user_id)
+            .join(IdentityProfile, col(IdentityProfile.pincer_user_id) == col(IdentityPhone.pincer_user_id))
+            .where(col(IdentityPhone.confirmed).is_(True), col(IdentityProfile.active).is_(True))
+            .distinct()
+            .order_by(col(IdentityPhone.pincer_user_id))
+        )
+        return (await self.session.exec(stmt)).all()
+
     async def owner_of(self, phone: str) -> str | None:
         """Whoever holds this number, confirmed or not."""
         stmt = select(IdentityPhone.pincer_user_id).where(col(IdentityPhone.phone) == phone)

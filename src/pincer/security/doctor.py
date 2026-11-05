@@ -730,15 +730,14 @@ class SecurityDoctor:
                 category="voice",
             )
         from pincer.config.identity import load_identity_map
+        from pincer.services.identity import confirmed_phone_owners
 
         mode = str(getattr(settings, "identity_management", "update"))
-        if mode == "clionly":
-            return CheckResult(
-                name="voice_registered_phones",
-                status=CheckStatus.SKIPPED,
-                message="PINCER_IDENTITY_MANAGEMENT=clionly: phones are set with `pincer identity set --add-phone`",
-                category="voice",
-            )
+        try:
+            # Phones added with `pincer identity set --add-phone` count too.
+            stored = confirmed_phone_owners(Path(settings.db_path))
+        except Exception:
+            stored = []  # no database or no identity tables yet
         try:
             entries = load_identity_map(self.config_dir, mode)
         except ValueError as e:
@@ -749,14 +748,15 @@ class SecurityDoctor:
                 fix_hint="Fix the [identity] section in pincer.toml / pincer.local.toml",
                 category="voice",
             )
-        owners = sorted(uid for uid, entry in entries.items() if entry.phones)
+        owners = sorted({uid for uid, entry in entries.items() if entry.phones} | set(stored))
         if not owners:
             return CheckResult(
                 name="voice_registered_phones",
                 status=CheckStatus.WARNING,
-                message="No identity lists `phones`: everyone on a call is a guest, so the agent cannot "
+                message="No identity has a confirmed phone: everyone on a call is a guest, so the agent cannot "
                 "create calendar events on a generic call",
-                fix_hint='Add your number to your identity in pincer.toml: phones = ["+49…"]; '
+                fix_hint='Add your number to your identity in pincer.toml: phones = ["+49…"], or run '
+                "`pincer identity set <name> --add-phone +49…`; "
                 "or allow guests, e.g. PINCER_VOICE_GUESTS_TOOLS_ALLOWED=google__*",
                 category="voice",
             )

@@ -137,6 +137,11 @@ class IdentityService(DatabaseService):
         async with session_scope(self._url) as session:
             return await IdentityProfileRepository(session).has_roster()
 
+    async def confirmed_phone_owners(self) -> Sequence[str]:
+        """Active identities a call can recognise by a confirmed phone (from the config or the CLI)."""
+        async with session_scope(self._url) as session:
+            return await IdentityPhoneRepository(session).confirmed_owners()
+
     async def ids_by_source(self, source: str, *, linked_only: bool = False) -> Sequence[str]:
         """Ids of the identities from `source`; with `linked_only`, only those with a channel."""
         async with session_scope(self._url) as session:
@@ -518,6 +523,16 @@ def roster_summary(db_path: Path) -> tuple[bool, list[str]] | None:
         return await profiles.has_roster(), sorted(await profiles.ids_by_source(SOURCE_CLI))
 
     return query_sync(db_path, read)
+
+
+def confirmed_phone_owners(db_path: Path) -> list[str]:
+    """`IdentityService.confirmed_phone_owners`, for `pincer doctor`; empty without a database."""
+    from pincer.services.base import query_sync
+
+    async def read(session: Any) -> list[str]:
+        return list(await IdentityPhoneRepository(session).confirmed_owners())
+
+    return query_sync(db_path, read) or []
 
 
 async def get_identity_service() -> IdentityService:

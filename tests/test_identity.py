@@ -1023,7 +1023,10 @@ class TestCleanup:
             await r.cleanup({ChannelType.TELEGRAM: _StubChannel(error=RuntimeError("not connected"))})
 
         assert "skipping cleanup" in caplog.text
-        assert await r.resolve(ChannelType.WHATSAPP, "4912345") == uid
+        # Stored state, not resolve(): an auto id is deterministic, so resolve()
+        # would make the same identity again after a wipe.
+        assert await r._store.profile(uid) is not None
+        assert await r._store.owner_any("whatsapp", "4912345") == (uid, True)
 
 
 @pytest.mark.asyncio
@@ -1275,15 +1278,21 @@ class TestUpdateMode:
 
     async def test_a_lid_learned_at_runtime_is_kept(self, tmp_path):
         db = tmp_path / "update_lid.db"
-        r = await _boot(db, f"tom@whatsapp:{TOM_PHONE}")
+        r = await _boot(db, f"tom@whatsapp:{TOM_PHONE}=telegram:111", "ann@slack:U1=whatsapp:4999")
         await r.link_if_new("tom", ChannelType.WHATSAPP, TOM_LID)
+        await r.link_if_new("ann", ChannelType.WHATSAPP, "123456789000001")  # ann's runtime LID
 
+        # Telegram resolves, so the whitelist is not empty and cleanup runs:
+        # tom's LID survives only through the keep for his unresolved phone.
         down = {ChannelType.WHATSAPP: _StubChannel(error=RuntimeError("not connected"))}
-        r2 = IdentityResolver(db, identity_entries(f"tom@whatsapp:{TOM_PHONE}"), "update")
+        r2 = IdentityResolver(db, identity_entries(f"tom@whatsapp:{TOM_PHONE}=telegram:111", "ann@slack:U1"), "update")
         await r2.seed_from_config(down)
         await r2.cleanup(down)
 
         assert await r2.find(ChannelType.WHATSAPP, TOM_LID) == "tom"
+        assert await r2.find(ChannelType.TELEGRAM, 111) == "tom"
+        # ann dropped WhatsApp from her TOML list: her LID goes with it.
+        assert await r2.find(ChannelType.WHATSAPP, "123456789000001") is None
 
     async def test_cli_identities_and_unlisted_links_are_untouched(self, tmp_path):
         db = tmp_path / "update_cli.db"

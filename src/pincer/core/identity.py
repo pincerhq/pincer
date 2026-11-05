@@ -149,6 +149,11 @@ class IdentityResolver:
         self._seeded.set()
 
     @property
+    def store(self) -> IdentityService:
+        """The identity store this resolver reads and writes."""
+        return self._store
+
+    @property
     def _store(self) -> IdentityService:
         """The store, built on first use for callers that skip `ensure_table`."""
         if self._service is None:

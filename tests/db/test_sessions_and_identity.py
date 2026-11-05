@@ -793,3 +793,17 @@ async def test_renaming_moves_phones_and_pruning_drops_them(url):
 
     assert await service.prune(set()) == (1, 1)
     assert await _phone_row(url, "+4915100000001") is None
+
+
+async def test_confirmed_phone_owners_count_cli_phones_of_active_identities(url):
+    service = IdentityService(url)
+    await service.create_profile("alice", channels=[("telegram", "1")])
+    await service.create_profile("bob", channels=[("telegram", "2")])
+    await service.add_phone("alice", "+4915100000001")
+    await service.add_phone("bob", "+4915100000002")
+    async with session_scope(url) as session:
+        await IdentityPhoneRepository(session).upsert("+4930123456", "bob", confirmed=False, source="api", now=_NOW)
+    assert await service.confirmed_phone_owners() == ["alice", "bob"]
+
+    await service.set_active("bob", False)
+    assert await service.confirmed_phone_owners() == ["alice"]
