@@ -31,6 +31,7 @@ class _ClaudeReasoningRule(NamedTuple):
 class _OpenAIReasoningRule(NamedTuple):
     efforts: tuple[str, ...]  # reasoning_effort levels the model accepts
     disabled: str | None  # the level `disabled` sends; None: reasoning can't be turned off
+    thinks_by_default: bool  # reasons when no reasoning_effort is sent
 
 
 # claude-<family>-<major>[-<minor>][-<date>], optionally behind a vendor prefix
@@ -116,14 +117,21 @@ _OPENAI_EFFORT_RE = re.compile(
 #   support none"; xhigh only after gpt-5.1-codex-max.
 # `disabled` sends the level that turns reasoning (nearly) off. The o-series
 # and codex (no page confirms none/minimal there) get no such level.
-_OPENAI_O_SERIES_RULE = _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled=None)
+# Default effort: models before gpt-5.1 reason at medium (the SDK docstring);
+# gpt-5.1 and gpt-5.2 default to none (their model pages), so they don't think unless asked.
+_OPENAI_O_SERIES_RULE = _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled=None, thinks_by_default=True)
 _EFFORT_TO_XHIGH = ("low", "medium", "high", "xhigh")
 # gpt-5 rows by first minor version, ascending; a model uses the highest at or below its own.
 _OPENAI_GPT5_RULES: tuple[tuple[int, _OpenAIReasoningRule], ...] = (
-    (0, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="minimal")),
-    (1, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="none")),
-    (2, _OpenAIReasoningRule(_EFFORT_TO_XHIGH, disabled="none")),
+    (0, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="minimal", thinks_by_default=True)),
+    (1, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="none", thinks_by_default=False)),
+    (2, _OpenAIReasoningRule(_EFFORT_TO_XHIGH, disabled="none", thinks_by_default=False)),
 )
+# The thinking fragments that turn extended thinking off. Sonnet 5.5's between_tools
+# counts: "the model does no extended thinking, and the short progress updates it
+# writes between tool calls come back as thinking blocks" (Claude API docs, Sonnet
+# 5.5 migration guide, breaking change 1).
+_CLAUDE_THINKING_OFF_TYPES = frozenset({"disabled", "between_tools"})
 
 # How `disabled` is sent to a model that thinks by default, by exact version:
 # a later version may not allow thinking off, so it gets nothing (the
@@ -262,6 +270,26 @@ def resolve_reasoning(
         else:
             fragment["thinking"] = dict(disabled)
     return ReasoningParams(fragment=fragment, drop_temperature=drop_temperature, dropped=tuple(dropped))
+
+
+def model_thinks(wire: ReasoningWire, model: str, params: ReasoningParams) -> bool | None:
+    """Whether `model` does extended thinking on a request carrying `params`
+    (from `resolve_reasoning`): what the request turns on or off, else the
+    model's default. None when the model isn't recognised."""
+    if wire is ReasoningWire.OPENAI:
+        rule = _openai_reasoning_rule(model)
+        if rule is None:
+            return None
+        level = params.fragment.get("reasoning_effort")
+        return rule.thinks_by_default if level is None else level != "none"
+    version = _claude_version(model)
+    claude_rule = _claude_reasoning_rule(version) if version else None
+    if claude_rule is None:
+        return None
+    sent = params.fragment.get("thinking", {}).get("type")
+    if sent is None:
+        return claude_rule.thinks_by_default
+    return sent not in _CLAUDE_THINKING_OFF_TYPES
 
 
 def _resolve_openai(model: str, effort: ReasoningEffort, thinking: ThinkingMode) -> ReasoningParams:

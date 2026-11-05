@@ -81,6 +81,13 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   `adaptive` is ignored on OpenAI. As before, only model ids on #344's list get
   the parameter; for any other, a set value is now logged once at WARNING
   (was INFO).
+- `pincer doctor` shows, for the default, voice and summary targets, the
+  provider and model and the effort and thinking each request really carries,
+  including step-downs. It warns, naming the setting to change, when a value is
+  dropped (not supported, unrecognised model, or not allowed at effort `xhigh` /
+  `max`), and when the voice model thinks while
+  `PINCER_VOICE_MAX_RESPONSE_TOKENS` is below 512. The checks make no API call
+  and never report CRITICAL.
 
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 

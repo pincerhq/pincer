@@ -32,8 +32,8 @@ def test_run_all_returns_report(doctor_env):
     # + 3 in-call tool execution (Sprint 11, #299) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
-    # + 1 identity management (issue #348)
-    assert len(report.checks) == 65
+    # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
+    assert len(report.checks) == 69
 
     assert 0 <= report.score <= 100
 
@@ -1862,3 +1862,273 @@ def test_google_workspace_check(monkeypatch, enabled, status, expected, hint):
     assert result.status == expected
     assert result.category == "google"
     assert (hint in result.fix_hint) if hint else result.fix_hint == ""
+
+
+# ── LLM effort and thinking (issue #345) ──────────────────────────────────────
+
+
+def _llm_cfg(**update):
+    """Explicit settings: every field the reasoning checks read is pinned, so the
+    developer's .env never decides a result."""
+    from pydantic import SecretStr
+
+    from pincer.config import Settings
+
+    base = Settings(
+        anthropic_api_key="sk-ant-test",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    pinned = {
+        "default_provider": "anthropic",
+        "default_model": "claude-haiku-5-5",
+        "anthropic_model": "",
+        "openai_model": "",
+        "openai_api_key": "",
+        "openai_compatible_provider": "",
+        "anthropic_compatible_provider": "",
+        "reasoning_effort": "",
+        "thinking": "",
+        "voice_enabled": True,
+        "voice_turn_model": "",
+        "voice_reasoning_effort": "",
+        "voice_thinking": "",
+        "voice_max_response_tokens": 1024,
+        "summary_provider": None,
+        "summary_model": "claude-haiku-5-5",
+        "summary_reasoning_effort": "",
+        "summary_thinking": "",
+    }
+    merged = {**pinned, **update}
+    # model_copy doesn't validate: keys must already be SecretStr, as the providers read them
+    merged["openai_api_key"] = SecretStr(merged["openai_api_key"])
+    return base.model_copy(update=merged)
+
+
+def test_llm_reasoning_default_shows_what_is_sent():
+    result = SecurityDoctor()._check_llm_reasoning_default(_llm_cfg(reasoning_effort="low", thinking="adaptive"))
+
+    assert result.status == CheckStatus.PASS
+    assert result.category == "llm"
+    assert "anthropic claude-haiku-5-5" in result.message
+    assert "effort low" in result.message
+    assert "thinking adaptive" in result.message
+
+
+def test_llm_reasoning_with_nothing_set_says_so():
+    result = SecurityDoctor()._check_llm_reasoning_default(_llm_cfg())
+
+    assert result.status == CheckStatus.PASS
+    assert result.message == "anthropic claude-haiku-5-5: nothing set; the model runs on its own defaults"
+
+
+def test_llm_reasoning_shows_a_step_down():
+    """Step-downs only log at DEBUG at request time; the doctor is where they show."""
+    result = SecurityDoctor()._check_llm_reasoning_default(
+        _llm_cfg(default_model="claude-opus-4-5", reasoning_effort="xhigh")
+    )
+
+    assert result.status == CheckStatus.PASS
+    assert result.message == "anthropic claude-opus-4-5: effort xhigh → high (stepped down)"
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        (  # Haiku 4.5 takes no effort
+            {"default_model": "claude-haiku-4-5-20251001", "reasoning_effort": "low"},
+            "anthropic claude-haiku-4-5-20251001: nothing sent; effort low not sent: not supported by this model",
+        ),
+        (  # a deployment name Pincer can't place
+            {"default_model": "voice-fast", "reasoning_effort": "low", "thinking": "adaptive"},
+            "anthropic voice-fast: nothing sent; effort low not sent: unrecognised model; "
+            "thinking adaptive not sent: unrecognised model",
+        ),
+        (  # disabled is rejected together with xhigh/max
+            {"reasoning_effort": "xhigh", "thinking": "disabled"},
+            "anthropic claude-haiku-5-5: effort xhigh; thinking disabled not sent: not allowed at effort xhigh or max",
+        ),
+    ],
+    ids=["unsupported", "unrecognised", "invalid-combination"],
+)
+def test_llm_reasoning_warns_about_a_dropped_setting(update, message):
+    result = SecurityDoctor()._check_llm_reasoning_default(_llm_cfg(**update))
+
+    assert result.status == CheckStatus.WARNING
+    assert result.message == message
+    assert "PINCER_REASONING_EFFORT" in result.fix_hint or "PINCER_THINKING" in result.fix_hint
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        (  # one knob on OpenAI: disabled wins over the effort, without a warning
+            {"reasoning_effort": "low", "thinking": "disabled"},
+            "openai gpt-5.1: reasoning_effort none (thinking disabled replaces effort low)",
+        ),
+        ({"reasoning_effort": "max"}, "openai gpt-5.1: reasoning_effort max → high (stepped down)"),
+        (
+            {"thinking": "adaptive"},
+            "openai gpt-5.1: thinking adaptive ignored (OpenAI models have no such setting)",
+        ),
+    ],
+    ids=["disabled-replaces-effort", "step-down", "adaptive-ignored"],
+)
+def test_llm_reasoning_on_openai_shows_reasoning_effort(update, message):
+    cfg = _llm_cfg(default_provider="openai", openai_api_key="sk-test", openai_model="gpt-5.1", **update)
+
+    result = SecurityDoctor()._check_llm_reasoning_default(cfg)
+
+    assert result.status == CheckStatus.PASS
+    assert result.message == message
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"voice_reasoning_effort": "low", "reasoning_effort": "high"}, "anthropic claude-haiku-5-5: effort low"),
+        ({"reasoning_effort": "medium"}, "anthropic claude-haiku-5-5: effort medium"),  # empty inherits the global
+    ],
+    ids=["own-value", "inherits-global"],
+)
+def test_llm_reasoning_voice_uses_the_voice_settings(update, message):
+    result = SecurityDoctor()._check_llm_reasoning_voice(_llm_cfg(**update))
+
+    assert result.status == CheckStatus.PASS
+    assert result.message == message
+
+
+def test_llm_reasoning_voice_on_another_provider_uses_its_wire():
+    """The voice turn plan's effective provider and model: here OpenAI while the default is Anthropic."""
+    cfg = _llm_cfg(openai_api_key="sk-test", voice_turn_model="openai:gpt-5.1", voice_reasoning_effort="low")
+
+    result = SecurityDoctor()._check_llm_reasoning_voice(cfg)
+
+    assert result.message == "openai gpt-5.1: reasoning_effort low"
+
+
+def test_llm_reasoning_summary_resolves_against_the_summary_model():
+    """The provider defaults to Haiku 5.5, but summaries ask for Sonnet 5.5, whose disabled is between_tools."""
+    cfg = _llm_cfg(summary_model="claude-sonnet-5-5", summary_thinking="disabled", thinking="adaptive")
+
+    result = SecurityDoctor()._check_llm_reasoning_summary(cfg)
+
+    assert result.status == CheckStatus.PASS
+    assert result.message == "anthropic claude-sonnet-5-5: thinking between_tools"
+
+
+def test_llm_reasoning_summary_on_an_openai_provider_uses_its_own_model():
+    """A claude-* summary_model on an OpenAI-wire summary provider is replaced by that provider's model."""
+    cfg = _llm_cfg(
+        openai_api_key="sk-test",
+        openai_model="gpt-5.1",
+        summary_provider="openai",
+        summary_model="claude-haiku-4-5-20251001",
+        summary_reasoning_effort="low",
+    )
+
+    result = SecurityDoctor()._check_llm_reasoning_summary(cfg)
+
+    assert result.message == "openai gpt-5.1: reasoning_effort low"
+
+
+@pytest.mark.parametrize(
+    ("update", "status"),
+    [
+        ({"voice_max_response_tokens": 150}, CheckStatus.WARNING),  # Haiku 5.5 thinks by default
+        ({"voice_max_response_tokens": 600}, CheckStatus.PASS),
+        ({"voice_max_response_tokens": 150, "voice_thinking": "disabled"}, CheckStatus.PASS),
+        # between_tools: no extended thinking, only short progress notes (Sonnet 5.5)
+        (
+            {"voice_max_response_tokens": 150, "default_model": "claude-sonnet-5-5", "voice_thinking": "disabled"},
+            CheckStatus.PASS,
+        ),
+        # gpt-5.1 defaults to reasoning_effort none; gpt-5 to medium
+        (
+            {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-5.1"},
+            CheckStatus.PASS,
+        ),
+        (
+            {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-5"},
+            CheckStatus.WARNING,
+        ),
+    ],
+    ids=["thinks-150", "thinks-600", "disabled-150", "between-tools-150", "gpt-5.1-150", "gpt-5-150"],
+)
+def test_voice_thinking_token_limit(update, status):
+    result = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(**update))
+
+    assert result.status == status
+    assert result.category == "voice"
+    if status == CheckStatus.WARNING:
+        assert "PINCER_VOICE_MAX_RESPONSE_TOKENS" in result.fix_hint
+
+
+_LLM_REASONING_CHECKS = (
+    "_check_llm_reasoning_default",
+    "_check_llm_reasoning_voice",
+    "_check_llm_reasoning_summary",
+    "_check_voice_thinking_token_limit",
+)
+
+
+def test_llm_reasoning_checks_never_fail_the_deploy_gate():
+    """Informational: `pincer doctor --production` exits non-zero on CRITICAL, so odd
+    settings give a warning at most, never CRITICAL and never an exception."""
+    cfg = _llm_cfg(
+        default_provider="mystery",
+        default_model="voice-fast",
+        voice_turn_model="ghost:model-x",
+        summary_provider="nope",
+        summary_model="whatever",
+        reasoning_effort="max",
+        thinking="disabled",
+        voice_max_response_tokens=32,
+    )
+
+    results = [getattr(SecurityDoctor(), check)(cfg) for check in _LLM_REASONING_CHECKS]
+
+    assert [r.status for r in results] == [
+        CheckStatus.WARNING,  # default: provider not configured
+        CheckStatus.WARNING,  # voice: falls back to the default, also not configured
+        CheckStatus.WARNING,  # summary: provider not configured
+        CheckStatus.PASS,  # limit: can't tell whether an unknown model thinks
+    ]
+    assert "not configured" in results[0].message
+
+
+def test_llm_reasoning_checks_make_no_network_call(monkeypatch):
+    """No API call: any HTTP request through httpx (both SDKs use it) raises here."""
+    import httpx
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the doctor made a network call")
+
+    monkeypatch.setattr(httpx.Client, "send", no_network)
+    monkeypatch.setattr(httpx.AsyncClient, "send", no_network)
+    with pytest.raises(AssertionError, match="network call"):  # the guard is live
+        httpx.Client().get("https://example.invalid")
+    # Voice and summary on another provider than the default: the voice plan builds that leaf
+    cfg = _llm_cfg(
+        openai_api_key="sk-test",
+        voice_turn_model="openai:gpt-5",
+        summary_provider="openai",
+        summary_model="gpt-5.1",
+        reasoning_effort="low",
+        voice_max_response_tokens=150,
+    )
+
+    results = [getattr(SecurityDoctor(), check)(cfg) for check in _LLM_REASONING_CHECKS]
+
+    assert [r.message.split(":")[0] for r in results[:3]] == [
+        "anthropic claude-haiku-5-5",
+        "openai gpt-5",
+        "openai gpt-5.1",
+    ]
+    assert results[3].status == CheckStatus.WARNING  # gpt-5 thinks by default at 150
+
+
+def test_llm_reasoning_voice_is_skipped_when_voice_is_off():
+    result = SecurityDoctor()._check_llm_reasoning_voice(_llm_cfg(voice_enabled=False, voice_outbound_enabled=False))
+
+    assert result.status == CheckStatus.SKIPPED
