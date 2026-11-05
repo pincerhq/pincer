@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pincer.config.identity import load_identity_config, resolve_identity_map_config
+from pincer.config.identity import load_identity_config, load_identity_map
 from pincer.core.identity import IdentityResolver
 from pincer.core.phone import normalize_e164
 from pincer.db.session import session_scope
@@ -28,9 +28,8 @@ def _write(tmp_path: Path, text: str) -> None:
     (tmp_path / "pincer.toml").write_text(text)
 
 
-async def _resolver(tmp_path: Path) -> IdentityResolver:
-    config, profiles = resolve_identity_map_config("", tmp_path)
-    resolver = IdentityResolver(tmp_path / "pincer.db", identity_map_config=config, profiles=profiles)
+async def _resolver(tmp_path: Path, mode: str = "update") -> IdentityResolver:
+    resolver = IdentityResolver(tmp_path / "pincer.db", load_identity_map(tmp_path, mode), mode)
     await resolver.ensure_table()
     return resolver
 
@@ -48,8 +47,7 @@ def test_normalize_e164():
 def test_phones_parsed_normalised_and_deduplicated(tmp_path):
     _write(tmp_path, OWNER_TOML)
     assert load_identity_config(tmp_path)["owner"].phones == ["+491512345678"]
-    _config, profiles = resolve_identity_map_config("", tmp_path)
-    assert profiles["owner"].phones == ("+491512345678",)
+    assert load_identity_map(tmp_path, "update")["owner"].phones == ["+491512345678"]
 
 
 def test_phone_used_by_two_identities_is_an_error(tmp_path):
@@ -197,3 +195,47 @@ async def test_rename_carries_phones_and_prune_drops_orphans(tmp_path):
     assert (removed, orphaned) == (1, 1)
     async with session_scope(store._url) as session:
         assert await IdentityPhoneRepository(session).get("+491512345678") is None
+
+
+OTHER_TOML = """
+[identity.other]
+phones = ["+491700000002"]
+
+[[identity.other.channels]]
+channel         = "telegram"
+channel_user_id = 200200
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "other_kept"), [("sync", False), ("update", True), ("clionly", True)])
+async def test_phone_cleanup_follows_the_mode(tmp_path, mode, other_kept):
+    """#348: sync drops every config phone the TOML lost; update only those of
+    the people it still lists; clionly none."""
+    _write(tmp_path, OWNER_TOML + OTHER_TOML)
+    resolver = await _resolver(tmp_path, "sync")
+    await resolver.seed_from_config()
+    store = resolver._store
+
+    # `other` leaves the TOML; `owner` stays but loses its phone.
+    _write(tmp_path, OWNER_TOML.replace('phones = ["+49 151 2345-678", "+491512345678"]', ""))
+    await (await _resolver(tmp_path, mode)).cleanup_phones()
+
+    assert (await store.user_for_confirmed_phone("+491700000002") == "other") is other_kept
+    owner_kept = mode == "clionly"
+    assert (await store.user_for_confirmed_phone("+491512345678") == "owner") is owner_kept
+
+
+@pytest.mark.asyncio
+async def test_a_deactivated_owner_is_a_guest_on_calls(tmp_path):
+    _write(tmp_path, OWNER_TOML)
+    resolver = await _resolver(tmp_path)
+    await resolver.seed_from_config()
+    store = resolver._store
+    await store.set_active("owner", False)
+    assert await store.user_for_confirmed_phone("+491512345678") is None
+    # Seeding again keeps it off.
+    await resolver.seed_from_config()
+    assert await store.user_for_confirmed_phone("+491512345678") is None
+    await store.set_active("owner", True)
+    assert await store.user_for_confirmed_phone("+491512345678") == "owner"

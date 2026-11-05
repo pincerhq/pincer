@@ -167,13 +167,13 @@ device, then delete the neonize session and re-pair.
 
 **Symptom**
 
-A message sent to the bot immediately after it starts (or replayed from history-sync on reconnect) is answered correctly, but the conversation is stored under the raw channel ID (`whatsapp:<lid>`) instead of the configured name from `PINCER_IDENTITY_MAP` (e.g. `user:john`). Subsequent messages in the same session resolve correctly.
+A message sent to the bot immediately after it starts (or replayed from history-sync on reconnect) is answered correctly, but the conversation is stored under the raw channel ID (`whatsapp:<lid>`) instead of the configured name from the `[identity]` TOML (e.g. `user:john`). Subsequent messages in the same session resolve correctly.
 
 **Cause**
 
 `neonize` registers the `MessageEv` handler and begins delivering events as soon as the WhatsApp socket handshake completes. Pincer's startup sequence seeds the identity map (`seed_from_config`) only after **all** channels have finished connecting. The gap between WhatsApp connecting and the identity map being ready is typically 1–3 seconds (longer if multiple channels are starting concurrently), but `neonize` may replay a burst of recent history-sync events during exactly that window.
 
-When a message arrives in this gap, `IdentityMiddleware` cannot find the user in the (not-yet-seeded) database. If `PINCER_IDENTITY_MAP` is configured, no new row is created (by design, to prevent phantom identities), and the message falls back to a channel-scoped identity: `whatsapp:<lid>`. Memory and context from that message are stored under the wrong key and will not be merged when the correct identity is seeded moments later.
+When a message arrives in this gap, `IdentityMiddleware` cannot find the user in the (not-yet-seeded) database. If the guest gate is on (identities are configured), no new row is created (by design, to prevent phantom identities), and the message falls back to a channel-scoped identity: `whatsapp:<lid>`. Memory and context from that message are stored under the wrong key and will not be merged when the correct identity is seeded moments later.
 
 **Impact**
 

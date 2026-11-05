@@ -102,14 +102,13 @@ def test_create_makes_nothing_when_the_credential_is_refused() -> None:
 
     both = _run("create", "tamias", PASSWORD, "--api-key")
     assert both.exit_code == 1
-    assert "not both" in both.output
+    assert "Give one of a password, --api-key or --no-password" in both.output
 
     assert "No identities" in _run("list").output
 
 
 def test_a_created_identity_survives_the_startup_pruning(tmp_path: Path) -> None:
-    """With an identity map, identities without a channel are swept at every
-    start — except the ones that can sign in. `create` must make one of those."""
+    """`create` makes a CLI identity, which no sync of the TOML prunes."""
     import asyncio
 
     assert _run("create", "tamias", PASSWORD).exit_code == 0
@@ -118,15 +117,37 @@ def test_a_created_identity_survives_the_startup_pruning(tmp_path: Path) -> None
     async def restart() -> list[str]:
         try:
             identities = IdentityService(get_database_url(tmp_path / "pincer.db"))
-            await identities.create_profile("bare")  # what `create` used to leave behind
+            await identities.prune(set())
+            return sorted(row["pincer_user_id"] for row in await identities.list_profiles())
+        finally:
+            await dispose_engines()
+
+    assert asyncio.run(restart()) == ["tamias", "widget"]
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+
+
+def test_a_config_identity_that_can_sign_in_survives_the_startup_pruning(tmp_path: Path) -> None:
+    """Config identities without a channel are swept at every sync start —
+    except the ones that hold a password or an API key."""
+    import asyncio
+
+    async def restart() -> list[str]:
+        try:
+            identities = IdentityService(get_database_url(tmp_path / "pincer.db"))
+            auth = build_auth_service()
+            for name in ("with_password", "with_key", "bare"):
+                await identities.create_profile(name, source="config")
+            await auth.set_password("with_password", PASSWORD)
+            await auth.generate_api_key("with_key")
             await identities.create_identity("mapped", channel="telegram", channel_user_id="1")
             await identities.prune({("telegram", "1")})
             return sorted(row["pincer_user_id"] for row in await identities.list_profiles())
         finally:
             await dispose_engines()
 
-    assert asyncio.run(restart()) == ["mapped", "tamias", "widget"]
-    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+    _run("list")  # brings the database to head
+    assert asyncio.run(restart()) == ["mapped", "with_key", "with_password"]
+    assert asyncio.run(_login("with_password", PASSWORD)).pincer_user_id == "with_password"
 
 
 def test_set_password_resets_and_prompts_hidden_when_omitted() -> None:
@@ -294,3 +315,235 @@ def test_revoke_removes_password_key_and_sessions() -> None:
     again = _run("revoke", "tamias")
     assert again.exit_code == 1
     assert "no password or API key" in again.output
+
+
+# ── roster management (#348) ─────────────────────────────────────────
+
+
+def _service(tmp_path: Path) -> IdentityService:
+    return IdentityService(get_database_url(tmp_path / "pincer.db"))
+
+
+def _query(tmp_path: Path, call):
+    import asyncio
+
+    async def run():
+        try:
+            return await call(_service(tmp_path))
+        finally:
+            await dispose_engines()
+
+    return asyncio.run(run())
+
+
+def test_create_with_a_channel_and_no_password(tmp_path: Path) -> None:
+    created = _run(
+        "create",
+        "alice",
+        "--no-password",
+        "--channel",
+        "telegram:123",
+        "--channel",
+        "whatsapp:+4915100000001",
+        "--timezone",
+        "Europe/Berlin",
+    )
+    assert created.exit_code == 0, created.output
+    assert _query(tmp_path, lambda s: s.channels_for("alice")) == [
+        ("telegram", "123"),
+        ("whatsapp", "4915100000001"),  # stored the way a message names it
+    ]
+    profile = _query(tmp_path, lambda s: s.profile("alice"))
+    assert (profile["source"], profile["active"], profile["timezone"]) == ("cli", True, "Europe/Berlin")
+    assert profile["preferred_channel"] == "telegram"
+
+    listed = _run("list").output
+    assert "active" in listed
+    assert "cli" in listed
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--no-password"], "needs a --channel"),
+        (["--no-password", "--channel", "fax:1"], "Unknown channel 'fax'"),
+        (["--no-password", "--channel", "telegram"], "is not CHANNEL:ID"),
+        (["--no-password", "--channel", "telegram:@alice"], "numeric user id"),
+        (["--no-password", "--channel", "telegram:1", "--timezone", "Mars/Base"], "not an IANA timezone"),
+        (["--api-key", "--no-password"], "Give one of"),
+    ],
+)
+def test_create_refuses_bad_channels_and_options(args: list[str], message: str) -> None:
+    result = _run("create", "alice", *args)
+    assert result.exit_code == 1
+    assert message in result.output
+    assert "alice" not in _run("list").output
+
+
+def test_create_refuses_a_channel_someone_else_has() -> None:
+    assert _run("create", "alice", "--no-password", "--channel", "telegram:1").exit_code == 0
+    clash = _run("create", "bob", "--no-password", "--channel", "telegram:1")
+    assert clash.exit_code == 1
+    assert "already belongs to 'alice'" in clash.output
+    assert "bob" not in _run("list").output
+
+
+def test_add_and_remove_channel(tmp_path: Path) -> None:
+    _run("create", "alice", "--no-password", "--channel", "telegram:1")
+    _run("create", "bob", "--no-password", "--channel", "telegram:2")
+
+    added = _run("add-channel", "alice", "signal", "+4915100000001")
+    assert added.exit_code == 0, added.output
+    assert "Linked signal:4915100000001 to 'alice'" in added.output
+    assert "already linked" in _run("add-channel", "alice", "signal", "4915100000001").output
+
+    taken = _run("add-channel", "alice", "telegram", "2")
+    assert taken.exit_code == 1
+    assert "already belongs to 'bob'" in taken.output
+    assert _run("add-channel", "alice", "telegram", "@bob").exit_code == 1
+    assert _run("add-channel", "ghost", "telegram", "9").exit_code == 1
+
+    removed = _run("remove-channel", "alice", "signal", "4915100000001")
+    assert removed.exit_code == 0, removed.output
+    not_linked = _run("remove-channel", "alice", "telegram", "2")
+    assert not_linked.exit_code == 1
+    assert "is not linked to 'alice'" in not_linked.output
+    assert _query(tmp_path, lambda s: s.channels_for("alice")) == [("telegram", "1")]
+
+
+def test_set_profile_fields_and_phones(tmp_path: Path) -> None:
+    _run("create", "alice", "--no-password", "--channel", "telegram:1")
+    _run("create", "bob", "--no-password", "--channel", "telegram:2", "--email", "bob@example.com")
+
+    result = _run(
+        "set",
+        "alice",
+        "--display-name",
+        "Alice A.",
+        "--email",
+        "alice@example.com",
+        "--timezone",
+        "Europe/Kyiv",
+        "--preferred-channel",
+        "telegram",
+        "--add-phone",
+        "+49 151 00000001",
+    )
+    assert result.exit_code == 0, result.output
+    profile = _query(tmp_path, lambda s: s.profile_with_channels("alice"))
+    assert (profile["display_name"], profile["email"], profile["timezone"]) == (
+        "Alice A.",
+        "alice@example.com",
+        "Europe/Kyiv",
+    )
+    assert profile["phones"] == [{"phone": "+4915100000001", "confirmed": True}]
+    assert _query(tmp_path, lambda s: s.user_for_confirmed_phone("+4915100000001")) == "alice"
+
+    assert "already belongs to 'bob'" in _run("set", "alice", "--email", "BOB@example.com").output
+    assert "already belongs to 'alice'" in _run("set", "bob", "--add-phone", "+4915100000001").output
+    assert _run("set", "alice", "--add-phone", "12").exit_code == 1
+    assert "Nothing to set" in _run("set", "alice").output
+    assert _run("set", "alice", "--email", "alice@example.com").exit_code == 0  # its own email
+
+    assert _run("set", "alice", "--remove-phone", "+4915100000001").exit_code == 0
+    assert _query(tmp_path, lambda s: s.user_for_confirmed_phone("+4915100000001")) is None
+
+
+def test_deactivate_blocks_sign_in_and_activate_restores_it(tmp_path: Path) -> None:
+    import asyncio
+
+    from pincer.services.auth import InvalidCredentialsError
+
+    _run("create", "tamias", PASSWORD, "--channel", "telegram:1")
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+
+    off = _run("deactivate", "tamias")
+    assert off.exit_code == 0, off.output
+    assert "Deactivated 'tamias'" in off.output
+    assert "already inactive" in _run("deactivate", "tamias").output
+    assert "inactive" in _run("list").output
+    with pytest.raises(InvalidCredentialsError):
+        asyncio.run(_login("tamias", PASSWORD))
+    assert _query(tmp_path, lambda s: s.user_for_channel("telegram", "1")) is None
+
+    on = _run("activate", "tamias")
+    assert on.exit_code == 0, on.output
+    assert "already active" in _run("activate", "tamias").output
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+    assert _run("deactivate", "ghost").exit_code == 1
+
+
+_ALICE_TOML = '[identity.alice]\n\n[[identity.alice.channels]]\nchannel = "telegram"\nchannel_user_id = "1"\n'
+
+
+def _mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setenv("PINCER_IDENTITY_MANAGEMENT", mode)
+    get_settings_relaxed.cache_clear()
+
+
+@pytest.mark.parametrize("mode", ["sync", "update"])
+def test_a_change_to_a_toml_listed_identity_is_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    (tmp_path / "pincer.toml").write_text(_ALICE_TOML)
+    _mode(monkeypatch, mode)
+    created = _run("create", "alice", "--no-password", "--channel", "telegram:1")
+    assert created.exit_code == 0, created.output
+    assert "the next start resets what the TOML states" in created.output
+
+
+def test_sync_warns_about_a_config_identity_the_toml_no_longer_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _query(tmp_path, lambda s: s.for_path(tmp_path / "pincer.db"))  # schema at head
+    _query(tmp_path, lambda s: s.create_identity("gone", channel="telegram", channel_user_id="9"))
+    (tmp_path / "pincer.toml").write_text(_ALICE_TOML)  # lists alice only
+
+    _mode(monkeypatch, "sync")
+    result = _run("set", "gone", "--display-name", "Gone")
+    assert result.exit_code == 0, result.output
+    assert "the next start removes it" in result.output
+
+    _mode(monkeypatch, "update")  # update removes nobody
+    assert "next start" not in _run("set", "gone", "--display-name", "Gone").output
+
+
+def test_sync_does_not_warn_about_a_cli_identity_the_toml_does_not_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pincer.toml").write_text(_ALICE_TOML)
+    _mode(monkeypatch, "sync")
+    created = _run("create", "carol", "--no-password", "--channel", "telegram:3")
+    assert created.exit_code == 0, created.output
+    result = _run("set", "carol", "--display-name", "Carol")
+    assert result.exit_code == 0, result.output
+    assert "next start" not in created.output + result.output
+
+
+def test_remove_channel_refuses_a_channel_the_toml_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next message from it would link it again: the TOML is where it goes."""
+    (tmp_path / "pincer.toml").write_text(
+        '[identity.alice]\n\n[[identity.alice.channels]]\nchannel = "telegram"\nchannel_user_id = "1"\n'
+    )
+    _run("create", "alice", "--no-password", "--channel", "telegram:1", "--channel", "slack:U1")
+
+    refused = _run("remove-channel", "alice", "telegram", "1")
+    assert refused.exit_code == 1
+    assert "is listed for 'alice'" in refused.output
+    assert _run("remove-channel", "alice", "slack", "U1").exit_code == 0
+
+    monkeypatch.setenv("PINCER_IDENTITY_MANAGEMENT", "clionly")  # the TOML is ignored: removal is final
+    get_settings_relaxed.cache_clear()
+    assert _run("remove-channel", "alice", "telegram", "1").exit_code == 0
+
+
+def test_set_changes_nothing_when_a_phone_is_refused(tmp_path: Path) -> None:
+    _run("create", "alice", "--no-password", "--channel", "telegram:1")
+    _run("create", "bob", "--no-password", "--channel", "telegram:2", "--email", "bob@example.com")
+    _run("set", "alice", "--add-phone", "+4915100000001")
+
+    result = _run("set", "bob", "--email", "new@example.com", "--add-phone", "+4915100000001")
+
+    assert result.exit_code == 1
+    assert "Nothing was changed" in result.output
+    assert _query(tmp_path, lambda s: s.profile("bob"))["email"] == "bob@example.com"

@@ -62,3 +62,22 @@ SEED_ID_SQL = (
     "lower(hex(randomblob(4))||'-'||hex(randomblob(2))||'-7'||substr(hex(randomblob(2)),2)"
     "||'-8'||substr(hex(randomblob(2)),2)||'-'||hex(randomblob(6)))"
 )
+
+
+def identity_entries(*people: str, **profiles: dict[str, object]) -> dict[str, object]:
+    """`[identity]` TOML entries for a test, written short.
+
+    Each person is `name@channel:id=channel:id…`; `profiles` adds TOML fields
+    to a person by name, e.g. `identity_entries("john@telegram:1", john={"timezone": "Europe/Berlin"})`.
+    """
+    from pincer.config.identity import IdentityTomlEntry
+
+    entries: dict[str, object] = {}
+    for person in people:
+        name, _, pairs = person.partition("@")
+        channels = [tuple(pair.split(":", 1)) for pair in pairs.split("=") if pair]
+        fields = dict(profiles.get(name, {}))
+        if "phones" in fields:
+            fields["phones"] = list(fields["phones"])  # type: ignore[call-overload]
+        entries[name] = IdentityTomlEntry(pincer_user_id=name, channels=channels, **fields)  # type: ignore[arg-type]
+    return entries

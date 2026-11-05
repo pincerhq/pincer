@@ -393,7 +393,7 @@ def test_doctor_warns_when_no_identity_has_phones(tmp_path):
     from pincer.security.doctor import CheckStatus
 
     doc = _doctor(tmp_path)
-    voice = _settings(voice_enabled=True, identity_map="")
+    voice = _settings(voice_enabled=True, identity_management="update")
     assert doc._check_voice_registered_phones(_settings(voice_enabled=False)).status == CheckStatus.SKIPPED
     assert doc._check_voice_registered_phones(voice).status == CheckStatus.WARNING
     (tmp_path / "pincer.toml").write_text(
@@ -403,6 +403,34 @@ def test_doctor_warns_when_no_identity_has_phones(tmp_path):
     result = doc._check_voice_registered_phones(voice)
     assert result.status == CheckStatus.PASS
     assert "owner" in result.message
+
+
+def test_doctor_counts_phones_added_with_the_cli(tmp_path):
+    """#348: a number from `pincer identity set --add-phone` identifies its caller too."""
+    import asyncio
+
+    from pincer.db.engine import dispose_engines
+    from pincer.security.doctor import CheckStatus
+    from pincer.services.identity import IdentityService
+
+    db_path = tmp_path / "pincer.db"
+
+    async def add_phone() -> None:
+        try:
+            service = await IdentityService.for_path(db_path)
+            await service.create_profile("owner", channels=[("telegram", "1")])
+            await service.add_phone("owner", "+491512345678")
+        finally:
+            await dispose_engines()
+
+    asyncio.run(add_phone())
+    doc = _doctor(tmp_path)
+    for mode in ("update", "clionly"):
+        result = doc._check_voice_registered_phones(
+            _settings(voice_enabled=True, identity_management=mode, db_path=db_path)
+        )
+        assert result.status == CheckStatus.PASS, mode
+        assert "owner" in result.message
 
 
 def test_removed_settings_are_gone():

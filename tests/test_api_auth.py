@@ -725,3 +725,54 @@ def test_the_auth_service_is_built_once_per_app(authed_app: AuthedApp, monkeypat
         assert authed_app.client.get(STATUS, headers=authed_app.jwt_headers).status_code == 200
         assert authed_app.client.get("/api/identity/me/api-key", headers=authed_app.jwt_headers).status_code == 200
     assert built == 1
+
+
+# ── deactivated identities (#348) ────────────────────────────────────
+
+
+def test_a_deactivated_identity_cannot_sign_in_by_any_route(authed_app: AuthedApp) -> None:
+    from pincer.repositories.identity import IdentityProfileRepository
+
+    auth = authed_app.auth
+
+    async def check() -> None:
+        session = await auth.authenticate_bearer(authed_app.access_token)
+        ticket = await auth.issue_ws_ticket(session, "CA1")
+        # Switched off without ending the sessions, so the check itself is what refuses.
+        async with session_scope(authed_app.db_url) as db:
+            await IdentityProfileRepository(db).set_active("alice", False)
+
+        with pytest.raises(InvalidCredentialsError):
+            await auth.login("alice", authed_app.password)
+        with pytest.raises(InvalidCredentialsError):
+            await auth.login(authed_app.email, authed_app.password)
+        for bearer in (authed_app.access_token, authed_app.api_key):
+            with pytest.raises(InvalidTokenError):
+                await auth.authenticate_bearer(bearer)
+        with pytest.raises(InvalidTokenError):
+            await auth.refresh(authed_app.refresh_token)
+        with pytest.raises(InvalidTokenError):
+            await auth.authenticate_ws_ticket(ticket, "CA1")
+
+    authed_app.run(check)
+    assert _login(authed_app, "alice", authed_app.password).status_code == 401
+    assert authed_app.client.get("/api/identity/me", headers=_bearer(authed_app.api_key)).status_code == 401
+
+
+def test_deactivating_ends_the_sessions_and_keeps_the_credentials(authed_app: AuthedApp) -> None:
+    auth = authed_app.auth
+
+    async def check() -> None:
+        assert await authed_app.identities.set_active("alice", False)
+        async with session_scope(authed_app.db_url) as db:
+            credential = await IdentityCredentialRepository(db).get("alice")
+        assert credential is not None and credential.password_hash and credential.api_key_hash
+
+        assert await authed_app.identities.set_active("alice", True)
+        # Back on: the key and password work again, the old session does not.
+        assert (await auth.authenticate_bearer(authed_app.api_key)).pincer_user_id == "alice"
+        assert (await auth.login("alice", authed_app.password)).access_token
+        with pytest.raises(TokenStaleError):
+            await auth.authenticate_bearer(authed_app.access_token)
+
+    authed_app.run(check)

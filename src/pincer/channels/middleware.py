@@ -33,7 +33,7 @@ class IdentityMiddleware:
 
     Adapters emit IncomingMessage with user_id set to the raw channel identifier
     (e.g. a Telegram numeric ID or a WhatsApp LID).  This middleware resolves it
-    to the owner defined in PINCER_IDENTITY_MAP, or falls back to the
+    to its active identity (see `IdentityResolver`), or falls back to the
     channel-scoped form ``{channel}:{user_id}`` so downstream code always sees
     a non-empty, deterministic canonical identity.
 
@@ -50,7 +50,7 @@ class IdentityMiddleware:
 
         # Phase 1: look up each candidate without creating anything.
         # This ensures a LID tried first never shadow a phone number that
-        # IS already mapped (e.g. via PINCER_IDENTITY_MAP).
+        # IS already mapped (e.g. via the [identity] TOML).
         matched_candidate: str | None = None
         owner: str | None = None
         for candidate in candidates:
@@ -63,13 +63,17 @@ class IdentityMiddleware:
                 matched_candidate = candidate
                 break
 
-        # Phase 2: create a new identity only when no config is set.
-        # With a config, startup (seed_from_config + cleanup) is authoritative —
+        # Phase 2: create a new identity only when the guest gate is off.
+        # With it on, the roster (TOML and database) is authoritative —
         # unknown IDs must NOT produce new DB rows at runtime.
-        if owner is None and msg.user_id and not self._identity.has_config:
+        if owner is None and msg.user_id and not await self._identity.gated():
             try:
                 owner = await self._identity.resolve(msg.channel_type, msg.user_id)
                 matched_candidate = msg.user_id
+                if owner == f"{msg.channel_type.value}:{msg.user_id}":
+                    # The channel-scoped stand-in for a deactivated identity:
+                    # no profile behind it, so nothing may be linked to it.
+                    owner = None
             except Exception:
                 logger.debug("Identity resolve error for %s/%s", msg.channel, msg.user_id, exc_info=True)
 

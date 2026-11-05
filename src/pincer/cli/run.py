@@ -83,6 +83,8 @@ async def run(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
+    _refuse_legacy_identity_map()
+
     if detach:
         if component is not None:
             console.print(
@@ -179,6 +181,25 @@ class CoreComponents:
     skill_service: SkillService
     mcp_manager: MCPClientManager | None
     agent: Agent
+
+
+def _refuse_legacy_identity_map() -> None:
+    """Stop when the removed PINCER_IDENTITY_MAP is still set.
+
+    Settings ignores unknown variables, so starting anyway would drop the
+    identities it lists and, with them, the guest gate it closed.
+    """
+    from pincer.config.identity import legacy_identity_map, legacy_identity_map_error
+
+    value = legacy_identity_map()
+    if value is None:
+        return
+    from rich.text import Text
+
+    # Text, not markup: the TOML in the message is full of `[identity.<name>]`,
+    # which markup would swallow as style tags.
+    console.print(Text("Configuration error:", style="red"), Text(legacy_identity_map_error(value)), soft_wrap=True)
+    raise typer.Exit(1)
 
 
 async def _build_core(settings: Settings) -> CoreComponents:
@@ -1230,8 +1251,8 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
                 pass
 
             # Recover channel_user_id from a channel-scoped fallback canonical_id
-            # (e.g. "teams:{aad_id}" when has_config=True and the user is absent
-            # from PINCER_IDENTITY_MAP — no channel_identities row exists for them).
+            # (e.g. "teams:{aad_id}" when the guest gate is on and the user is
+            # not a known identity — no channel_identities row exists for them).
             if ch_user_id is None:
                 prefix = f"{incoming.channel_type.value}:"
                 if canonical_id.startswith(prefix):
@@ -1257,19 +1278,25 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
     # Sprint 3: Identity resolver
     from pincer.channels.middleware import IdentityMiddleware, build_pipeline
-    from pincer.config.identity import resolve_identity_map_config
+    from pincer.config.identity import load_identity_map
     from pincer.core.identity import IdentityResolver
 
-    identity_map_config, identity_profiles = resolve_identity_map_config(settings.identity_map)
-    identity = IdentityResolver(settings.db_path, identity_map_config, identity_profiles)
+    identity_entries = load_identity_map(None, settings.identity_management)
+    identity = IdentityResolver(settings.db_path, identity_entries, settings.identity_management)
     await identity.ensure_table()
-    if getattr(settings, "voice_enabled", False) and not any(p.phones for p in identity_profiles.values()):
+    if (
+        getattr(settings, "voice_enabled", False)
+        and not any(entry.phones for entry in identity_entries.values())
+        and not await identity.store.confirmed_phone_owners()
+    ):
         # #299: without a confirmed phone every call party is a guest, and a
-        # guest gets no calendar writes on a generic call by default.
+        # guest gets no calendar writes on a generic call by default. Phones
+        # come from the TOML (seeded later this start) or `pincer identity set`.
         logger.warning(
-            "Voice is enabled but no identity lists `phones`: everyone on a call is a guest, so the agent "
-            "cannot create calendar events on a generic call. Add your number as `phones` to your "
-            "[identity.<key>] in pincer.toml, or allow guests via PINCER_VOICE_GUESTS_TOOLS_ALLOWED."
+            "Voice is enabled but no identity has a confirmed phone: everyone on a call is a guest, so the "
+            "agent cannot create calendar events on a generic call. Add your number as `phones` to your "
+            "[identity.<key>] in pincer.toml or with `pincer identity set <name> --add-phone`, or allow "
+            "guests via PINCER_VOICE_GUESTS_TOOLS_ALLOWED."
         )
     # Lets the per-turn clock in the system prompt read in each user's own
     # timezone instead of the deployment-wide one (see core/clock.py).

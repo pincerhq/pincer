@@ -405,12 +405,12 @@ class TestWhatsAppRouting:
         ch._handler.assert_called_once()
 
     async def test_incoming_dm_identity_present_but_no_config_rejected(self):
-        """An IdentityResolver is wired in but has no configured map at all (has_config=False)
+        """An IdentityResolver is wired in but has the guest gate off (gated() is False)
         → same fail-closed-without-map behavior as identity=None."""
         settings = _make_settings(whatsapp_self_chat_only=False)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings, identity=AsyncMock())
-        ch._identity.has_config = False
+        ch._identity.gated = AsyncMock(return_value=False)
         ch._own_jid = OWNER_PHONE
         ch._handler = AsyncMock(return_value="ok")
         ch._extract_message = AsyncMock(
@@ -440,7 +440,7 @@ class TestWhatsAppRouting:
         settings = _make_settings(whatsapp_self_chat_only=False)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings, identity=AsyncMock())
-        ch._identity.has_config = True
+        ch._identity.gated = AsyncMock(return_value=True)
 
         async def fake_is_guest(channel, candidate):
             return candidate != OTHER_PHONE  # only the phone-number form is known
@@ -817,7 +817,7 @@ def _promoting_channel():
     settings = _make_settings(whatsapp_self_chat_only=False)
     settings.whatsapp_guests_allowed = False
     ch = WhatsAppChannel(settings, identity=AsyncMock())
-    ch._identity.has_config = True
+    ch._identity.gated = AsyncMock(return_value=True)
     known = {OTHER_PHONE}
 
     async def fake_promote(channel, real_id, placeholders):

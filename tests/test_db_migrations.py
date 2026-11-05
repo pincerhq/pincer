@@ -2120,3 +2120,57 @@ def test_0024_preserves_existing_onboarding_closures(migration_url, tmp_path):
         command.upgrade(cfg, "head")
     finally:
         engine_.dispose()
+
+
+def test_identity_status_backfills_the_source(migration_url, tmp_path):
+    """0028 (#348): `usr_` ids are auto, a credential without a channel is a CLI
+    identity, the rest came from the config; everyone starts active."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0027")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        with engine_.begin() as con:
+            for uid in ("usr_0123abcd", "usrbob", "usr_x", "alice", "dashboard", "revoked"):
+                con.execute(sa.text("INSERT INTO pincer_identity_profiles (pincer_user_id) VALUES (:u)"), {"u": uid})
+            for channel_user_id, uid in (("1", "usr_0123abcd"), ("2", "alice"), ("3", "usrbob")):
+                con.execute(
+                    sa.text(
+                        "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
+                        "VALUES ('telegram', :c, :u)"
+                    ),
+                    {"c": channel_user_id, "u": uid},
+                )
+            for uid, password_hash in (("dashboard", "hash"), ("alice", "hash"), ("revoked", None), ("usr_x", "h")):
+                con.execute(
+                    sa.text(
+                        "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash, token_version) "
+                        "VALUES (:u, :p, 0)"
+                    ),
+                    {"u": uid, "p": password_hash},
+                )
+
+        command.upgrade(cfg, "0028")
+
+        with engine_.connect() as con:
+            rows = {
+                uid: (source, bool(active))
+                for uid, source, active in con.execute(
+                    sa.text("SELECT pincer_user_id, source, active FROM pincer_identity_profiles")
+                ).all()
+            }
+        assert rows == {
+            "usr_0123abcd": ("auto", True),
+            # `usr` without the underscore is a name, not an auto id: the `_` is escaped.
+            "usrbob": ("config", True),
+            # A channel-less auto id with a credential stays auto: only config rows become cli.
+            "usr_x": ("auto", True),
+            "alice": ("config", True),
+            "dashboard": ("cli", True),
+            "revoked": ("config", True),
+        }
+
+        command.downgrade(cfg, "0027")
+        columns = {column["name"] for column in sa.inspect(engine_).get_columns("pincer_identity_profiles")}
+        assert not {"active", "source"} & columns
+    finally:
+        engine_.dispose()

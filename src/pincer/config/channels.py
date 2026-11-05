@@ -11,8 +11,9 @@ class ChannelSettings(BaseModel):
     telegram_guests_allowed: bool = Field(
         default=False,
         description=(
-            "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
-            "disposable guests instead of rejecting them. No-op if no identity map is configured."
+            "When the guest gate is on (identities in the [identity] TOML or the database, or "
+            "PINCER_IDENTITY_MANAGEMENT=clionly), allow unknown senders through as disposable guests "
+            "instead of rejecting them. No-op when the gate is off."
         ),
     )
     telegram_group_trigger: str = Field(
@@ -53,13 +54,13 @@ class ChannelSettings(BaseModel):
     whatsapp_guests_allowed: bool = Field(
         default=False,
         description=(
-            "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
-            "disposable guests instead of rejecting them. For group mentions this is a no-op "
-            "if no identity map is configured, same as Telegram/Signal. For DMs it is NOT a "
-            "no-op: unlike Telegram/Signal, WhatsApp DMs are rejected by default with no "
-            "identity map configured (matching the pre-PR default of the removed "
-            "PINCER_WHATSAPP_DM_ALLOWLIST, which rejected all DMs when empty); set this to "
-            "True to accept DMs from anyone regardless of whether a map is configured."
+            "When the guest gate is on (identities in the [identity] TOML or the database, or "
+            "PINCER_IDENTITY_MANAGEMENT=clionly), allow unknown senders through as disposable "
+            "guests instead of rejecting them. For group mentions this is a no-op when the gate "
+            "is off, same as Telegram/Signal. For DMs it is NOT a no-op: unlike Telegram/Signal, "
+            "WhatsApp DMs are rejected by default with the gate off (matching the pre-PR default "
+            "of the removed PINCER_WHATSAPP_DM_ALLOWLIST, which rejected all DMs when empty); set "
+            "this to True to accept DMs from anyone regardless of the gate."
         ),
     )
     whatsapp_group_trigger: str = Field(
@@ -132,8 +133,9 @@ class ChannelSettings(BaseModel):
     signal_guests_allowed: bool = Field(
         default=False,
         description=(
-            "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
-            "disposable guests instead of rejecting them. No-op if no identity map is configured."
+            "When the guest gate is on (identities in the [identity] TOML or the database, or "
+            "PINCER_IDENTITY_MANAGEMENT=clionly), allow unknown senders through as disposable guests "
+            "instead of rejecting them. No-op when the gate is off."
         ),
     )
     signal_group_reply: str = Field(
@@ -521,9 +523,17 @@ class ChannelSettings(BaseModel):
     email_from: str = Field(default="", description="Override sender address")
 
     # ── Cross-Channel Identity ────────────────────────────
-    identity_map: str = Field(
-        default="",
-        description="Cross-channel identity mapping, e.g. telegram:12345=whatsapp:491234567890",
+    # Identities are configured in the [identity] section of pincer.toml /
+    # pincer.local.toml (see pincer.config.identity); PINCER_IDENTITY_MAP is
+    # no longer read, and `pincer run` refuses to start while it is set.
+    identity_management: Literal["sync", "update", "clionly"] = Field(
+        default="update",
+        description=(
+            "How the [identity] TOML section is applied at start. sync: the TOML is the source of truth — "
+            "adds, updates, and removes config identities it no longer lists (CLI-made ones are kept). "
+            "update: adds and updates the identities it lists, never removes. clionly: the TOML section is "
+            "ignored; identities are managed with `pincer identity …` only."
+        ),
     )
     default_user_id: str = Field(
         default="",

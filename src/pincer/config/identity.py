@@ -1,16 +1,7 @@
 """Cross-channel identity configuration — loaded from pincer.toml / pincer.local.toml.
 
-An alternative to `PINCER_IDENTITY_MAP` (see `pincer.core.identity` module
-docstring) for rosters too large to comfortably manage as one env-var string.
-
-Priority (highest to lowest):
-1. PINCER_IDENTITY_MAP, if non-empty — TOML is not even read in that case.
-2. pincer.local.toml's [identity] section (optional — overrides/extends pincer.toml)
-3. pincer.toml's [identity] section
-
-This is a deliberate divergence from `pincer.mcp.config.load_mcp_config`'s
-field-level env > local.toml > toml merge: here the env var, when set, fully
-replaces the TOML section rather than merging with it.
+pincer.local.toml's [identity] section overrides/extends pincer.toml's, per
+person and per field (see `_merge_identity_raw`).
 
 Schema — one person per `[identity.<key>]` table, `<key>` becomes the
 `pincer_user_id`:
@@ -26,33 +17,51 @@ Schema — one person per `[identity.<key>]` table, `<key>` becomes the
     channel         = "telegram"
     channel_user_id = 123456
 
-Unlike `PINCER_IDENTITY_MAP`, a person may have just one `[[...channels]]`
-entry — useful for pre-registering a roster incrementally as new channel IDs
-become known.
+A person may have just one `[[...channels]]` entry — useful for
+pre-registering a roster incrementally as new channel IDs become known.
 
 `phones` are the person's own numbers in E.164. They are stored as confirmed
 phones of the identity: a voice call from or to one of them is that person's
 call, with their tools and approval rules, not a guest's. A number may belong
 to one person only.
 
-Entries are converted into `PINCER_IDENTITY_MAP`'s own string grammar
-(`name@ch1:id1=ch2:id2...`) so `IdentityResolver._parse_mapping` and its
-callers need no changes. `email`/`timezone`/`phones` have no slot in that
-grammar, so they're returned separately as `IdentityProfile`s — see
-`resolve_identity_map_config`.
+How the section reaches the database is `PINCER_IDENTITY_MANAGEMENT`:
+
+- `sync`: the TOML is the source of truth. New people are added, the fields
+  and channels it states overwrite the database, and identities that came
+  from the config but left it are removed (identities made with the CLI are
+  kept).
+- `update` (default): new people are added and listed people are updated;
+  nobody is removed.
+- `clionly`: the section is ignored; identities are managed with
+  `pincer identity …` only.
+
+`PINCER_IDENTITY_MAP`, the env-var string this section replaced, is no longer
+read. `pincer run` refuses to start while it is set and prints the TOML it
+corresponds to (`legacy_identity_map_toml`).
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from pincer.channels.base import ChannelType
 from pincer.config.toml_loader import read_toml_raw
-from pincer.core.identity import RESERVED_IDENTITY_NAMES, IdentityProfile
+from pincer.core.identity import RESERVED_IDENTITY_NAMES
 from pincer.core.phone import normalize_e164
+
+logger = logging.getLogger(__name__)
+
+IdentityManagement = Literal["sync", "update", "clionly"]
+IDENTITY_MANAGEMENT_MODES: tuple[str, ...] = get_args(IdentityManagement)
+
+#: The env var the [identity] section replaced; see `legacy_identity_map`.
+LEGACY_IDENTITY_MAP_ENV = "PINCER_IDENTITY_MAP"
 
 _KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 
@@ -181,47 +190,137 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
     return entries
 
 
-def _stringify_entry(entry: IdentityTomlEntry) -> str:
-    pairs = "=".join(f"{ch}:{cid}" for ch, cid in entry.channels)
-    return f"{entry.pincer_user_id}@{pairs}"
+def load_identity_map(config_dir: Path | None, mode: str) -> dict[str, IdentityTomlEntry]:
+    """The [identity] entries the resolver applies under `mode`.
 
-
-def resolve_identity_map_config(
-    env_value: str,
-    config_dir: Path | None = None,
-) -> tuple[str, dict[str, IdentityProfile]]:
-    """Resolve the effective identity-map config for `IdentityResolver`.
-
-    Returns (identity_map_config, profiles):
-    - identity_map_config: a string in PINCER_IDENTITY_MAP's own grammar,
-      ready to pass straight to `IdentityResolver`.
-    - profiles: pincer_user_id -> IdentityProfile, carrying the fields that
-      grammar has no room for (display_name, preferred_channel, email,
-      timezone, phones). Always empty when PINCER_IDENTITY_MAP is used, since that
-      grammar has no field for any of these.
-
-    PINCER_IDENTITY_MAP, when non-empty, is returned as-is — the TOML
-    [identity] section is not even read in that case. Raises ValueError when
-    it names a reserved identity, exactly as the TOML loader does.
+    In `clionly` that is none: the section is not merged at all, and a
+    warning says so when it has entries. Raises ValueError like
+    `load_identity_config` for an invalid section in the other modes.
     """
-    if env_value:
-        for raw_entry in env_value.split(","):
-            name, at, _ = raw_entry.partition("@")
-            # `name@ch:id=…` only; in the unnamed form an "@" belongs to an id.
-            if at and "=" not in name and name.strip().lower() in RESERVED_IDENTITY_NAMES:
-                raise ValueError(f"identity key '{name.strip()}' is reserved")
-        return env_value, {}
+    if mode not in IDENTITY_MANAGEMENT_MODES:
+        raise ValueError(f"PINCER_IDENTITY_MANAGEMENT must be one of {', '.join(IDENTITY_MANAGEMENT_MODES)}")
+    if mode == "clionly":
+        if toml_declares_identities(config_dir):
+            logger.warning(
+                "PINCER_IDENTITY_MANAGEMENT=clionly: the [identity] section of pincer.toml / pincer.local.toml "
+                "is ignored; manage identities with `pincer identity …`"
+            )
+        return {}
+    return load_identity_config(config_dir)
 
-    entries = load_identity_config(config_dir)
-    identity_map_config = ",".join(_stringify_entry(entry) for entry in entries.values())
-    profiles = {
-        entry.pincer_user_id: IdentityProfile(
-            display_name=entry.display_name,
-            preferred_channel=entry.preferred_channel,
-            email=entry.email,
-            timezone=entry.timezone,
-            phones=tuple(entry.phones),
-        )
-        for entry in entries.values()
-    }
-    return identity_map_config, profiles
+
+def toml_declares_identities(config_dir: Path | None) -> bool:
+    """True when pincer.toml or pincer.local.toml has an [identity] entry, valid or not."""
+    base_dir = config_dir or Path.cwd()
+    return any(
+        bool((read_toml_raw(base_dir / name) or {}).get("identity")) for name in ("pincer.toml", "pincer.local.toml")
+    )
+
+
+# ── the removed PINCER_IDENTITY_MAP ──────────────────────────────
+
+
+def legacy_identity_map(config_dir: Path | None = None) -> str | None:
+    """The value of the removed `PINCER_IDENTITY_MAP`, if it is still set in
+    the environment or in a `.env` file Settings reads; None otherwise.
+
+    Settings ignores unknown variables, so without this check a deployment
+    that relied on the variable to gate its channels would silently open.
+    """
+    for key, value in os.environ.items():
+        if key.upper() == LEGACY_IDENTITY_MAP_ENV and value.strip():
+            return value
+    from dotenv import dotenv_values
+
+    base_dir = config_dir or Path.cwd()
+    # The files and order `Settings.model_config.env_file` names.
+    for env_file in (base_dir.parent / ".env", base_dir / ".env"):
+        if not env_file.is_file():
+            continue
+        for key, env_value in dotenv_values(env_file).items():
+            if key.upper() == LEGACY_IDENTITY_MAP_ENV and env_value and env_value.strip():
+                return env_value
+    return None
+
+
+def _parse_legacy_entry(entry: str) -> tuple[str | None, list[tuple[str, str]]]:
+    """One `name@ch1:id1=ch2:id2` (or unnamed `ch1:id1=ch2:id2`) entry of the
+    old string, as (name, [(channel, id), ...]). Raises ValueError when it
+    has no `channel:id` pair."""
+    entry = entry.strip()
+    name: str | None = None
+    eq_pos = entry.find("=")
+    at_pos = entry.find("@")
+    if 0 < at_pos < (eq_pos if eq_pos >= 0 else len(entry)):
+        name = entry[:at_pos].strip() or None
+        entry = entry[at_pos + 1 :]
+    pairs: list[tuple[str, str]] = []
+    for part in entry.split("="):
+        ch, colon, cid = part.strip().partition(":")
+        if colon and ch.strip() and cid.strip():
+            pairs.append((ch.strip(), cid.strip()))
+    if not pairs:
+        raise ValueError(f"entry has no channel:id pair: {entry!r}")
+    return name, pairs
+
+
+def _toml_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def legacy_identity_map_toml(value: str) -> str:
+    """The `[identity.<name>]` TOML that says what a `PINCER_IDENTITY_MAP`
+    string said, ready to paste: it loads as written.
+
+    Entries with the same name become one person with their channels merged,
+    since TOML refuses a table declared twice. An unnamed entry (or one whose
+    name is not a valid key) gets a placeholder (`person_1`, …) to rename,
+    never one an entry already uses. An entry that does not parse is left as
+    a comment.
+    """
+    parsed: list[tuple[str | None, list[tuple[str, str]]]] = []
+    comments: list[str] = []
+    for raw_entry in value.split(","):
+        if not raw_entry.strip():
+            continue
+        try:
+            name, pairs = _parse_legacy_entry(raw_entry)
+        except ValueError:
+            comments.append(f"# could not convert: {raw_entry.strip()}")
+            continue
+        parsed.append((name if name is not None and _KEY_PATTERN.match(name) else None, pairs))
+
+    taken = {name for name, _pairs in parsed if name is not None}
+    people: dict[str, list[tuple[str, str]]] = {}
+    unnamed = 0
+    for name, pairs in parsed:
+        if name is None:
+            unnamed += 1
+            while f"person_{unnamed}" in taken:
+                unnamed += 1
+            name = f"person_{unnamed}"
+            taken.add(name)
+        channels = people.setdefault(name, [])
+        channels.extend(pair for pair in pairs if pair not in channels)
+
+    blocks: list[str] = []
+    for name, channels in people.items():
+        lines = [f"[identity.{name}]"]
+        for channel, channel_user_id in channels:
+            lines += [
+                "",
+                f"[[identity.{name}.channels]]",
+                f"channel = {_toml_string(channel)}",
+                f"channel_user_id = {_toml_string(channel_user_id)}",
+            ]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks + comments)
+
+
+def legacy_identity_map_error(value: str) -> str:
+    """What `pincer run` and `pincer doctor` say while the old variable is set."""
+    return (
+        f"{LEGACY_IDENTITY_MAP_ENV} is no longer read. Move it into the [identity] section of pincer.toml "
+        f"(or pincer.local.toml) and remove it from the environment / .env. The equivalent TOML:\n\n"
+        f"{legacy_identity_map_toml(value)}\n"
+    )

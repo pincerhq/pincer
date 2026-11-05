@@ -356,10 +356,12 @@ async def test_touch_active_channel_records_when(url):
     assert len(profile["active_channel_updated_at"]) == 19
 
 
-async def test_seeding_creates_identities_and_backfills_without_clobbering(url):
+async def test_seeding_creates_identities_and_overwrites_only_what_the_config_states(url):
     service = IdentityService(url)
-    # An identity that already exists, with a name the config does not set.
+    # An identity that already exists, with a name the config does not set
+    # and an email the config changes.
     await service.create_identity("alice", channel="telegram", channel_user_id="12345", display_name="Alice")
+    await service.update_profile("alice", {"email": "old@example.com"})
 
     await service.seed(
         [
@@ -367,7 +369,7 @@ async def test_seeding_creates_identities_and_backfills_without_clobbering(url):
                 pincer_user_id="alice",
                 channels=[("telegram", "12345"), ("whatsapp", "4930111")],
                 insert={"preferred_channel": "telegram", "display_name": None, "email": None, "timezone": None},
-                backfill={"display_name": None, "preferred_channel": None, "email": "a@example.com", "timezone": None},
+                overwrite={"display_name": None, "preferred_channel": None, "email": "a@example.com", "timezone": None},
             ),
             SeedEntry(
                 pincer_user_id="bob",
@@ -378,14 +380,15 @@ async def test_seeding_creates_identities_and_backfills_without_clobbering(url):
                     "email": None,
                     "timezone": "Europe/Berlin",
                 },
-                backfill={"display_name": "Bob", "preferred_channel": None, "email": None, "timezone": None},
+                overwrite={"display_name": "Bob", "preferred_channel": None, "email": None, "timezone": None},
             ),
         ]
     )
 
     alice = await service.profile("alice")
     assert alice["display_name"] == "Alice"  # not overwritten by the config's None
-    assert alice["email"] == "a@example.com"  # filled in
+    assert alice["email"] == "a@example.com"  # the config's value wins
+    assert (alice["source"], alice["active"]) == ("config", True)
     assert await service.channels_for("alice") == [("telegram", "12345"), ("whatsapp", "4930111")]
 
     bob = await service.profile("bob")
@@ -567,7 +570,7 @@ async def test_prune_keeps_an_identity_that_can_sign_in(url):
 async def test_prune_takes_an_identity_whose_credentials_were_revoked(url):
     service = IdentityService(url)
     await service.create_identity("usr_keep", channel="telegram", channel_user_id="12345")
-    await service.create_profile("former_admin")
+    await service.create_profile("former_admin", source="config")
     await _set_password(url, "former_admin", "hash")
     session_id = await _open_session(url, "former_admin")
     assert (await service.prune([("telegram", "12345")]))[1] == 0
@@ -578,6 +581,97 @@ async def test_prune_takes_an_identity_whose_credentials_were_revoked(url):
     assert (await service.prune([("telegram", "12345")]))[1] == 1
     assert await service.profile("former_admin") is None
     assert not await _session_exists(url, session_id)  # no cascade on SQLite: swept explicitly
+
+
+async def test_sync_prune_leaves_cli_identities_alone(url):
+    """#348: what `pincer identity` made is not the TOML's to remove."""
+    service = IdentityService(url)
+    await service.create_profile("handmade", channels=[("telegram", "777")])
+    await service.create_profile("bare")  # no channel, no credential
+    await service.create_identity("usr_auto", channel="telegram", channel_user_id="888")
+    await service.create_identity("config_person", channel="telegram", channel_user_id="999")
+
+    unlisted, channelless = await service.prune([("telegram", "12345")])
+
+    assert (unlisted, channelless) == (2, 2)
+    assert await service.channels_for("handmade") == [("telegram", "777")]
+    assert await service.profile("bare") is not None
+    assert await service.profile("usr_auto") is None
+    assert await service.profile("config_person") is None
+
+
+async def test_update_prune_unlinks_only_listed_identities_and_deletes_nobody(url):
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="1")
+    await service.link_channel("alice", "slack", "U1")
+    await service.create_identity("bob", channel="telegram", channel_user_id="2")
+
+    assert await service.prune([("telegram", "1")], listed={"alice"}) == (1, 0)
+    assert await service.channels_for("alice") == [("telegram", "1")]
+    assert await service.channels_for("bob") == [("telegram", "2")]
+
+
+async def test_deactivating_ends_sessions_keeps_credentials_and_hides_the_identity(url):
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="12345")
+    await _set_password(url, "alice", "hash")
+    await service.add_phone("alice", "+4915100000009")
+    session_id = await _open_session(url, "alice")
+    assert await service.has_roster()
+
+    assert await service.set_active("alice", False)
+
+    assert not await _session_exists(url, session_id)
+    assert (await _credential(url, "alice")).password_hash == "hash"
+    assert await service.user_for_channel("telegram", "12345") is None
+    assert await service.owner_any("telegram", "12345") == ("alice", False)
+    assert await service.user_for_confirmed_phone("+4915100000009") is None
+    assert await service.has_roster()  # a deactivated person is a guest, not a reason to open the gate
+    assert (await service.profile_with_channels("alice"))["active"] is False
+
+    assert await service.set_active("alice", True)
+    assert await service.user_for_channel("telegram", "12345") == "alice"
+    assert await service.user_for_confirmed_phone("+4915100000009") == "alice"
+    assert not await service.set_active("nobody", False)
+
+
+async def test_auto_identities_do_not_make_a_roster(url):
+    """An ungated deployment makes `usr_` ids for every sender; counting them
+    would close the gate on everyone after the first message."""
+    service = IdentityService(url)
+    await service.create_identity("usr_a", channel="telegram", channel_user_id="1")
+    assert not await service.has_roster()
+    await service.create_profile("bob", channels=[("telegram", "2")], password_hash="h")
+    assert await service.has_roster()
+
+
+async def test_channel_and_phone_conflicts_are_refused(url):
+    from pincer.services.identity import ChannelTakenError, PhoneTakenError
+
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="1")
+    await service.add_phone("alice", "+4915100000001")
+    with pytest.raises(ChannelTakenError):
+        await service.create_profile("bob", channels=[("telegram", "1")])
+    assert await service.profile("bob") is None  # nothing left behind
+    await service.create_profile("bob", channels=[("telegram", "2")])
+    with pytest.raises(ChannelTakenError):
+        await service.add_channel("bob", "telegram", "1")
+    assert not await service.add_channel("bob", "telegram", "2")  # already its own
+    with pytest.raises(PhoneTakenError):
+        await service.add_phone("bob", "+4915100000001")
+    assert not await service.unlink_channel("bob", "telegram", "1")
+    assert await service.unlink_channel("bob", "telegram", "2")
+    assert await service.remove_phone("alice", "+4915100000001")
+
+
+async def test_renaming_keeps_status_and_source(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    await service.set_active("usr_hash", False)
+    await service.rename_identity("usr_hash", "alice")
+    alice = await service.profile("alice")
+    assert (alice["active"], alice["source"]) == (False, "auto")
 
 
 async def test_renaming_ends_the_sessions_of_the_old_id(url):
@@ -639,7 +733,7 @@ def _phone_seed(uid: str, channel_id: str, phones: tuple[str, ...]) -> SeedEntry
         pincer_user_id=uid,
         channels=[("telegram", channel_id)],
         insert=fields,
-        backfill={**fields, "preferred_channel": None},
+        overwrite={**fields, "preferred_channel": None},
         phones=phones,
     )
 
@@ -699,3 +793,17 @@ async def test_renaming_moves_phones_and_pruning_drops_them(url):
 
     assert await service.prune(set()) == (1, 1)
     assert await _phone_row(url, "+4915100000001") is None
+
+
+async def test_confirmed_phone_owners_count_cli_phones_of_active_identities(url):
+    service = IdentityService(url)
+    await service.create_profile("alice", channels=[("telegram", "1")])
+    await service.create_profile("bob", channels=[("telegram", "2")])
+    await service.add_phone("alice", "+4915100000001")
+    await service.add_phone("bob", "+4915100000002")
+    async with session_scope(url) as session:
+        await IdentityPhoneRepository(session).upsert("+4930123456", "bob", confirmed=False, source="api", now=_NOW)
+    assert await service.confirmed_phone_owners() == ["alice", "bob"]
+
+    await service.set_active("bob", False)
+    assert await service.confirmed_phone_owners() == ["alice"]

@@ -108,6 +108,9 @@ class SecurityDoctor:
         # `pincer doctor --production` (Sprint 7, T7.3): extra deploy-gate
         # checks; the deploy script refuses to start on any CRITICAL.
         self.production = production
+        # The identity roster, read once per `run_all` instead of once per
+        # access check (each read opens its own loop and engine).
+        self._roster_cache: dict[Path, tuple[bool, list[str]]] | None = None
 
     def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
@@ -119,6 +122,7 @@ class SecurityDoctor:
     def run_all(self) -> DoctorReport:
         from pincer.config import get_settings_relaxed
 
+        self._roster_cache = {}
         settings = get_settings_relaxed()
         report = DoctorReport()
         # Secrets (6 checks)
@@ -129,6 +133,7 @@ class SecurityDoctor:
         report.checks.append(self._check_gitignore_has_env())
         report.checks.append(self._check_no_hardcoded_secrets())
         # Access Control (4 checks)
+        report.checks.append(self._check_identity_management(settings))
         report.checks.append(self._check_telegram_access_control(settings))
         report.checks.append(self._check_whatsapp_access_control(settings))
         report.checks.append(self._check_whatsapp_neonize_version())
@@ -213,6 +218,7 @@ class SecurityDoctor:
             report.checks.append(self._check_prod_environment_flag(settings))
             report.checks.append(self._check_prod_cors_origins(settings))
             report.checks.append(self._check_prod_voice_signatures(settings))
+        self._roster_cache = None
         return report
 
     # ── Production deploy gate (Sprint 7, T7.3) ───────────
@@ -723,12 +729,17 @@ class SecurityDoctor:
                 message="Voice disabled",
                 category="voice",
             )
-        from pincer.config.identity import resolve_identity_map_config
+        from pincer.config.identity import load_identity_map
+        from pincer.services.identity import confirmed_phone_owners
 
+        mode = str(getattr(settings, "identity_management", "update"))
         try:
-            _config, profiles = resolve_identity_map_config(
-                str(getattr(settings, "identity_map", "") or ""), self.config_dir
-            )
+            # Phones added with `pincer identity set --add-phone` count too.
+            stored = confirmed_phone_owners(Path(settings.db_path))
+        except Exception:
+            stored = []  # no database or no identity tables yet
+        try:
+            entries = load_identity_map(self.config_dir, mode)
         except ValueError as e:
             return CheckResult(
                 name="voice_registered_phones",
@@ -737,14 +748,15 @@ class SecurityDoctor:
                 fix_hint="Fix the [identity] section in pincer.toml / pincer.local.toml",
                 category="voice",
             )
-        owners = sorted(uid for uid, profile in profiles.items() if profile.phones)
+        owners = sorted({uid for uid, entry in entries.items() if entry.phones} | set(stored))
         if not owners:
             return CheckResult(
                 name="voice_registered_phones",
                 status=CheckStatus.WARNING,
-                message="No identity lists `phones`: everyone on a call is a guest, so the agent cannot "
+                message="No identity has a confirmed phone: everyone on a call is a guest, so the agent cannot "
                 "create calendar events on a generic call",
-                fix_hint='Add your number to your identity in pincer.toml: phones = ["+49…"]; '
+                fix_hint='Add your number to your identity in pincer.toml: phones = ["+49…"], or run '
+                "`pincer identity set <name> --add-phone +49…`; "
                 "or allow guests, e.g. PINCER_VOICE_GUESTS_TOOLS_ALLOWED=google__*",
                 category="voice",
             )
@@ -1125,21 +1137,96 @@ class SecurityDoctor:
 
     # ── Access Control ────────────────────────────────────
 
-    def _identity_map(self, cfg: Settings, name: str, category: str) -> str | CheckResult:
-        """The effective identity map, or the finding to report when it does
-        not load — `pincer run` refuses to start on the same error."""
-        from pincer.config.identity import resolve_identity_map_config
+    def _identity_gate(self, cfg: Settings, name: str, category: str) -> str | CheckResult:
+        """What closes the guest gate, or "" when it is open; the finding to
+        report when the [identity] TOML does not load — `pincer run` refuses
+        to start on the same error.
 
+        The gate is on in `clionly`, when the TOML lists anyone, or when the
+        database has a configured or hand-made identity with a channel (active or not).
+        """
+        from pincer.config.identity import load_identity_map
+
+        mode = cfg.identity_management
+        if mode == "clionly":
+            return "PINCER_IDENTITY_MANAGEMENT=clionly"
         try:
-            return resolve_identity_map_config(cfg.identity_map, self.config_dir)[0]
+            entries = load_identity_map(self.config_dir, mode)
         except ValueError as e:
             return CheckResult(
                 name,
                 CheckStatus.CRITICAL,
-                f"Identity map is invalid: {e}",
-                fix_hint="Fix PINCER_IDENTITY_MAP (or the [identity] TOML section); Pincer will not start with it",
+                f"Identity config is invalid: {e}",
+                fix_hint="Fix the [identity] section in pincer.toml / pincer.local.toml; Pincer will not start with it",
                 category=category,
             )
+        if entries:
+            return "the [identity] TOML"
+        if self._db_roster(cfg)[0]:
+            return "the identities in the database"
+        return ""
+
+    def _db_roster(self, cfg: Settings) -> tuple[bool, list[str]]:
+        """(the database holds a gating roster, CLI-made identity ids); (False, []) when unreadable."""
+        from pincer.services.identity import roster_summary
+
+        db_path = Path(cfg.db_path)
+        if self._roster_cache is not None and db_path in self._roster_cache:
+            return self._roster_cache[db_path]
+        try:
+            summary = roster_summary(db_path) or (False, [])
+        except Exception:
+            # No database or no identity tables yet: no roster.
+            summary = (False, [])
+        if self._roster_cache is not None:
+            self._roster_cache[db_path] = summary
+        return summary
+
+    def _check_identity_management(self, cfg: Settings | None = None) -> CheckResult:
+        """#348: the removed PINCER_IDENTITY_MAP, and a TOML the mode ignores."""
+        from pincer.config.identity import (
+            LEGACY_IDENTITY_MAP_ENV,
+            legacy_identity_map,
+            legacy_identity_map_toml,
+            toml_declares_identities,
+        )
+
+        cfg = self._cfg(cfg)
+        legacy = legacy_identity_map(self.config_dir)
+        if legacy is not None:
+            return CheckResult(
+                "identity_management",
+                CheckStatus.CRITICAL,
+                f"{LEGACY_IDENTITY_MAP_ENV} is set but no longer read — `pincer run` refuses to start",
+                fix_hint="Move it into pincer.toml and remove it from the environment / .env:\n"
+                + legacy_identity_map_toml(legacy),
+                category="access",
+            )
+        mode = cfg.identity_management
+        if mode == "clionly" and toml_declares_identities(self.config_dir):
+            return CheckResult(
+                "identity_management",
+                CheckStatus.WARNING,
+                "PINCER_IDENTITY_MANAGEMENT=clionly, so the [identity] section of pincer.toml is ignored",
+                fix_hint="Manage identities with `pincer identity …` and remove the [identity] section, "
+                "or set PINCER_IDENTITY_MANAGEMENT=update to apply it",
+                category="access",
+            )
+        if mode == "sync":
+            cli_ids = self._db_roster(cfg)[1]
+            if cli_ids:
+                return CheckResult(
+                    "identity_management",
+                    CheckStatus.PASS,
+                    "PINCER_IDENTITY_MANAGEMENT=sync; identities made with the CLI are kept: " + ", ".join(cli_ids),
+                    category="access",
+                )
+        return CheckResult(
+            "identity_management",
+            CheckStatus.PASS,
+            f"PINCER_IDENTITY_MANAGEMENT={mode}",
+            category="access",
+        )
 
     def _check_telegram_access_control(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
@@ -1150,22 +1237,22 @@ class SecurityDoctor:
                 "Telegram not configured",
                 category="access",
             )
-        identity_map_config = self._identity_map(cfg, "telegram_access_control", "access")
-        if isinstance(identity_map_config, CheckResult):
-            return identity_map_config
-        if identity_map_config:
+        gate = self._identity_gate(cfg, "telegram_access_control", "access")
+        if isinstance(gate, CheckResult):
+            return gate
+        if gate:
             return CheckResult(
                 "telegram_access_control",
                 CheckStatus.PASS,
-                "Telegram access controlled by PINCER_IDENTITY_MAP",
+                f"Telegram access controlled by {gate}",
                 category="access",
             )
         return CheckResult(
             "telegram_access_control",
             CheckStatus.CRITICAL,
-            "Telegram bot has no PINCER_IDENTITY_MAP configured — any Telegram user can message it",
+            "Telegram bot has no identities configured — any Telegram user can message it",
             fix_hint=(
-                "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section), "
+                "Add yourself to the [identity] section of pincer.toml (or `pincer identity create … --channel`), "
                 "then set PINCER_TELEGRAM_GUESTS_ALLOWED=false"
             ),
             category="access",
@@ -1180,14 +1267,14 @@ class SecurityDoctor:
                 "WhatsApp not configured",
                 category="access",
             )
-        identity_map_config = self._identity_map(cfg, "whatsapp_access_control", "access")
-        if isinstance(identity_map_config, CheckResult):
-            return identity_map_config
-        if identity_map_config:
+        gate = self._identity_gate(cfg, "whatsapp_access_control", "access")
+        if isinstance(gate, CheckResult):
+            return gate
+        if gate:
             return CheckResult(
                 "whatsapp_access_control",
                 CheckStatus.PASS,
-                "WhatsApp access controlled by PINCER_IDENTITY_MAP (covers DMs and group mentions)",
+                f"WhatsApp access controlled by {gate} (covers DMs and group mentions)",
                 category="access",
             )
         if cfg.whatsapp_self_chat_only:
@@ -1196,10 +1283,10 @@ class SecurityDoctor:
                 CheckStatus.WARNING,
                 "WhatsApp is in self-chat-only mode, but group mentions/trigger-word messages "
                 "are answered for any group member regardless of this setting, and no "
-                "PINCER_IDENTITY_MAP is configured to gate them",
+                "identities are configured to gate them",
                 fix_hint=(
-                    "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section) and "
-                    "PINCER_WHATSAPP_GUESTS_ALLOWED=false to restrict who can trigger Pincer "
+                    "Add identities to the [identity] section of pincer.toml (or with `pincer identity create`) "
+                    "and PINCER_WHATSAPP_GUESTS_ALLOWED=false to restrict who can trigger Pincer "
                     "from a group; self-chat-only alone does not protect group chats."
                 ),
                 category="access",
@@ -1209,21 +1296,21 @@ class SecurityDoctor:
                 "whatsapp_access_control",
                 CheckStatus.CRITICAL,
                 "WhatsApp accepts DMs from anyone — PINCER_WHATSAPP_GUESTS_ALLOWED=true "
-                "overrides the fail-closed default that applies with no PINCER_IDENTITY_MAP configured",
+                "overrides the fail-closed default that applies with no identities configured",
                 fix_hint=(
-                    "Set PINCER_WHATSAPP_SELF_CHAT_ONLY=true, or set PINCER_IDENTITY_MAP "
-                    "(or configure the [identity] TOML section) and PINCER_WHATSAPP_GUESTS_ALLOWED=false"
+                    "Set PINCER_WHATSAPP_SELF_CHAT_ONLY=true, or add identities to the [identity] section of "
+                    "pincer.toml (or with `pincer identity create`) and set PINCER_WHATSAPP_GUESTS_ALLOWED=false"
                 ),
                 category="access",
             )
         return CheckResult(
             "whatsapp_access_control",
             CheckStatus.WARNING,
-            "WhatsApp DMs are blocked by default with no PINCER_IDENTITY_MAP configured "
+            "WhatsApp DMs are blocked by default with no identities configured "
             "(fail-closed), but group mentions/trigger-word messages are still answered "
             "for any group member",
             fix_hint=(
-                "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section) and "
+                "Add identities to the [identity] section of pincer.toml (or with `pincer identity create`) and "
                 "PINCER_WHATSAPP_GUESTS_ALLOWED=false to restrict who can trigger Pincer "
                 "from a group"
             ),
@@ -2136,22 +2223,22 @@ class SecurityDoctor:
                 "Signal not enabled",
                 category="signal",
             )
-        identity_map_config = self._identity_map(cfg, "signal_access_control", "signal")
-        if isinstance(identity_map_config, CheckResult):
-            return identity_map_config
-        if identity_map_config:
+        gate = self._identity_gate(cfg, "signal_access_control", "signal")
+        if isinstance(gate, CheckResult):
+            return gate
+        if gate:
             return CheckResult(
                 "signal_access_control",
                 CheckStatus.PASS,
-                "Signal access controlled by PINCER_IDENTITY_MAP",
+                f"Signal access controlled by {gate}",
                 category="signal",
             )
         return CheckResult(
             "signal_access_control",
             CheckStatus.WARNING,
-            "Signal has no PINCER_IDENTITY_MAP configured — any phone number can DM it",
+            "Signal has no identities configured — any phone number can DM it",
             fix_hint=(
-                "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section), "
+                "Add identities to the [identity] section of pincer.toml (or with `pincer identity create`), "
                 "then set PINCER_SIGNAL_GUESTS_ALLOWED=false"
             ),
             category="signal",

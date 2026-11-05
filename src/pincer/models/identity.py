@@ -22,6 +22,12 @@ class IdentityProfile(SQLModel, table=True):
     )
     email: str | None = Field(default=None, sa_column=Column(Text()))
     timezone: str | None = Field(default=None, sa_column=Column(Text()))
+    # False: the identity is switched off (`pincer identity deactivate`). Its
+    # channels and phones no longer identify it, and it cannot sign in.
+    active: bool = Field(default=True, sa_column=Column(Boolean(), nullable=False, server_default=sa.text("TRUE")))
+    # Where it came from: "config" (the [identity] TOML), "cli" (`pincer
+    # identity …`) or "auto" (a `usr_` id made for an unknown sender).
+    source: str = Field(default="config", sa_column=Column(Text(), nullable=False, server_default="config"))
 
 
 class ChannelIdentity(SQLModel, table=True):

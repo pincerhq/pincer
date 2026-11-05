@@ -39,6 +39,9 @@ class ChannelRouter:
     async def rebuild_identity_map(self) -> None:
         """Seed/cleanup the identity map, then unblock is_guest() for all channels.
 
+        What each step does is `PINCER_IDENTITY_MANAGEMENT` (see
+        `IdentityResolver.seed_from_config` / `cleanup`).
+
         mark_seeding_complete() always runs, even on failure, so a seeding error
         degrades to "treated as complete despite partial data" (logged loudly)
         rather than hanging every channel's guest check.
@@ -52,6 +55,8 @@ class ChannelRouter:
         except Exception:
             logger.exception("rebuild_identity_map: seeding/cleanup failed — guest gate unblocking anyway")
         finally:
+            # Whether the database alone holds a roster that gates guests.
+            await self._identity.refresh_gate()
             self._identity.mark_seeding_complete()
 
     async def send(self, channel_type: ChannelType, chat_id: str, text: str) -> bool:
@@ -82,7 +87,12 @@ class ChannelRouter:
         "active channel" may be before it's ignored in favor of the durable
         `preferred_channel` — see `IdentityResolver.get_preferred_channel`.
         Default `None` preserves today's behavior (no staleness check).
+
+        A deactivated identity gets nothing.
         """
+        if not await self._identity.is_active(pincer_user_id):
+            logger.warning("Router: %s is not an active identity — not sending", pincer_user_id)
+            return False
         if prefer:
             all_channels = await self._identity.get_all_channels(pincer_user_id)
             if prefer in all_channels:
