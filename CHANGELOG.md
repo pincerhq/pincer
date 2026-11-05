@@ -95,6 +95,9 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   `low` still applies). If a model takes neither, nothing is sent and, while
   the global settings are empty, nothing is warned about. Conversation
   summaries keep `PINCER_SUMMARY_*`.
+- The minimum `anthropic` SDK is now 0.78.0 (was 0.49.0): older versions raise
+  a `TypeError` on the `output_config` and `thinking: adaptive` parameters
+  these settings send, which failover does not catch. The lock is unchanged (0.97.0).
 - On OpenAI reasoning models these settings become `reasoning_effort`, on every
   call, mapped per model: o-series `low` to `high`; gpt-5 adds `minimal` for
   `disabled`; gpt-5.1 sends `none` for `disabled`; gpt-5.2+ also takes `xhigh`
