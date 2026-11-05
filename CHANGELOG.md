@@ -47,6 +47,31 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   does change its tools or history (a skill load re-selects tools, a tool-pair
   repair, the streaming chat's final text request), the turn's thinking is
   dropped before the next request.
+- New `PINCER_REASONING_EFFORT` (`low` | `medium` | `high` | `xhigh` | `max`)
+  and `PINCER_THINKING` (`adaptive` | `disabled`) set effort and thinking for
+  every request to a Claude model. Empty (the default) sends nothing, so the
+  model runs on its own defaults as before. Each value is translated for the
+  model requested: `xhigh` steps down to `high` on Opus 4.5 and 4.6, and `max`
+  on Opus 4.5. `adaptive` drops `PINCER_TEMPERATURE` on the models that
+  otherwise take it (Opus and Sonnet 4.6). `disabled` is sent only where the
+  model allows it (Haiku 5.5, Sonnet 5, Sonnet 5.5, Opus 5) and at effort
+  `high` or below. A value the model doesn't take, or any value for a model id
+  Pincer doesn't recognise (e.g. a custom deployment name), is dropped, with
+  one WARNING per model and value. Thinking counts toward the output limit.
+- `PINCER_VOICE_REASONING_EFFORT` now applies to Claude models too and takes
+  the same five values; empty inherits `PINCER_REASONING_EFFORT`. New
+  `PINCER_VOICE_THINKING` does the same for `PINCER_THINKING`. The call's
+  language-guard regeneration uses the global values. On OpenAI-wire providers
+  only a set voice value is sent, still only `low` / `medium` / `high`.
+- New `PINCER_SUMMARY_REASONING_EFFORT` and `PINCER_SUMMARY_THINKING` do the
+  same for conversation summaries, translated for the summary model; empty
+  inherits the global value. `low` is the suggested value, on a summary model
+  that takes effort (e.g. `claude-haiku-5-5`; the default `claude-haiku-4-5`
+  drops it with a warning).
+- Internal calls leave room for a model that thinks: the conversation summary
+  may use up to 2048 output tokens (was 500), the onboarding answer extraction
+  1024 (was 200), the call-thread summary merge 2048 (was 700) and the call
+  outcome extraction 2048 (was 1000). Only generated tokens are billed.
 
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 

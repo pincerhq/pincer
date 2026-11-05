@@ -82,9 +82,11 @@ class FakeLLM:
         self._payload = payload
         self._raises = raises
         self.calls = 0
+        self.max_tokens: list[int | None] = []
 
     async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
         self.calls += 1
+        self.max_tokens.append(max_tokens)
         if self._raises:
             raise RuntimeError("LLM down")
         content = self._payload if isinstance(self._payload, str) else json.dumps(self._payload, ensure_ascii=False)
@@ -382,6 +384,17 @@ async def test_update_after_call_keeps_open_while_commitments_remain(manager):
     update = await manager.update_after_call("CA1", outcome=outcome, llm=llm, language="de")
     assert update is not None and update.resolved_now is False
     assert (await manager.require(thread.thread_id)).status == STATUS_OPEN
+
+
+async def test_summary_merge_leaves_room_for_thinking(manager):
+    """A model that thinks spends output tokens before the JSON (issue #345, Q18)."""
+    thread = await manager.create("Termin", language="de")
+    await manager.attach("CA1", thread.thread_id, KIND_ORIGIN)
+    llm = FakeLLM({"summary": "Läuft.\nStand: offen.", "satisfied_commitments": []})
+
+    await manager.update_after_call("CA1", outcome=_outcome(), llm=llm, language="de")
+
+    assert llm.max_tokens == [2048]
 
 
 async def test_update_after_call_is_noop_for_threadless_calls(manager):

@@ -161,6 +161,93 @@ async def test_summarizer_skips_short_conversation(memory_store: MemoryStore, se
     mock_llm.complete.assert_not_called()
 
 
+# ── Summary effort and thinking (issue #345) ───────────────────────────
+
+
+def _summary_settings(**update):
+    """Anthropic settings with the effort/thinking fields pinned (the developer's env never leaks in)."""
+    from pincer.config import Settings
+
+    base = Settings(
+        anthropic_api_key="sk-ant-test",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="anthropic",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    pinned = {
+        "default_model": "claude-haiku-5-5",
+        "anthropic_model": "",
+        "reasoning_effort": "",
+        "thinking": "",
+    }
+    return base.model_copy(update={**pinned, **update})
+
+
+async def _summary_request(settings, memory_store, session_manager, **summarizer_kwargs) -> dict:
+    """The request body a real summary sends, through the scripted Anthropic transport."""
+    import anthropic_sse as sse
+
+    async with sse.ScriptedAnthropic(settings, [([sse.text("Summary.")], "end_turn")]) as llm:
+        summarizer = Summarizer(
+            llm=llm.provider,
+            memory_store=memory_store,
+            session_manager=session_manager,
+            threshold=6,
+            **summarizer_kwargs,
+        )
+        session = await session_manager.get_or_create("user-s", "test")
+        for i in range(8):
+            role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+            await session_manager.add_message(session, LLMMessage(role=role, content=f"Message {i}"))
+        assert await summarizer.maybe_summarize(session) is True
+    assert len(llm.requests) == 1
+    return llm.requests[0]
+
+
+@pytest.mark.asyncio
+async def test_summary_sends_its_own_effort_and_thinking(memory_store: MemoryStore, session_manager) -> None:
+    settings = _summary_settings(reasoning_effort="high", thinking="disabled")
+
+    body = await _summary_request(settings, memory_store, session_manager, reasoning_effort="low", thinking="adaptive")
+
+    assert body["model"] == "claude-haiku-5-5"
+    assert body["output_config"] == {"effort": "low"}
+    assert body["thinking"] == {"type": "adaptive"}
+
+
+@pytest.mark.asyncio
+async def test_summary_without_its_own_values_sends_the_global_ones(memory_store: MemoryStore, session_manager) -> None:
+    settings = _summary_settings(reasoning_effort="medium", thinking="adaptive")
+
+    body = await _summary_request(settings, memory_store, session_manager)
+
+    assert body["output_config"] == {"effort": "medium"}
+    assert body["thinking"] == {"type": "adaptive"}
+
+
+@pytest.mark.asyncio
+async def test_summary_values_are_resolved_against_the_summary_model(
+    memory_store: MemoryStore, session_manager
+) -> None:
+    """The provider defaults to Haiku 5.5 (`disabled` form), but the summary asks for
+    Sonnet 5.5, whose form of `disabled` is `between_tools`."""
+    settings = _summary_settings()
+
+    body = await _summary_request(
+        settings, memory_store, session_manager, summary_model="claude-sonnet-5-5", thinking="disabled"
+    )
+
+    assert body["model"] == "claude-sonnet-5-5"
+    assert body["thinking"] == {"type": "between_tools"}
+
+
+@pytest.mark.asyncio
+async def test_summary_leaves_room_for_thinking(memory_store: MemoryStore, session_manager) -> None:
+    body = await _summary_request(_summary_settings(), memory_store, session_manager)
+
+    assert body["max_tokens"] == 2048
+
+
 # ── Python Exec Tests ────────────────────────────────────────
 
 

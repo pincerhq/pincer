@@ -31,7 +31,9 @@ class FakeLLM:
         self.calls: list[dict] = []
 
     async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        self.calls.append({"messages": messages, "system": system, "temperature": temperature})
+        self.calls.append(
+            {"messages": messages, "system": system, "temperature": temperature, "max_tokens": max_tokens}
+        )
         if self._raises:
             raise RuntimeError("LLM down")
         return SimpleNamespace(content=self._content)
@@ -397,6 +399,14 @@ class TestExtractOutcome:
 
     async def test_unparseable_returns_none(self):
         assert await extract_outcome(FakeLLM("garbage"), "AGENT: hello", "") is None
+
+    async def test_extraction_leaves_room_for_thinking(self):
+        """A model that thinks spends output tokens before the JSON (issue #345, Q18)."""
+        llm = FakeLLM(_json())
+
+        assert await extract_outcome(llm, "AGENT: hello", "") is not None
+
+        assert [call["max_tokens"] for call in llm.calls] == [2048]
 
     async def test_empty_transcript_returns_none(self):
         llm = FakeLLM(_json())

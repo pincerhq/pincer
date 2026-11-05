@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Output room for the outcome extraction: a model that thinks spends tokens
+# before the JSON (issue #345, Q18)
+_EXTRACTION_MAX_TOKENS = 2048
+
 VALID_OUTCOMES = {
     "completed",
     "partial",
@@ -294,7 +298,7 @@ async def extract_outcome(
             messages=[LLMMessage(role=MessageRole.USER, content=user_content)],
             system=EXTRACTION_SYSTEM_PROMPT,
             temperature=0.0,
-            max_tokens=1000,
+            max_tokens=_EXTRACTION_MAX_TOKENS,
         )
         outcome = CallOutcome.from_json(response.content or "")
         if outcome is None:

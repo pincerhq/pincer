@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from pincer.core.agent import Agent, StreamEventType
+from pincer.core.agent import _ONBOARDING_EXTRACTION_MAX_TOKENS, Agent, StreamEventType
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
     ONBOARDING_FOLLOWUP_INSTRUCTION,
@@ -169,6 +169,29 @@ async def test_reply_in_asking_session_completes_onboarding(
 
     assert llm.complete.call_count == 4
     assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args_list[3].kwargs["system"]
+
+
+async def test_extraction_leaves_room_for_thinking(
+    tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """A model that thinks spends output tokens before the JSON (issue #345, Q17)."""
+    llm = _scripted_llm(
+        "Hello!",
+        "Nice to meet you, Bob.",
+        '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "en"}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    key = conversation_key("user-t", "web", "x")
+
+    await _reply(agent, "blocking", "user-t", "web", "Hi!", session_key=key)
+    await _reply(agent, "blocking", "user-t", "web", "I'm Bob, accountant", session_key=key)
+
+    prompt_head = EXTRACTION_PROMPT_TEMPLATE.split("{reply}")[0]
+    extractions = [
+        call.kwargs for call in llm.complete.call_args_list if prompt_head in (call.kwargs["messages"][0].content or "")
+    ]
+    assert len(extractions) == 1, "the reply must have been sent for extraction"
+    assert extractions[0]["max_tokens"] == 1024
 
 
 _EMPTY = '{"name": null, "use_case": null, "language": null}'
@@ -462,7 +485,7 @@ async def test_concurrent_answers_write_one_profile(
     answer = '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "en"}'
 
     async def complete(**kwargs):
-        if kwargs.get("max_tokens") == 200:  # the extraction call
+        if kwargs.get("max_tokens") == _ONBOARDING_EXTRACTION_MAX_TOKENS:  # the extraction call
             await both_extracting.wait()
             return _llm_text(answer)
         return _llm_text("Nice to meet you.")

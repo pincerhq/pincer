@@ -90,6 +90,9 @@ MAX_SUMMARY = 1200
 MAX_CONTEXT_BLOCK = 1600
 MAX_COMMITMENTS = 20
 MAX_CONTEXT_COMMITMENTS = 5
+# Output room for the summary merge: a model that thinks spends tokens before
+# the JSON (issue #345, Q18)
+_MERGE_MAX_TOKENS = 2048
 # How many recent threads the expired-commitment filter scans (see list_threads).
 EXPIRED_SCAN_LIMIT = 500
 # Terminal outcome codes that count as task success for the §5 auto-resolve.
@@ -348,7 +351,7 @@ async def merge_summary(
             messages=[LLMMessage(role=MessageRole.USER, content=user_content)],
             system=MERGE_SYSTEM_PROMPT,
             temperature=0.0,
-            max_tokens=700,
+            max_tokens=_MERGE_MAX_TOKENS,
         )
         data = _parse_json_object(response.content or "")
         summary = str((data or {}).get("summary", "")).strip()

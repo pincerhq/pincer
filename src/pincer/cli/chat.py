@@ -78,6 +78,9 @@ async def _chat_loop() -> None:
                 session_manager=session_mgr,
                 summary_model=summary_model,
                 threshold=settings.summary_threshold,
+                # Empty means the global setting: the provider reads None that way
+                reasoning_effort=settings.summary_reasoning_effort or None,
+                thinking=settings.summary_thinking or None,
             )
 
     from pincer.tools.approval import ApprovalPolicy

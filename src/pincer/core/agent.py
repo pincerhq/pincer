@@ -103,6 +103,9 @@ _CALL_PLACED_THEN_FAILED_TEXT = (
 # close it too.
 _ONBOARDING_ANSWER_WINDOW_S = 24 * 60 * 60
 _ONBOARDING_MAX_EMPTY_REPLIES = 2
+# Output room for the onboarding answer extraction: a model that thinks spends
+# tokens before the JSON (issue #345, Q17)
+_ONBOARDING_EXTRACTION_MAX_TOKENS = 1024
 
 _GOOGLE_TOOL_CHAIN_HINTS = """
 ## Google Workspace Tool Chains
@@ -2068,7 +2071,7 @@ class Agent:
             )
             response = await self._llm.complete(
                 messages=[extraction_msg],
-                max_tokens=200,
+                max_tokens=_ONBOARDING_EXTRACTION_MAX_TOKENS,
                 temperature=0,
             )
         except Exception as e:
