@@ -626,7 +626,7 @@ async def test_deactivating_ends_sessions_keeps_credentials_and_hides_the_identi
     assert await service.user_for_channel("telegram", "12345") is None
     assert await service.owner_any("telegram", "12345") == ("alice", False)
     assert await service.user_for_confirmed_phone("+4915100000009") is None
-    assert not await service.has_roster()
+    assert await service.has_roster()  # a deactivated person is a guest, not a reason to open the gate
     assert (await service.profile_with_channels("alice"))["active"] is False
 
     assert await service.set_active("alice", True)

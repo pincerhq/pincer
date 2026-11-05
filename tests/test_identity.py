@@ -1362,7 +1362,24 @@ class TestDatabaseRosterGate:
         assert await r.is_guest(ChannelType.TELEGRAM, 2)
         assert not await r.is_guest(ChannelType.TELEGRAM, 1)
 
+        # Switching the last person off makes them a guest; it does not open the gate.
         await r._store.set_active("alice", False)
+        assert await r.gated()
+        assert await r.is_guest(ChannelType.TELEGRAM, 1)
+        assert await r.is_guest(ChannelType.TELEGRAM, 2)
+
+    async def test_the_gate_fails_closed_while_the_database_cannot_be_read(self, tmp_path, monkeypatch):
+        r = await _boot(tmp_path / "roster_down.db")
+        monkeypatch.setattr(IdentityResolver, "_ROSTER_TTL", 0.0)
+
+        async def down():
+            raise RuntimeError("database unreachable")
+
+        monkeypatch.setattr(r._store, "has_roster", down)
+        assert await r.gated()
+        assert r._roster_checked is None  # not cached: asked again next time
+
+        monkeypatch.undo()
         assert not await r.gated()
 
     async def test_the_answer_is_cached_for_a_few_seconds(self, tmp_path):
@@ -1428,3 +1445,86 @@ class TestDeactivation:
         await r._store.set_active("alice", False)
         with pytest.raises(ValueError, match="deactivated"):
             await r.get_preferred_channel("alice")
+
+
+@pytest.mark.asyncio
+class TestReviewFixes:
+    async def test_sync_with_an_empty_toml_removes_config_identities(self, tmp_path, caplog):
+        db = tmp_path / "sync_empty.db"
+        r = await _boot(db, "alice@telegram:1", mode="sync")
+        await r._store.create_profile("carol", channels=[("telegram", "3")])
+        stranger = await r.resolve(ChannelType.SLACK, "U9")
+
+        with caplog.at_level("WARNING", logger="pincer.core.identity"):
+            r = await _boot(db, mode="sync")
+
+        assert await r._store.profile("alice") is None
+        assert await r.find(ChannelType.TELEGRAM, 3) == "carol"
+        assert await r.find(ChannelType.SLACK, "U9") == stranger
+        assert "lists nobody" in caplog.text
+
+    async def test_update_with_an_empty_toml_warns_about_leftover_config_identities(self, tmp_path, caplog):
+        db = tmp_path / "update_empty.db"
+        await _boot(db, "alice@telegram:1")
+
+        with caplog.at_level("WARNING", logger="pincer.core.identity"):
+            r = await _boot(db)
+
+        assert await r.find(ChannelType.TELEGRAM, 1) == "alice"
+        assert await r.gated()
+        assert "earlier config are still in the database (alice)" in caplog.text
+
+    async def test_a_toml_entry_does_not_adopt_a_cli_identity_as_a_rename(self, tmp_path, caplog):
+        db = tmp_path / "no_adopt.db"
+        r = IdentityResolver(db)
+        await r.ensure_table()
+        await r._store.create_profile("alice_cli", channels=[("telegram", "1")])
+
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            r = await _boot(db, "alice@telegram:1=slack:U1", mode="sync")
+
+        cli = await r._store.profile("alice_cli")
+        assert cli["source"] == "cli"
+        assert await r.find(ChannelType.TELEGRAM, 1) == "alice_cli"
+        assert await r.find(ChannelType.SLACK, "U1") == "alice"
+        assert "already belongs to 'alice_cli'" in caplog.text
+
+    async def test_update_prunes_the_phones_of_a_renamed_entry(self, tmp_path):
+        db = tmp_path / "rename_phones.db"
+        await _boot(db, "bob@telegram:1", bob={"phones": ["+4915100000001"]})
+        r = await _boot(db, "bob2@telegram:1", bob2={"phones": ["+4915100000001"]})
+        assert await r._store.user_for_confirmed_phone("+4915100000001") == "bob"
+
+        r = await _boot(db, "bob2@telegram:1")
+
+        assert await r._store.user_for_confirmed_phone("+4915100000001") is None
+
+    async def test_no_link_to_a_stand_in_or_deactivated_id(self, tmp_path):
+        r = IdentityResolver(tmp_path / "no_orphans.db")
+        await r.ensure_table()
+        uid = await r.resolve(ChannelType.WHATSAPP, "111")
+        await r._store.set_active(uid, False)
+
+        await r.link_if_new("whatsapp:111", ChannelType.WHATSAPP, "4911")
+        await r.link_if_new(uid, ChannelType.WHATSAPP, "4912")
+
+        assert await r._store.owner_any("whatsapp", "4911") is None
+        assert await r._store.owner_any("whatsapp", "4912") is None
+
+    async def test_middleware_treats_a_deactivated_sender_as_unknown(self, tmp_path):
+        from pincer.channels.base import IncomingMessage
+        from pincer.channels.middleware import IdentityMiddleware
+
+        r = IdentityResolver(tmp_path / "middleware.db")
+        await r.ensure_table()
+        uid = await r.resolve(ChannelType.WHATSAPP, "111")
+        await r._store.set_active(uid, False)
+
+        msg = IncomingMessage(
+            user_id="111", channel="whatsapp", text="hi", channel_type=ChannelType.WHATSAPP, alt_user_ids=["4911"]
+        )
+        msg = await IdentityMiddleware(r)(msg)
+
+        assert msg.pincer_user_id == "whatsapp:111"
+        assert await r._store.owner_any("whatsapp", "4911") is None
+        assert (await r._store.profile(uid))["active_channel"] is None

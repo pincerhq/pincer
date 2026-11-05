@@ -111,6 +111,21 @@ def _warn_if_managed_by_toml(name: str, source: str | None) -> None:
         )
 
 
+def _toml_channels(name: str) -> set[tuple[str, str]]:
+    """The channels the [identity] TOML lists for `name`, as stored, under the configured mode."""
+    from pincer.config import get_settings_relaxed
+    from pincer.config.identity import load_identity_map
+    from pincer.core.identity import IdentityResolver
+
+    try:
+        entry = load_identity_map(None, get_settings_relaxed().identity_management).get(name)
+    except ValueError:
+        return set()
+    if entry is None:
+        return set()
+    return {(ch, IdentityResolver._normalize_id(ch, cid)) for ch, cid in entry.channels}
+
+
 async def _require(identities: IdentityService, name: str) -> dict[str, object]:
     profile = await identities.profile(name)
     if profile is None:
@@ -347,8 +362,17 @@ async def identity_remove_channel(
     channel: Annotated[str, typer.Argument(help="Channel, e.g. telegram")],
     channel_user_id: Annotated[str, typer.Argument(help="The user's id on that channel")],
 ) -> None:
-    """Unlink a channel id from an identity."""
+    """Unlink a channel id from an identity.
+
+    Refused for a channel the [identity] TOML lists for that person: the
+    next message from it would link it again. Remove it from the TOML.
+    """
     pair = _parse_channel(channel, channel_user_id)
+    if pair in _toml_channels(name):
+        raise _fail(
+            f"{pair[0]}:{pair[1]} is listed for '{name}' in the \\[identity] TOML, which links it again on the "
+            "next message. Remove it from pincer.toml / pincer.local.toml instead."
+        )
     identities, _ = await _services()
     profile = await _require(identities, name)
     if not await identities.unlink_channel(name, *pair):
@@ -411,15 +435,12 @@ async def identity_set(
     profile = await _require(identities, name)
     if email is not None and (owners := [o for o in await identities.email_owners(email) if o != name]):
         raise _fail(f"'{email}' already belongs to '{owners[0]}'. An email can sign in for one identity only.")
-    await identities.update_profile(name, fields)
-    for phone in added:
-        try:
-            await identities.add_phone(name, phone)
-        except PhoneTakenError as e:
-            raise _fail(f"{e}. A number can belong to one identity only.") from e
-    for phone in removed:
-        if not await identities.remove_phone(name, phone):
-            console.print(f"[yellow]'{name}' has no phone {phone}.[/yellow]")
+    try:
+        missing = await identities.update_identity(name, fields, add_phones=added, remove_phones=removed)
+    except PhoneTakenError as e:
+        raise _fail(f"{e}. A number can belong to one identity only. Nothing was changed.") from e
+    for phone in missing:
+        console.print(f"[yellow]'{name}' has no phone {phone}.[/yellow]")
     console.print(f"[green]Updated '{name}'.[/green]")
     _warn_if_managed_by_toml(name, str(profile.get("source")))
 

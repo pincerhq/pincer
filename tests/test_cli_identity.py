@@ -468,3 +468,32 @@ def test_a_change_to_a_toml_listed_identity_is_warned_about(tmp_path: Path, monk
     quiet = _run("set", "alice", "--display-name", "Alice")
     assert quiet.exit_code == 0, quiet.output
     assert "next start" not in quiet.output
+
+
+def test_remove_channel_refuses_a_channel_the_toml_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next message from it would link it again: the TOML is where it goes."""
+    (tmp_path / "pincer.toml").write_text(
+        '[identity.alice]\n\n[[identity.alice.channels]]\nchannel = "telegram"\nchannel_user_id = "1"\n'
+    )
+    _run("create", "alice", "--no-password", "--channel", "telegram:1", "--channel", "slack:U1")
+
+    refused = _run("remove-channel", "alice", "telegram", "1")
+    assert refused.exit_code == 1
+    assert "is listed for 'alice'" in refused.output
+    assert _run("remove-channel", "alice", "slack", "U1").exit_code == 0
+
+    monkeypatch.setenv("PINCER_IDENTITY_MANAGEMENT", "clionly")  # the TOML is ignored: removal is final
+    get_settings_relaxed.cache_clear()
+    assert _run("remove-channel", "alice", "telegram", "1").exit_code == 0
+
+
+def test_set_changes_nothing_when_a_phone_is_refused(tmp_path: Path) -> None:
+    _run("create", "alice", "--no-password", "--channel", "telegram:1")
+    _run("create", "bob", "--no-password", "--channel", "telegram:2", "--email", "bob@example.com")
+    _run("set", "alice", "--add-phone", "+4915100000001")
+
+    result = _run("set", "bob", "--email", "new@example.com", "--add-phone", "+4915100000001")
+
+    assert result.exit_code == 1
+    assert "Nothing was changed" in result.output
+    assert _query(tmp_path, lambda s: s.profile("bob"))["email"] == "bob@example.com"

@@ -470,6 +470,28 @@ def test_access_control_counts_clionly_and_a_database_roster(tmp_path, check):
     assert "database" in from_db.message
 
 
+def test_the_identity_roster_is_read_once_per_run(tmp_path, monkeypatch):
+    from pincer.services import identity as identity_service
+
+    calls = []
+    monkeypatch.setattr(identity_service, "roster_summary", lambda path: calls.append(path) or (False, ["cli1"]))
+    monkeypatch.delenv("PINCER_IDENTITY_MAP", raising=False)
+    cfg = _access_cfg(tmp_path, mode="sync")
+    cfg.whatsapp_enabled = True
+    cfg.signal_enabled = True
+    doc = SecurityDoctor(config_dir=tmp_path)
+
+    doc._roster_cache = {}  # what run_all sets up
+    for check in ("_check_identity_management", "_check_telegram_access_control", "_check_signal_access_control"):
+        getattr(doc, check)(cfg)
+    doc._check_whatsapp_access_control(cfg)
+    assert len(calls) == 1
+
+    doc._roster_cache = None  # outside a run, every check reads afresh
+    doc._check_telegram_access_control(cfg)
+    assert len(calls) == 2
+
+
 def test_identity_management_is_critical_while_the_old_env_var_is_set(tmp_path, monkeypatch):
     monkeypatch.setenv("PINCER_IDENTITY_MAP", "john@telegram:1=whatsapp:+4911,telegram:2")
     result = SecurityDoctor(config_dir=tmp_path)._check_identity_management(_access_cfg(tmp_path))

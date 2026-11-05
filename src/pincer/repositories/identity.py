@@ -64,21 +64,27 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
         return int((await self.session.exec(stmt)).rowcount)
 
     async def has_roster(self) -> bool:
-        """True when an active identity that was configured or made by hand
-        has a channel. `auto` identities do not count: they are the unknown
-        senders an ungated deployment lets in, and counting them would close
-        the gate on everyone after the first message."""
+        """True when an identity that was configured or made by hand has a
+        channel, active or not.
+
+        A deactivated one counts: switching the last person off must make
+        them a guest, not open the gate for everyone. `auto` identities do
+        not count: they are the unknown senders an ungated deployment lets
+        in, and counting them would close the gate on everyone after the
+        first message."""
         stmt = (
             select(IdentityProfile.pincer_user_id)
             .join(ChannelIdentity, col(ChannelIdentity.pincer_user_id) == col(IdentityProfile.pincer_user_id))
-            .where(col(IdentityProfile.active).is_(True), col(IdentityProfile.source) != "auto")
+            .where(col(IdentityProfile.source) != "auto")
             .limit(1)
         )
         return (await self.session.exec(stmt)).first() is not None
 
-    async def ids_by_source(self, source: str) -> Sequence[str]:
+    async def ids_by_source(self, source: str, *, linked_only: bool = False) -> Sequence[str]:
         stmt = select(IdentityProfile.pincer_user_id).where(col(IdentityProfile.source) == source)
-        return (await self.session.exec(stmt)).all()
+        if linked_only:
+            stmt = stmt.where(col(IdentityProfile.pincer_user_id).in_(select(col(ChannelIdentity.pincer_user_id))))
+        return (await self.session.exec(stmt.order_by(col(IdentityProfile.pincer_user_id)))).all()
 
     async def set_active_channel(self, pincer_user_id: str, channel: str, *, now: str) -> int:
         stmt = (

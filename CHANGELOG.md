@@ -54,11 +54,13 @@ and an identity can be switched off without deleting it.
   `add-channel`, `remove-channel`, `set` (display name, email, timezone,
   preferred channel, `--add-phone` / `--remove-phone`), `activate`,
   `deactivate`. A change to an identity the TOML still governs is warned about.
-- **Guest gate** — on when the TOML lists anyone, the database has an active
-  configured or hand-made identity with a channel, or the mode is `clionly`.
-  A roster kept only in the database therefore still gates unknown senders,
-  and the first `pincer identity create … --channel` closes the gate within
-  seconds, without a restart.
+- **Guest gate** — on when the TOML lists anyone, the database has a
+  configured or hand-made identity with a channel (a deactivated one counts,
+  so switching the last person off never opens the gate), or the mode is
+  `clionly`. A roster kept only in the database therefore still gates unknown
+  senders, and the first `pincer identity create … --channel` closes the gate
+  within seconds, without a restart. If the database cannot be read, the gate
+  stays on.
 - **Doctor** — the Telegram, WhatsApp and Signal access checks use that rule;
   a new `identity_management` check flags a leftover `PINCER_IDENTITY_MAP`
   and a TOML that `clionly` ignores.

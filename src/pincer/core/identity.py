@@ -27,8 +27,9 @@ channel ids and phones identify nobody, so its senders are guests. Every
 lookup reads the database, so (de)activating takes effect in a running app.
 
 The guest gate (`gated`) is on when the mode is `clionly`, the TOML lists
-anyone, or the database has an active configured or hand-made identity with
-a channel.
+anyone, or the database has a configured or hand-made identity with a
+channel (a deactivated one included: it is a guest, not a reason to open
+the gate).
 """
 
 from __future__ import annotations
@@ -110,24 +111,32 @@ class IdentityResolver:
         """True when unknown senders are guests (the guest gate is on).
 
         That is when the mode is `clionly`, the TOML lists anyone, or the
-        database has an active configured or hand-made identity with a
-        channel — so a roster kept only in the database still gates.
+        database has a configured or hand-made identity with a channel
+        (active or not) — so a roster kept only in the database still gates.
+
+        Fails closed: while the database cannot be asked, the gate is on.
         """
         if self._mode == "clionly" or self._entries:
             return True
-        now = time.monotonic()
-        if self._roster_checked is None or now - self._roster_checked >= self._ROSTER_TTL:
-            await self.refresh_gate()
+        stale = self._roster_checked is None or time.monotonic() - self._roster_checked >= self._ROSTER_TTL
+        if stale and not await self.refresh_gate():
+            return True
         return self._roster
 
-    async def refresh_gate(self) -> None:
-        """Ask the database again whether it holds a roster (see `gated`)."""
+    async def refresh_gate(self) -> bool:
+        """Ask the database again whether it holds a roster (see `gated`).
+
+        False when the question failed; nothing is cached then, so the next
+        call asks again rather than trusting a stale or unknown answer.
+        """
         try:
             self._roster = await self._store.has_roster()
         except Exception:
-            # No identity tables yet: nothing to gate on. Keep what was known.
-            logger.debug("Identity roster check failed", exc_info=True)
+            logger.warning("Identity roster check failed — treating unknown senders as guests", exc_info=True)
+            self._roster_checked = None
+            return False
         self._roster_checked = time.monotonic()
+        return True
 
     def mark_seeding_complete(self) -> None:
         """Signal that startup identity-map seeding (see seed_from_config) has finished.
@@ -242,6 +251,10 @@ class IdentityResolver:
     ) -> None:
         """Link channel_user_id to an existing pincer_user_id if not already linked."""
         normalized = self._normalize_id(channel, channel_user_id)
+        if not await self.is_active(pincer_user_id):
+            # No profile (e.g. a channel-scoped stand-in id) or a deactivated
+            # one: a link would point nowhere, or hand a guest's id to it.
+            return
         if await self._store.owner_any(channel.value, normalized) is None:
             await self._link_channel(pincer_user_id, channel, normalized)
 
@@ -502,6 +515,10 @@ class IdentityResolver:
         mentions and whose pairs only one entry touches. Two entries reaching
         the same old identity cannot both be its rename, and picking one
         would fold the other person into it.
+
+        Only an identity that came from the config can be renamed by it. One
+        made with the CLI is somebody's on purpose: a TOML entry claiming its
+        channel is refused that pair (see `_claim_pairs`), not merged into it.
         """
         configured_names = {name for name, _ in resolved_entries}
         touched_by: dict[str, int] = {}
@@ -513,7 +530,12 @@ class IdentityResolver:
                     owners.add(uid)
             for uid in owners:
                 touched_by[uid] = touched_by.get(uid, 0) + 1
-        return {uid for uid, count in touched_by.items() if count == 1}
+        targets: set[str] = set()
+        for uid, count in touched_by.items():
+            profile = await self._store.profile(uid) if count == 1 else None
+            if profile is not None and profile.get("source") == SOURCE_CONFIG:
+                targets.add(uid)
+        return targets
 
     async def _entry_owners(
         self,
@@ -608,12 +630,20 @@ class IdentityResolver:
           everything.
         - `update`: only the TOML-listed identities lose the links the TOML
           no longer gives them. Nobody else is touched, and nobody is deleted.
-        - `clionly`, or no entries: nothing to enforce.
+        - `clionly`: nothing to enforce.
+
+        With no entries at all, `sync` removes every identity that came from
+        the config (auto `usr_` ids and CLI ones stay), and `update` warns
+        about config identities still in the database, which keep the guest
+        gate on (see `_no_entries`).
 
         Phones are not handled here but by `cleanup_phones`, which startup
         runs on its own so a failure in seeding or here cannot skip it.
         """
-        if self._mode == "clionly" or not self._entries:
+        if self._mode == "clionly":
+            return
+        if not self._entries:
+            await self._no_entries()
             return
 
         entries = await self._resolved_entries(channels)
@@ -644,6 +674,38 @@ class IdentityResolver:
                 channelless,
             )
 
+    async def _no_entries(self) -> None:
+        """Cleanup for a TOML that lists nobody.
+
+        In `sync`, the TOML is the source of truth, so the config identities
+        go. In `update` nothing is removed, but config identities left from an
+        earlier config — or backfilled as config by migration 0028 — keep the
+        guest gate on, which nothing else in the log would explain.
+        """
+        try:
+            if self._mode == "sync":
+                unlisted, channelless = await self._store.prune(set(), sources=(SOURCE_CONFIG,))
+                if unlisted or channelless:
+                    logger.warning(
+                        "Identity cleanup (sync): the [identity] TOML lists nobody — removed %d link(s) and "
+                        "%d identity/identities that came from the config",
+                        unlisted,
+                        channelless,
+                    )
+                return
+            leftovers = await self._store.ids_by_source(SOURCE_CONFIG, linked_only=True)
+        except Exception:
+            logger.debug("Identity cleanup skipped: tables unavailable", exc_info=True)
+            return
+        if leftovers:
+            logger.warning(
+                "The [identity] TOML lists nobody, but %d identity/identities from an earlier config are still in "
+                "the database (%s), so unknown senders are guests. Keep them, or remove them with "
+                "`pincer identity remove-channel` / PINCER_IDENTITY_MANAGEMENT=sync",
+                len(leftovers),
+                ", ".join(leftovers[:10]) + (", …" if len(leftovers) > 10 else ""),
+            )
+
     async def _listed_identities(self, entries: list[tuple[str, list[_Pair], list[tuple[str, str]]]]) -> set[str]:
         """The identities the TOML lists: each entry's keeper (see `_entry_owners`)."""
         rename_targets = await self._rename_targets([(name, resolved) for name, resolved, _ in entries])
@@ -666,8 +728,13 @@ class IdentityResolver:
         if self._mode == "clionly":
             return
         keep = {phone for entry in self._entries.values() for phone in entry.phones}
-        owners = None if self._mode == "sync" else set(self._entries)
         try:
+            owners: set[str] | None = None
+            if self._mode != "sync":
+                # The entries' names, and the identities they seed into: a
+                # renamed entry keeps the old identity, whose phones these are.
+                # Config ids as written: no channel is connected yet.
+                owners = set(self._entries) | await self._listed_identities(await self._resolved_entries(None))
             removed = await self._store.prune_config_phones(keep, owners=owners)
         except Exception:
             logger.debug("Identity phone cleanup skipped: table unavailable", exc_info=True)

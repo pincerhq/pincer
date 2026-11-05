@@ -70,6 +70,10 @@ class IdentityMiddleware:
             try:
                 owner = await self._identity.resolve(msg.channel_type, msg.user_id)
                 matched_candidate = msg.user_id
+                if owner == f"{msg.channel_type.value}:{msg.user_id}":
+                    # The channel-scoped stand-in for a deactivated identity:
+                    # no profile behind it, so nothing may be linked to it.
+                    owner = None
             except Exception:
                 logger.debug("Identity resolve error for %s/%s", msg.channel, msg.user_id, exc_info=True)
 

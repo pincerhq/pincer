@@ -133,13 +133,14 @@ class IdentityService(DatabaseService):
             return await ChannelIdentityRepository(session).owner(channel, channel_user_id)
 
     async def has_roster(self) -> bool:
-        """True when an active configured or hand-made identity has a channel (see the guest gate)."""
+        """True when a configured or hand-made identity, active or not, has a channel (see the guest gate)."""
         async with session_scope(self._url) as session:
             return await IdentityProfileRepository(session).has_roster()
 
-    async def ids_by_source(self, source: str) -> Sequence[str]:
+    async def ids_by_source(self, source: str, *, linked_only: bool = False) -> Sequence[str]:
+        """Ids of the identities from `source`; with `linked_only`, only those with a channel."""
         async with session_scope(self._url) as session:
-            return await IdentityProfileRepository(session).ids_by_source(source)
+            return await IdentityProfileRepository(session).ids_by_source(source, linked_only=linked_only)
 
     async def user_for_confirmed_phone(self, phone: str) -> str | None:
         """The identity this number is a confirmed phone of, if any.
@@ -308,6 +309,36 @@ class IdentityService(DatabaseService):
             await profiles.overwrite(pincer_user_id, values)
         return True
 
+    async def update_identity(
+        self,
+        pincer_user_id: str,
+        fields: dict[str, Any],
+        *,
+        add_phones: Sequence[str] = (),
+        remove_phones: Sequence[str] = (),
+    ) -> list[str]:
+        """Set profile fields (None ones are left alone) and add or remove
+        confirmed phones, all in one transaction: a refused phone changes
+        nothing. Returns the phones to remove that the identity did not have.
+
+        Raises `LookupError` for an unknown identity and `PhoneTakenError`
+        when a phone to add belongs to another identity.
+        """
+        now = datetime.now(UTC).isoformat()
+        async with session_scope(self._url) as session:
+            profiles = IdentityProfileRepository(session)
+            if await profiles.get(pincer_user_id) is None:
+                raise LookupError(pincer_user_id)
+            phones = IdentityPhoneRepository(session)
+            for phone in add_phones:
+                owner = await phones.owner_of(phone)
+                if owner is not None and owner != pincer_user_id:
+                    raise PhoneTakenError(phone, owner)
+            await profiles.overwrite(pincer_user_id, fields)
+            for phone in add_phones:
+                await phones.upsert(phone, pincer_user_id, confirmed=True, source=SOURCE_CLI, now=now)
+            return [phone for phone in remove_phones if not await phones.delete_for(phone, pincer_user_id)]
+
     async def set_active(self, pincer_user_id: str, active: bool) -> bool:
         """Switch an identity on or off. False for an unknown identity.
 
@@ -421,12 +452,19 @@ class IdentityService(DatabaseService):
                 for phone in entry.phones:
                     await phones.upsert(phone, entry.pincer_user_id, confirmed=True, source="config", now=now)
 
-    async def prune(self, keep: Iterable[tuple[str, str]], *, listed: Iterable[str] | None = None) -> tuple[int, int]:
+    async def prune(
+        self,
+        keep: Iterable[tuple[str, str]],
+        *,
+        listed: Iterable[str] | None = None,
+        sources: Sequence[str] = PRUNABLE_SOURCES,
+    ) -> tuple[int, int]:
         """Unlink channel pairs outside `keep`. Returns (links removed, profiles removed).
 
-        Without `listed` (sync): a pair goes when its owner came from the
-        config or is an auto `usr_` id; then such profiles left with no
-        channel are dropped too. Identities made with the CLI are not touched.
+        Without `listed` (sync): a pair goes when its owner's source is one of
+        `sources` (by default the config and auto `usr_` ids); then such
+        profiles left with no channel are dropped too. Identities made with
+        the CLI are not touched.
 
         With `listed` (update): only pairs owned by these identities go, and
         no profile is dropped.
@@ -443,7 +481,7 @@ class IdentityService(DatabaseService):
             for channel, channel_user_id, owner, source in await links.pairs_with_owner():
                 if (channel, channel_user_id) in allowed:
                     continue
-                if scope is None and source is not None and source not in PRUNABLE_SOURCES:
+                if scope is None and source is not None and source not in sources:
                     continue
                 if scope is not None and owner not in scope:
                     continue
@@ -452,9 +490,9 @@ class IdentityService(DatabaseService):
                 return removed, 0
             # Children first: SQLite runs with foreign keys off, so nothing
             # cascades there, and Postgres wants the child rows gone anyway.
-            await IdentityCredentialRepository(session).delete_unlinked_empty(PRUNABLE_SOURCES)
+            await IdentityCredentialRepository(session).delete_unlinked_empty(sources)
             await AuthSessionRepository(session).delete_orphaned()
-            orphaned = await IdentityProfileRepository(session).delete_unlinked(PRUNABLE_SOURCES)
+            orphaned = await IdentityProfileRepository(session).delete_unlinked(sources)
             # After the profiles: a phone does not keep its identity alive, and
             # on SQLite nothing cascades to the numbers of a deleted profile.
             await IdentityPhoneRepository(session).delete_orphaned()

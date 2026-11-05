@@ -449,7 +449,7 @@ The key sets the `pincer_user_id` used as the memory tag (e.g. `user:johndoe`), 
 
 #### Guest access control
 
-The guest gate is on when the TOML `[identity]` section lists anyone, the database has an active identity (from the config or the CLI) with a channel, or `PINCER_IDENTITY_MANAGEMENT=clionly`. With it on, senders on Telegram, WhatsApp, and Signal who are not a known, active identity are treated as guests:
+The guest gate is on when the TOML `[identity]` section lists anyone, the database has an identity from the config or the CLI with a channel (a deactivated one counts — it is a guest, it does not open the gate), or `PINCER_IDENTITY_MANAGEMENT=clionly`. If the database cannot be read, the gate stays on. With it on, senders on Telegram, WhatsApp, and Signal who are not a known, active identity are treated as guests:
 
 | Variable | Default | Description |
 |----------|---------|-------------|

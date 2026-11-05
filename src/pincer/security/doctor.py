@@ -108,6 +108,9 @@ class SecurityDoctor:
         # `pincer doctor --production` (Sprint 7, T7.3): extra deploy-gate
         # checks; the deploy script refuses to start on any CRITICAL.
         self.production = production
+        # The identity roster, read once per `run_all` instead of once per
+        # access check (each read opens its own loop and engine).
+        self._roster_cache: dict[Path, tuple[bool, list[str]]] | None = None
 
     def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
@@ -119,6 +122,7 @@ class SecurityDoctor:
     def run_all(self) -> DoctorReport:
         from pincer.config import get_settings_relaxed
 
+        self._roster_cache = {}
         settings = get_settings_relaxed()
         report = DoctorReport()
         # Secrets (6 checks)
@@ -214,6 +218,7 @@ class SecurityDoctor:
             report.checks.append(self._check_prod_environment_flag(settings))
             report.checks.append(self._check_prod_cors_origins(settings))
             report.checks.append(self._check_prod_voice_signatures(settings))
+        self._roster_cache = None
         return report
 
     # ── Production deploy gate (Sprint 7, T7.3) ───────────
@@ -1138,7 +1143,7 @@ class SecurityDoctor:
         to start on the same error.
 
         The gate is on in `clionly`, when the TOML lists anyone, or when the
-        database has an active configured or hand-made identity with a channel.
+        database has a configured or hand-made identity with a channel (active or not).
         """
         from pincer.config.identity import load_identity_map
 
@@ -1165,11 +1170,17 @@ class SecurityDoctor:
         """(the database holds a gating roster, CLI-made identity ids); (False, []) when unreadable."""
         from pincer.services.identity import roster_summary
 
+        db_path = Path(cfg.db_path)
+        if self._roster_cache is not None and db_path in self._roster_cache:
+            return self._roster_cache[db_path]
         try:
-            return roster_summary(Path(cfg.db_path)) or (False, [])
+            summary = roster_summary(db_path) or (False, [])
         except Exception:
             # No database or no identity tables yet: no roster.
-            return False, []
+            summary = (False, [])
+        if self._roster_cache is not None:
+            self._roster_cache[db_path] = summary
+        return summary
 
     def _check_identity_management(self, cfg: Settings | None = None) -> CheckResult:
         """#348: the removed PINCER_IDENTITY_MAP, and a TOML the mode ignores."""
