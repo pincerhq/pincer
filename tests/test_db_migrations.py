@@ -51,6 +51,9 @@ EXPECTED_TABLES = {
     "pincer_phone_contacts",
 }
 
+#: Columns migrations after 0018 add on purpose to the tables 0017/0018 rebuild.
+_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0027
+
 
 def _tables(db_path: Path) -> set[str]:
     con = sqlite3.connect(str(db_path))
@@ -1295,6 +1298,8 @@ def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(mig
         # name but keep it filed under the old one, so it still lines up with
         # `before` and with the `after["schedules"]` lookup below.
         after = {table: _shape(sa.inspect(conn), f"pincer_{table}") for table in [*_CONVERTED, *_REBUILT_BY_0018]}
+        for table, added in _ADDED_AFTER_0018.items():
+            after[table]["columns"] = [c for c in after[table]["columns"] if c[0] not in added]
         if migration_url.startswith("sqlite"):
             assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
 

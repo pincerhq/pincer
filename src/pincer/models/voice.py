@@ -52,6 +52,7 @@ class CallTranscript(SQLModel, table=True):
     confidence: float | None = Field(default=None, sa_column=Column(Real(), server_default=sa.text("1.0")))
     is_final: bool | None = Field(default=None, sa_column=Column(Boolean(), server_default=sa.text("TRUE")))
     state: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    delivery_reason: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     timestamp: str = Field(sa_column=Column(IsoText(), nullable=False))
 
 

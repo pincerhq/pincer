@@ -514,6 +514,18 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- **Voice: an interrupted line is no longer reported as a delivery failure,
+  and a German "Na, das war's. Tschüss." ends the call (#301).** Every agent
+  transcript line now records its delivery outcome and the reason in the new
+  `delivery_reason` column (migration 0027). `undelivered` now means only a
+  failure: `send_speech` returned False, and the engine records why
+  (`send_error`, `no_websocket`, `tts_failed`, …). A line the caller talked
+  over, or one the call ended on, before any of it played is the new
+  `cancelled` state (`barge_in` / `call_ended`). It no longer counts toward
+  `no_audio`. The German goodbye fillers now include `na`, `naja`, `nun` and
+  `so`, so "Na, das war's. Tschüss." after the agent's goodbye ends the call
+  instead of starting a second farewell. A goodbye the caller never heard does
+  not count as said, and a failed farewell no longer schedules the hangup.
 - **Agent: a requested language is used, and kept (#305).** The base prompt
   told the model to "always respond in the same language the user writes in",
   so "please speak Ukrainian", written in English, was pulled back to English.

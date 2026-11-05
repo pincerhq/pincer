@@ -88,6 +88,12 @@ RELAY_WEBHOOK_KEY = "relay_webhook"
 #: claimed it as (see `claim_pending_outbound`). The dialer branches on this,
 #: not on a live lookup — a claimed call may already be over.
 CLAIMED_SID_KEY = "claimed_sid"
+#: Metadata key for why the call's latest `send_speech` returned False, read by
+#: the channel right after it returns: `no_websocket`, `send_error`, `no_tts`,
+#: `tts_failed`, `empty` or `no_audio` are failures; `barge_in` (Media Streams,
+#: cut before its first audio) is a deliberate cancellation. "" after a send
+#: that delivered. A call the engine does not know has no state to carry it.
+SPEECH_FAILURE_KEY = "last_speech_failure"
 
 _ULAW_NS_PER_BYTE = 1_000_000_000 // MULAW_BYTES_PER_SECOND
 
@@ -320,7 +326,9 @@ class VoiceEngine(ABC):
     async def send_speech(self, call_sid: str, text_or_audio: Any, *, last: bool = True) -> bool:
         """Speak on the call. Returns True only when the audio was actually
         handed to the transport — a False return means the caller heard
-        nothing (transcripts must record that honestly).
+        nothing (transcripts must record that honestly). When the call is
+        known, a False return leaves the reason in
+        ``state.metadata[SPEECH_FAILURE_KEY]``; every send clears it first.
 
         ``last=False`` marks a partial utterance in a streamed turn (Sprint 5):
         ConversationRelay buffers tokens until a ``last=True`` token closes the
@@ -1259,6 +1267,7 @@ class ConversationRelayEngine(VoiceEngine):
             return False
 
         delivered = False
+        state.metadata[SPEECH_FAILURE_KEY] = ""
         ws = state.metadata.get("websocket")
         if ws:
             from pincer.voice.language import relay_language
@@ -1286,8 +1295,10 @@ class ConversationRelayEngine(VoiceEngine):
                 if accumulator is not None:
                     accumulator.agent_text(text, state.language)
             except Exception:
+                state.metadata[SPEECH_FAILURE_KEY] = "send_error"
                 logger.exception("CR websocket send failed [%s] — agent output DROPPED", call_sid)
         else:
+            state.metadata[SPEECH_FAILURE_KEY] = "no_websocket"
             logger.warning("send_speech with no CR websocket [%s] — agent output DROPPED", call_sid)
         logger.info("CR speech output [%s] delivered=%s: %s", call_sid, delivered, text[:80])
         return delivered
@@ -1729,8 +1740,10 @@ class MediaStreamEngine(VoiceEngine):
             return False
 
         text = str(text_or_audio)
+        state.metadata[SPEECH_FAILURE_KEY] = ""
 
         if not self._tts_provider:
+            state.metadata[SPEECH_FAILURE_KEY] = "no_tts"
             logger.warning("send_speech with no TTS provider [%s] — agent output DROPPED", call_sid)
             return False
 
@@ -1738,6 +1751,7 @@ class MediaStreamEngine(VoiceEngine):
 
         segments = split_into_segments(text)
         if not segments:
+            state.metadata[SPEECH_FAILURE_KEY] = "empty"
             return False
         progress = _SpeechProgress(epoch=int(state.metadata.get("speech_epoch", 0)))
 
@@ -1749,6 +1763,19 @@ class MediaStreamEngine(VoiceEngine):
             state.metadata["last_speech_cut"] = progress.wrote_audio
             raise
         if not delivered:
+            if progress.cut:
+                # A barge-in stopped it before any audio was written: a
+                # deliberate cut, not a failure.
+                state.metadata[SPEECH_FAILURE_KEY] = "barge_in"
+            elif not state.metadata.get(SPEECH_FAILURE_KEY):
+                state.metadata[SPEECH_FAILURE_KEY] = "no_audio"
+                logger.warning("TTS produced no audio [%s] — agent output DROPPED", call_sid)
+            logger.info(
+                "MS speech output [%s] delivered=False reason=%s: %s",
+                call_sid,
+                state.metadata[SPEECH_FAILURE_KEY],
+                text[:80],
+            )
             return False
 
         # Read by the channel right after this returns: a cut utterance was
@@ -1787,6 +1814,7 @@ class MediaStreamEngine(VoiceEngine):
                 return await self._stream_tts(call_sid, state, segments, progress)
             except Exception:
                 logger.exception("TTS retry failed [%s] — spoken fallback + hangup", call_sid)
+                state.metadata[SPEECH_FAILURE_KEY] = "tts_failed"
                 await self.fallback_and_end(call_sid)
                 return False
 
@@ -1815,6 +1843,7 @@ class MediaStreamEngine(VoiceEngine):
 
         ws = state.metadata.get("websocket")
         if not ws:
+            state.metadata[SPEECH_FAILURE_KEY] = "no_websocket"
             logger.warning("send_speech with no MS websocket [%s] — agent output DROPPED", call_sid)
             return False
         stream_sid = state.metadata.get("stream_sid", "")

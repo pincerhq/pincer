@@ -28,13 +28,21 @@ from pincer.voice.engine import (
     ENDED_BY_DASHBOARD,
     ENDED_BY_KEY,
     PROVIDER_STATUS_KEY,
+    SPEECH_FAILURE_KEY,
     UTTERANCE_MARKERS,
     CallDirection,
     set_end_cause,
 )
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.state_machine import CallPhase, CallStateMachine
-from pincer.voice.transcript import Speaker, TranscriptLogger
+from pincer.voice.transcript import (
+    CANCELLED,
+    INTERRUPTED,
+    NOT_PLAYED_STATES,
+    UNDELIVERED,
+    Speaker,
+    TranscriptLogger,
+)
 
 if TYPE_CHECKING:
     from pincer.config import Settings
@@ -103,6 +111,9 @@ class VoiceChannel(BaseChannel):
         # says the caller heard. A line that turn was still sending is logged
         # only as it unwinds — after mark_interrupted ran — and is judged here.
         self._interrupted_turns: dict[str, tuple[asyncio.Task[None], str]] = {}
+        # Why the call's speech was last cancelled (`_cancel_active_turn`'s
+        # reason): a line cut mid-send is logged with it as its delivery reason.
+        self._cancel_causes: dict[str, str] = {}
         # Barge-in: caller utterances are handled off the transport's read loop
         # (see _on_caller_speech). The lock keeps one call's utterances in
         # arrival order; the tasks are held so call end can cancel them.
@@ -788,13 +799,41 @@ class VoiceChannel(BaseChannel):
             task.cancel()
 
     def _after_agent_turn(self, call_sid: str, sm: CallStateMachine, spoken_text: str, end_requested: bool) -> None:
-        """Schedule the hangup if the reply carried [END_CALL] or answered a goodbye."""
+        """Schedule the hangup if the reply carried [END_CALL] or answered a goodbye.
+
+        Not when the goodbye failed to play: the call must not go silent on a
+        farewell the caller never heard. The failed send logged its reason, and
+        a Media Streams TTS failure has already taken its spoken-fallback exit.
+        """
         answered_farewell = call_sid in self._farewell_turns
         self._farewell_turns.discard(call_sid)
+        if (end_requested or answered_farewell) and self._farewell_undelivered(call_sid):
+            logger.warning("Goodbye not delivered [%s] — hangup not scheduled", call_sid)
+            return
         if end_requested:
             self._schedule_hangup(call_sid, sm, spoken_text, "agent_end_call")
         elif answered_farewell:
             self._schedule_hangup(call_sid, sm, spoken_text, "caller_farewell")
+
+    def _farewell_undelivered(self, call_sid: str) -> bool:
+        """Did the reply just spoken fail to deliver its goodbye?
+
+        Judged on the reply's lines that say goodbye, or on all of them when
+        none does ([END_CALL] after a plain closing line).
+        """
+        transcript = self._transcripts.get(call_sid)
+        if transcript is None:
+            return False
+        reply = []
+        for entry in reversed(transcript.entries):
+            if entry.speaker == Speaker.CALLER:
+                break
+            if entry.speaker == Speaker.AGENT:
+                reply.append(entry)
+        state = self._engine.get_call_state(call_sid) if self._engine else None
+        language = str(getattr(state, "language", "") or "en")[:2]
+        goodbyes = [e for e in reply if call_end.contains_farewell(e.text, language)] or reply
+        return bool(goodbyes) and all(e.state == UNDELIVERED for e in goodbyes)
 
     def _schedule_hangup(self, call_sid: str, sm: CallStateMachine, spoken_text: str, reason: str) -> None:
         """Hang up once the farewell has played plus the grace period.
@@ -1006,6 +1045,7 @@ class VoiceChannel(BaseChannel):
             # to close early. Leave the dict alone and let the owner finish.
             return None
         self._active_turns.pop(call_sid, None)
+        self._cancel_causes[call_sid] = reason
         prior_trace = self._turn_traces.pop(call_sid, None)
         if prior_trace is not None:
             # The interrupting utterance owns the call now; the old turn's trace
@@ -1022,6 +1062,7 @@ class VoiceChannel(BaseChannel):
                 tasks.append(turn)
         for call_sid in list(self._utterance_tasks):
             for task in self._utterance_tasks.pop(call_sid, set()):
+                self._cancel_causes[call_sid] = "shutdown"
                 task.cancel()
                 tasks.append(task)
         if tasks:
@@ -1638,7 +1679,9 @@ class VoiceChannel(BaseChannel):
         still unwinding, so appending would put the cut sentence after it and
         into the next reply's `mark_interrupted` window. It is "interrupted"
         only when some of its audio reached Twilio; cancelled before the
-        first TTS chunk it is "undelivered". After a hangup the transcript
+        first TTS chunk it is "cancelled" — a deliberate cut, never
+        "undelivered", which is kept for failed sends. Either way the line
+        records why (`barge_in`, `call_ended`). After a hangup the transcript
         belongs to the post-call pipeline and is left alone.
         """
         assert self._engine is not None
@@ -1659,15 +1702,18 @@ class VoiceChannel(BaseChannel):
                     )
                     transcript.mark_interrupted(interrupted[1])
                 else:
-                    state = "interrupted" if self._speech_was_heard(call_sid) else "undelivered"
-                    transcript.log_utterance(Speaker.AGENT, text, state=state, position=mark)
+                    cause = self._cancel_causes.get(call_sid, "barge_in")
+                    reason = "call_ended" if cause in ("call_ended", "shutdown") else "barge_in"
+                    state = INTERRUPTED if self._speech_was_heard(call_sid) else CANCELLED
+                    transcript.log_utterance(Speaker.AGENT, text, state=state, position=mark, delivery_reason=reason)
             raise
         transcript = self._transcripts.get(call_sid)
         if transcript is not None:
             if text:
+                reason = ""
                 if state is None:
-                    state = self._spoken_state(call_sid, delivered, sm)
-                transcript.log_utterance(Speaker.AGENT, text, state=state)
+                    state, reason = self._spoken_state(call_sid, delivered, sm)
+                transcript.log_utterance(Speaker.AGENT, text, state=state, delivery_reason=reason)
             if last:
                 transcript.end_agent_utterance()
         return delivered
@@ -1681,18 +1727,26 @@ class VoiceChannel(BaseChannel):
             return True
         return bool(state.metadata.get("last_speech_cut", True))
 
-    def _spoken_state(self, call_sid: str, delivered: bool, sm: CallStateMachine | None) -> str:
-        """Transcript state for an agent line `send_speech` just returned on.
+    def _spoken_state(self, call_sid: str, delivered: bool, sm: CallStateMachine | None) -> tuple[str, str]:
+        """Transcript state and delivery reason for an agent line
+        `send_speech` just returned on.
 
-        Must be called right after it returns: the engine's cut flag is per
-        call and the next utterance overwrites it.
+        Must be called right after it returns: the engine's cut flag and
+        failure reason are per call and the next utterance overwrites them.
+        A barge-in that stopped the line before its first audio is
+        "cancelled"; any other False return is a failure, "undelivered".
         """
-        if not delivered:
-            return "undelivered"
         state = self._engine.get_call_state(call_sid) if self._engine else None
+        if not delivered:
+            if state is None:
+                return UNDELIVERED, "unknown_call"
+            reason = str(state.metadata.get(SPEECH_FAILURE_KEY) or "unknown")
+            if reason == "barge_in":
+                return CANCELLED, reason
+            return UNDELIVERED, reason
         if state is not None and state.metadata.get("last_speech_cut"):
-            return "interrupted"  # a barge-in stopped it partway (Media Streams)
-        return str(sm.phase) if sm is not None else ""
+            return INTERRUPTED, "barge_in"  # a barge-in stopped it partway (Media Streams)
+        return (str(sm.phase) if sm is not None else ""), ""
 
     def _log_turn_latency(
         self,
@@ -1806,6 +1860,7 @@ class VoiceChannel(BaseChannel):
             get_monitor_hub().end(call_sid)
         self._error_counts.pop(call_sid, None)
         self._interrupted_turns.pop(call_sid, None)
+        self._cancel_causes.pop(call_sid, None)
         self._cancel_hangup(call_sid)
         self._farewell_turns.discard(call_sid)
         # Sprint 11: a hangup while a `user` approval card is open cancels the
@@ -2001,11 +2056,18 @@ class VoiceChannel(BaseChannel):
 
     @staticmethod
     def _call_was_silent(transcript: TranscriptLogger) -> bool:
-        """True when the agent produced turns but every one was undelivered."""
+        """True when no agent turn played and at least one failed to.
+
+        A caller talking into the dead air cancels lines too, so cancelled
+        lines count as unplayed; only an all-cancelled call (every line
+        barged in, nothing failed) is not silent.
+        """
         agent_entries = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.is_final]
         if not agent_entries:
             return False
-        return all(e.state == "undelivered" for e in agent_entries)
+        return all(e.state in NOT_PLAYED_STATES for e in agent_entries) and any(
+            e.state == UNDELIVERED for e in agent_entries
+        )
 
     async def _record_call_telemetry(
         self,

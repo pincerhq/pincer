@@ -146,6 +146,21 @@ they heard nothing, or only the greeting.
 **Signature.** `failure_code=no_audio`. Log lines with `state="undelivered"`.
 Twilio error **64111** ("Error converting tokens to speech") repeated.
 
+**Reading a transcript line's delivery outcome.** An agent line that did not
+play in full has one of three states, and its `delivery_reason` says why:
+
+| `state` | meaning | `delivery_reason` |
+|---|---|---|
+| `undelivered` | a **failure**: `send_speech` returned False | `no_websocket`, `send_error` (CR socket send raised), `unknown_call`, `no_tts`, `tts_failed` (retry failed, spoken fallback taken), `empty`, `no_audio` (TTS produced nothing), `unknown` |
+| `cancelled` | a **deliberate cut** before any of it played | `barge_in` (the caller talked over it), `call_ended` (hangup or shutdown) |
+| `interrupted` | played in part, then cut | `barge_in`, `call_ended` |
+
+Only `undelivered` counts toward `no_audio`: a call whose lines were all
+`cancelled` is a caller who kept interrupting, not a silent agent. The failure
+itself is in the logs next to the line (`CR websocket send failed`,
+`TTS retry failed`, `send_speech with no … websocket`). The dashboard shows `⚠`
+only for `undelivered`; the other two get a muted "not played" marker.
+
 **Why it is classified as a failure even though the call "completed":** a call
 whose agent turns never reached the caller is not a success, and
 `_classify_call_failure` reclassifies it so it cannot score as one.

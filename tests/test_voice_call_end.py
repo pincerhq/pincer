@@ -51,6 +51,11 @@ def test_parse_end_call_token(text, present, stripped):
         ("Tschüss!", "de", True),
         ("Alles klar, danke, auf Wiederhören.", "de", True),
         ("Tschüss, ach warte, noch eine Frage", "de", False),
+        ("Na, das war's. Tschüss.", "de", True),  # issue #301
+        ("So, das war's, tschüss", "de", True),
+        ("Naja, das ist alles. Auf Wiederhören!", "de", True),
+        ("Na, eine Frage noch, tschüss", "de", False),
+        ("Well, that's it. Bye!", "en", True),
         ("До побачення!", "uk", True),
         ("Дякую, бувайте.", "uk", True),
         ("Бувайте, але ще одне питання", "uk", False),
@@ -64,6 +69,49 @@ def test_contains_farewell_for_agent_lines():
     assert call_end.contains_farewell("I'll report back. Thanks — goodbye!", "en")
     assert call_end.contains_farewell("Vielen Dank, auf Wiederhören!", "de")
     assert not call_end.contains_farewell("Which day suits you?", "en")
+
+
+def _transcript_with(*agent_lines: tuple[str, str]):
+    from pincer.voice.transcript import Speaker, TranscriptLogger
+
+    transcript = TranscriptLogger("CA_t")
+    transcript.log_utterance(Speaker.CALLER, "Danke schön.")
+    for text, state in agent_lines:
+        transcript.log_utterance(Speaker.AGENT, text, state=state)
+    return transcript
+
+
+@pytest.mark.parametrize("state", ["undelivered", "cancelled"])
+def test_a_farewell_the_caller_never_heard_is_not_said(state):
+    transcript = _transcript_with(("Gern geschehen.", "freeform"), ("Einen schönen Tag noch!", state))
+    assert not call_end.last_agent_said_farewell(transcript, "de")
+
+
+def test_a_cut_off_farewell_still_counts_as_said():
+    transcript = _transcript_with(("Einen schönen Tag noch!", "interrupted"))
+    assert call_end.last_agent_said_farewell(transcript, "de")
+
+
+def test_an_earlier_goodbye_before_a_new_question_does_not_count():
+    """The goodbye was heard, but the caller asked again and the answer was cut
+    before any audio: the agent has not said goodbye to the latest turn."""
+    from pincer.voice.transcript import Speaker, TranscriptLogger
+
+    transcript = TranscriptLogger("CA_t")
+    transcript.log_utterance(Speaker.CALLER, "Danke schön.")
+    transcript.log_utterance(Speaker.AGENT, "Schönen Tag noch!", state="freeform")
+    transcript.log_utterance(Speaker.CALLER, "Moment, noch eine Frage zu den Öffnungszeiten.")
+    transcript.log_utterance(Speaker.AGENT, "Wir haben montags", state="cancelled")
+    transcript.log_utterance(Speaker.CALLER, "Okay, tschüss.")
+    assert not call_end.last_agent_said_farewell(transcript, "de")
+
+
+def test_the_callers_own_goodbye_line_is_skipped():
+    transcript = _transcript_with(("Einen schönen Tag noch!", "freeform"))
+    from pincer.voice.transcript import Speaker
+
+    transcript.log_utterance(Speaker.CALLER, "Tschüss.")
+    assert call_end.last_agent_said_farewell(transcript, "de")
 
 
 def test_estimate_speech_seconds():

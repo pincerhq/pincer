@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -732,6 +733,87 @@ class TestRelayBargeIn:
         await channel.stop()
 
 
+FAREWELL_LEAD = "Gern geschehen, Ihr Termin am Montag um zehn Uhr ist eingetragen."
+FAREWELL = "Ich wünsche Ihnen einen schönen Tag!"
+
+
+def _failing_text_sends(sock) -> None:
+    """The socket raises on every text token, as a dropped CR socket does."""
+    send = sock.send_text
+
+    async def _send_text(text: str) -> None:
+        if json.loads(text).get("type") == "text":
+            raise ConnectionError("socket gone")
+        await send(text)
+
+    sock.send_text = _send_text
+
+
+class TestRelayDelivery:
+    """Issue #301: every agent line has an outcome a reader can trace."""
+
+    async def test_a_failed_send_is_undelivered_with_its_reason(self, relay_call):
+        from test_voice_streaming_turn import text_chunks
+
+        engine, channel, agent, sock, loop, _traces = await relay_call([text_chunks(NEW_REPLY)])
+        await asyncio.sleep(0)  # let the read loop take the setup frame
+        _failing_text_sends(sock)
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        line = next(e for e in channel.get_transcript("CA_cr").entries if e.text == NEW_REPLY)
+        assert (line.state, line.delivery_reason) == ("undelivered", "send_error")
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
+    async def test_a_goodbye_that_failed_to_play_does_not_hang_up(self, relay_call):
+        from test_voice_streaming_turn import text_chunks
+
+        engine, channel, agent, sock, loop, _traces = await relay_call([text_chunks(f"{FAREWELL} [END_CALL]")])
+        await asyncio.sleep(0)
+        _failing_text_sends(sock)
+        sock.push(type="prompt", voicePrompt="Danke, das war alles.", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        assert not channel._hangup_pending("CA_cr")
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
+    async def test_a_goodbye_over_a_cut_farewell_ends_the_call_without_a_second_one(self, relay_call, caplog):
+        """The issue's call: the caller says goodbye over the agent's farewell.
+        The cut farewell is a cancellation, not a failure, and the caller's
+        "Na, das war's. Tschüss." ends the call — no second LLM turn."""
+        from test_voice_streaming_turn import text_chunks
+
+        caplog.set_level(logging.INFO, logger="pincer.channels.phone_calls")
+        engine, channel, agent, sock, loop, _traces = await relay_call(
+            [text_chunks(f"{FAREWELL_LEAD} ", f"{FAREWELL} [END_CALL]"), text_chunks("Auf Wiederhören!")]
+        )
+        sock.push(type="prompt", voicePrompt="Danke schön.", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+        assert channel._hangup_pending("CA_cr")
+
+        sock.push(type="interrupt", utteranceUntilInterrupt="Gern geschehen, Ihr Termin")
+        sock.push(type="prompt", voicePrompt="Na, das war's. Tschüss.", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        assert len(agent.calls) == 1
+        assert sock.tokens() == [FAREWELL_LEAD, FAREWELL]
+        assert channel._hangup_pending("CA_cr")
+        assert "Mutual goodbye" in caplog.text
+        line = next(e for e in channel.get_transcript("CA_cr").entries if e.text == FAREWELL)
+        assert (line.state, line.delivery_reason) == ("cancelled", "barge_in")
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
+
 def _reply(*utterances: list[str]) -> TranscriptLogger:
     """A caller question, then the agent's reply as provider utterances."""
     transcript = TranscriptLogger("CA_t")
@@ -747,6 +829,10 @@ def _states(transcript: TranscriptLogger) -> list[str]:
     return [e.state for e in transcript.entries if e.speaker == Speaker.AGENT]
 
 
+def _reasons(transcript: TranscriptLogger) -> list[str]:
+    return [e.delivery_reason for e in transcript.entries if e.speaker == Speaker.AGENT]
+
+
 class TestMarkInterrupted:
     def test_an_earlier_utterance_counts_as_heard(self):
         """Filler played in full; `heard` covers only the answer being played."""
@@ -754,7 +840,8 @@ class TestMarkInterrupted:
 
         marked = transcript.mark_interrupted("Der Termin ist am")
 
-        assert _states(transcript) == ["freeform", "interrupted", "undelivered"]
+        assert _states(transcript) == ["freeform", "interrupted", "cancelled"]
+        assert _reasons(transcript) == ["", "barge_in", "barge_in"]
         assert marked == 2
 
     def test_heard_lines_of_the_playing_utterance_keep_their_state(self):
@@ -762,14 +849,14 @@ class TestMarkInterrupted:
 
         transcript.mark_interrupted("Der Termin ist am Montag. Um zehn")
 
-        assert _states(transcript) == ["freeform", "freeform", "interrupted", "undelivered"]
+        assert _states(transcript) == ["freeform", "freeform", "interrupted", "cancelled"]
 
     def test_utterances_after_the_playing_one_never_played(self):
         transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag."])
 
         transcript.mark_interrupted("Einen Moment")
 
-        assert _states(transcript) == ["interrupted", "undelivered"]
+        assert _states(transcript) == ["interrupted", "cancelled"]
 
     def test_unmatched_heard_marks_only_the_latest_utterance(self):
         transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag."])
