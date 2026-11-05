@@ -22,7 +22,7 @@ class LLMRateLimitError(LLMError):
 
 
 class LLMOutputTruncatedError(LLMError):
-    """The response stopped on max_tokens, so its tool calls may be cut off."""
+    """The response stopped on max_tokens and cannot be used: a tool call may be cut off, or there is no text."""
 
     def __init__(self, output_tokens: int, max_tokens: int):
         self.output_tokens = output_tokens

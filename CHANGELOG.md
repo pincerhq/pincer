@@ -19,6 +19,11 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   error (`LLMOutputTruncatedError`) instead; a scheduled action returns its
   usual "couldn't complete" message. A cut-off reply that is only text is
   still delivered as before.
+- A reply cut off by `max_tokens` before it wrote any text (a thinking model
+  spent the whole budget on thinking) is treated the same way instead of being
+  delivered as an empty message: chat and streaming chat fail with
+  `LLMOutputTruncatedError`, and a scheduled action returns its "couldn't
+  complete" message. Raise `PINCER_MAX_TOKENS` if it happens.
 - A chat turn that already placed a phone call does not fail when a later
   response is cut off: it returns the placed call and replies that the call
   was placed and its result will follow, as for any other error after a

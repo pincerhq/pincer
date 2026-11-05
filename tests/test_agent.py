@@ -13,6 +13,7 @@ import pytest
 
 from pincer.config import Settings
 from pincer.core.agent import (
+    _HEADLESS_LLM_ERROR_TEXT,
     _SESSION_CLEARED_TEXT,
     Agent,
     AgentResponse,
@@ -548,6 +549,72 @@ async def test_a_turn_cut_off_before_placing_a_call_still_raises(settings, mock_
 
     with pytest.raises(LLMOutputTruncatedError):
         await agent.handle_message("user1", "test", "call them")
+
+
+def _cut_off_before_any_text(text: str = "") -> LLMResponse:
+    """A thinking model spent its whole max_tokens budget: stopped on max_tokens with no tool call."""
+    return LLMResponse(
+        content=text, model="test", input_tokens=80, output_tokens=4096, stop_reason="max_tokens", provider="test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_before_any_text_is_an_error_not_an_empty_answer(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = [_cut_off_before_any_text()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMOutputTruncatedError):
+        await agent.handle_message("user1", "test", "think hard")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_mid_sentence_is_still_delivered(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = [_cut_off_before_any_text("The answer is long and be")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.handle_message("user1", "test", "explain", memory=False)
+
+    assert result.text == "The answer is long and be"
+
+
+@pytest.mark.asyncio
+async def test_a_headless_run_cut_off_before_any_text_returns_the_error_text(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = [_cut_off_before_any_text()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.run_headless("Say hi", user_id="usr1", channel="scheduled")
+
+    assert result == _HEADLESS_LLM_ERROR_TEXT
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_reply_cut_off_before_any_text_raises(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = [_cut_off_before_any_text()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMOutputTruncatedError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "think hard")]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_before_any_text()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    result = await agent.handle_message("user1", "test", "call them")
+
+    assert result.call_sids == ["CA9"]
+    assert "placed the call" in result.text
 
 
 @pytest.mark.asyncio

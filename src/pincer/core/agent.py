@@ -339,20 +339,32 @@ def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
 
 
-def _refuse_truncated_tool_calls(response: LLMResponse, max_tokens: int) -> None:
-    """Raise instead of running tool calls from a response cut off by max_tokens.
+def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
+    """Raise instead of using a response cut off by max_tokens that cannot be used.
 
-    The last tool call's input may be incomplete, so none of them run and the
-    assistant turn is not saved. The log names the tools, never their arguments.
+    Two cuts are unusable. A cut-off tool call may have incomplete input, so none of the
+    calls run and the assistant turn is not saved. A cut with no text at all means the
+    whole budget went on thinking: delivering it would send the user an empty reply.
+    Text that was cut off mid-sentence is still delivered. The log names the tools, never
+    their arguments.
     """
-    if not (response.truncated and response.has_tool_calls):
+    if not response.truncated:
         return
-    logger.warning(
-        "LLM output cut off at max_tokens (%d of %d tokens); not running tool calls: %s",
-        response.output_tokens,
-        max_tokens,
-        [tc.name for tc in response.tool_calls],
-    )
+    if response.has_tool_calls:
+        logger.warning(
+            "LLM output cut off at max_tokens (%d of %d tokens); not running tool calls: %s",
+            response.output_tokens,
+            max_tokens,
+            [tc.name for tc in response.tool_calls],
+        )
+    elif not response.content.strip():
+        logger.warning(
+            "LLM output cut off at max_tokens (%d of %d tokens) before any text: no reply to deliver",
+            response.output_tokens,
+            max_tokens,
+        )
+    else:
+        return
     raise LLMOutputTruncatedError(response.output_tokens, max_tokens)
 
 
@@ -831,7 +843,7 @@ class Agent:
                 break
 
             try:
-                _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+                _refuse_truncated_output(response, self._settings.max_tokens)
             except LLMOutputTruncatedError as e:
                 if not call_sids:
                     raise
@@ -1056,7 +1068,7 @@ class Agent:
                 return f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
 
             try:
-                _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+                _refuse_truncated_output(response, self._settings.max_tokens)
             except LLMOutputTruncatedError:
                 # Already logged by the guard; keep this method's no-raise contract.
                 return _HEADLESS_LLM_ERROR_TEXT
@@ -1250,7 +1262,7 @@ class Agent:
                     return
                 raise
 
-            _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+            _refuse_truncated_output(response, self._settings.max_tokens)
 
             if not response.has_tool_calls:
                 break
