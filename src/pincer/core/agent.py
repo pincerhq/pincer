@@ -341,16 +341,6 @@ def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
 
 
-def _drop_image_unless_thinking(session: Session, user_msg: LLMMessage, response: LLMResponse) -> None:
-    """Stop resending the turn's image once a completion has seen it (it is billed on every request).
-
-    Kept while the turn has thinking blocks, the response's own included: the history
-    under them must not change. end_turn drops it then (images are never persisted).
-    """
-    if user_msg.images and not (response.thinking_blocks or any(m.thinking_blocks for m in session.messages)):
-        user_msg.images = []
-
-
 def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
     """Raise instead of using a response cut off by max_tokens that cannot be used.
 
@@ -819,7 +809,9 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
-                _drop_image_unless_thinking(session, user_msg, response)
+                # The image stays on every request of the turn: dropping it
+                # would change the history under the turn's thinking blocks.
+                # end_turn drops it (images are never persisted).
             except BudgetExceededError:
                 final_text = (
                     "Warning: Daily budget limit reached. "
@@ -1274,7 +1266,6 @@ class Agent:
                     tools=tool_schemas,
                     system=system_prompt,
                 )
-                _drop_image_unless_thinking(session, user_msg, response)
             except BudgetExceededError:
                 yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                 return
