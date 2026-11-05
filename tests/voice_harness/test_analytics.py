@@ -84,6 +84,7 @@ class ScriptedExtractor:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
         self.calls += 1
         self.last_user = messages[0].content

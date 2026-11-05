@@ -355,6 +355,7 @@ async def merge_summary(
             max_tokens=_MERGE_MAX_TOKENS,
             reasoning_effort=STRUCTURED_CALL_EFFORT,
             thinking=STRUCTURED_CALL_THINKING,
+            pinned=True,
         )
         data = _parse_json_object(response.content or "")
         summary = str((data or {}).get("summary", "")).strip()

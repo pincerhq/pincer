@@ -355,6 +355,7 @@ class LLMRouter(BaseLLMProvider):
         system: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
         """Primary first, then failovers in random order. An explicit ``model``
         goes to the primary only: failovers use their own model (see ``stream_turn``)."""
@@ -369,6 +370,7 @@ class LLMRouter(BaseLLMProvider):
                 system=system,
                 reasoning_effort=reasoning_effort,
                 thinking=thinking,
+                pinned=pinned,
             )
         except (LLMError, LLMRateLimitError) as primary_err:
             for provider in random.sample(failovers, len(failovers)):
@@ -382,6 +384,7 @@ class LLMRouter(BaseLLMProvider):
                         system=system,
                         reasoning_effort=reasoning_effort,
                         thinking=thinking,
+                        pinned=pinned,
                     )
                 except (LLMError, LLMRateLimitError) as err:
                     logger.warning("Failover provider failed: %s — trying next", err)

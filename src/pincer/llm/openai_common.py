@@ -232,6 +232,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         system: str | None,
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> dict[str, Any]:
         """Request kwargs shared by complete / stream / stream_turn."""
         model = model or self._default_model
@@ -249,8 +250,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             model,
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
-            global_effort=self._reasoning_effort,
-            global_thinking=self._thinking,
+            pinned=pinned,
         )
         kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)
@@ -265,6 +265,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         system: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
         kwargs = self._build_kwargs(
             messages,
@@ -275,6 +276,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             system,
             reasoning_effort=reasoning_effort,
             thinking=thinking,
+            pinned=pinned,
         )
 
         try:

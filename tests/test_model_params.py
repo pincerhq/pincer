@@ -353,6 +353,27 @@ def test_resolve_and_warn_keeps_the_two_wires_apart(caplog):
     assert [r.levelno for r in _dropped_warnings(caplog, model)] == [logging.WARNING, logging.WARNING]
 
 
+def test_an_operators_dropped_setting_warns_even_when_it_equals_the_pin(caplog):
+    """Voice low + disabled set by the operator on a model that cannot disable thinking: not the internal pin."""
+    caplog.set_level(logging.DEBUG)
+    model = "claude-opus-5-5"
+
+    resolve_and_warn(ReasoningWire.ANTHROPIC, model, "low", "disabled")
+
+    records = _dropped_warnings(caplog, model)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "thinking=disabled" in records[0].getMessage()
+
+
+def test_a_pinned_call_logs_its_dropped_values_at_debug_only(caplog):
+    caplog.set_level(logging.DEBUG)
+    model = "claude-opus-5-5"
+
+    resolve_and_warn(ReasoningWire.ANTHROPIC, model, "low", "disabled", pinned=True)
+
+    assert {r.levelno for r in _dropped_warnings(caplog, model)} == {logging.DEBUG}
+
+
 def test_resolve_and_warn_stays_quiet_when_nothing_is_dropped(caplog):
     caplog.set_level(logging.DEBUG)
 

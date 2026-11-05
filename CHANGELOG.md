@@ -93,9 +93,10 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   `disabled`, whatever `PINCER_REASONING_EFFORT` / `PINCER_THINKING` say, so a
   model that thinks can't use up their small output limit and lose the result.
   Each model still gets only what it accepts (Opus 5.5 can't turn thinking off;
-  `low` still applies). If a model takes neither, nothing is sent and, while
-  the global settings are empty, nothing is warned about. Conversation
-  summaries keep `PINCER_SUMMARY_*`.
+  `low` still applies). If a model takes neither, nothing is sent and nothing
+  is warned about (DEBUG only). An operator's own `PINCER_VOICE_*` or
+  `PINCER_SUMMARY_*` value that a model drops still warns, whatever its value.
+  Conversation summaries keep `PINCER_SUMMARY_*`.
 - The minimum `anthropic` SDK is now 0.78.0 (was 0.49.0): older versions raise
   a `TypeError` on the `output_config` and `thinking: adaptive` parameters
   these settings send, which failover does not catch. The lock is unchanged (0.97.0).

@@ -303,6 +303,7 @@ async def extract_outcome(
             max_tokens=_EXTRACTION_MAX_TOKENS,
             reasoning_effort=STRUCTURED_CALL_EFFORT,
             thinking=STRUCTURED_CALL_THINKING,
+            pinned=True,
         )
         outcome = CallOutcome.from_json(response.content or "")
         if outcome is None:

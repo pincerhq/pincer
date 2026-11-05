@@ -326,6 +326,7 @@ class _CountingLLM:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
         self.calls += 1
         self.last_user = messages[0].content
@@ -537,6 +538,7 @@ class _PipelineLLM:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
         self.calls += 1
         self.prompts.append(messages[0].content)

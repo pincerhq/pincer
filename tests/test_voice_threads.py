@@ -83,6 +83,7 @@ class FakeLLM:
         self._raises = raises
         self.calls = 0
         self.max_tokens: list[int | None] = []
+        self.pinned: list[bool] = []
 
     async def complete(
         self,
@@ -94,7 +95,9 @@ class FakeLLM:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
+        self.pinned.append(pinned)
         self.calls += 1
         self.max_tokens.append(max_tokens)
         if self._raises:
@@ -405,6 +408,7 @@ async def test_summary_merge_leaves_room_for_thinking(manager):
     await manager.update_after_call("CA1", outcome=_outcome(), llm=llm, language="de")
 
     assert llm.max_tokens == [2048]
+    assert llm.pinned == [True]  # the pin is not the operator's setting
 
 
 async def test_update_after_call_is_noop_for_threadless_calls(manager):

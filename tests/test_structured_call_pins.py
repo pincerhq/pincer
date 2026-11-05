@@ -113,11 +113,14 @@ async def test_a_dropped_pin_is_logged_at_debug_when_nothing_is_set_globally(set
     assert {r.levelno for r in records} == {logging.DEBUG}
 
 
-async def test_a_dropped_pin_still_warns_when_the_operator_set_something_globally(settings, caplog):
+async def test_a_dropped_pin_is_never_a_warning_even_when_the_operator_set_something_globally(
+    structured_request, caplog
+):
+    """With a global adaptive thinking, "Not sending thinking=disabled" would name a value the operator never set."""
     caplog.set_level(logging.DEBUG)
-    settings.anthropic_model = "claude-3-5-sonnet-20241022"
-    settings.reasoning_effort = "high"
-    async with ScriptedAnthropic(settings, _JSON_REPLY) as llm:
-        await extract_outcome(llm.provider, "AGENT: hi\nCALLER: bye", "")
+    request = await structured_request("claude-opus-5-5")  # a model that cannot turn thinking off
 
-    assert logging.WARNING in {r.levelno for r in _dropped(caplog, "claude-3-5-sonnet-20241022")}
+    assert "thinking" not in request or request["thinking"]["type"] != "disabled"  # precondition: it was dropped
+    records = _dropped(caplog, "claude-opus-5-5")
+    assert records, "precondition: the pin was dropped and logged"
+    assert {r.levelno for r in records} == {logging.DEBUG}

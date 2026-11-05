@@ -34,6 +34,7 @@ class FakeLLM:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
         if self._raises:
             raise RuntimeError("LLM down")

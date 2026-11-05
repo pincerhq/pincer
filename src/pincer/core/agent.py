@@ -2105,6 +2105,7 @@ class Agent:
                 temperature=0,
                 reasoning_effort=STRUCTURED_CALL_EFFORT,
                 thinking=STRUCTURED_CALL_THINKING,
+                pinned=True,
             )
         except Exception as e:
             logger.warning("Onboarding extraction failed; the gate is left as it was: %s", e)

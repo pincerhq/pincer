@@ -68,6 +68,7 @@ class SequencedLLM:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
         index = min(self.calls, len(self._payloads) - 1)
         self.calls += 1

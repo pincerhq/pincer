@@ -40,9 +40,16 @@ class FakeLLM:
         system=None,
         reasoning_effort=None,
         thinking=None,
+        pinned=False,
     ):
         self.calls.append(
-            {"messages": messages, "system": system, "temperature": temperature, "max_tokens": max_tokens}
+            {
+                "messages": messages,
+                "system": system,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "pinned": pinned,
+            }
         )
         if self._raises:
             raise RuntimeError("LLM down")
@@ -417,6 +424,7 @@ class TestExtractOutcome:
         assert await extract_outcome(llm, "AGENT: hello", "") is not None
 
         assert [call["max_tokens"] for call in llm.calls] == [2048]
+        assert [call["pinned"] for call in llm.calls] == [True]  # the pin is not the operator's setting
 
     async def test_empty_transcript_returns_none(self):
         llm = FakeLLM(_json())

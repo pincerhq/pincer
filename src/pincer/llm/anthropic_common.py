@@ -100,6 +100,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         system: str | None,
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> dict[str, Any]:
         """Request kwargs shared by complete / stream / stream_turn."""
         model = model or self._default_model
@@ -114,8 +115,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             model,
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
-            global_effort=self._reasoning_effort,
-            global_thinking=self._thinking,
+            pinned=pinned,
         )
         if not anthropic_accepts_sampling(model):
             logger.debug("Dropping temperature: %s does not accept it", model)
@@ -140,8 +140,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         system: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
+        kwargs = self._build_kwargs(
+            messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking, pinned
+        )
 
         try:
             response: Message = await self._call_with_retry(kwargs)

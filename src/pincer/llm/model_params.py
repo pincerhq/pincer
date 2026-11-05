@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
 from pincer.core.log_once import LogOncePerKey
 
 if TYPE_CHECKING:
@@ -335,21 +334,18 @@ def resolve_and_warn(
     effort: ReasoningEffort,
     thinking: ThinkingMode,
     *,
-    global_effort: ReasoningEffort = "",
-    global_thinking: ThinkingMode = "",
+    pinned: bool = False,
 ) -> ReasoningParams:
     """`resolve_reasoning`, plus one WARNING per wire, model and dropped value (repeats at DEBUG).
 
-    The pin of the internal structured calls (see STRUCTURED_CALL_EFFORT) is not the operator's
-    setting: while the operator set nothing globally (`global_*` empty), a dropped pin is
-    logged at DEBUG only, so a model that can't take it doesn't warn every deployment.
+    `pinned` is passed by the internal structured calls (see STRUCTURED_CALL_EFFORT): their pin
+    is not the operator's setting, so a dropped value is logged at DEBUG only and a model that
+    can't take it doesn't warn every deployment. An operator's setting always warns.
     """
     params = resolve_reasoning(wire, model, effort, thinking)
-    pinned = (effort, thinking) == (STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING)
-    log = logger.debug if pinned and not (global_effort or global_thinking) else None
     for dropped in params.dropped:
-        if log is not None:
-            log("Not sending %s=%s to %s: %s", dropped.setting, dropped.value, model, dropped.reason)
+        if pinned:
+            logger.debug("Not sending %s=%s to %s: %s", dropped.setting, dropped.value, model, dropped.reason)
             continue
         _reasoning_dropped.log(
             f"{wire}|{model}|{dropped.setting}|{dropped.value}",

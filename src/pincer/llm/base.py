@@ -175,8 +175,13 @@ class BaseLLMProvider(ABC):
         system: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
-        """Send messages and get a complete response."""
+        """Send messages and get a complete response.
+
+        ``pinned`` marks an internal structured call whose effort and thinking are fixed by
+        Pincer, not the operator's: a value the model can't take is then logged at DEBUG only.
+        """
         ...
 
     @abstractmethod
