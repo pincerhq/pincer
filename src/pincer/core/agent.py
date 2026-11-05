@@ -1460,8 +1460,10 @@ class Agent:
         await self._sessions.add_message(session, user_msg)
         # NOTE: no summarizer here — it is an LLM call on the voice critical
         # path (seconds of dead air when it triggers mid-conversation).
-        # add_message auto-trims to max_session_messages, so context stays
-        # bounded; text channels keep the richer summarize-then-trim flow.
+        # add_message does not trim while the turn is open: SessionManager.turn()
+        # trims to max_session_messages when the turn ends. Growth within one turn
+        # is bounded by max_tool_iterations; text channels keep the richer
+        # summarize-then-trim flow.
 
         turn = await self._begin_turn(user_id)
         # Sprint 11: in call context the bound gate owns the EXACT tool set
