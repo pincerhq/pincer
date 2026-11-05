@@ -66,6 +66,10 @@ class LLMMessage:
     tool_calls: list[ToolCall] = field(default_factory=list)  # From assistant
     # The response's thinking, sent back on the turn's later requests; never in to_dict
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
+    # The response's content blocks as the API sent them, in order (thinking, text, tool_use
+    # interleaved). Set only when the response had thinking, so the next request can replay it
+    # as it was; never in to_dict.
+    content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal dict for session storage (JSON-serializable)."""
@@ -127,6 +131,8 @@ class LLMResponse:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
+    # Every content block in the order the API sent them; filled only when there is thinking
+    content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -143,6 +149,7 @@ def strip_thinking(messages: list[LLMMessage]) -> None:
     for message in messages:
         if message.thinking_blocks:
             message.thinking_blocks = []
+            message.content_blocks = []
 
 
 @dataclass(frozen=True, slots=True)

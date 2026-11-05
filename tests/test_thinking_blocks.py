@@ -739,3 +739,59 @@ async def test_a_failed_turn_leaves_no_turn_open(settings, session_manager, cost
     assert open_when_failing == [True]  # precondition: it failed inside the turn
     session = await session_manager.get_or_create("user1", loop)
     assert session._turn_open is False
+
+
+_INTERLEAVED = (
+    [
+        thinking(_THOUGHT, _SIGNATURE),
+        text("Checking."),
+        thinking("SECOND-THOUGHT", "SECOND-SIG"),
+        tool_use("toolu_1", "create_event", {"title": "Dentist"}),
+    ],
+    "tool_use",
+)
+
+
+async def test_chat_turn_replays_an_interleaved_response_in_its_own_order(
+    settings, session_manager, cost_tracker, tools
+):
+    async with ScriptedAnthropic(settings, [_INTERLEAVED, ([text("Erledigt.")], "end_turn")]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
+        await agent.handle_message("user1", "test", "Book the dentist", memory=False)
+
+    replayed = [m for m in llm.requests[1]["messages"] if m["role"] == "assistant"][-1]
+    assert [b["type"] for b in replayed["content"]] == ["thinking", "text", "thinking", "tool_use"]
+
+
+async def test_streaming_chat_turn_replays_an_interleaved_response_in_its_own_order(
+    settings, session_manager, cost_tracker, tools
+):
+    script = [_INTERLEAVED, ([text("Erledigt.")], "end_turn"), ([text("Erledigt.")], "end_turn")]
+    async with ScriptedAnthropic(settings, script) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
+        _chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
+
+    replayed = [m for m in llm.requests[1]["messages"] if m["role"] == "assistant"][-1]
+    assert [b["type"] for b in replayed["content"]] == ["thinking", "text", "thinking", "tool_use"]
+
+
+async def test_voice_turn_replays_an_interleaved_response_in_its_own_order(
+    settings, session_manager, cost_tracker, tools
+):
+    async with ScriptedAnthropic(settings, [_INTERLEAVED, ([text("Erledigt.")], "end_turn")]) as llm:
+        agent = _voice_agent(settings, llm.provider, session_manager, cost_tracker, tools)
+        _chunks = [c async for c in agent.stream_voice_turn("+4930111222", "voice", "Termin beim Zahnarzt")]
+
+    replayed = [m for m in llm.requests[1]["messages"] if m["role"] == "assistant"][-1]
+    assert [b["type"] for b in replayed["content"]] == ["thinking", "text", "thinking", "tool_use"]
+
+
+async def test_a_session_trimmed_at_the_end_of_a_turn_keeps_no_recorded_blocks(
+    settings, session_manager, cost_tracker, tools
+):
+    async with ScriptedAnthropic(settings, [_INTERLEAVED, ([text("Erledigt.")], "end_turn")]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
+        await agent.handle_message("user1", "test", "Book the dentist", memory=False)
+
+    session = await session_manager.get_or_create("user1", "test")
+    assert all(not m.content_blocks for m in session.messages)

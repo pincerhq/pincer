@@ -715,7 +715,7 @@ async def test_text_turn_without_text_never_sends_thinking_alone(anthropic_setti
     assert sent[1] == {"role": "assistant", "content": ""}  # exactly as without thinking
 
 
-async def test_merging_assistant_turns_keeps_thinking_first(anthropic_settings):
+async def test_merging_assistant_turns_keeps_each_messages_blocks_in_order(anthropic_settings):
     call = ToolCall(id="toolu_1", name="t", arguments={})
     sent = await _sent_messages(
         anthropic_settings,
@@ -732,8 +732,8 @@ async def test_merging_assistant_turns_keeps_thinking_first(anthropic_settings):
     assert sent[1] == {
         "role": "assistant",
         "content": [
-            *_THINKING_API,
             {"type": "text", "text": "One moment."},
+            *_THINKING_API,
             {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {}},
         ],
     }
@@ -887,3 +887,111 @@ class TestReasoningSettings:
         assert body["model"] == "claude-haiku-5-5"
         assert "output_config" not in body
         assert "thinking" not in body
+
+
+# ── Block order within a response (issue #345, review round 1) ─────────────────
+
+_SECOND_THOUGHT = "SECOND-THOUGHT-9c1d"
+_SECOND_SIGNATURE = "SIG-9c1d-signature"
+_INTERLEAVED_REPLY = (
+    [
+        sse.thinking(_THOUGHT, _SIGNATURE),
+        sse.text("Checking."),
+        sse.thinking(_SECOND_THOUGHT, _SECOND_SIGNATURE),
+        sse.tool_use("toolu_1", "t", {"a": 1}),
+    ],
+    "tool_use",
+)
+_INTERLEAVED_API = [
+    {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+    {"type": "text", "text": "Checking."},
+    {"type": "thinking", "thinking": _SECOND_THOUGHT, "signature": _SECOND_SIGNATURE},
+    {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": 1}},
+]
+
+
+def _saved_as_the_agent_does(result) -> LLMMessage:
+    return LLMMessage(
+        role=MessageRole.ASSISTANT,
+        content=result.content,
+        tool_calls=result.tool_calls,
+        thinking_blocks=list(result.thinking_blocks),
+        content_blocks=list(result.content_blocks),
+    )
+
+
+async def test_an_interleaved_response_is_replayed_in_the_order_it_was_generated(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_INTERLEAVED_REPLY]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            _saved_as_the_agent_does(result),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert sent[1] == {"role": "assistant", "content": _INTERLEAVED_API}
+
+
+async def test_a_response_without_thinking_records_no_content_blocks(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [([sse.text("Hello!")], "end_turn")]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.content_blocks == []
+
+
+async def test_a_text_reply_with_thinking_in_the_middle_is_replayed_in_order(anthropic_settings):
+    reply = ([sse.text("One."), sse.thinking(_THOUGHT, _SIGNATURE), sse.text("Two.")], "end_turn")
+    async with sse.ScriptedAnthropic(anthropic_settings, [reply]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            _saved_as_the_agent_does(result),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1]["content"] == [
+        {"type": "text", "text": "One."},
+        {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+        {"type": "text", "text": "Two."},
+    ]
+
+
+async def test_a_message_edited_after_the_response_falls_back_to_thinking_first(anthropic_settings):
+    """Pair repair may drop a tool call from a saved message: the recorded order no longer fits it."""
+    async with sse.ScriptedAnthropic(anthropic_settings, [_INTERLEAVED_REPLY]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+    edited = _saved_as_the_agent_does(result)
+    edited.content = "Edited."
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            edited,
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert [b["type"] for b in sent[1]["content"]] == ["thinking", "thinking", "text", "tool_use"]
+
+
+async def test_merging_assistant_messages_never_moves_a_later_thinking_ahead_of_an_earlier_text(anthropic_settings):
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="One moment."),
+            LLMMessage(role=MessageRole.ASSISTANT, content="Done.", thinking_blocks=list(_THINKING_BLOCKS)),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "One moment."}, *_THINKING_API, {"type": "text", "text": "Done."}],
+    }

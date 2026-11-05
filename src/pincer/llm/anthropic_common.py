@@ -274,31 +274,34 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 continue
 
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                # Thinking first, then text, then tool_use: the order the API
-                # expects. A response with thinking after a tool_use (interleaved)
-                # would be reordered here.
-                content_blocks: list[dict[str, Any]] = [self._thinking_to_api(b) for b in msg.thinking_blocks]
-                if msg.content:
-                    content_blocks.append({"type": "text", "text": msg.content})
-                for tc in msg.tool_calls:
-                    content_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.arguments,
-                        }
-                    )
+                content_blocks = self._replayed_blocks(msg)
+                if content_blocks is None:
+                    # Rebuilt: thinking first, then text, then tool_use. Only a message
+                    # edited since its response (or built without the recorded order)
+                    # gets here; a response's own order is never changed.
+                    content_blocks = [self._thinking_to_api(b) for b in msg.thinking_blocks]
+                    if msg.content:
+                        content_blocks.append({"type": "text", "text": msg.content})
+                    for tc in msg.tool_calls:
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": tc.arguments,
+                            }
+                        )
                 result.append({"role": "assistant", "content": content_blocks})
                 continue
 
             # Thinking with no text after it is not sent: an assistant message
             # holding only thinking is never valid.
             if msg.role == MessageRole.ASSISTANT and msg.thinking_blocks and msg.content:
-                thinking_first = [self._thinking_to_api(b) for b in msg.thinking_blocks]
-                result.append(
-                    {"role": "assistant", "content": [*thinking_first, {"type": "text", "text": msg.content}]}
-                )
+                replayed = self._replayed_blocks(msg)
+                if replayed is None:
+                    thinking_first = [self._thinking_to_api(b) for b in msg.thinking_blocks]
+                    replayed = [*thinking_first, {"type": "text", "text": msg.content}]
+                result.append({"role": "assistant", "content": replayed})
                 continue
 
             # Standard text or text+image
@@ -322,6 +325,23 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 result.append({"role": msg.role.value, "content": msg.content})
 
         return self._validate_api_messages(result)
+
+    @staticmethod
+    def _replayed_blocks(msg: LLMMessage) -> list[dict[str, Any]] | None:
+        """The message's content blocks in the order its response generated them, or None.
+
+        The recorded order is used only while it still describes the message: the same
+        tool calls and the same text. A message edited since (a tool call dropped by pair
+        repair) is rebuilt instead.
+        """
+        blocks = msg.content_blocks
+        if not (blocks and msg.thinking_blocks):
+            return None
+        tool_ids = [b["id"] for b in blocks if b["type"] == "tool_use"]
+        text = "\n".join(b["text"] for b in blocks if b["type"] == "text")
+        if tool_ids != [tc.id for tc in msg.tool_calls] or text != msg.content:
+            return None
+        return [dict(b) for b in blocks]
 
     @staticmethod
     def _thinking_to_api(block: ThinkingBlock) -> dict[str, Any]:
@@ -417,8 +437,6 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                     merged[-1] = {**prev, "content": [{"type": "text", "text": prev_content}] + cur_content}
                 elif isinstance(prev_content, list) and isinstance(cur_content, str):
                     merged[-1] = {**prev, "content": prev_content + [{"type": "text", "text": cur_content}]}
-                if merged[-1]["role"] == "assistant" and isinstance(merged[-1]["content"], list):
-                    merged[-1] = {**merged[-1], "content": _thinking_first(merged[-1]["content"])}
             else:
                 merged.append(msg)
 
@@ -434,21 +452,25 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         tool_calls: list[ToolCall] = []
         thinking_blocks: list[ThinkingBlock] = []
 
+        ordered: list[dict[str, Any]] = []
         for block in response.content:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
+                ordered.append({"type": "text", "text": block.text})
             elif isinstance(block, SDKThinkingBlock):
                 thinking_blocks.append(ThinkingBlock("thinking", thinking=block.thinking, signature=block.signature))
+                ordered.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
             elif isinstance(block, SDKRedactedThinkingBlock):
                 thinking_blocks.append(ThinkingBlock("redacted_thinking", data=block.data))
+                ordered.append({"type": "redacted_thinking", "data": block.data})
             elif isinstance(block, ToolUseBlock):
-                tool_calls.append(
-                    ToolCall(
-                        id=block.id,
-                        name=block.name,
-                        arguments=dict(block.input) if isinstance(block.input, dict) else {},
-                    )
+                call = ToolCall(
+                    id=block.id,
+                    name=block.name,
+                    arguments=dict(block.input) if isinstance(block.input, dict) else {},
                 )
+                tool_calls.append(call)
+                ordered.append({"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments})
 
         return LLMResponse(
             content="\n".join(text_parts),
@@ -461,13 +483,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             cache_read_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
             cache_write_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
             thinking_blocks=thinking_blocks,
+            # The order matters only to the thinking the next request returns
+            content_blocks=ordered if thinking_blocks else [],
         )
 
 
 def _is_thinking(block: Any) -> bool:
     return isinstance(block, dict) and block.get("type") in _THINKING_TYPES
-
-
-def _thinking_first(blocks: list[Any]) -> list[Any]:
-    """Thinking blocks ahead of all others; both keep their own order."""
-    return [b for b in blocks if _is_thinking(b)] + [b for b in blocks if not _is_thinking(b)]

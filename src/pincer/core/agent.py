@@ -872,6 +872,7 @@ class Agent:
                     content=response.content,
                     tool_calls=response.tool_calls,
                     thinking_blocks=list(response.thinking_blocks),
+                    content_blocks=list(response.content_blocks),
                 )
                 await self._sessions.add_message(session, assistant_msg)
 
@@ -1088,6 +1089,7 @@ class Agent:
                         content=response.content,
                         tool_calls=response.tool_calls,
                         thinking_blocks=list(response.thinking_blocks),
+                        content_blocks=list(response.content_blocks),
                     )
                 )
 
@@ -1285,6 +1287,7 @@ class Agent:
                 content=response.content,
                 tool_calls=response.tool_calls,
                 thinking_blocks=list(response.thinking_blocks),
+                content_blocks=list(response.content_blocks),
             )
             await self._sessions.add_message(session, assistant_msg)
 
@@ -1684,6 +1687,7 @@ class Agent:
                 content=response.content,
                 tool_calls=response.tool_calls,
                 thinking_blocks=list(response.thinking_blocks),
+                content_blocks=list(response.content_blocks),
             )
             await self._sessions.add_message(session, assistant_msg)
 
