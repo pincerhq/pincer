@@ -269,3 +269,51 @@ def test_voice_max_response_tokens_bounds(tmp_path: Path, value: int, accepted: 
     else:
         with pytest.raises(ValidationError, match="voice_max_response_tokens"):
             build()
+
+
+def _settings_from_env(tmp_path: Path) -> Settings:
+    return Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+
+def test_effort_and_thinking_default_to_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset sends nothing, so the model keeps its own default (issue #345)."""
+    monkeypatch.delenv("PINCER_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("PINCER_THINKING", raising=False)
+    s = _settings_from_env(tmp_path)
+    assert (s.reasoning_effort, s.thinking) == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("env", "value"),
+    [
+        *(("PINCER_REASONING_EFFORT", v) for v in ("", "low", "medium", "high", "xhigh", "max")),
+        *(("PINCER_THINKING", v) for v in ("", "adaptive", "disabled")),
+    ],
+)
+def test_effort_and_thinking_accept_their_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str, value: str
+) -> None:
+    monkeypatch.setenv(env, value)
+    s = _settings_from_env(tmp_path)
+    assert getattr(s, env.removeprefix("PINCER_").lower()) == value
+
+
+@pytest.mark.parametrize(
+    ("env", "value"),
+    [
+        ("PINCER_REASONING_EFFORT", "minimal"),  # an OpenAI level, not a setting value
+        ("PINCER_REASONING_EFFORT", "LOW"),
+        ("PINCER_THINKING", "enabled"),
+        ("PINCER_THINKING", "on"),
+    ],
+)
+def test_effort_and_thinking_reject_other_values_at_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str, value: str
+) -> None:
+    monkeypatch.setenv(env, value)
+    with pytest.raises(ValidationError, match=env.removeprefix("PINCER_").lower()):
+        _settings_from_env(tmp_path)

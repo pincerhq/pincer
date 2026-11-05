@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import NoDecode
+
+# "" = not set: nothing is sent and the model runs on its own default.
+ReasoningEffort = Literal["", "low", "medium", "high", "xhigh", "max"]
+ThinkingMode = Literal["", "adaptive", "disabled"]
 
 
 class LLMProvider(StrEnum):
@@ -87,6 +91,16 @@ class LLMSettings(BaseModel):
     )
     max_tokens: int = Field(default=8192, ge=1, le=128000)
     temperature: float = Field(default=0.5, ge=0.0, le=2.0)
+    reasoning_effort: ReasoningEffort = Field(
+        default="",
+        description="Effort for every request ('' = the model's default). Translated per model: stepped down "
+        "where a level is unsupported, dropped (warned once) where the model takes no effort",
+    )
+    thinking: ThinkingMode = Field(
+        default="",
+        description="'adaptive' turns thinking on, 'disabled' off, where the model allows it ('' = the model's "
+        "default). Thinking counts toward max_tokens",
+    )
 
     agent_name: str = Field(default="Pincer", description="Agent display name")
     system_prompt: str = Field(

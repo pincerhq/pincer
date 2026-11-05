@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic_sse as sse
@@ -752,3 +753,106 @@ async def test_orphaned_tool_call_turn_is_dropped_with_its_thinking(anthropic_se
     )
 
     assert sent == [{"role": "user", "content": "hi\nagain"}]
+
+
+# ── Effort and thinking settings (issue #345) ─────────────────────
+
+_HI = [LLMMessage(role=MessageRole.USER, content="hi")]
+_OK_REPLY = ([sse.text("ok")], "end_turn")
+
+
+async def _sent_request(settings, method: str = "complete", **call_kwargs) -> dict:
+    """The request body the provider really sends for one call of `method`."""
+    async with sse.ScriptedAnthropic(settings, [_OK_REPLY]) as llm:
+        if method == "complete":
+            await llm.provider.complete(_HI, **call_kwargs)
+        else:
+            _ = [e async for e in getattr(llm.provider, method)(_HI, **call_kwargs)]
+    assert len(llm.requests) == 1
+    return llm.requests[0]
+
+
+class TestReasoningSettings:
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_global_effort_and_thinking_reach_the_request(self, anthropic_settings, method):
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "low", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, method)
+
+        assert body["model"] == "claude-haiku-5-5"
+        assert body["output_config"] == {"effort": "low"}
+        assert body["thinking"] == {"type": "adaptive"}
+
+    @pytest.mark.parametrize("model", ["claude-opus-4-6", "claude-sonnet-4-6"])
+    async def test_adaptive_thinking_drops_temperature(self, anthropic_settings, model):
+        """These models still take `temperature`, but not together with thinking (a 400)."""
+        settings = anthropic_settings.model_copy(update={"default_model": model, "thinking": "adaptive"})
+        body = await _sent_request(settings, temperature=0)
+
+        assert body["thinking"] == {"type": "adaptive"}
+        assert "temperature" not in body
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-opus-5-1",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-haiku-6",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-3-5-sonnet-20241022",
+        ],
+    )
+    async def test_empty_settings_send_what_they_sent_before(self, anthropic_settings, model):
+        settings = anthropic_settings.model_copy(update={"default_model": model})
+        assert (settings.reasoning_effort, settings.thinking) == ("", "")
+        body = await _sent_request(settings)
+
+        takes_temperature = model in ("claude-haiku-4-5-20251001", "claude-sonnet-4-5", "claude-opus-4-5")
+        takes_temperature |= model in ("claude-opus-4-6", "claude-sonnet-4-6", "claude-3-5-sonnet-20241022")
+        expected = {"model", "max_tokens", "messages", "stream"} | ({"temperature"} if takes_temperature else set())
+        assert set(body) == expected
+        if takes_temperature:
+            assert body["temperature"] == settings.temperature
+
+    @staticmethod
+    async def _two_requests(settings) -> None:
+        async with sse.ScriptedAnthropic(settings, [_OK_REPLY, _OK_REPLY]) as llm:
+            await llm.provider.complete(_HI)
+            await llm.provider.complete(_HI)
+        assert len(llm.requests) == 2
+
+    @pytest.mark.parametrize(
+        ("model", "update", "setting"),
+        [
+            # unrecognised: a deployment name that hides the Claude model
+            ("voice-fast-warn-once", {"reasoning_effort": "low"}, "reasoning_effort=low"),
+            # recognised, but the model rejects the setting
+            ("us.anthropic.claude-haiku-4-5-warn-once", {"thinking": "adaptive"}, "thinking=adaptive"),
+        ],
+    )
+    async def test_a_dropped_setting_warns_once(self, anthropic_settings, caplog, model, update, setting):
+        settings = anthropic_settings.model_copy(update={"default_model": model, **update})
+        with caplog.at_level(logging.DEBUG, logger="pincer"):
+            await self._two_requests(settings)
+
+        lines = [r for r in caplog.records if model in r.getMessage() and setting in r.getMessage()]
+        assert [r.levelno for r in lines] == [logging.WARNING, logging.DEBUG]
+
+    async def test_empty_settings_never_warn_for_an_unrecognised_model(self, anthropic_settings, caplog):
+        settings = anthropic_settings.model_copy(update={"default_model": "voice-fast-benign"})
+        with caplog.at_level(logging.DEBUG, logger="pincer"):
+            await self._two_requests(settings)
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []

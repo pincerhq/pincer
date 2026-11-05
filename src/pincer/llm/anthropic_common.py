@@ -21,6 +21,7 @@ from anthropic.types import (
 from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
 from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
+from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
     BaseLLMProvider,
@@ -31,7 +32,7 @@ from pincer.llm.base import (
     ThinkingBlock,
     ToolCall,
 )
-from pincer.llm.model_params import anthropic_accepts_sampling
+from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_reasoning
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 # Content block types that carry a response's thinking
 _THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
+# An effort/thinking setting a model can't take: one WARNING per model and value
+_reasoning_dropped = LogOncePerKey(logger, logging.WARNING)
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -71,6 +74,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
+        # Read once: every request of a turn sends the same effort/thinking
+        # (changing them mid-conversation invalidates the prompt cache).
+        self._reasoning_effort = settings.reasoning_effort
+        self._thinking = settings.thinking
 
     def _maybe_cache_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Prompt caching (Sprint 5, T5.4): the tool schemas are the largest
@@ -101,14 +108,27 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             "max_tokens": max_tokens or self._default_max_tokens,
             "messages": self._convert_messages(messages),
         }
-        if anthropic_accepts_sampling(model):
-            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
-        else:
+        reasoning = resolve_reasoning(ReasoningWire.ANTHROPIC, model, self._reasoning_effort, self._thinking)
+        if not anthropic_accepts_sampling(model):
             logger.debug("Dropping temperature: %s does not accept it", model)
+        elif reasoning.drop_temperature:
+            logger.debug("Dropping temperature: %s does not accept it with thinking on", model)
+        else:
+            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
         if system:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs.update(reasoning.fragment)
+        for dropped in reasoning.dropped:
+            _reasoning_dropped.log(
+                f"{model}|{dropped.setting}|{dropped.value}",
+                "Not sending %s=%s to %s: %s",
+                dropped.setting,
+                dropped.value,
+                model,
+                dropped.reason,
+            )
         return kwargs
 
     async def complete(
