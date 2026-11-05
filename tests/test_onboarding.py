@@ -22,7 +22,7 @@ from pincer.core.session import (
 )
 from pincer.db.engine import get_database_url
 from pincer.exceptions import BudgetExceededError
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
 from pincer.memory.store import MemoryStore
 from pincer.repositories.onboarding import OnboardingRepository
 from pincer.services.onboarding import OnboardingRecord, OnboardingService
@@ -49,10 +49,11 @@ def _llm_text(content: str) -> LLMResponse:
 def _streams(llm: AsyncMock, text: str) -> None:
     """Give the mock LLM a stream that yields ``text``, as a provider would."""
 
-    async def stream(**_: object) -> AsyncIterator[str]:
-        yield text
+    async def stream_turn(**_: object) -> AsyncIterator[StreamTurnEvent]:
+        yield StreamTurnEvent(text=text)
+        yield StreamTurnEvent(response=_llm_text(text))
 
-    llm.stream = stream
+    llm.stream_turn = stream_turn
 
 
 def _scripted_llm(*replies: str | Exception) -> AsyncMock:

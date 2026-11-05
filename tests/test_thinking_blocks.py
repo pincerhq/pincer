@@ -154,12 +154,13 @@ async def test_streaming_chat_final_stream_gets_no_thinking(
         completed_with.append(_sent_thinking(messages))
         return responses.pop(0)
 
-    async def stream(messages, **kwargs):
+    async def stream_turn(messages, **kwargs):
         streamed_with.append(_sent_thinking(messages))
-        yield "Booked."
+        yield StreamTurnEvent(text="Booked.")
+        yield StreamTurnEvent(response=_DONE)
 
     mock_llm.complete.side_effect = complete
-    mock_llm.stream = stream
+    mock_llm.stream_turn = stream_turn
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
 
     with caplog.at_level(logging.DEBUG, logger="pincer"):
@@ -278,10 +279,11 @@ async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
     """turn() yields the session; the inner method must use it, not look the key up again."""
     mock_llm.complete.return_value = _DONE
 
-    async def stream(messages, **kwargs):
-        yield "done"
+    async def stream_turn(messages, **kwargs):
+        yield StreamTurnEvent(text="done")
+        yield StreamTurnEvent(response=_DONE)
 
-    mock_llm.stream = stream
+    mock_llm.stream_turn = stream_turn
     provider = _ScriptedVoice([[StreamTurnEvent(text="done"), StreamTurnEvent(response=_DONE)]])
     agent = (
         _voice_agent(settings, provider, session_manager, cost_tracker, tools)

@@ -23,7 +23,9 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   spent the whole budget on thinking) is treated the same way instead of being
   delivered as an empty message: chat and streaming chat fail with
   `LLMOutputTruncatedError`, and a scheduled action returns its "couldn't
-  complete" message. Raise `PINCER_MAX_TOKENS` if it happens.
+  complete" message. Raise `PINCER_MAX_TOKENS` if it happens. In streaming chat
+  the check is made on the streamed reply, the one the user receives: it is
+  now generated with `stream_turn`, so its stop reason is known.
 - A chat turn that already placed a phone call does not fail when a later
   response is cut off: it returns the placed call and replies that the call
   was placed and its result will follow, as for any other error after a

@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anthropic_sse import ScriptedAnthropic, text, thinking
 
 from pincer.config import Settings
 from pincer.core.agent import Agent, StreamChunk, StreamEventType
@@ -174,6 +175,47 @@ async def test_streaming_chat_turn_never_runs_a_cut_off_tool_call(
     assert StreamEventType.TOOL_START not in [c.type for c in chunks]
     session = await session_manager.get_or_create("user1", "web")
     assert [m.role for m in session.messages] == [MessageRole.USER]
+
+
+async def _stream_chat(llm, settings, session_manager, cost_tracker, registry) -> list[StreamChunk]:
+    agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+    return [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
+
+
+async def test_streaming_chat_final_stream_cut_off_before_any_text_raises(
+    settings, session_manager, cost_tracker, recording
+):
+    """The reply the user gets is the final stream: a budget spent on thinking must not send DONE("")."""
+    script = [([text("Booked.")], "end_turn"), ([thinking("hmm", "sig")], "max_tokens")]
+    async with ScriptedAnthropic(settings, script) as llm:
+        with pytest.raises(LLMOutputTruncatedError):
+            await _stream_chat(llm, settings, session_manager, cost_tracker, recording.registry)
+
+    assert len(llm.requests) == 2  # precondition: the final stream was reached
+    session = await session_manager.get_or_create("user1", "web")
+    assert [m.role for m in session.messages] == [MessageRole.USER]  # no blank reply saved
+
+
+async def test_streaming_chat_probe_cut_off_before_text_still_answers_from_the_final_stream(
+    settings, session_manager, cost_tracker, recording
+):
+    script = [([thinking("hmm", "sig")], "max_tokens"), ([text("Booked.")], "end_turn")]
+    async with ScriptedAnthropic(settings, script) as llm:
+        chunks = await _stream_chat(llm, settings, session_manager, cost_tracker, recording.registry)
+
+    assert chunks[-1].type is StreamEventType.DONE
+    assert chunks[-1].content == "Booked."
+    assert len(llm.requests) == 2
+
+
+async def test_streaming_chat_final_stream_cut_off_mid_sentence_is_delivered(
+    settings, session_manager, cost_tracker, recording
+):
+    script = [([text("Booked.")], "end_turn"), ([text("Booked the den")], "max_tokens")]
+    async with ScriptedAnthropic(settings, script) as llm:
+        chunks = await _stream_chat(llm, settings, session_manager, cost_tracker, recording.registry)
+
+    assert chunks[-1].content == "Booked the den"
 
 
 async def test_voice_turn_never_runs_a_cut_off_tool_call(settings, session_manager, cost_tracker, recording):

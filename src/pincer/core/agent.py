@@ -341,14 +341,15 @@ def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
 
 
-def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
+def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_text_ok: bool = False) -> None:
     """Raise instead of using a response cut off by max_tokens that cannot be used.
 
     Two cuts are unusable. A cut-off tool call may have incomplete input, so none of the
     calls run and the assistant turn is not saved. A cut with no text at all means the
     whole budget went on thinking: delivering it would send the user an empty reply.
     Text that was cut off mid-sentence is still delivered. The log names the tools, never
-    their arguments.
+    their arguments. `blank_text_ok` lets a blank cut through: the streaming chat's tool
+    loop uses it, because its reply is the final stream, which is checked on its own.
     """
     if not response.truncated:
         return
@@ -359,7 +360,7 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
             max_tokens,
             [tc.name for tc in response.tool_calls],
         )
-    elif not response.content.strip():
+    elif not response.content.strip() and not blank_text_ok:
         logger.warning(
             "LLM output cut off at max_tokens (%d of %d tokens) before any text: no reply to deliver",
             response.output_tokens,
@@ -1279,7 +1280,8 @@ class Agent:
                     return
                 raise
 
-            _refuse_truncated_output(response, self._settings.max_tokens)
+            # A blank cut-off here is fine: the final stream below is the reply, and is checked
+            _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
 
             if not response.has_tool_calls:
                 break
@@ -1355,17 +1357,26 @@ class Agent:
         # thinking is dropped before it (Q2c).
         strip_thinking(session.messages)
         full_text = ""
+        streamed: LLMResponse | None = None
         try:
-            async for token in self._llm.stream(
+            async for event in self._llm.stream_turn(
                 messages=session.messages,
                 system=system_prompt,
             ):
-                full_text += token
-                yield StreamChunk(StreamEventType.TEXT, token)
+                if event.response is not None:
+                    streamed = event.response
+                elif event.text:
+                    full_text += event.text
+                    yield StreamChunk(StreamEventType.TEXT, event.text)
         except Exception:
             logger.exception("Streaming failed, falling back to complete()")
             if not full_text:
                 full_text = response.content if response else ""
+        else:
+            # The reply is the stream, so its stop reason decides: a budget spent on thinking
+            # leaves no text, which must not be sent as an empty reply
+            if streamed is not None:
+                _refuse_truncated_output(streamed, self._settings.max_tokens)
 
         # ── Onboarding: append warm question on a fresh session ────────────
         asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)

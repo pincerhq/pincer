@@ -25,7 +25,7 @@ from pincer.core.agent import (
 )
 from pincer.core.session import SessionManager
 from pincer.exceptions import BudgetExceededError, LLMError, LLMOutputTruncatedError
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall, ToolResult
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall, ToolResult
 from pincer.memory.mcp import MCPMemoryBackend
 from pincer.memory.summarizer import Summarizer
 from pincer.tools.builtin import files
@@ -597,7 +597,12 @@ async def test_a_headless_run_cut_off_before_any_text_returns_the_error_text(
 async def test_a_streamed_reply_cut_off_before_any_text_raises(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    mock_llm.complete.side_effect = [_cut_off_before_any_text()]
+    """The reply is the final stream: when that one is cut off before any text, the turn raises."""
+
+    async def stream_turn(**kwargs):
+        yield StreamTurnEvent(response=_cut_off_before_any_text())
+
+    mock_llm.stream_turn = stream_turn
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
     with pytest.raises(LLMOutputTruncatedError):

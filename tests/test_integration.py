@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 
 from pincer.core.agent import Agent, AgentResponse, StreamChunk, StreamEventType
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, ToolCall
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.memory.store import MemoryStore
 from pincer.memory.summarizer import Summarizer
 
@@ -342,9 +342,10 @@ async def test_agent_stream_simple(settings, session_manager, cost_tracker, tool
 
     async def fake_stream(**kwargs):
         for token in ["Hello", " ", "world", "!"]:
-            yield token
+            yield StreamTurnEvent(text=token)
+        yield StreamTurnEvent(response=LLMResponse(content="Hello world!", model="test", stop_reason="end_turn"))
 
-    mock_llm.stream = fake_stream
+    mock_llm.stream_turn = fake_stream
 
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
@@ -385,9 +386,12 @@ async def test_agent_stream_with_tools(settings, session_manager, cost_tracker, 
 
     async def fake_stream(**kwargs):
         for token in ["The ", "greeting ", "worked!"]:
-            yield token
+            yield StreamTurnEvent(text=token)
+        yield StreamTurnEvent(
+            response=LLMResponse(content="The greeting worked!", model="test", stop_reason="end_turn")
+        )
 
-    mock_llm.stream = fake_stream
+    mock_llm.stream_turn = fake_stream
 
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
