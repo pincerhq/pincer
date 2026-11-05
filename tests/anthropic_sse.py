@@ -17,6 +17,9 @@ from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 if TYPE_CHECKING:
     from pincer.config import Settings
 
+# One scripted response: streamed blocks + stop reason (+ usage), or an HTTP error status
+Scripted = tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, dict[str, int]] | int
+
 
 def thinking(text: str, signature: str) -> dict[str, Any]:
     return {"type": "thinking", "thinking": text, "signature": signature}
@@ -56,8 +59,11 @@ def _block_events(index: int, block: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def sse_body(blocks: list[dict[str, Any]], stop_reason: str, model: str = "claude-x") -> bytes:
-    """One streamed Messages response holding `blocks`, in order."""
+def sse_body(
+    blocks: list[dict[str, Any]], stop_reason: str, model: str = "claude-x", usage: dict[str, int] | None = None
+) -> bytes:
+    """One streamed Messages response holding `blocks`, in order; `usage` adds to the start usage
+    (e.g. ``cache_read_input_tokens``)."""
     events: list[dict[str, Any]] = [
         {
             "type": "message_start",
@@ -69,7 +75,7 @@ def sse_body(blocks: list[dict[str, Any]], stop_reason: str, model: str = "claud
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 10, "output_tokens": 0},
+                "usage": {"input_tokens": 10, "output_tokens": 0, **(usage or {})},
             },
         }
     ]
@@ -88,9 +94,10 @@ def sse_body(blocks: list[dict[str, Any]], stop_reason: str, model: str = "claud
 
 class ScriptedAnthropic:
     """An Anthropic provider whose HTTP responses are scripted, one per request:
-    `(blocks, stop_reason)` streams a response, an int returns that HTTP error."""
+    `(blocks, stop_reason)` or `(blocks, stop_reason, usage)` streams a response, an int
+    returns that HTTP error."""
 
-    def __init__(self, settings: Settings, responses: list[tuple[list[dict[str, Any]], str] | int]) -> None:
+    def __init__(self, settings: Settings, responses: list[Scripted]) -> None:
         self._responses = list(responses)
         self.requests: list[dict[str, Any]] = []
         self.raw_requests: list[str] = []
@@ -115,5 +122,6 @@ class ScriptedAnthropic:
         if isinstance(scripted, int):  # an HTTP error status (4xx is not retried by the SDK)
             error = {"type": "error", "error": {"type": "invalid_request_error", "message": "scripted failure"}}
             return httpx.Response(scripted, json=error)
-        blocks, stop_reason = scripted
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse_body(blocks, stop_reason))
+        blocks, stop_reason, *usage = scripted
+        body = sse_body(blocks, stop_reason, usage=usage[0] if usage else None)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
