@@ -23,7 +23,7 @@ from pincer.core.agent import (
     _sanitize_tool_pairs,
 )
 from pincer.core.session import SessionManager
-from pincer.exceptions import BudgetExceededError, LLMError
+from pincer.exceptions import BudgetExceededError, LLMError, LLMOutputTruncatedError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall, ToolResult
 from pincer.memory.mcp import MCPMemoryBackend
 from pincer.memory.summarizer import Summarizer
@@ -510,6 +510,43 @@ async def test_a_turn_that_fails_before_placing_a_call_still_raises(settings, mo
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
 
     with pytest.raises(LLMError):
+        await agent.handle_message("user1", "test", "call them")
+
+
+def _cut_off_dial() -> LLMResponse:
+    """A response stopped by max_tokens inside a tool call: its input may be incomplete."""
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc3", name="make_phone_call", arguments={})],
+        model="test",
+        input_tokens=80,
+        output_tokens=4096,
+        stop_reason="max_tokens",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cut_off_after_placing_a_call_still_returns_it(settings, mock_llm, session_manager, cost_tracker):
+    """The cut-off guard must not hide a ringing call either: the turn ends with
+    the placed-call reply, and the cut-off tool call never runs."""
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_dial()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    result = await agent.handle_message("user1", "test", "call them")
+
+    assert result.call_sids == ["CA9"]
+    assert "placed the call" in result.text
+    session = await session_manager.get_or_create("user1", "test")
+    assert all(tc.id != "tc3" for m in session.messages for tc in m.tool_calls)
+    assert all(m.tool_call_id != "tc3" for m in session.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cut_off_before_placing_a_call_still_raises(settings, mock_llm, session_manager, cost_tracker):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_dial()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
+
+    with pytest.raises(LLMOutputTruncatedError):
         await agent.handle_message("user1", "test", "call them")
 
 

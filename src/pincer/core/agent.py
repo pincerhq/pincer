@@ -832,7 +832,15 @@ class Agent:
                     final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
                     break
 
-                _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+                try:
+                    _refuse_truncated_tool_calls(response, self._settings.max_tokens)
+                except LLMOutputTruncatedError as e:
+                    if not call_sids:
+                        raise
+                    # As for any LLM error after a dial: the ringing call must reach the channel.
+                    logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
+                    final_text = _CALL_PLACED_THEN_FAILED_TEXT
+                    break
 
                 # If the LLM wants to use tools
                 if response.has_tool_calls:

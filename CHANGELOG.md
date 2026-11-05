@@ -19,6 +19,10 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   error (`LLMOutputTruncatedError`) instead; a scheduled action returns its
   usual "couldn't complete" message. A cut-off reply that is only text is
   still delivered as before.
+- A chat turn that already placed a phone call does not fail when a later
+  response is cut off: it returns the placed call and replies that the call
+  was placed and its result will follow, as for any other error after a
+  placed call (#345 with #303).
 - OpenAI-wire providers report a `length` stop as `max_tokens`, like
   Anthropic, so the same protection applies there. A streamed tool call whose
   arguments were cut off is no longer run with empty arguments.
