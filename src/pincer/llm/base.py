@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
+
 # The stop reason every provider reports when the output hit max_tokens
 STOP_REASON_MAX_TOKENS = "max_tokens"
 
@@ -164,6 +166,8 @@ class BaseLLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> LLMResponse:
         """Send messages and get a complete response."""
         ...
@@ -177,6 +181,8 @@ class BaseLLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[str]:
         """Stream text tokens as they arrive.
 
@@ -193,7 +199,8 @@ class BaseLLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """Stream ONE turn: text tokens as they arrive, then the complete
         LLMResponse (with tool calls and usage) as the final event.
@@ -202,15 +209,23 @@ class BaseLLMProvider(ABC):
         ``complete()`` the caller sees text before generation finishes —
         the voice latency pipeline (Sprint 5) depends on both properties.
 
-        ``reasoning_effort`` is a hint for reasoning models; providers that
-        have no such knob ignore it.
+        ``reasoning_effort`` and ``thinking`` (on every method) override the
+        global settings for this call; ``None`` means the global setting.
+        Providers translate them per model and drop what a model can't take.
 
         Default implementation falls back to ``complete()`` (one text event
         with the full content, then the response) so every provider works;
         providers with true incremental APIs override it.
         """
         response = await self.complete(
-            messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, system=system
+            messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
         )
         if response.content:
             yield StreamTurnEvent(text=response.content)

@@ -350,6 +350,8 @@ class _OneCallLLM(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: str | None = None,
+        thinking: str | None = None,
     ) -> LLMResponse:
         self.offered.append({t["name"] for t in tools or []})
         last_user = max(i for i, m in enumerate(messages) if m.role == MessageRole.USER)

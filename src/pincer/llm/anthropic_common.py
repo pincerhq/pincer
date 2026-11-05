@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None,
         temperature: float | None,
         system: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> dict[str, Any]:
         """Request kwargs shared by complete / stream / stream_turn."""
         model = model or self._default_model
@@ -108,7 +111,13 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             "max_tokens": max_tokens or self._default_max_tokens,
             "messages": self._convert_messages(messages),
         }
-        reasoning = resolve_reasoning(ReasoningWire.ANTHROPIC, model, self._reasoning_effort, self._thinking)
+        # A per-call value (voice, summary) replaces the global setting; None keeps it.
+        reasoning = resolve_reasoning(
+            ReasoningWire.ANTHROPIC,
+            model,
+            self._reasoning_effort if reasoning_effort is None else reasoning_effort,
+            self._thinking if thinking is None else thinking,
+        )
         if not anthropic_accepts_sampling(model):
             logger.debug("Dropping temperature: %s does not accept it", model)
         elif reasoning.drop_temperature:
@@ -139,8 +148,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
         try:
             response: Message = await self._call_with_retry(kwargs)
@@ -161,8 +172,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
@@ -182,13 +195,13 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): text deltas arrive as
         the model writes; the final message (tool calls + usage) comes from the
-        same stream — tools are never lost, nothing is generated twice.
-        ``reasoning_effort`` is an OpenAI knob and is ignored here."""
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        same stream — tools are never lost, nothing is generated twice."""
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:

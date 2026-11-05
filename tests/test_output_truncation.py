@@ -50,7 +50,15 @@ class _ScriptedVoiceProvider(BaseLLMProvider):
         yield ""  # pragma: no cover
 
     async def stream_turn(
-        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, reasoning_effort=None
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
     ):
         self.requests.append({"max_tokens": max_tokens, "messages": [m.content for m in messages]})
         for event in self.turns.pop(0):

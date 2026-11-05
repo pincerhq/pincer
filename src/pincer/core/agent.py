@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
     from pincer.core.session import Session, SessionManager
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
@@ -1470,9 +1471,11 @@ class Agent:
                 preferred_language=False,
             )
             max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 1024) or 1024)
-            # Reasoning models can spend that whole budget thinking; only the OpenAI
-            # reasoning models that take the knob act on it.
-            reasoning_effort = str(getattr(self._settings, "voice_reasoning_effort", "") or "") or None
+            # Thinking shares that budget. Read once per turn, so every request of
+            # the turn (the silent retry too) sends the same values. An empty voice
+            # setting passes None, which the provider reads as the global setting.
+            reasoning_effort: ReasoningEffort | None = self._settings.voice_reasoning_effort or None
+            thinking: ThinkingMode | None = self._settings.voice_thinking or None
 
             # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
             # "<model>" = default provider, that model; "openai:gpt-5-mini" = that
@@ -1549,6 +1552,7 @@ class Agent:
                             model=voice_model,
                             max_tokens=request_max_tokens,
                             reasoning_effort=reasoning_effort,
+                            thinking=thinking,
                         ):
                             if event.response is not None:
                                 response = event.response

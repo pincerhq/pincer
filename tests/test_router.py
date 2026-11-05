@@ -5,12 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import anthropic_sse as sse
 import pytest
 
 from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError
 from pincer.llm import router as router_mod
-from pincer.llm.base import BaseLLMProvider, LLMResponse
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole
 from pincer.llm.router import LLMRouter
 
 
@@ -431,3 +432,48 @@ def test_vendor_prefixed_claude_id_is_kept_on_openai_wire():
         _, model = LLMRouter().get_summarizer()
 
     assert model == "anthropic/claude-haiku-4.5"
+
+
+# ── Effort and thinking reach every provider (issue #345) ────────────────────
+
+
+async def _call(router: LLMRouter, method: str, **kwargs) -> None:
+    messages = [LLMMessage(role=MessageRole.USER, content="hi")]
+    if method == "complete":
+        await router.complete(messages, **kwargs)
+    else:
+        _ = [e async for e in getattr(router, method)(messages, **kwargs)]
+
+
+@pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+async def test_effort_and_thinking_reach_the_primary_and_the_failover(settings, method):
+    """The primary fails (400), the failover answers: both requests carry the call's values."""
+    async with (
+        sse.ScriptedAnthropic(settings.model_copy(update={"anthropic_model": "claude-haiku-5-5"}), [400]) as primary,
+        sse.ScriptedAnthropic(
+            settings.model_copy(update={"anthropic_model": "claude-opus-5"}), [([sse.text("ok")], "end_turn")]
+        ) as failover,
+    ):
+        router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": failover.provider})
+        await _call(router, method, reasoning_effort="low", thinking="adaptive")
+
+    sent = [*primary.requests, *failover.requests]
+    assert [body["model"] for body in sent] == ["claude-haiku-5-5", "claude-opus-5"]
+    assert [body["output_config"] for body in sent] == [{"effort": "low"}] * 2
+    assert [body["thinking"] for body in sent] == [{"type": "adaptive"}] * 2
+
+
+async def test_failover_off_sonnet_5_5_resolves_disabled_for_its_own_model(settings):
+    """between_tools is Sonnet 5.5's form only: a failover to another model never re-sends it."""
+    async with (
+        sse.ScriptedAnthropic(settings.model_copy(update={"anthropic_model": "claude-sonnet-5-5"}), [400]) as primary,
+        sse.ScriptedAnthropic(
+            settings.model_copy(update={"anthropic_model": "claude-haiku-5-5"}), [([sse.text("ok")], "end_turn")]
+        ) as failover,
+    ):
+        router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": failover.provider})
+        await _call(router, "stream_turn", reasoning_effort="low", thinking="disabled")
+
+    assert primary.requests[0]["thinking"] == {"type": "between_tools"}  # the precondition: Sonnet 5.5 got its form
+    assert failover.requests[0]["model"] == "claude-haiku-5-5"
+    assert failover.requests[0]["thinking"] == {"type": "disabled"}

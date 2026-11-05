@@ -292,6 +292,8 @@ def test_effort_and_thinking_default_to_unset(tmp_path: Path, monkeypatch: pytes
     [
         *(("PINCER_REASONING_EFFORT", v) for v in ("", "low", "medium", "high", "xhigh", "max")),
         *(("PINCER_THINKING", v) for v in ("", "adaptive", "disabled")),
+        *(("PINCER_VOICE_REASONING_EFFORT", v) for v in ("", "low", "medium", "high", "xhigh", "max")),
+        *(("PINCER_VOICE_THINKING", v) for v in ("", "adaptive", "disabled")),
     ],
 )
 def test_effort_and_thinking_accept_their_values(
@@ -309,6 +311,8 @@ def test_effort_and_thinking_accept_their_values(
         ("PINCER_REASONING_EFFORT", "LOW"),
         ("PINCER_THINKING", "enabled"),
         ("PINCER_THINKING", "on"),
+        ("PINCER_VOICE_THINKING", "enabled"),
+        ("PINCER_VOICE_THINKING", "on"),
     ],
 )
 def test_effort_and_thinking_reject_other_values_at_load(
@@ -317,3 +321,9 @@ def test_effort_and_thinking_reject_other_values_at_load(
     monkeypatch.setenv(env, value)
     with pytest.raises(ValidationError, match=env.removeprefix("PINCER_").lower()):
         _settings_from_env(tmp_path)
+
+
+def test_voice_thinking_defaults_to_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset inherits PINCER_THINKING (issue #345)."""
+    monkeypatch.delenv("PINCER_VOICE_THINKING", raising=False)
+    assert _settings_from_env(tmp_path).voice_thinking == ""

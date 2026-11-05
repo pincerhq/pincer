@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
+from pincer.config.llm import ReasoningEffort, ThinkingMode  # noqa: TC001 (pydantic resolves them at runtime)
+
 # The largest output a voice request may ask for: the 5.5 models' output limit
 VOICE_MAX_RESPONSE_TOKENS_CEILING = 128_000
 
@@ -265,13 +267,16 @@ class ChannelSettings(BaseModel):
         description="max_tokens per voice request: the worst-case silence before a reply, shared by the "
         "model's thinking and its speech. A request cut off before saying anything is retried once at 4x.",
     )
-    # Voice turns only, and only on OpenAI reasoning models (GPT-5, o-series) on
-    # an OpenAI-wire provider. "" = not sent (the API default, "medium"), which
-    # can spend the short voice budget above on reasoning and leave no reply.
-    # "minimal" is left out: GPT-5.1+ and the o-series reject it.
-    voice_reasoning_effort: Literal["", "low", "medium", "high"] = Field(
+    # Voice turns only (issue #345): translated per model like PINCER_REASONING_EFFORT /
+    # PINCER_THINKING, which an empty value inherits. Not used by the call's
+    # language-guard regeneration, which runs on the chat settings (Q15c).
+    voice_reasoning_effort: ReasoningEffort = Field(
         default="",
-        description="reasoning_effort for voice turns on OpenAI reasoning models ('' = API default)",
+        description="Effort for voice turns ('' = PINCER_REASONING_EFFORT)",
+    )
+    voice_thinking: ThinkingMode = Field(
+        default="",
+        description="Thinking for voice turns: adaptive | disabled ('' = PINCER_THINKING)",
     )
     voice_stt_endpointing_ms: int = Field(
         default=0,

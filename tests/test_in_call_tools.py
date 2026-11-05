@@ -1073,6 +1073,7 @@ async def test_call_context_tool_schemas_exact_at_agent_level(settings, session_
             temperature=None,
             system=None,
             reasoning_effort=None,
+            thinking=None,
         ):
             self.tools = tools
             yield StreamTurnEvent(response=LLMResponse(content="ok", model="m", input_tokens=1, output_tokens=1))

@@ -34,10 +34,13 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletion
 
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
 # One INFO line per model id that a configured reasoning_effort can't apply to
 _effort_skipped = LogOncePerKey(logger, logging.INFO)
+# The #344 levels; xhigh/max wait for the per-model mapping (slice 8 of #345)
+_OPENAI_VOICE_EFFORTS = frozenset({"low", "medium", "high"})
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -249,6 +252,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> LLMResponse:
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
 
@@ -271,6 +276,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[str]:
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
         kwargs["stream"] = True
@@ -294,18 +301,28 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): content deltas are
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
         Anthropic implementation, so the voice pipeline can run either.
         ``reasoning_effort`` is sent only to models known to take it
-        (``openai_accepts_reasoning_effort``)."""
+        (``openai_accepts_reasoning_effort``), and only low/medium/high.
+        ``thinking`` is ignored. Slice 8 of #345 replaces both with the
+        per-model mapping in ``model_params.resolve_reasoning``."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
         if reasoning_effort:
             request_model = str(kwargs["model"])
-            if openai_accepts_reasoning_effort(request_model):
+            if reasoning_effort not in _OPENAI_VOICE_EFFORTS:
+                _effort_skipped.log(
+                    f"{request_model}|{reasoning_effort}",
+                    "reasoning_effort %r not sent to %r: only low/medium/high are sent to OpenAI models for now",
+                    reasoning_effort,
+                    request_model,
+                )
+            elif openai_accepts_reasoning_effort(request_model):
                 kwargs["reasoning_effort"] = reasoning_effort
             else:
                 _effort_skipped.log(

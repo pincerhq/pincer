@@ -190,7 +190,15 @@ class _ScriptedVoice(BaseLLMProvider):
         yield ""  # pragma: no cover
 
     async def stream_turn(
-        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, reasoning_effort=None
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
     ):
         self.sent.append(_sent_thinking(messages))
         for event in self.turns.pop(0):

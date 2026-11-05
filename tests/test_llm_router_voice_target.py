@@ -418,6 +418,16 @@ async def test_effort_not_sent_to_a_model_that_rejects_it(caplog):
     assert len(skipped) == 1  # once per model id
 
 
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+async def test_levels_above_high_are_not_sent_to_openai_yet(caplog, effort):
+    """Until the per-model OpenAI mapping (#345 slice 8), only #344's low/medium/high go out."""
+    caplog.set_level(logging.DEBUG, logger="pincer.llm.openai_common")
+    for _ in range(2):
+        assert "reasoning_effort" not in await _stream_turn_kwargs("gpt-5.4-mini", effort)
+    skipped = [r for r in caplog.records if "not sent" in r.getMessage() and effort in r.getMessage()]
+    assert [r.levelno for r in skipped] == [logging.INFO, logging.DEBUG]
+
+
 # ── LogOncePerKey ────────────────────────────────────────────────────────────
 
 

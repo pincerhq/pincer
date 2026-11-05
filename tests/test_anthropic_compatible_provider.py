@@ -856,3 +856,34 @@ class TestReasoningSettings:
             await self._two_requests(settings)
 
         assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_call_arguments_replace_the_global_settings(self, anthropic_settings, method):
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, method, reasoning_effort="low", thinking="disabled")
+
+        assert body["output_config"] == {"effort": "low"}
+        assert body["thinking"] == {"type": "disabled"}
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_none_arguments_keep_the_global_settings(self, anthropic_settings, method):
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, method, reasoning_effort=None, thinking=None)
+
+        assert body["output_config"] == {"effort": "high"}
+        assert body["thinking"] == {"type": "adaptive"}
+
+    async def test_empty_arguments_send_nothing_even_when_global_settings_are_set(self, anthropic_settings):
+        """`""` means "send nothing" for this call; only None falls back to the global setting."""
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, reasoning_effort="", thinking="")
+
+        assert body["model"] == "claude-haiku-5-5"
+        assert "output_config" not in body
+        assert "thinking" not in body
