@@ -974,6 +974,90 @@ async def test_the_placed_call_text_alone_when_nothing_was_streamed(settings, mo
     assert done == saved == _CALL_PLACED_THEN_FAILED_TEXT
 
 
+def _stream_that_fails_after(*texts: str):
+    async def stream_turn(**kwargs):
+        for text in texts:
+            yield StreamTurnEvent(text=text)
+        raise RuntimeError("connection reset")
+
+    return stream_turn
+
+
+def _tool_loop_reply(content: str) -> LLMResponse:
+    return LLMResponse(content=content, model="test", input_tokens=80, output_tokens=5, stop_reason="end_turn")
+
+
+async def _final_stream_log(agent, caplog) -> tuple[str, str]:
+    """(the DONE text, everything the agent logged) of one streamed turn."""
+    with caplog.at_level(logging.INFO, logger="pincer.core.agent"):
+        chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+    return chunks[-1].content, caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_logs_that_it_kept_the_streamed_text(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    mock_llm.complete.side_effect = [_tool_loop_reply("Hello there")]
+    mock_llm.stream_turn = _stream_that_fails_after("Hel")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    done, log = await _final_stream_log(agent, caplog)
+
+    assert done == "Hel"  # the precondition: the partial text is the reply
+    assert "Final stream failed after 3 chars" in log
+    assert "Keeping the 3 streamed chars" in log
+    assert "tool-loop" not in log  # the reply did not come from the tool loop
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_logs_that_it_used_the_tool_loop_response(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    mock_llm.complete.side_effect = [_tool_loop_reply("Hello there")]
+    _stream_turn_fails_before_its_first_event(mock_llm)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    done, log = await _final_stream_log(agent, caplog)
+
+    assert done == "Hello there"
+    assert "Final stream failed after 0 chars" in log
+    assert "Using the tool-loop response" in log
+    assert "Keeping" not in log
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_logs_that_it_had_no_fallback(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    mock_llm.complete.side_effect = [_tool_loop_reply("")]
+    _stream_turn_fails_before_its_first_event(mock_llm)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with caplog.at_level(logging.INFO, logger="pincer.core.agent"), pytest.raises(LLMError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+    assert "Final stream failed after 0 chars" in caplog.text
+    assert "No usable fallback" in caplog.text
+    assert "Using the tool-loop response" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_blank_partial_after_a_failed_final_stream_falls_back_to_the_tool_loop_response(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """Whitespace is not something the user can read: it counts as nothing streamed."""
+    mock_llm.complete.side_effect = [_tool_loop_reply("Hello there")]
+    mock_llm.stream_turn = _stream_that_fails_after("  ")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+    assert chunks[-1].content == "Hello there"
+    session = await session_manager.get_or_create("user1", "test")
+    assert session.messages[-1].content == "Hello there"
+
+
 @pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker

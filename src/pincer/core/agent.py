@@ -1372,14 +1372,22 @@ class Agent:
                         full_text += event.text
                         yield StreamChunk(StreamEventType.TEXT, event.text)
             except Exception as err:
-                logger.exception("Streaming failed; using the tool-loop response")
-                if not full_text:
+                logger.exception("Final stream failed after %d chars", len(full_text))
+                if full_text.strip():
+                    logger.warning("Keeping the %d streamed chars as the reply", len(full_text))
+                else:
                     # The tool loop let a blank cut-off through because this stream was the reply;
                     # it must not become the reply now that the stream failed.
                     if response is not None:
-                        _refuse_truncated_output(response, self._settings.max_tokens)
+                        try:
+                            _refuse_truncated_output(response, self._settings.max_tokens)
+                        except LLMError:
+                            logger.warning("No usable fallback after the final stream failed: tool-loop cut off")
+                            raise
                     if response is None or not response.content:
+                        logger.warning("No usable fallback after the final stream failed: tool-loop has no text")
                         raise LLMError("the final stream failed and the tool-loop response has no text") from err
+                    logger.warning("Using the tool-loop response as the reply")
                     full_text = response.content
             else:
                 # The reply is the stream, so its stop reason decides: a budget spent on thinking
