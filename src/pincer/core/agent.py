@@ -1372,7 +1372,7 @@ class Agent:
                         full_text += event.text
                         yield StreamChunk(StreamEventType.TEXT, event.text)
             except Exception as err:
-                logger.exception("Streaming failed, falling back to complete()")
+                logger.exception("Streaming failed; using the tool-loop response")
                 if not full_text:
                     # The tool loop let a blank cut-off through because this stream was the reply;
                     # it must not become the reply now that the stream failed.
