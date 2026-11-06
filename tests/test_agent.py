@@ -609,6 +609,58 @@ async def test_a_streamed_reply_cut_off_before_any_text_raises(
         _chunks = [c async for c in agent.handle_message_stream("user1", "test", "think hard")]
 
 
+def _stream_turn_fails_before_its_first_event(mock_llm) -> None:
+    async def stream_turn(**kwargs):
+        raise RuntimeError("connection reset")
+        yield  # pragma: no cover
+
+    mock_llm.stream_turn = stream_turn
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_never_falls_back_to_a_cut_off_blank_response(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """The tool loop lets a blank cut-off through because the final stream is the reply; when that
+    stream fails before its first event, the fallback must not send the blank response as the reply."""
+    mock_llm.complete.side_effect = [_cut_off_before_any_text()]
+    _stream_turn_fails_before_its_first_event(mock_llm)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMOutputTruncatedError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "think hard", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_never_falls_back_to_a_blank_response(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = [
+        LLMResponse(content="", model="test", input_tokens=80, output_tokens=1, stop_reason="end_turn")
+    ]
+    _stream_turn_fails_before_its_first_event(mock_llm)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_falls_back_to_the_tool_loop_text(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = [
+        LLMResponse(content="Hello there", model="test", input_tokens=80, output_tokens=5, stop_reason="end_turn")
+    ]
+    _stream_turn_fails_before_its_first_event(mock_llm)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+    assert chunks[-1].type == StreamEventType.DONE
+    assert chunks[-1].content == "Hello there"
+
+
 @pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker

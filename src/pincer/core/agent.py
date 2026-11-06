@@ -1369,7 +1369,13 @@ class Agent:
         except Exception:
             logger.exception("Streaming failed, falling back to complete()")
             if not full_text:
-                full_text = response.content if response else ""
+                # The tool loop let a blank cut-off through because this stream was the reply;
+                # it must not become the reply now that the stream failed.
+                if response is not None:
+                    _refuse_truncated_output(response, self._settings.max_tokens)
+                if response is None or not response.content:
+                    raise LLMError("the final stream failed and the tool-loop response has no text")
+                full_text = response.content
         else:
             # The reply is the stream, so its stop reason decides: a budget spent on thinking
             # leaves no text, which must not be sent as an empty reply
