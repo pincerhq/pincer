@@ -371,6 +371,29 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_te
     raise LLMOutputTruncatedError(response.output_tokens, max_tokens)
 
 
+def _tool_loop_fallback(response: LLMResponse | None, max_tokens: int, why: str) -> str:
+    """The text to reply with when the final stream gave none: the tool loop's last response.
+
+    That response (it has no tool call: the loop ended on it) is often a complete answer. It
+    is used unless it was cut off (`_refuse_truncated_output`, no `blank_text_ok`) or is blank;
+    then this raises, and the caller's handler maps that to the placed-call reply if a call
+    was placed. `why` names the stream's ending in the log.
+    """
+    if response is None:
+        logger.warning("No usable fallback after the final stream %s: no tool-loop response", why)
+        raise LLMError(f"the final stream {why} and there is no tool-loop response")
+    try:
+        _refuse_truncated_output(response, max_tokens)
+    except LLMError:
+        logger.warning("No usable fallback after the final stream %s: tool-loop cut off", why)
+        raise
+    if not response.content.strip():
+        logger.warning("No usable fallback after the final stream %s: tool-loop has no text", why)
+        raise LLMError(f"the final stream {why} and the tool-loop response has no text")
+    logger.warning("Using the tool-loop response as the reply: the final stream %s", why)
+    return response.content
+
+
 class _RepeatedCallGuard:
     """The tool calls made so far in one call turn, by name and arguments.
 
@@ -1378,37 +1401,30 @@ class Agent:
                     elif event.text:
                         full_text += event.text
                         yield StreamChunk(StreamEventType.TEXT, event.text)
-            except Exception as err:
+            except Exception:
                 logger.exception("Final stream failed after %d chars", len(full_text))
                 if full_text.strip():
                     logger.warning("Keeping the %d streamed chars as the reply", len(full_text))
                 else:
                     # The tool loop let a blank cut-off through because this stream was the reply;
                     # it must not become the reply now that the stream failed.
-                    if response is not None:
-                        try:
-                            _refuse_truncated_output(response, self._settings.max_tokens)
-                        except LLMError:
-                            logger.warning("No usable fallback after the final stream failed: tool-loop cut off")
-                            raise
-                    if response is None or not response.content:
-                        logger.warning("No usable fallback after the final stream failed: tool-loop has no text")
-                        raise LLMError("the final stream failed and the tool-loop response has no text") from err
-                    logger.warning("Using the tool-loop response as the reply")
-                    full_text = response.content
+                    fallback = _tool_loop_fallback(response, self._settings.max_tokens, "failed")
+                    full_text += fallback
+                    yield StreamChunk(StreamEventType.TEXT, fallback)
             else:
                 # The reply is the stream, so its stop reason decides: a budget spent on thinking
                 # leaves no text, which must not be sent as an empty reply
                 if streamed is not None:
                     _refuse_truncated_output(streamed, self._settings.max_tokens)
-                    if not full_text.strip():
-                        # Completed, not cut off, and nothing to say: an empty reply is not an answer
-                        raise LLMError("the final stream completed with no text")
-                elif not full_text.strip():
-                    raise LLMError("stream_turn ended without a final response")
+                if full_text.strip():
+                    if streamed is None:
+                        # The user already saw these chunks, so they are the reply
+                        logger.warning("stream_turn ended without a final response; replying with the streamed text")
                 else:
-                    # The user already saw these chunks, so they are the reply
-                    logger.warning("stream_turn ended without a final response; replying with the streamed text")
+                    why = "completed with no text" if streamed is not None else "closed without a final response"
+                    fallback = _tool_loop_fallback(response, self._settings.max_tokens, why)
+                    full_text += fallback
+                    yield StreamChunk(StreamEventType.TEXT, fallback)
         except Exception:
             if not call_sids:
                 raise
