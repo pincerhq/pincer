@@ -1058,6 +1058,106 @@ async def test_a_blank_partial_after_a_failed_final_stream_falls_back_to_the_too
     assert session.messages[-1].content == "Hello there"
 
 
+class _SdkError(Exception):
+    """Stands in for a raw SDK or httpx error that is not an LLMError."""
+
+
+_NON_LLM_ERRORS = [
+    pytest.param(lambda: _SdkError("socket closed"), id="sdk-error"),
+    pytest.param(lambda: TypeError("unexpected None"), id="type-error"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_error", _NON_LLM_ERRORS)
+async def test_a_streamed_turn_that_raises_a_non_llm_error_after_a_dial_still_returns_the_placed_call(
+    settings, mock_llm, session_manager, cost_tracker, make_error
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], make_error()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_error", _NON_LLM_ERRORS)
+async def test_a_turn_that_raises_a_non_llm_error_after_a_dial_still_returns_the_placed_call(
+    settings, mock_llm, session_manager, cost_tracker, make_error
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], make_error()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    result = await agent.handle_message("user1", "test", "call them", memory=False)
+
+    assert result.call_sids == ["CA9"]
+    assert result.text == _CALL_PLACED_THEN_FAILED_TEXT
+    session = await session_manager.get_or_create("user1", "test")
+    assert session.messages[-1].role == MessageRole.ASSISTANT
+    assert session.messages[-1].content == _CALL_PLACED_THEN_FAILED_TEXT
+
+
+async def _run_streamed(agent) -> None:
+    _chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+
+
+async def _run_blocking(agent) -> None:
+    await agent.handle_message("user1", "test", "call them", memory=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run", [_run_streamed, _run_blocking], ids=["stream", "blocking"])
+@pytest.mark.parametrize("make_error", _NON_LLM_ERRORS)
+async def test_a_non_llm_error_with_no_call_placed_is_re_raised_unchanged(
+    settings, mock_llm, session_manager, cost_tracker, make_error, run
+):
+    """The very same exception object comes out: not wrapped, not converted to an LLMError."""
+    boom = make_error()
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], boom]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
+
+    with pytest.raises(type(boom)) as raised:
+        await run(agent)
+
+    assert raised.value is boom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run", [_run_streamed, _run_blocking], ids=["stream", "blocking"])
+async def test_a_non_llm_error_after_a_dial_is_logged_with_its_traceback(
+    settings, mock_llm, session_manager, cost_tracker, run, caplog
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _SdkError("socket closed")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    with caplog.at_level(logging.WARNING, logger="pincer.core.agent"):
+        await run(agent)
+
+    [record] = [r for r in caplog.records if "placed" in r.getMessage()]
+    assert record.exc_info is not None
+    assert record.exc_info[0] is _SdkError
+
+
+@pytest.mark.asyncio
+async def test_a_budget_stop_after_a_dial_keeps_its_own_reply(settings, mock_llm, session_manager, cost_tracker):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], BudgetExceededError(5.0, 5.0)]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    result = await agent.handle_message("user1", "test", "call them", memory=False)
+
+    assert result.text.startswith("Warning: Daily budget limit reached.")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_streamed_turn_after_a_dial_is_not_swallowed(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], asyncio.CancelledError()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_streamed(agent)
+
+
 @pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker

@@ -836,6 +836,13 @@ class Agent:
                     final_text = _CALL_PLACED_THEN_FAILED_TEXT
                     break
                 raise
+            except Exception:
+                # A raw SDK or transport error: after a dial it must not hide the ringing call either
+                if not call_sids:
+                    raise
+                logger.exception("LLM request failed after the turn placed %s", call_sids)
+                final_text = _CALL_PLACED_THEN_FAILED_TEXT
+                break
 
             # Track cost
             try:
@@ -1402,12 +1409,12 @@ class Agent:
                 else:
                     # The user already saw these chunks, so they are the reply
                     logger.warning("stream_turn ended without a final response; replying with the streamed text")
-        except LLMError as e:
+        except Exception:
             if not call_sids:
                 raise
             # As on the non-stream path: a call is already ringing, and an error would hide it
             # from the channel, which then never waits for its report.
-            logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
+            logger.exception("Streamed turn failed after it placed %s", call_sids)
             # The client already received whatever was streamed, so the notice follows it
             tail = ("\n\n" if full_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
             full_text += tail
