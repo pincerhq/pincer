@@ -13,6 +13,7 @@ import pytest
 
 from pincer.config import Settings
 from pincer.core.agent import (
+    _CALL_PLACED_THEN_FAILED_TEXT,
     _HEADLESS_LLM_ERROR_TEXT,
     _SESSION_CLEARED_TEXT,
     Agent,
@@ -659,6 +660,68 @@ async def test_a_failed_final_stream_falls_back_to_the_tool_loop_text(
 
     assert chunks[-1].type == StreamEventType.DONE
     assert chunks[-1].content == "Hello there"
+
+
+def _dials_then_a_blank_reply() -> list[LLMResponse]:
+    """The tool loop: a batch of dials, then a response with no tool call and no text (the stream is the reply)."""
+    dials, _ringing = _two_dials_then_text()
+    blank = LLMResponse(content="", model="test", input_tokens=80, output_tokens=1, stop_reason="end_turn")
+    return [dials, blank]
+
+
+async def _assert_the_placed_call_text_is_the_reply(agent, session_manager) -> None:
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+
+    assert chunks[-1].type == StreamEventType.DONE
+    assert chunks[-1].content == _CALL_PLACED_THEN_FAILED_TEXT
+    assert "".join(c.content for c in chunks if c.type == StreamEventType.TEXT) == _CALL_PLACED_THEN_FAILED_TEXT
+    session = await session_manager.get_or_create("user1", "test")
+    assert [m.role for m in session.messages[-2:]] == [MessageRole.TOOL_RESULT, MessageRole.ASSISTANT]
+    assert session.messages[-1].content == _CALL_PLACED_THEN_FAILED_TEXT
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_reply_cut_off_after_placing_a_call_still_returns_it(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """As on the non-stream path: a ringing call must reach the channel, so the cut-off ends the turn with a reply."""
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+
+    async def stream_turn(**kwargs):
+        yield StreamTurnEvent(response=_cut_off_before_any_text())
+
+    mock_llm.stream_turn = stream_turn
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_stream_after_placing_a_call_still_returns_it(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+    _stream_turn_fails_before_its_first_event(mock_llm)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_reply_cut_off_before_placing_a_call_still_raises(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """The first dial fails (the limit), so no call was placed."""
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+
+    async def stream_turn(**kwargs):
+        yield StreamTurnEvent(response=_cut_off_before_any_text())
+
+    mock_llm.stream_turn = stream_turn
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
+
+    with pytest.raises(LLMOutputTruncatedError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
 
 
 @pytest.mark.asyncio

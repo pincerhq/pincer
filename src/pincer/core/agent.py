@@ -1253,6 +1253,7 @@ class Agent:
         circuit_broken = False
         sanitize_attempts = 0
         response: LLMResponse | None = None
+        call_sids: list[str] = []
 
         # Tool-call iterations (non-streaming)
         for _iteration in range(self._settings.max_tool_iterations):
@@ -1310,7 +1311,10 @@ class Agent:
                     tool_call_id=result.tool_call_id,
                 )
                 await self._sessions.add_message(session, result_msg)
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, _placed_call_sid(tool_call.name, result))
+                sid = _placed_call_sid(tool_call.name, result)
+                if sid and sid not in call_sids:
+                    call_sids.append(sid)
+                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, sid)
                 if result.is_error:
                     iteration_had_error = True
                 elif (skill := _loaded_skill(tool_call, result)) is not None:
@@ -1357,30 +1361,39 @@ class Agent:
         full_text = ""
         streamed: LLMResponse | None = None
         try:
-            async for event in self._llm.stream_turn(
-                messages=session.messages,
-                system=system_prompt,
-            ):
-                if event.response is not None:
-                    streamed = event.response
-                elif event.text:
-                    full_text += event.text
-                    yield StreamChunk(StreamEventType.TEXT, event.text)
-        except Exception:
-            logger.exception("Streaming failed, falling back to complete()")
-            if not full_text:
-                # The tool loop let a blank cut-off through because this stream was the reply;
-                # it must not become the reply now that the stream failed.
-                if response is not None:
-                    _refuse_truncated_output(response, self._settings.max_tokens)
-                if response is None or not response.content:
-                    raise LLMError("the final stream failed and the tool-loop response has no text")
-                full_text = response.content
-        else:
-            # The reply is the stream, so its stop reason decides: a budget spent on thinking
-            # leaves no text, which must not be sent as an empty reply
-            if streamed is not None:
-                _refuse_truncated_output(streamed, self._settings.max_tokens)
+            try:
+                async for event in self._llm.stream_turn(
+                    messages=session.messages,
+                    system=system_prompt,
+                ):
+                    if event.response is not None:
+                        streamed = event.response
+                    elif event.text:
+                        full_text += event.text
+                        yield StreamChunk(StreamEventType.TEXT, event.text)
+            except Exception as err:
+                logger.exception("Streaming failed, falling back to complete()")
+                if not full_text:
+                    # The tool loop let a blank cut-off through because this stream was the reply;
+                    # it must not become the reply now that the stream failed.
+                    if response is not None:
+                        _refuse_truncated_output(response, self._settings.max_tokens)
+                    if response is None or not response.content:
+                        raise LLMError("the final stream failed and the tool-loop response has no text") from err
+                    full_text = response.content
+            else:
+                # The reply is the stream, so its stop reason decides: a budget spent on thinking
+                # leaves no text, which must not be sent as an empty reply
+                if streamed is not None:
+                    _refuse_truncated_output(streamed, self._settings.max_tokens)
+        except LLMError as e:
+            if not call_sids:
+                raise
+            # As on the non-stream path: a call is already ringing, and an error would hide it
+            # from the channel, which then never waits for its report.
+            logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
+            full_text = _CALL_PLACED_THEN_FAILED_TEXT
+            yield StreamChunk(StreamEventType.TEXT, full_text)
 
         # ── Onboarding: append warm question on a fresh session ────────────
         asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
