@@ -109,8 +109,31 @@ _ONBOARDING_MAX_EMPTY_REPLIES = 2
 # tokens before the JSON (issue #345, Q17)
 _ONBOARDING_EXTRACTION_MAX_TOKENS = 1024
 
+# Tools that turn a person's name into a phone number for make_phone_call, in
+# the order the model should try them.
+_NUMBER_LOOKUP_TOOLS = (
+    ("google__search_contacts", "Google Contacts"),
+    ("contact_lookup", "saved phone contacts"),
+)
+
+# Header of the recalled-memories block. Memories are past conversation text,
+# so the model must not present them as facts checked against Contacts etc.
+MEMORY_BLOCK_HEADER = (
+    "[Relevant memories about this user — recalled from past conversations; "
+    "not verified against Contacts, Calendar or other systems]"
+)
+
 _GOOGLE_TOOL_CHAIN_HINTS = """
 ## Google Workspace Tool Chains
+
+### Google Contacts — always verify and name the source
+- Never say a person is "saved", "a contact" or "in your contacts" unless google__search_contacts
+  returned them in THIS turn. Memories and earlier messages are not proof.
+- Always say where a person's details came from: "found in Google Contacts",
+  "remembered from our conversation (not in Contacts)", or "not found".
+- If a full name finds nothing, search the first name alone and the last name alone before giving up.
+- Do not trust an earlier "couldn't find" (in memory or chat history) — search again.
+- google__get_contact(resource_name="<ID from search>") gives full details of a found contact.
 
 When the user asks to download or save an email attachment:
 1. google__search_messages → find the email (by sender, subject, keywords, "has:attachment")
@@ -199,9 +222,12 @@ _GOOGLE_HINT_TOOLS = frozenset(
         "google__get_attachment",
         "google__get_doc_content",
         "google__get_message",
+        "google__get_contact",
         "google__get_sheet_values",
+        "google__list_contacts",
         "google__list_local_files",
         "google__list_sheets",
+        "google__search_contacts",
         "google__search_drive_files",
         "google__search_messages",
         "google__search_sheet_values",
@@ -1946,6 +1972,13 @@ class Agent:
                 "\n\nWhen the user asks you to call a phone number, you MUST use the "
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
+            lookups = [f"{name} ({source})" for name, source in _NUMBER_LOOKUP_TOOLS if name in tool_names]
+            if lookups:
+                base_prompt += (
+                    " make_phone_call needs a phone number: when the user names a person instead of a number,"
+                    f" look the number up first with {', then '.join(lookups)}, then call."
+                    " If no lookup finds a number, ask the user for it."
+                )
 
         if LANGUAGE_TOOL_NAME in tool_names:
             base_prompt += "\n\n" + LANGUAGE_TOOL_HINT
@@ -2048,7 +2081,7 @@ class Agent:
 
         memory_block, language = await asyncio.gather(search(), read_language())
         if memory_block:
-            base_prompt += f"\n\n[Relevant memories about this user]\n{memory_block}"
+            base_prompt += f"\n\n{MEMORY_BLOCK_HEADER}\n{memory_block}"
         if language:
             base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
         return _with_extra(base_prompt)

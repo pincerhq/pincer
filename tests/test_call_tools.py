@@ -91,6 +91,30 @@ async def test_contact_lookup_reads_phone_contacts(settings, tmp_path):
     assert json.loads(await registry.execute("contact_lookup", {"name": "nobody"})) == []
 
 
+async def test_contact_lookup_matches_every_word_in_any_order(settings, tmp_path):
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(settings.db_path) as db:
+        await db.execute("CREATE TABLE pincer_phone_contacts (name TEXT, phone_number TEXT, category TEXT, notes TEXT)")
+        await db.executemany(
+            "INSERT INTO pincer_phone_contacts (name, phone_number, category, notes) VALUES (?, ?, ?, '')",
+            [("Doe, Jane", "+4930111", "friend"), ("John Doe", "+4930222", "")],
+        )
+        await db.commit()
+    registry = ToolRegistry()
+    register_call_tools(registry, settings)
+    rows = json.loads(await registry.execute("contact_lookup", {"name": "Jane Doe"}))
+    assert [r["name"] for r in rows] == ["Doe, Jane"]
+    rows = json.loads(await registry.execute("contact_lookup", {"name": "doe"}))
+    assert [r["name"] for r in rows] == ["Doe, Jane", "John Doe"]
+
+
+def test_contact_lookup_description_says_not_google_contacts(settings):
+    registry = ToolRegistry()
+    register_call_tools(registry, settings)
+    schema = next(s for s in registry.get_schemas() if s["name"] == "contact_lookup")
+    assert "not search google contacts" in schema["description"].lower()
+
+
 async def test_contact_lookup_without_table_is_empty(settings):
     registry = ToolRegistry()
     register_call_tools(registry, settings)

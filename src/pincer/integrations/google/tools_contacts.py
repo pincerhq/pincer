@@ -8,6 +8,8 @@ import asyncio
 import contextlib
 import functools
 import logging
+import re
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.quota import with_backoff
@@ -26,6 +28,22 @@ _PERSON_FIELDS = "names,emailAddresses,phoneNumbers,addresses,organizations,biog
 
 # Subset used for searchContacts (uses readMask, not personFields)
 _SEARCH_FIELDS = "names,emailAddresses,phoneNumbers,organizations"
+
+# searchContacts rejects pageSize > 30 with a 400.
+_SEARCH_MAX_PAGE_SIZE = 30
+
+# searchContacts is backed by a lazily built cache: Google documents that a
+# warmup request (empty query) is needed and that results may lag behind it.
+_WARMUP_WAIT_SECONDS = 0.5
+_RETRY_WAIT_SECONDS = 1.5
+
+# Local fallback: page through all connections and match client-side.
+_FALLBACK_FIELDS = "names,nicknames,emailAddresses,phoneNumbers,organizations"
+_FALLBACK_PAGE_SIZE = 1000
+_FALLBACK_MAX_PAGES = 10
+
+_PHONE_QUERY_RE = re.compile(r"^[\d\s+().\-/]+$")
+_MIN_PHONE_QUERY_DIGITS = 3
 
 
 def _fmt_contact(person: dict[str, Any]) -> str:
@@ -127,6 +145,80 @@ async def google__list_contacts(
     return f"{len(lines)} contact(s):\n" + "\n".join(lines) + suffix
 
 
+def _normalize(text: str) -> str:
+    """Casefold, strip accents and replace punctuation with spaces."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in stripped.casefold())
+    return " ".join(cleaned.split())
+
+
+def _person_words(person: dict[str, Any]) -> set[str]:
+    """Searchable words of a contact: names, nicknames, emails and organizations."""
+    texts: list[str] = []
+    for name in person.get("names", []):
+        texts.extend(name.get(k, "") for k in ("givenName", "middleName", "familyName", "displayName"))
+    texts.extend(n.get("value", "") for n in person.get("nicknames", []))
+    texts.extend(e.get("value", "") for e in person.get("emailAddresses", []))
+    texts.extend(o.get("name", "") for o in person.get("organizations", []))
+    return {word for text in texts if text for word in _normalize(text).split()}
+
+
+def _person_matches(person: dict[str, Any], query: str) -> bool:
+    """True if every query token is contained in some word of the contact.
+
+    Phone-like queries (digits and separators only) match on phone digits.
+    """
+    if _PHONE_QUERY_RE.match(query):
+        digits = re.sub(r"\D", "", query)
+        if len(digits) >= _MIN_PHONE_QUERY_DIGITS:
+            return any(digits in re.sub(r"\D", "", p.get("value", "")) for p in person.get("phoneNumbers", []))
+    tokens = _normalize(query).split()
+    if not tokens:
+        return False
+    words = _person_words(person)
+    return all(any(token in word for word in words) for token in tokens)
+
+
+async def _warmup_search_cache(svc: Any, wait_seconds: float) -> None:
+    """Send the empty-query warmup searchContacts expects, then give the cache time.
+
+    Failure is non-fatal — the real search may still return results.
+    """
+    with contextlib.suppress(Exception):
+        await with_backoff(lambda: svc.people().searchContacts(query="", readMask=_SEARCH_FIELDS).execute())
+    await asyncio.sleep(wait_seconds)
+
+
+async def _scan_connections(svc: Any, query: str, max_results: int) -> list[dict[str, Any]]:
+    """Page through people.connections.list and match ``query`` locally."""
+    matches: list[dict[str, Any]] = []
+    page_token = ""
+    for _ in range(_FALLBACK_MAX_PAGES):
+        kwargs: dict[str, Any] = {
+            "resourceName": "people/me",
+            "pageSize": _FALLBACK_PAGE_SIZE,
+            "personFields": _FALLBACK_FIELDS,
+        }
+        if page_token:
+            kwargs["pageToken"] = page_token
+        result = await with_backoff(lambda kw=kwargs: svc.people().connections().list(**kw).execute())
+        for person in result.get("connections", []):
+            if _person_matches(person, query):
+                matches.append(person)
+                if len(matches) >= max_results:
+                    return matches
+        page_token = result.get("nextPageToken", "")
+        if not page_token:
+            break
+    return matches
+
+
+def _fmt_search_results(people: list[dict[str, Any]]) -> str:
+    lines = [_fmt_contact(p) for p in people]
+    return f"Found {len(lines)} contact(s) in Google Contacts:\n" + "\n".join(lines)
+
+
 async def google__search_contacts(
     factory: GoogleServiceFactory,
     query: str,
@@ -134,21 +226,37 @@ async def google__search_contacts(
 ) -> str:
     """Search contacts by name, email, or phone."""
     svc = await factory.get("contacts")
+    page_size = max(1, min(int(max_results), _SEARCH_MAX_PAGE_SIZE))
 
-    # Google requires a warmup request with empty query to hydrate its lazy cache.
-    # Failure is non-fatal — the real search below may still return results.
-    with contextlib.suppress(Exception):
-        await with_backoff(lambda: svc.people().searchContacts(query="", readMask=_SEARCH_FIELDS).execute())
-    await asyncio.sleep(0.5)
+    async def _search() -> list[dict[str, Any]]:
+        result = await with_backoff(
+            lambda: svc.people().searchContacts(query=query, pageSize=page_size, readMask=_SEARCH_FIELDS).execute()
+        )
+        return [r.get("person", {}) for r in result.get("results", [])]
 
-    result = await with_backoff(
-        lambda: svc.people().searchContacts(query=query, pageSize=max_results, readMask=_SEARCH_FIELDS).execute()
+    await _warmup_search_cache(svc, _WARMUP_WAIT_SECONDS)
+    people = await _search()
+    if not people:
+        # A cold cache often returns [] for contacts that exist: warm up again and retry once.
+        await _warmup_search_cache(svc, _RETRY_WAIT_SECONDS)
+        people = await _search()
+    if people:
+        return _fmt_search_results(people)
+
+    try:
+        people = await _scan_connections(svc, query, page_size)
+    except Exception as e:
+        logger.warning("Contacts fallback scan failed for %r: %s", query, e)
+        return (
+            f'No match from Google Contacts search for "{query}", and the full contact scan failed ({e}). '
+            "Cannot confirm whether this person is a saved contact."
+        )
+    if people:
+        return _fmt_search_results(people)
+    return (
+        f'No match in Google Contacts for "{query}" (searched names, nicknames, emails, phones, organizations). '
+        "This person is not a saved contact."
     )
-    results = result.get("results", [])
-    if not results:
-        return f"No contacts found for: {query}"
-    lines = [_fmt_contact(r.get("person", {})) for r in results]
-    return f"Found {len(lines)} contact(s):\n" + "\n".join(lines)
 
 
 async def google__get_contact(
@@ -418,13 +526,28 @@ def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     )
     registry.register(
         name="google__search_contacts",
-        description="Search Google Contacts by name, email, or phone number.",
+        description=(
+            "Search the user's saved Google Contacts by name, nickname, email, phone number or organization."
+            " Results are the source of truth for whether a person is a saved contact: only call someone"
+            " 'saved' or 'in your contacts' if this tool returned them. If a full name finds nothing,"
+            " also try the first name alone and the last name alone."
+        ),
         handler=_h(google__search_contacts),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "max_results": {"type": "integer", "default": 20},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Full or partial name (first or last name alone works), nickname, email address"
+                        " or part of it, phone number digits, or organization."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "default": 20,
+                    "description": "Maximum number of contacts to return (1-30).",
+                },
             },
             "required": ["query"],
         },
