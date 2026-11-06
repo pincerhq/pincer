@@ -911,6 +911,69 @@ async def test_a_completed_stream_with_text_is_delivered_and_saved(
     assert session.messages[-1].content == "Hello there"
 
 
+async def _placed_call_reply_chunks(agent, session_manager) -> tuple[list[str], str, str]:
+    """(the TEXT chunks the client received, the DONE text, the saved assistant message)."""
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+    session = await session_manager.get_or_create("user1", "test")
+    assert chunks[-1].type == StreamEventType.DONE
+    assert session.messages[-1].role == MessageRole.ASSISTANT
+    return (
+        [c.content for c in chunks if c.type == StreamEventType.TEXT],
+        chunks[-1].content,
+        session.messages[-1].content,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_placed_call_text_is_appended_to_text_already_streamed(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """The client already received "Ringing now": DONE, the saved message and the chunks must all agree."""
+    cut_off = LLMResponse(
+        content="Ringing now",
+        tool_calls=[ToolCall(id="tc9", name="make_phone_call", arguments={})],
+        model="test",
+        input_tokens=80,
+        output_tokens=4096,
+        stop_reason="max_tokens",
+    )
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="Ringing now"), StreamTurnEvent(response=cut_off))
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    texts, done, saved = await _placed_call_reply_chunks(agent, session_manager)
+
+    expected = "Ringing now\n\n" + _CALL_PLACED_THEN_FAILED_TEXT
+    assert texts == ["Ringing now", "\n\n" + _CALL_PLACED_THEN_FAILED_TEXT]
+    assert done == saved == expected
+
+
+@pytest.mark.asyncio
+async def test_the_placed_call_text_follows_blank_streamed_text_without_a_separator(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="  "), _BLANK_FINAL)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    texts, done, saved = await _placed_call_reply_chunks(agent, session_manager)
+
+    assert texts == ["  ", _CALL_PLACED_THEN_FAILED_TEXT]
+    assert done == saved == "  " + _CALL_PLACED_THEN_FAILED_TEXT
+
+
+@pytest.mark.asyncio
+async def test_the_placed_call_text_alone_when_nothing_was_streamed(settings, mock_llm, session_manager, cost_tracker):
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+    mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    texts, done, saved = await _placed_call_reply_chunks(agent, session_manager)
+
+    assert texts == [_CALL_PLACED_THEN_FAILED_TEXT]
+    assert done == saved == _CALL_PLACED_THEN_FAILED_TEXT
+
+
 @pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker

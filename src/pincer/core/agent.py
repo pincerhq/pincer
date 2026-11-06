@@ -1400,8 +1400,10 @@ class Agent:
             # As on the non-stream path: a call is already ringing, and an error would hide it
             # from the channel, which then never waits for its report.
             logger.warning("LLM failed after the turn placed %s: %s", call_sids, e)
-            full_text = _CALL_PLACED_THEN_FAILED_TEXT
-            yield StreamChunk(StreamEventType.TEXT, full_text)
+            # The client already received whatever was streamed, so the notice follows it
+            tail = ("\n\n" if full_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
+            full_text += tail
+            yield StreamChunk(StreamEventType.TEXT, tail)
 
         # ── Onboarding: append warm question on a fresh session ────────────
         asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
