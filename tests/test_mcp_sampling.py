@@ -150,19 +150,6 @@ async def test_agent_llm_backend_complete():
 
 
 @pytest.mark.asyncio
-async def test_agent_llm_backend_pins_effort_and_thinking_like_the_extraction_calls():
-    """A sampling request has a small output limit, so it must not inherit the operator's effort and thinking."""
-    mock_router = AsyncMock()
-    mock_router.complete = AsyncMock(return_value="agent response")
-
-    await AgentLLMBackend(llm_router=mock_router).complete([{"role": "user", "content": "hi"}], max_tokens=256)
-
-    kwargs = mock_router.complete.await_args.kwargs
-    assert kwargs["max_tokens"] == 256  # precondition: the call reached the router as before
-    assert (kwargs["reasoning_effort"], kwargs["thinking"], kwargs["pinned"]) == ("low", "disabled", True)
-
-
-@pytest.mark.asyncio
 async def test_agent_llm_backend_fallback_to_chat():
     """Fallback to .chat() if .complete() raises AttributeError."""
 

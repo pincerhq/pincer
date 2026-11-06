@@ -26,8 +26,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
-
 logger = logging.getLogger("pincer.mcp.sampling")
 
 
@@ -79,14 +77,7 @@ class AgentLLMBackend(LLMBackend):
         max_tokens: int = 1024,
     ) -> str:
         try:
-            result: Any = await self._router.complete(
-                messages,
-                model=model,
-                max_tokens=max_tokens,
-                reasoning_effort=STRUCTURED_CALL_EFFORT,
-                thinking=STRUCTURED_CALL_THINKING,
-                pinned=True,
-            )
+            result: Any = await self._router.complete(messages, model=model, max_tokens=max_tokens)
             return str(result)
         except AttributeError:
             # Fallback: try chat() / generate() depending on router interface

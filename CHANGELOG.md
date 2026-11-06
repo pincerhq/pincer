@@ -91,8 +91,7 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   1024 (was 200), the call-thread summary merge 2048 (was 700) and the call
   outcome extraction 2048 (was 1000). Only generated tokens are billed.
 - The internal JSON-extraction calls (call outcome, call-thread summary merge,
-  onboarding answer extraction, and an MCP sampling request run through the
-  agent's LLM router) always use effort `low` and thinking
+  onboarding answer extraction) always use effort `low` and thinking
   `disabled`, whatever `PINCER_REASONING_EFFORT` / `PINCER_THINKING` say, so a
   model that thinks can't use up their small output limit and lose the result.
   Each model still gets only what it accepts (Opus 5.5 can't turn thinking off;
