@@ -225,25 +225,72 @@ async def test_search_contacts_fallback_phone_needs_suffix(mock_factory, mock_co
 
 
 @pytest.mark.parametrize(
-    ("query", "reason"),
+    ("stored", "query", "matches"),
     [
-        ("", "empty"),
-        ("   ", "empty"),
-        ("?!.", "empty"),
-        ("a", "too short"),
-        ("123", "at least 6 digits"),
-        ("@example.com", "part before the @"),
+        ("123456", "+44 20 7946 0123456", False),  # short stored number is not the tail of a longer query
+        ("123456", "123456", True),
+        ("0170 1234567", "+49 170 1234567", True),  # national number + country code in the query
+        ("170 1234567", "0049 170 1234567", True),
     ],
 )
-async def test_search_contacts_rejects_unsearchable_query(mock_factory, mock_contacts_service, query, reason):
+async def test_search_contacts_fallback_reverse_phone_suffix_needs_national_number(
+    mock_factory, mock_contacts_service, stored, query, matches
+):
+    person = _jane()
+    person["phoneNumbers"] = [{"value": stored}]
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [person]}
+    result = await google__search_contacts(mock_factory, query=query)
+    assert ("people/c42" in result) is matches
+
+
+@pytest.mark.parametrize("query", ["", "   ", "?!."])
+async def test_search_contacts_rejects_empty_query(mock_factory, mock_contacts_service, query):
     mock_contacts_service.people().searchContacts.reset_mock()
     mock_contacts_service.people().connections().list.reset_mock()
     result = await google__search_contacts(mock_factory, query=query)
     assert result.startswith("Error:")
-    assert reason in result
-    assert "not a saved contact" not in result
+    assert "empty" in result
     assert not mock_contacts_service.people().searchContacts.call_args_list
     assert not mock_contacts_service.people().connections().list.call_args_list
+
+
+@pytest.mark.parametrize("query", ["王", "a", "123", "@example.com"])
+async def test_search_contacts_short_query_still_asks_google(mock_factory, mock_contacts_service, query):
+    """Short or domain-only queries go to searchContacts; Google's hits are returned (review on #351)."""
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _jane()}]}
+    result = await google__search_contacts(mock_factory, query=query)
+    assert "Found 1 contact(s) in Google Contacts" in result
+
+
+@pytest.mark.parametrize(
+    ("query", "reason"),
+    [
+        ("王", "at least 2 characters"),
+        ("a", "at least 2 characters"),
+        ("123", "at least 6 digits"),
+        ("@example.com", "email domains alone"),
+    ],
+)
+async def test_search_contacts_short_query_skips_fallback_without_verdict(
+    mock_factory, mock_contacts_service, query, reason
+):
+    """When Google finds nothing, a query too vague for the local scan is not scanned and gets no "not saved"."""
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().searchContacts.reset_mock()
+    mock_contacts_service.people().connections().list.reset_mock()
+    result = await google__search_contacts(mock_factory, query=query)
+    assert [c[1]["query"] for c in mock_contacts_service.people().searchContacts.call_args_list] == [
+        "",
+        query,
+        "",
+        query,
+    ]
+    assert not mock_contacts_service.people().connections().list.call_args_list
+    assert not result.startswith("Error:")
+    assert reason in result
+    assert "Cannot confirm" in result
+    assert "not a saved contact" not in result
 
 
 async def test_search_contacts_fallback_page_cap_is_not_a_negative(mock_factory, mock_contacts_service):

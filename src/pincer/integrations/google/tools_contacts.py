@@ -46,6 +46,9 @@ _PHONE_QUERY_RE = re.compile(r"^[\d\s+().\-/]+$")
 # Phone queries match as a suffix of the stored number (or vice versa), so
 # they need enough digits not to hit unrelated numbers.
 _MIN_PHONE_QUERY_DIGITS = 6
+# A stored number may match as the tail of a longer query (the query adds a
+# country code) only if it is this long, i.e. a full national number.
+_MIN_NATIONAL_NUMBER_DIGITS = 9
 # Shorter name tokens (initials) are ignored; a query with none left is rejected.
 _MIN_TOKEN_LEN = 2
 
@@ -171,25 +174,24 @@ def _name_tokens(query: str) -> list[str]:
     return [t for t in _normalize(query).split() if len(t) >= _MIN_TOKEN_LEN]
 
 
-def _query_error(query: str) -> str | None:
-    """Why ``query`` can't be searched for, or None if it can.
+def _fallback_skip_reason(query: str) -> str | None:
+    """Why the local fallback scan can't judge ``query``, or None if it can.
 
-    Rejected up front so a meaningless query never reaches the
-    "not a saved contact" verdict.
+    The scan matches loosely (prefixes, phone suffixes), so a query too
+    short or vague to match safely is not scanned at all. Google's own
+    search still runs for it; only the fallback verdict is withheld.
     """
     q = query.strip()
-    if not _normalize(q):
-        return "Error: the query is empty. Give a name, email address, phone number or organization."
     if _is_phone_query(q):
         if len(_digits(q)) < _MIN_PHONE_QUERY_DIGITS:
-            return f"Error: phone number searches need at least {_MIN_PHONE_QUERY_DIGITS} digits."
+            return f"a phone number needs at least {_MIN_PHONE_QUERY_DIGITS} digits for the full contact scan"
         return None
     if "@" in q:
         if len(q.split("@", 1)[0]) < _MIN_TOKEN_LEN:
-            return "Error: email searches need the part before the @ (domain-only searches are not supported)."
+            return "the full contact scan does not match on email domains alone"
         return None
     if not _name_tokens(q):
-        return f"Error: the query is too short. Give at least {_MIN_TOKEN_LEN} letters of a name."
+        return f"the full contact scan needs words of at least {_MIN_TOKEN_LEN} characters"
     return None
 
 
@@ -218,9 +220,10 @@ def _person_words(person: dict[str, Any]) -> set[str]:
 
 
 def _person_matches(person: dict[str, Any], query: str) -> bool:
-    """True if ``query`` (already accepted by ``_query_error``) identifies this contact.
+    """True if ``query`` (already accepted by ``_fallback_skip_reason``) identifies this contact.
 
-    - Phone queries: one number ends with the other (leading zeros ignored).
+    - Phone queries: the stored number ends with the query, or the query
+      ends with a stored number of national length (leading zeros ignored).
     - Email queries (with "@"): the query is a prefix of a full address.
     - Otherwise: the query is a prefix of an email local part ("jane.d"),
       or every token of at least ``_MIN_TOKEN_LEN`` characters is a prefix
@@ -231,7 +234,11 @@ def _person_matches(person: dict[str, Any], query: str) -> bool:
         wanted = _digits(q)
         for phone in person.get("phoneNumbers", []):
             have = _digits(phone.get("value", ""))
-            if len(have) >= _MIN_PHONE_QUERY_DIGITS and (have.endswith(wanted) or wanted.endswith(have)):
+            if len(have) < _MIN_PHONE_QUERY_DIGITS:
+                continue
+            # A query ending in a short stored number is usually a different
+            # number; only a full national number may match as the query's tail.
+            if have.endswith(wanted) or (len(have) >= _MIN_NATIONAL_NUMBER_DIGITS and wanted.endswith(have)):
                 return True
         return False
 
@@ -298,9 +305,8 @@ async def google__search_contacts(
     max_results: int = 20,
 ) -> str:
     """Search contacts by name, email, or phone."""
-    error = _query_error(query)
-    if error:
-        return error
+    if not _normalize(query):
+        return "Error: the query is empty. Give a name, email address, phone number or organization."
     svc = await factory.get("contacts")
     page_size = max(1, min(int(max_results), _SEARCH_MAX_PAGE_SIZE))
 
@@ -319,6 +325,12 @@ async def google__search_contacts(
     if people:
         return _fmt_search_results(people)
 
+    skip_reason = _fallback_skip_reason(query)
+    if skip_reason:
+        return (
+            f'No match from Google Contacts search for "{query}", and {skip_reason}. '
+            "Cannot confirm whether this person is a saved contact; try a longer or more specific query."
+        )
     try:
         people, complete = await _scan_connections(svc, query, page_size)
     except Exception as e:
@@ -621,8 +633,8 @@ def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "query": {
                     "type": "string",
                     "description": (
-                        "Full or partial name (first or last name alone works, at least 2 letters), nickname,"
-                        " email address or its beginning, phone number (at least 6 digits), or organization."
+                        "Full or partial name (first or last name alone works), nickname, email address"
+                        " or its beginning, phone number, or organization."
                     ),
                 },
                 "max_results": {
