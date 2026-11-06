@@ -184,9 +184,10 @@ _CLAUDE_DISABLED_FORMS: dict[tuple[str, int, int], dict[str, str]] = {
 def model_max_output_tokens(model: str) -> int | None:
     """The model's own limit on `max_tokens` (its synchronous output limit), or None when
     it isn't known. Only rows read off a model page are listed, so an unrecognised model,
-    an Azure deployment name or a dated OpenAI snapshot is None, and a caller must not ask
-    such a model for more than it already asks. An `ft:` or gateway `vendor/` prefix is
-    stripped."""
+    an Azure deployment name or a dated OpenAI snapshot is None. Asking such a model for
+    more than it accepts is a 400, so a caller that raises `max_tokens` caps it at a
+    conservative value instead (the voice retry's is `UNKNOWN_LIMIT_RETRY_CAP` in
+    `voice/truncation.py`). An `ft:` or gateway `vendor/` prefix is stripped."""
     version = _claude_version(model)
     if version is not None:
         family, major, minor = version
