@@ -835,6 +835,82 @@ async def test_a_streamed_turn_over_budget_after_a_dial_keeps_the_budget_reply(
     assert chunks[-1].content == "Daily budget limit reached."
 
 
+def _stream_of(*events: StreamTurnEvent):
+    async def stream_turn(**kwargs):
+        for event in events:
+            yield event
+
+    return stream_turn
+
+
+_BLANK_FINAL = StreamTurnEvent(
+    response=LLMResponse(content="", model="test", input_tokens=80, output_tokens=1, stop_reason="end_turn")
+)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_stream_with_no_text_is_an_error_not_an_empty_answer(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_stream_of_only_whitespace_is_an_error(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="  "), StreamTurnEvent(text="\n"), _BLANK_FINAL)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_streamed_with_no_final_response_is_an_error(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="  \n"))
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_blank_stream_after_placing_a_call_still_returns_it(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+    mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_stream_with_text_is_delivered_and_saved(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    final = StreamTurnEvent(
+        response=LLMResponse(
+            content="Hello there", model="test", input_tokens=80, output_tokens=5, stop_reason="end_turn"
+        )
+    )
+    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="Hello "), StreamTurnEvent(text="there"), final)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+    assert chunks[-1].content == "Hello there"
+    session = await session_manager.get_or_create("user1", "test")
+    assert session.messages[-1].content == "Hello there"
+
+
 @pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker

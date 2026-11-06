@@ -1386,7 +1386,10 @@ class Agent:
                 # leaves no text, which must not be sent as an empty reply
                 if streamed is not None:
                     _refuse_truncated_output(streamed, self._settings.max_tokens)
-                elif not full_text:
+                    if not full_text.strip():
+                        # Completed, not cut off, and nothing to say: an empty reply is not an answer
+                        raise LLMError("the final stream completed with no text")
+                elif not full_text.strip():
                     raise LLMError("stream_turn ended without a final response")
                 else:
                     # The user already saw these chunks, so they are the reply
