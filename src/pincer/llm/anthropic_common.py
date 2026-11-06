@@ -157,29 +157,6 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result.provider = self._provider_name
         return result
 
-    async def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        thinking: ThinkingMode | None = None,
-    ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
-
-        try:
-            async with self._client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    yield text
-        except anthropic.RateLimitError as e:
-            retry_after = float(e.response.headers.get("retry-after", "5"))
-            raise LLMRateLimitError(retry_after=retry_after) from e
-        except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
-
     async def stream_turn(
         self,
         messages: list[LLMMessage],

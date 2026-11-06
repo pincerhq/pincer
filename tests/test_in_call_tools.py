@@ -1061,9 +1061,6 @@ async def test_call_context_tool_schemas_exact_at_agent_level(settings, session_
         async def complete(self, *a, **k):
             raise AssertionError
 
-        async def stream(self, *a, **k):
-            yield ""
-
         async def stream_turn(
             self,
             messages,

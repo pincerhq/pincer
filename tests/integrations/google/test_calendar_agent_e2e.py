@@ -135,22 +135,6 @@ class ScriptedLLM(BaseLLMProvider):
             return self._call("google__search_events", {"query": title})
         return self._copy(offered, title, changes)
 
-    def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-    ) -> AsyncIterator[str]:
-        async def _tokens() -> AsyncIterator[str]:
-            response = await self.complete(messages, tools=tools, system=system)
-            if response.content:
-                yield response.content
-
-        return _tokens()
-
     async def close(self) -> None:
         return None
 
@@ -363,14 +347,6 @@ class _OneCallLLM(BaseLLMProvider):
         return LLMResponse(
             tool_calls=[self._call], model="scripted", input_tokens=1, output_tokens=1, stop_reason="tool_use"
         )
-
-    def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):  # type: ignore[no-untyped-def]
-        async def _tokens() -> AsyncIterator[str]:
-            response = await self.complete(messages, tools=tools, system=system)
-            if response.content:
-                yield response.content
-
-        return _tokens()
 
     async def close(self) -> None:
         return None

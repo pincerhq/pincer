@@ -290,40 +290,6 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         result.provider = self._provider_name
         return result
 
-    async def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        thinking: ThinkingMode | None = None,
-    ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(
-            messages,
-            tools,
-            model,
-            max_tokens,
-            temperature,
-            system,
-            reasoning_effort=reasoning_effort,
-            thinking=thinking,
-        )
-        kwargs["stream"] = True
-
-        try:
-            stream = await self._client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta and delta.content:
-                    yield delta.content
-        except openai.RateLimitError as e:
-            raise LLMRateLimitError(retry_after=5.0) from e
-        except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} stream error: {e.status_code} {e.message}") from e
-
     async def stream_turn(
         self,
         messages: list[LLMMessage],

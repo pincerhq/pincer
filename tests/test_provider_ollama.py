@@ -79,7 +79,7 @@ def _make_stream_chunk(content: str | None):
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_text_chunks(ollama_settings):
+async def test_stream_turn_yields_text_chunks(ollama_settings):
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
     chunks = [_make_stream_chunk("Hello"), _make_stream_chunk(" world"), _make_stream_chunk(None)]
@@ -96,7 +96,7 @@ async def test_stream_yields_text_chunks(ollama_settings):
 
         provider = OpenAICompatibleProvider(ollama_settings, "ollama")
         messages = [LLMMessage(role=MessageRole.USER, content="Say hi")]
-        result = [token async for token in provider.stream(messages)]
+        result = [e.text async for e in provider.stream_turn(messages) if e.response is None]
 
     assert result == ["Hello", " world"]
 

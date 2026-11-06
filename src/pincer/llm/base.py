@@ -184,25 +184,6 @@ class BaseLLMProvider(ABC):
         """
         ...
 
-    @abstractmethod
-    def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        thinking: ThinkingMode | None = None,
-    ) -> AsyncIterator[str]:
-        """Stream text tokens as they arrive.
-
-        Declared as a plain method returning an async iterator (not ``async def``)
-        so async-generator implementations type-check cleanly as overrides.
-        """
-        ...
-
     async def stream_turn(
         self,
         messages: list[LLMMessage],
@@ -217,9 +198,9 @@ class BaseLLMProvider(ABC):
         """Stream ONE turn: text tokens as they arrive, then the complete
         LLMResponse (with tool calls and usage) as the final event.
 
-        Unlike ``stream()`` this never loses tool calls, and unlike
-        ``complete()`` the caller sees text before generation finishes —
-        the voice latency pipeline (Sprint 5) depends on both properties.
+        Unlike ``complete()`` the caller sees text before generation finishes, and it
+        never loses tool calls: the voice latency pipeline (Sprint 5) and the chat
+        reply both rely on that.
 
         ``reasoning_effort`` and ``thinking`` (on every method) override the
         global settings for this call; ``None`` means the global setting.

@@ -56,10 +56,6 @@ class _ScriptedVoiceProvider(BaseLLMProvider):
     ):
         raise AssertionError("voice turns must not use complete()")
 
-    async def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        raise AssertionError("voice turns must not use stream()")
-        yield ""  # pragma: no cover
-
     async def stream_turn(
         self,
         messages,

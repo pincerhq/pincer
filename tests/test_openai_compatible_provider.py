@@ -363,25 +363,7 @@ def _make_async_iterable(chunks):
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_content(openai_settings):
-    from pincer.llm.openai_common import OpenAICompatibleProvider
-
-    chunks = [_make_stream_chunk("Hello"), _make_stream_chunk(" world"), _make_stream_chunk(None)]
-
-    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = _make_async_iterable(chunks)
-        mock_client.close = AsyncMock()
-        mock_cls.return_value = mock_client
-
-        provider = OpenAICompatibleProvider(openai_settings, "openai")
-        result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
-
-    assert result == ["Hello", " world"]
-
-
-@pytest.mark.asyncio
-async def test_stream_with_tools(openai_settings):
+async def test_stream_turn_with_tools(openai_settings):
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
     chunks = [_make_stream_chunk("ok")]
@@ -402,13 +384,13 @@ async def test_stream_with_tools(openai_settings):
 
         provider = OpenAICompatibleProvider(openai_settings, "openai")
         tools = [{"name": "my_tool", "description": "a tool", "input_schema": {"type": "object", "properties": {}}}]
-        result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)]
+        events = [e async for e in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)]
 
-    assert result == ["ok"]
+    assert [e.text for e in events if e.response is None] == ["ok"]
 
 
 @pytest.mark.asyncio
-async def test_stream_rate_limit_error(openai_settings):
+async def test_stream_turn_rate_limit_error(openai_settings):
     from pincer.exceptions import LLMRateLimitError
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
@@ -423,12 +405,12 @@ async def test_stream_rate_limit_error(openai_settings):
 
         provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
 @pytest.mark.asyncio
-async def test_stream_api_status_error(openai_settings):
+async def test_stream_turn_api_status_error(openai_settings):
     from pincer.exceptions import LLMError
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
@@ -443,7 +425,7 @@ async def test_stream_api_status_error(openai_settings):
 
         provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMError, match="500"):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
@@ -587,7 +569,7 @@ class TestStreamTurn:
             _ = [e async for e in getattr(provider, method)(messages=[], **call_kwargs)]
         return create.call_args.kwargs
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     @pytest.mark.parametrize("model", ["gpt-5-mini", "o3-mini", "gpt-6-luna", "gpt-6.1-sol"])
     async def test_reasoning_model_kwargs_normalized(self, method, model):
         provider = self._provider()
@@ -596,7 +578,7 @@ class TestStreamTurn:
         assert "max_tokens" not in kwargs
         assert "temperature" not in kwargs  # reasoning models accept only default
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     @pytest.mark.parametrize("model", ["gpt-4o-mini", "grok-3"])
     async def test_non_reasoning_model_kwargs_untouched(self, method, model):
         provider = self._provider()
@@ -608,8 +590,6 @@ class TestStreamTurn:
     async def test_stream_flags_set_by_caller(self):
         provider = self._provider()
         assert "stream" not in await self._sent_kwargs(provider, "complete")
-        kwargs = await self._sent_kwargs(provider, "stream")
-        assert kwargs["stream"] is True and "stream_options" not in kwargs
         kwargs = await self._sent_kwargs(provider, "stream_turn")
         assert kwargs["stream"] is True and kwargs["stream_options"] == {"include_usage": True}
 
@@ -711,14 +691,14 @@ async def _sent_body(settings, method: str = "complete", **call_kwargs) -> dict:
 
 
 class TestReasoningSettings:
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_global_effort_reaches_the_request(self, method):
         body = await _sent_body(_reasoning_settings("gpt-5.4-mini", reasoning_effort="low"), method)
 
         assert body["model"] == "gpt-5.4-mini"
         assert body.get("reasoning_effort") == "low"
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_per_call_effort_replaces_the_global_one_and_none_keeps_it(self, method):
         settings = _reasoning_settings("gpt-5.4-mini", reasoning_effort="high")
 

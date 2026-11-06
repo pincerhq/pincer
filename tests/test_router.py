@@ -11,7 +11,7 @@ import pytest
 from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError
 from pincer.llm import router as router_mod
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
 from pincer.llm.router import LLMRouter
 
 
@@ -41,11 +41,11 @@ class FakeProvider(BaseLLMProvider):
             raise LLMError(f"{self.name} boom")
         return LLMResponse(content=f"from {self.name}", model=self.name, provider=self.name)
 
-    async def stream(self, messages=None, **kwargs):  # type: ignore[override]
+    async def stream_turn(self, messages=None, **kwargs):  # type: ignore[override]
         if self.stream_fail_before:
             raise LLMError(f"{self.name} stream boom")
         for token in self.stream_tokens:
-            yield token
+            yield StreamTurnEvent(text=token)
         if self.stream_fail_after:
             raise LLMError(f"{self.name} stream mid boom")
 
@@ -121,40 +121,40 @@ async def test_complete_second_failover_serves_when_first_fails():
     assert result.model == "fb2"
 
 
-# ── stream() failover ─────────────────────────────────────────────────────────
+# ── stream_turn() failover ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_stream_fails_over_before_first_token():
+async def test_stream_turn_fails_over_before_first_event():
     primary = FakeProvider("primary", stream_fail_before=True)
     fb = FakeProvider("fb", stream_tokens=["He", "llo"])
     r = _router_with_pool("primary", ["fb"], {"primary": primary, "fb": fb})
 
-    tokens = [t async for t in r.stream(messages=[])]
+    tokens = [e.text async for e in r.stream_turn(messages=[])]
 
     assert tokens == ["He", "llo"]
 
 
 @pytest.mark.asyncio
-async def test_stream_no_failover_after_first_token():
+async def test_stream_turn_no_failover_after_first_event():
     primary = FakeProvider("primary", stream_tokens=["a"], stream_fail_after=True)
     fb = FakeProvider("fb", stream_tokens=["b"])
     r = _router_with_pool("primary", ["fb"], {"primary": primary, "fb": fb})
 
     collected: list[str] = []
     with pytest.raises(LLMError):
-        async for token in r.stream(messages=[]):
-            collected.append(token)
+        async for event in r.stream_turn(messages=[]):
+            collected.append(event.text)
 
     assert collected == ["a"]  # mid-stream error propagates; failover NOT used
 
 
 @pytest.mark.asyncio
-async def test_stream_primary_success():
+async def test_stream_turn_primary_success():
     primary = FakeProvider("primary", stream_tokens=["x", "y"])
     r = _router_with_pool("primary", [], {"primary": primary})
 
-    tokens = [t async for t in r.stream(messages=[])]
+    tokens = [e.text async for e in r.stream_turn(messages=[])]
     assert tokens == ["x", "y"]
 
 
@@ -445,7 +445,7 @@ async def _call(router: LLMRouter, method: str, **kwargs) -> None:
         _ = [e async for e in getattr(router, method)(messages, **kwargs)]
 
 
-@pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+@pytest.mark.parametrize("method", ["complete", "stream_turn"])
 async def test_effort_and_thinking_reach_the_primary_and_the_failover(settings, method):
     """The primary fails (400), the failover answers: both requests carry the call's values."""
     async with (

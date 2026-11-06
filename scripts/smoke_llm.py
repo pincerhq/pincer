@@ -3,9 +3,9 @@
 
 Unit tests mock the SDKs, so they cannot tell when a model starts rejecting a
 request param (a 400 on `temperature`, `max_tokens`, …) or stops returning tool
-calls. This sends the same three request shapes the app does — `complete`,
-`stream`, and a tool round-trip ending in `stream_turn` — through the real
-providers and reports each one.
+calls. This sends the same three request shapes the app does — `complete`, a
+streamed turn (`stream_turn`), and a tool round-trip ending in `stream_turn` —
+through the real providers and reports each one.
 
 Then, on the voice turn model (issue #345): effort `low`, thinking `disabled`, a
 tool loop that sends the thinking back, a tampered signature and an edited
@@ -43,7 +43,7 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -206,7 +206,11 @@ async def check_complete(provider: BaseLLMProvider, model: str) -> str:
 
 async def check_stream(provider: BaseLLMProvider, model: str) -> str:
     messages = [LLMMessage(role=MessageRole.USER, content="Reply with the single word: pong")]
-    chunks = [t async for t in provider.stream(messages, model=model, temperature=0, max_tokens=MAX_TOKENS)]
+    chunks = [
+        e.text
+        async for e in provider.stream_turn(messages, model=model, temperature=0, max_tokens=MAX_TOKENS)
+        if e.text
+    ]
     text = "".join(chunks).strip()
     if not text:
         raise AssertionError("stream produced no text")
@@ -343,19 +347,6 @@ class DryRunProvider(BaseLLMProvider):  # type: ignore[misc]  # plain mypy can't
         thinking: ThinkingMode | None = None,
     ) -> LLMResponse:
         return self._record(messages, tools, model, max_tokens, reasoning_effort, thinking)
-
-    async def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        thinking: ThinkingMode | None = None,
-    ) -> AsyncIterator[str]:
-        yield self._record(messages, tools, model, max_tokens, reasoning_effort, thinking).content
 
     async def close(self) -> None:
         return None

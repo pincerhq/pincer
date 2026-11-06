@@ -281,29 +281,6 @@ async def test_convert_handles_images_tool_results(anthropic_settings):
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_text(anthropic_settings):
-    from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-
-    async def _text_stream():
-        for t in ["He", "llo"]:
-            yield t
-
-    stream_cm = MagicMock()
-    stream_cm.__aenter__ = AsyncMock(return_value=MagicMock(text_stream=_text_stream()))
-    stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-    with patch(f"{MODULE}.AsyncAnthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.stream = MagicMock(return_value=stream_cm)
-        mock_cls.return_value = mock_client
-
-        provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
-        result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
-
-    assert result == ["He", "llo"]
-
-
-@pytest.mark.asyncio
 async def test_complete_retries_then_succeeds(anthropic_settings):
     import anthropic
 
@@ -401,7 +378,7 @@ async def test_complete_rate_limit_exhausted(anthropic_settings):
 
 
 @pytest.mark.asyncio
-async def test_stream_rate_limit_error(anthropic_settings):
+async def test_stream_turn_rate_limit_error(anthropic_settings):
     import anthropic
 
     from pincer.exceptions import LLMRateLimitError
@@ -419,12 +396,12 @@ async def test_stream_rate_limit_error(anthropic_settings):
 
         provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
         with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
 @pytest.mark.asyncio
-async def test_stream_status_error(anthropic_settings):
+async def test_stream_turn_status_error(anthropic_settings):
     import anthropic
 
     from pincer.exceptions import LLMError
@@ -442,7 +419,7 @@ async def test_stream_status_error(anthropic_settings):
 
         provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
         with pytest.raises(LLMError, match="stream error"):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
@@ -583,7 +560,7 @@ class TestTemperatureByModel:
         _ = [e async for e in getattr(provider, method)(messages, **call_kwargs)]
         return provider._client.messages.stream.call_args.kwargs
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_dropped_for_model_that_rejects_it(self, anthropic_settings, method):
         provider = self._provider(anthropic_settings)
         kwargs = await self._sent_kwargs(provider, method, model=self.REJECTS, temperature=0, max_tokens=150)
@@ -591,13 +568,13 @@ class TestTemperatureByModel:
         assert kwargs["model"] == self.REJECTS
         assert kwargs["max_tokens"] == 150
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_sent_for_model_that_accepts_it(self, anthropic_settings, method):
         provider = self._provider(anthropic_settings)
         kwargs = await self._sent_kwargs(provider, method, model=self.ACCEPTS, temperature=0)
         assert kwargs["temperature"] == 0  # an explicit 0 is not replaced by the default
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_default_model_and_temperature(self, anthropic_settings, method):
         """No per-call model: the rule applies to the provider's default model."""
         anthropic_settings.anthropic_model = self.REJECTS
@@ -654,13 +631,6 @@ async def test_stream_turn_keeps_thinking_blocks_and_never_streams_them_as_text(
     assert final is not None
     assert final.thinking_blocks == _THINKING_BLOCKS
     assert final.content == "Hello!"
-
-
-async def test_stream_never_yields_thinking_as_text(anthropic_settings):
-    async with sse.ScriptedAnthropic(anthropic_settings, [_THINKING_REPLY]) as llm:
-        tokens = [t async for t in llm.provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
-
-    assert tokens == ["Hello!"]
 
 
 async def test_tool_call_turn_sends_thinking_first_then_text_then_tool_use(anthropic_settings):
@@ -773,7 +743,7 @@ async def _sent_request(settings, method: str = "complete", **call_kwargs) -> di
 
 
 class TestReasoningSettings:
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_global_effort_and_thinking_reach_the_request(self, anthropic_settings, method):
         settings = anthropic_settings.model_copy(
             update={"default_model": "claude-haiku-5-5", "reasoning_effort": "low", "thinking": "adaptive"}
@@ -857,7 +827,7 @@ class TestReasoningSettings:
 
         assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_call_arguments_replace_the_global_settings(self, anthropic_settings, method):
         settings = anthropic_settings.model_copy(
             update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
@@ -867,7 +837,7 @@ class TestReasoningSettings:
         assert body["output_config"] == {"effort": "low"}
         assert body["thinking"] == {"type": "disabled"}
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_none_arguments_keep_the_global_settings(self, anthropic_settings, method):
         settings = anthropic_settings.model_copy(
             update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}

@@ -302,12 +302,6 @@ async def test_explicit_model_goes_to_the_primary_only():
                 raise LLMError("down")
             return router_mod.LLMResponse(content="ok", model=model or "", provider="")
 
-        async def stream(self, messages, tools=None, model=None, **kw):  # type: ignore[override]
-            self.models.append(model)
-            if self.fail:
-                raise LLMError("down")
-            yield "ok"
-
         async def stream_turn(self, messages, tools=None, model=None, **kw):  # type: ignore[override]
             self.models.append(model)
             if self.fail:
@@ -323,10 +317,9 @@ async def test_explicit_model_goes_to_the_primary_only():
     router._pool = {"azure": azure, "anthropic": anthropic}
 
     [e async for e in router.stream_turn([], model="gpt-5-mini")]
-    [t async for t in router.stream([], model="gpt-5-mini")]
     await router.complete([], model="gpt-5-mini")
-    assert azure.models == ["gpt-5-mini"] * 3
-    assert anthropic.models == [None] * 3
+    assert azure.models == ["gpt-5-mini"] * 2
+    assert anthropic.models == [None] * 2
 
 
 def test_router_and_dashboard_agree_after_another_hint_built_the_provider():

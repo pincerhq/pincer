@@ -160,10 +160,6 @@ class _ScriptedProvider:
     async def complete(self, *args, **kwargs):  # pragma: no cover - unused
         raise AssertionError("voice turns must not use complete()")
 
-    async def stream(self, *args, **kwargs):  # pragma: no cover - unused
-        raise AssertionError("voice turns must not use stream()")
-        yield ""
-
     async def stream_turn(
         self,
         messages,

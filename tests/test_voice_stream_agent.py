@@ -40,10 +40,6 @@ class ScriptedProvider(BaseLLMProvider):
     ):
         raise AssertionError("voice turns must not use complete()")
 
-    async def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        raise AssertionError("voice turns must not use stream()")
-        yield ""  # pragma: no cover
-
     async def stream_turn(
         self,
         messages,
@@ -91,19 +87,6 @@ class CompleteOnlyProvider(BaseLLMProvider):
     ):
         self.calls = [*getattr(self, "calls", []), {"reasoning_effort": reasoning_effort, "thinking": thinking}]
         return LLMResponse(content="Full answer at once.", model="m", input_tokens=10, output_tokens=5)
-
-    async def stream(
-        self,
-        messages,
-        tools=None,
-        model=None,
-        max_tokens=None,
-        temperature=None,
-        system=None,
-        reasoning_effort=None,
-        thinking=None,
-    ):
-        yield ""  # pragma: no cover
 
     async def close(self) -> None:
         pass
