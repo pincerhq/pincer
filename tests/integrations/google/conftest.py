@@ -199,6 +199,15 @@ def mock_tasks_service(mock_factory):
     return svc
 
 
+@pytest.fixture(autouse=True)
+def _no_contacts_search_waits(monkeypatch):
+    """Skip the real warmup/retry sleeps of google__search_contacts."""
+    from pincer.integrations.google import tools_contacts
+
+    monkeypatch.setattr(tools_contacts, "_WARMUP_WAIT_SECONDS", 0)
+    monkeypatch.setattr(tools_contacts, "_RETRY_WAIT_SECONDS", 0)
+
+
 @pytest.fixture
 def mock_contacts_service(mock_factory):
     svc = _build_mock_service()

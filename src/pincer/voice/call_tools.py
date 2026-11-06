@@ -103,8 +103,9 @@ def make_memory_note(settings: Any, memory: BaseMemoryBackend | None) -> Any:
 
 def make_contact_lookup(settings: Any) -> Any:
     async def contact_lookup(name: str) -> str:
-        """Look up a phone contact by (partial) name in the user's phone contacts.
-        Returns name, number and category; never returns anything else about the user.
+        """Look up a phone contact by (partial) name in the user's local phone contacts
+        (not Google Contacts). Returns name, number and category; never returns anything
+        else about the user.
         """
         from pincer.services.voice import ContactsService
 
@@ -162,7 +163,11 @@ def register_call_tools(registry: ToolRegistry, settings: Any, memory: BaseMemor
     )
     registry.register(
         name="contact_lookup",
-        description="Look up a phone contact by (partial) name in the user's phone contacts.",
+        description=(
+            "Look up a phone contact by (partial) name in the user's local phone-contacts list."
+            " This does NOT search Google Contacts: an empty result only means the person is not in the"
+            " phone-contacts list, not that they don't exist or aren't a saved Google contact."
+        ),
         handler=make_contact_lookup(settings),
         parameters={
             "type": "object",

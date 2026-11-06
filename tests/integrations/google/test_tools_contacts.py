@@ -4,6 +4,9 @@ Tests for Contacts tools — covers all 5 bug-fixed tools.
 
 from __future__ import annotations
 
+import pytest
+
+from pincer.integrations.google import tools_contacts
 from pincer.integrations.google.tools_contacts import (
     google__get_contact,
     google__list_contacts,
@@ -96,9 +99,9 @@ async def test_search_contacts_warmup_before_real_search(mock_factory, mock_cont
     mock_contacts_service.people().searchContacts.reset_mock()
     await google__search_contacts(mock_factory, query="test")
     calls = mock_contacts_service.people().searchContacts.call_args_list
-    assert len(calls) >= 2, "warmup + real search = at least 2 calls"
-    warmup_query = calls[0][1].get("query", "MISSING")
-    assert warmup_query == "", f"first call must be warmup with empty query, got: {warmup_query!r}"
+    queries = [c[1].get("query", "MISSING") for c in calls]
+    # warmup, search, then (empty result) warmup + retry
+    assert queries == ["", "test", "", "test"]
 
 
 async def test_search_contacts_returns_results(mock_factory, mock_contacts_service):
@@ -109,8 +112,10 @@ async def test_search_contacts_returns_results(mock_factory, mock_contacts_servi
 
 async def test_search_contacts_no_results(mock_factory, mock_contacts_service):
     mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [_person()]}
     result = await google__search_contacts(mock_factory, query="nobody")
-    assert "No contacts found" in result
+    assert 'No match in Google Contacts for "nobody"' in result
+    assert "not a saved contact" in result
 
 
 async def test_search_contacts_warmup_failure_is_nonfatal(mock_factory, mock_contacts_service):
@@ -127,6 +132,232 @@ async def test_search_contacts_warmup_failure_is_nonfatal(mock_factory, mock_con
     mock_contacts_service.people().searchContacts().execute.side_effect = execute_side_effect
     result = await google__search_contacts(mock_factory, query="John")
     assert "John Doe" in result
+
+
+async def test_search_contacts_retries_after_empty_result(mock_factory, mock_contacts_service):
+    responses = iter([{}, {"results": []}, {}, {"results": [{"person": _person()}]}])
+    mock_contacts_service.people().searchContacts().execute.side_effect = lambda: next(responses)
+    result = await google__search_contacts(mock_factory, query="John")
+    assert "Found 1 contact(s) in Google Contacts" in result
+    assert "John Doe" in result
+
+
+async def test_search_contacts_no_retry_when_first_search_hits(mock_factory, mock_contacts_service):
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _person()}]}
+    mock_contacts_service.people().searchContacts.reset_mock()
+    await google__search_contacts(mock_factory, query="John")
+    assert len(mock_contacts_service.people().searchContacts.call_args_list) == 2
+
+
+async def test_search_contacts_clamps_page_size(mock_factory, mock_contacts_service):
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _person()}]}
+    mock_contacts_service.people().searchContacts.reset_mock()
+    await google__search_contacts(mock_factory, query="John", max_results=100)
+    sizes = [c[1]["pageSize"] for c in mock_contacts_service.people().searchContacts.call_args_list if c[1]["query"]]
+    assert sizes == [30]
+
+
+async def test_search_contacts_result_labels_source(mock_factory, mock_contacts_service):
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _person()}]}
+    result = await google__search_contacts(mock_factory, query="John")
+    assert "in Google Contacts" in result
+
+
+def _jane():
+    return _person(
+        resource_name="people/c42",
+        display_name="Jané Doe",
+        given="Jané",
+        family="Doe",
+        email="jane.doe@example.com",
+        phone="+49 170 1234567",
+        org="Initech",
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Jane",
+        "Doe",
+        "jane doe",
+        "Jané",
+        "JANE",
+        "doe jane",
+        "J Doe",
+        "jane.d",
+        "jane.doe@exa",
+        "jane.doe@example.com",
+        "Initech",
+        "1234567",
+        "0170 1234567",
+        "+49 170 1234567",
+    ],
+)
+async def test_search_contacts_falls_back_to_connections(mock_factory, mock_contacts_service, query):
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {
+        "connections": [_person(display_name="John Roe", family="Roe"), _jane()],
+    }
+    result = await google__search_contacts(mock_factory, query=query)
+    assert "Found 1 contact(s) in Google Contacts" in result
+    assert "people/c42" in result
+    assert "people/c1\n" not in result
+
+
+@pytest.mark.parametrize("query", ["com", "example", "oe", "ane", "1234", "jane.doe@other.org", "doe@example.com"])
+async def test_search_contacts_fallback_rejects_loose_matches(mock_factory, mock_contacts_service, query):
+    """Email domains, mid-word substrings and short phone fragments match nobody (review on #351)."""
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [_jane()]}
+    result = await google__search_contacts(mock_factory, query=query)
+    assert "people/c42" not in result
+
+
+async def test_search_contacts_fallback_phone_needs_suffix(mock_factory, mock_contacts_service):
+    """Digits in the middle of a number are not a match; the end of the number is."""
+    person = _jane()
+    person["phoneNumbers"] = [{"value": "+1 (555) 123-4567"}]
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [person]}
+    assert "people/c42" not in await google__search_contacts(mock_factory, query="555123")
+    assert "people/c42" in await google__search_contacts(mock_factory, query="555 123 4567")
+
+
+@pytest.mark.parametrize(
+    ("stored", "query", "matches"),
+    [
+        ("123456", "+44 20 7946 0123456", False),  # short stored number is not the tail of a longer query
+        ("123456", "123456", True),
+        ("0170 1234567", "+49 170 1234567", True),  # national number + country code in the query
+        ("170 1234567", "0049 170 1234567", True),
+    ],
+)
+async def test_search_contacts_fallback_reverse_phone_suffix_needs_national_number(
+    mock_factory, mock_contacts_service, stored, query, matches
+):
+    person = _jane()
+    person["phoneNumbers"] = [{"value": stored}]
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [person]}
+    result = await google__search_contacts(mock_factory, query=query)
+    assert ("people/c42" in result) is matches
+
+
+@pytest.mark.parametrize("query", ["", "   ", "?!."])
+async def test_search_contacts_rejects_empty_query(mock_factory, mock_contacts_service, query):
+    mock_contacts_service.people().searchContacts.reset_mock()
+    mock_contacts_service.people().connections().list.reset_mock()
+    result = await google__search_contacts(mock_factory, query=query)
+    assert result.startswith("Error:")
+    assert "empty" in result
+    assert not mock_contacts_service.people().searchContacts.call_args_list
+    assert not mock_contacts_service.people().connections().list.call_args_list
+
+
+@pytest.mark.parametrize("query", ["王", "a", "123", "@example.com"])
+async def test_search_contacts_short_query_still_asks_google(mock_factory, mock_contacts_service, query):
+    """Short or domain-only queries go to searchContacts; Google's hits are returned (review on #351)."""
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _jane()}]}
+    result = await google__search_contacts(mock_factory, query=query)
+    assert "Found 1 contact(s) in Google Contacts" in result
+
+
+@pytest.mark.parametrize(
+    ("query", "reason"),
+    [
+        ("王", "at least 2 characters"),
+        ("a", "at least 2 characters"),
+        ("123", "at least 6 digits"),
+        ("@example.com", "email domains alone"),
+    ],
+)
+async def test_search_contacts_short_query_skips_fallback_without_verdict(
+    mock_factory, mock_contacts_service, query, reason
+):
+    """When Google finds nothing, a query too vague for the local scan is not scanned and gets no "not saved"."""
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().searchContacts.reset_mock()
+    mock_contacts_service.people().connections().list.reset_mock()
+    result = await google__search_contacts(mock_factory, query=query)
+    assert [c[1]["query"] for c in mock_contacts_service.people().searchContacts.call_args_list] == [
+        "",
+        query,
+        "",
+        query,
+    ]
+    assert not mock_contacts_service.people().connections().list.call_args_list
+    assert not result.startswith("Error:")
+    assert reason in result
+    assert "Cannot confirm" in result
+    assert "not a saved contact" not in result
+
+
+async def test_search_contacts_fallback_page_cap_is_not_a_negative(mock_factory, mock_contacts_service):
+    """Hitting the page cap with pages left must not claim the person isn't saved (review on #351)."""
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {
+        "connections": [_person(display_name="John Roe", family="Roe")],
+        "nextPageToken": "more",
+    }
+    mock_contacts_service.people().connections().list.reset_mock()
+    result = await google__search_contacts(mock_factory, query="Jane")
+    assert len(mock_contacts_service.people().connections().list.call_args_list) == tools_contacts._FALLBACK_MAX_PAGES
+    assert "Cannot confirm" in result
+    assert "not a saved contact" not in result
+
+
+async def test_search_contacts_fallback_uses_connections_fields(mock_factory, mock_contacts_service):
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": []}
+    mock_contacts_service.people().connections().list.reset_mock()
+    await google__search_contacts(mock_factory, query="Jane")
+    kw = mock_contacts_service.people().connections().list.call_args[1]
+    assert kw["resourceName"] == "people/me"
+    assert kw["pageSize"] == 1000
+    assert "nicknames" in kw["personFields"]
+    assert "resourceName" not in kw["personFields"]
+
+
+async def test_search_contacts_fallback_pages_through_connections(mock_factory, mock_contacts_service):
+    pages = iter(
+        [
+            {"connections": [_person()], "nextPageToken": "p2"},
+            {"connections": [_jane()]},
+        ]
+    )
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.side_effect = lambda: next(pages)
+    mock_contacts_service.people().connections().list.reset_mock()
+    result = await google__search_contacts(mock_factory, query="Jane")
+    assert "people/c42" in result
+    tokens = [c[1].get("pageToken") for c in mock_contacts_service.people().connections().list.call_args_list]
+    assert tokens == [None, "p2"]
+
+
+async def test_search_contacts_fallback_matches_nickname(mock_factory, mock_contacts_service):
+    person = _jane()
+    person["nicknames"] = [{"value": "JJ"}]
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [person]}
+    result = await google__search_contacts(mock_factory, query="jj")
+    assert "people/c42" in result
+
+
+async def test_search_contacts_fallback_respects_max_results(mock_factory, mock_contacts_service):
+    people = [_person(resource_name=f"people/c{i}", display_name=f"Jane {i}", given="Jane") for i in range(5)]
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": people}
+    result = await google__search_contacts(mock_factory, query="Jane", max_results=2)
+    assert "Found 2 contact(s)" in result
+
+
+async def test_search_contacts_fallback_failure_is_not_a_negative(mock_factory, mock_contacts_service):
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.side_effect = RuntimeError("boom")
+    result = await google__search_contacts(mock_factory, query="Jane")
+    assert "Cannot confirm" in result
+    assert "not a saved contact" not in result
 
 
 # ── get_contact ───────────────────────────────────────────────────────────────

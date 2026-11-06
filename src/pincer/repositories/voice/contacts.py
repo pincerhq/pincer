@@ -25,16 +25,19 @@ class ContactRepository(BaseRepository[PhoneContact, str]):
     async def search_by_name(self, fragment: str, limit: int = 5) -> Sequence[tuple[str, str, str | None]]:
         """Case-insensitive name search: (name, number, category).
 
+        The fragment is split into words (on spaces and commas) and every word
+        must occur in the name, so "Jane Doe" also finds "Doe, Jane".
         `lower()` on both sides rather than SQLite's `COLLATE NOCASE`, which
         Postgres does not have; same result for the names this matches. Only
         the three columns the caller shows are read — a contact's notes are
         not a phone number, and a hand-made table without the other columns
         still works.
         """
-        needle = f"%{fragment.lower()}%"
+        tokens = fragment.replace(",", " ").lower().split() or [""]
+        lowered = func.lower(col(PhoneContact.name))
         stmt = (
             select(PhoneContact.name, PhoneContact.phone_number, PhoneContact.category)
-            .where(func.lower(col(PhoneContact.name)).like(needle))
+            .where(*(lowered.like(f"%{token}%") for token in tokens))
             .order_by(func.lower(col(PhoneContact.name)))
             .limit(limit)
         )

@@ -11,6 +11,11 @@ Relevant memories are already retrieved automatically and injected into
 your system prompt as a "Relevant memories about this user" block on every
 turn — you usually don't need to do anything extra to use them.
 
+Memories are recalled conversation text, not verified facts. Don't present
+them as coming from Contacts, Calendar or another system: when the user asks
+whether someone is a saved contact, search that system and say where each
+detail came from.
+
 ## When to explicitly search memory
 
 Reach for an explicit memory search tool (if one is registered — look for

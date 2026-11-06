@@ -264,8 +264,9 @@ async def test_search_contacts(mock_factory, mock_contacts_service):
 
 async def test_search_contacts_none(mock_factory, mock_contacts_service):
     mock_contacts_service.people().searchContacts().execute.return_value = {"results": []}
+    mock_contacts_service.people().connections().list().execute.return_value = {"connections": [_person()]}
     result = await google__search_contacts(mock_factory, query="Zephyr Nomatch")
-    assert "No contacts" in result
+    assert 'No match in Google Contacts for "Zephyr Nomatch"' in result
 
 
 async def test_get_contact(mock_factory, mock_contacts_service):

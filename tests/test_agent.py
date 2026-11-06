@@ -16,6 +16,7 @@ from pincer.core.agent import (
     _CALL_PLACED_THEN_FAILED_TEXT,
     _HEADLESS_LLM_ERROR_TEXT,
     _SESSION_CLEARED_TEXT,
+    MEMORY_BLOCK_HEADER,
     Agent,
     AgentResponse,
     StreamChunk,
@@ -1616,7 +1617,7 @@ async def test_unavailable_memories_warn_and_still_reply(
     assert "Hello! I'm Pincer." in result.text
     memory.search_text.assert_awaited()
     system_prompt = mock_llm.complete.call_args.kwargs["system"]
-    assert "[Relevant memories about this user]" not in system_prompt
+    assert MEMORY_BLOCK_HEADER not in system_prompt
 
     warnings = [
         r
@@ -2094,6 +2095,19 @@ async def test_a_turn_with_memory_still_reads_and_writes_it(
     assert "the user's private fact" in mock_llm.complete.call_args.kwargs["system"]
 
 
+async def test_memory_block_is_labelled_unverified(settings, mock_llm, session_manager, cost_tracker, tool_registry):
+    """Recalled memories are marked as conversation text, not facts checked against Contacts (#343)."""
+    memory = AsyncMock()
+    memory.search_text.return_value = [SimpleNamespace(content="Jane Doe is a friend")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    await agent.handle_message("user1", "test", "who is Jane?")
+
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert f"{MEMORY_BLOCK_HEADER}\n- Jane Doe is a friend" in system_prompt
+    assert "not verified against Contacts" in MEMORY_BLOCK_HEADER
+
+
 class _RecordingSelector(ToolSelector):
     """A ToolSelector that keeps the names in ``keeps`` (one set per call, the last repeats) and
     records each call's query and recent tools."""
@@ -2157,6 +2171,50 @@ async def test_tool_selector_sets_tools_and_prompt_hints(settings, mock_llm, ses
     assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
     assert "make_phone_call tool" not in kwargs["system"]
     assert "google__" not in kwargs["system"]
+
+
+def _registry_with(*names: str) -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def noop() -> str:
+        return "ok"
+
+    for name in names:
+        registry.register(name=name, description=name, handler=noop, parameters={"type": "object", "properties": {}})
+    return registry
+
+
+@pytest.mark.parametrize("tool", ["google__search_contacts", "google__list_contacts", "google__get_contact"])
+async def test_contacts_tools_get_contacts_hint(settings, mock_llm, session_manager, cost_tracker, tool):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _registry_with(tool))
+    await agent.handle_message("user1", "test", "find Jane")
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert "Google Contacts — always verify and name the source" in system_prompt
+    assert "first name alone and the last name alone" in system_prompt
+
+
+async def test_phone_call_hint_names_available_lookups(settings, mock_llm, session_manager, cost_tracker):
+    agent = Agent(
+        settings,
+        mock_llm,
+        session_manager,
+        cost_tracker,
+        _registry_with("make_phone_call", "google__search_contacts", "contact_lookup"),
+    )
+    await agent.handle_message("user1", "test", "call Jane")
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert (
+        "look the number up first with google__search_contacts (Google Contacts),"
+        " then contact_lookup (saved phone contacts), then call."
+    ) in system_prompt
+
+
+async def test_phone_call_hint_without_lookup_tools(settings, mock_llm, session_manager, cost_tracker):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _registry_with("make_phone_call"))
+    await agent.handle_message("user1", "test", "call Jane")
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert "make_phone_call tool" in system_prompt
+    assert "look the number up" not in system_prompt
 
 
 async def test_without_selector_prompt_hints_follow_registry(settings, mock_llm, session_manager, cost_tracker):
@@ -2409,7 +2467,7 @@ async def test_stored_preferred_language_reaches_the_prompt_without_a_search_hit
     memory.list_memories.assert_awaited_with(user_id="user1", category="profile", limit=1)
     system_prompt = mock_llm.complete.call_args.kwargs["system"]
     assert "[User preferred language: uk]" in system_prompt
-    assert "[Relevant memories about this user]" not in system_prompt
+    assert MEMORY_BLOCK_HEADER not in system_prompt
 
 
 async def test_no_preferred_language_line_without_a_profile(
