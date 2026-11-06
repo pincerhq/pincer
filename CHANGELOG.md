@@ -37,7 +37,7 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   silently, with four times the voice limit, capped at the voice model's own
   output limit (at most 128000). A voice model whose output limit Pincer does
   not know (a custom deployment name, a dated OpenAI snapshot, Opus 4.1) is
-  still retried silently, but only up to 8192 tokens, and only if that is
+  still retried silently, but only up to 4096 tokens, and only if that is
   above the voice limit. If the retry doesn't help, or there is none, the caller hears the "could you say
   that again?" line and the call continues. A reply cut off mid-sentence ends the turn with what was said.
 - Cut-off voice turns have their own counter: the third in a row plays the

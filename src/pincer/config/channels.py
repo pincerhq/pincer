@@ -269,7 +269,7 @@ class ChannelSettings(BaseModel):
         le=VOICE_MAX_RESPONSE_TOKENS_CEILING,
         description="max_tokens per voice request: the worst-case silence before a reply, shared by the "
         "model's thinking and its speech. A request cut off before saying anything is retried once at 4x, "
-        "up to the model's own output limit (8192 when that limit is unknown).",
+        "up to the model's own output limit (4096 when that limit is unknown).",
     )
     # Voice turns only (issue #345): translated per model like PINCER_REASONING_EFFORT /
     # PINCER_THINKING, which an empty value inherits. Not used by the call's

@@ -99,7 +99,7 @@ _CLAUDE_FAMILY_ALIASES = {"mythos": "fable"}
 # opus-4-5, sonnet-4-5 and haiku-4-5 64K; opus-4-6, 4-7, 4-8, 5, 5-5, sonnet-4-6, 5, 5-5,
 # haiku-5-5, fable-5-1 128K (models overview). Versions below the first row of a family
 # (Opus 4 / 4.1 and Sonnet 4: no model page found on 2026-11-05, so not confirmed; the
-# pre-4 names) are unknown, and the voice retry caps them at 8192.
+# pre-4 names) are unknown, and the voice retry caps them at 4096.
 _CLAUDE_MAX_OUTPUT_TOKENS: dict[str, tuple[tuple[tuple[int, int], int], ...]] = {
     "opus": (((4, 5), 64_000), ((4, 6), 128_000)),
     "sonnet": (((4, 5), 64_000), ((4, 6), 128_000)),

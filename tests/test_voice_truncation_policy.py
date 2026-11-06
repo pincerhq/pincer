@@ -104,8 +104,8 @@ def test_a_model_whose_limit_is_unknown_is_retried_at_a_conservative_cap(streame
     ("max_tokens", "retried", "expected"),
     [
         (1024, False, TruncationDecision(RETRY, 4096)),
-        (4096, False, TruncationDecision(RETRY, 8192)),  # 4x would be 16384: capped at 8192
-        (8192, False, TruncationDecision(RAISE)),  # the cap is not above the request
+        (2048, False, TruncationDecision(RETRY, 4096)),  # 4x would be 8192: capped at 4096
+        (4096, False, TruncationDecision(RAISE)),  # the cap is not above the request
         (1024, True, TruncationDecision(RAISE)),  # a retry is not retried
     ],
 )

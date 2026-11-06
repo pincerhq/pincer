@@ -13,9 +13,9 @@ from pincer.config.channels import VOICE_MAX_RESPONSE_TOKENS_CEILING
 
 # A silent retry gets this many times the configured voice limit (capped)
 RETRY_TOKEN_FACTOR = 4
-# The cap of that retry for a model whose own output limit is unknown: below any current
-# model's limit, so it is safe to ask for
-UNKNOWN_LIMIT_RETRY_CAP = 8192
+# The cap of that retry for a model whose own output limit is unknown: older Azure
+# deployments and local models cap output at 4096, so that is the most it is safe to ask for
+UNKNOWN_LIMIT_RETRY_CAP = 4096
 
 
 class TruncationAction(StrEnum):
