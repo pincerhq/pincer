@@ -5,6 +5,11 @@ from typing import Annotated
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import NoDecode
 
+from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtime)
+    ReasoningEffortOverride,
+    ThinkingOverride,
+)
+
 
 class ToolSettings(BaseModel):
     # ── Shell ─────────────────────────────────────────────
@@ -95,6 +100,17 @@ class ToolSettings(BaseModel):
             "also picks the provider, overriding summary_provider. A claude-* id on an OpenAI-wire provider "
             "is ignored in favour of that provider's own model"
         ),
+    )
+    # Summaries only (issue #345): translated per model, against the summary model, like
+    # PINCER_REASONING_EFFORT / PINCER_THINKING, which an empty value inherits.
+    summary_reasoning_effort: ReasoningEffortOverride = Field(
+        default="",
+        description="Effort for conversation summaries ('' = PINCER_REASONING_EFFORT, 'default' = send nothing)",
+    )
+    summary_thinking: ThinkingOverride = Field(
+        default="",
+        description="Thinking for conversation summaries: adaptive | disabled "
+        "('' = PINCER_THINKING, 'default' = send nothing)",
     )
     summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
 

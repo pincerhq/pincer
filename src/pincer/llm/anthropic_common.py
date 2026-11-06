@@ -18,6 +18,8 @@ from anthropic.types import (
     TextBlock,
     ToolUseBlock,
 )
+from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
+from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
@@ -26,16 +28,21 @@ from pincer.llm.base import (
     LLMResponse,
     MessageRole,
     StreamTurnEvent,
+    ThinkingBlock,
     ToolCall,
 )
-from pincer.llm.model_params import anthropic_accepts_sampling
+from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
+
+# Content block types that carry a response's thinking
+_THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -65,6 +72,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
+        # Read once: every request of a turn sends the same effort/thinking
+        # (changing them mid-conversation invalidates the prompt cache).
+        self._reasoning_effort = settings.reasoning_effort
+        self._thinking = settings.thinking
 
     def _maybe_cache_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Prompt caching (Sprint 5, T5.4): the tool schemas are the largest
@@ -87,6 +98,9 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None,
         temperature: float | None,
         system: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> dict[str, Any]:
         """Request kwargs shared by complete / stream / stream_turn."""
         model = model or self._default_model
@@ -95,14 +109,25 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             "max_tokens": max_tokens or self._default_max_tokens,
             "messages": self._convert_messages(messages),
         }
-        if anthropic_accepts_sampling(model):
-            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
-        else:
+        # A per-call value (voice, summary) replaces the global setting; None keeps it.
+        reasoning = resolve_and_warn(
+            ReasoningWire.ANTHROPIC,
+            model,
+            self._reasoning_effort if reasoning_effort is None else reasoning_effort,
+            self._thinking if thinking is None else thinking,
+            pinned=pinned,
+        )
+        if not anthropic_accepts_sampling(model):
             logger.debug("Dropping temperature: %s does not accept it", model)
+        elif reasoning.drop_temperature:
+            logger.debug("Dropping temperature: %s does not accept it with thinking on", model)
+        else:
+            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
         if system:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs.update(reasoning.fragment)
         return kwargs
 
     async def complete(
@@ -113,8 +138,13 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs = self._build_kwargs(
+            messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking, pinned
+        )
 
         try:
             response: Message = await self._call_with_retry(kwargs)
@@ -127,27 +157,6 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result.provider = self._provider_name
         return result
 
-    async def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-    ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
-
-        try:
-            async with self._client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    yield text
-        except anthropic.RateLimitError as e:
-            retry_after = float(e.response.headers.get("retry-after", "5"))
-            raise LLMRateLimitError(retry_after=retry_after) from e
-        except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
-
     async def stream_turn(
         self,
         messages: list[LLMMessage],
@@ -156,13 +165,13 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): text deltas arrive as
         the model writes; the final message (tool calls + usage) comes from the
-        same stream — tools are never lost, nothing is generated twice.
-        ``reasoning_effort`` is an OpenAI knob and is ignored here."""
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        same stream — tools are never lost, nothing is generated twice."""
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
@@ -235,19 +244,34 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 continue
 
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                content_blocks: list[dict[str, Any]] = []
-                if msg.content:
-                    content_blocks.append({"type": "text", "text": msg.content})
-                for tc in msg.tool_calls:
-                    content_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.arguments,
-                        }
-                    )
+                content_blocks = self._replayed_blocks(msg)
+                if content_blocks is None:
+                    # Rebuilt: thinking first, then text, then tool_use. Only a message
+                    # edited since its response (or built without the recorded order)
+                    # gets here; a response's own order is never changed.
+                    content_blocks = [self._thinking_to_api(b) for b in msg.thinking_blocks]
+                    if msg.content:
+                        content_blocks.append({"type": "text", "text": msg.content})
+                    for tc in msg.tool_calls:
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": tc.arguments,
+                            }
+                        )
                 result.append({"role": "assistant", "content": content_blocks})
+                continue
+
+            # Thinking with no text after it is not sent: an assistant message
+            # holding only thinking is never valid.
+            if msg.role == MessageRole.ASSISTANT and msg.thinking_blocks and msg.content:
+                replayed = self._replayed_blocks(msg)
+                if replayed is None:
+                    thinking_first = [self._thinking_to_api(b) for b in msg.thinking_blocks]
+                    replayed = [*thinking_first, {"type": "text", "text": msg.content}]
+                result.append({"role": "assistant", "content": replayed})
                 continue
 
             # Standard text or text+image
@@ -271,6 +295,30 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 result.append({"role": msg.role.value, "content": msg.content})
 
         return self._validate_api_messages(result)
+
+    @staticmethod
+    def _replayed_blocks(msg: LLMMessage) -> list[dict[str, Any]] | None:
+        """The message's content blocks in the order its response generated them, or None.
+
+        The recorded order is used only while it still describes the message: the same
+        tool calls and the same text. A message edited since (a tool call dropped by pair
+        repair) is rebuilt instead.
+        """
+        blocks = msg.content_blocks
+        if not (blocks and msg.thinking_blocks):
+            return None
+        tool_ids = [b["id"] for b in blocks if b["type"] == "tool_use"]
+        text = "\n".join(b["text"] for b in blocks if b["type"] == "text")
+        if tool_ids != [tc.id for tc in msg.tool_calls] or text != msg.content:
+            return None
+        return [dict(b) for b in blocks]
+
+    @staticmethod
+    def _thinking_to_api(block: ThinkingBlock) -> dict[str, Any]:
+        """A thinking block exactly as the response carried it."""
+        if block.kind == "redacted_thinking":
+            return {"type": "redacted_thinking", "data": block.data}
+        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
 
     @staticmethod
     def _validate_api_messages(
@@ -308,7 +356,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                         for b in blocks
                         if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in result_ids)
                     ]
-                    if not surviving:
+                    if all(_is_thinking(b) for b in surviving):  # thinking alone is never sent
                         logger.debug("Dropping assistant message: all tool_use blocks orphaned")
                         continue
                     if len(surviving) != len(blocks):
@@ -372,18 +420,27 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         """Parse Anthropic Message into unified LLMResponse."""
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        thinking_blocks: list[ThinkingBlock] = []
 
+        ordered: list[dict[str, Any]] = []
         for block in response.content:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
+                ordered.append({"type": "text", "text": block.text})
+            elif isinstance(block, SDKThinkingBlock):
+                thinking_blocks.append(ThinkingBlock("thinking", thinking=block.thinking, signature=block.signature))
+                ordered.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+            elif isinstance(block, SDKRedactedThinkingBlock):
+                thinking_blocks.append(ThinkingBlock("redacted_thinking", data=block.data))
+                ordered.append({"type": "redacted_thinking", "data": block.data})
             elif isinstance(block, ToolUseBlock):
-                tool_calls.append(
-                    ToolCall(
-                        id=block.id,
-                        name=block.name,
-                        arguments=dict(block.input) if isinstance(block.input, dict) else {},
-                    )
+                call = ToolCall(
+                    id=block.id,
+                    name=block.name,
+                    arguments=dict(block.input) if isinstance(block.input, dict) else {},
                 )
+                tool_calls.append(call)
+                ordered.append({"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments})
 
         return LLMResponse(
             content="\n".join(text_parts),
@@ -395,4 +452,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             # Cache visibility (Sprint 5): whether the tools-prefix cache hit
             cache_read_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
             cache_write_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
+            thinking_blocks=thinking_blocks,
+            # The order matters only to the thinking the next request returns
+            content_blocks=ordered if thinking_blocks else [],
         )
+
+
+def _is_thinking(block: Any) -> bool:
+    return isinstance(block, dict) and block.get("type") in _THINKING_TYPES

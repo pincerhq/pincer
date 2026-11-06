@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import anthropic_sse as sse
 import pytest
 from pydantic import SecretStr
 
@@ -26,15 +27,29 @@ class ScriptedProvider(BaseLLMProvider):
         self.turns = list(turns)
         self.calls: list[dict[str, Any]] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
         raise AssertionError("voice turns must not use complete()")
 
-    async def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        raise AssertionError("voice turns must not use stream()")
-        yield ""  # pragma: no cover
-
     async def stream_turn(
-        self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None, reasoning_effort=None
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
     ):
         self.calls.append(
             {
@@ -44,6 +59,7 @@ class ScriptedProvider(BaseLLMProvider):
                 "system": system,
                 "messages": list(messages),
                 "reasoning_effort": reasoning_effort,
+                "thinking": thinking,
             }
         )
         for event in self.turns.pop(0):
@@ -56,11 +72,21 @@ class ScriptedProvider(BaseLLMProvider):
 class CompleteOnlyProvider(BaseLLMProvider):
     """Exercises the base-class stream_turn fallback (complete()-backed)."""
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        return LLMResponse(content="Full answer at once.", model="m", input_tokens=10, output_tokens=5)
+    calls: list[dict[str, Any]]
 
-    async def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        yield ""  # pragma: no cover
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+    ):
+        self.calls = [*getattr(self, "calls", []), {"reasoning_effort": reasoning_effort, "thinking": thinking}]
+        return LLMResponse(content="Full answer at once.", model="m", input_tokens=10, output_tokens=5)
 
     async def close(self) -> None:
         pass
@@ -90,6 +116,11 @@ async def _collect(agent: Agent, **kwargs):
 
 
 class TestBaseStreamTurnFallback:
+    async def test_fallback_passes_effort_and_thinking_to_complete(self):
+        provider = CompleteOnlyProvider()
+        _ = [e async for e in provider.stream_turn(messages=[], reasoning_effort="low", thinking="disabled")]
+        assert provider.calls == [{"reasoning_effort": "low", "thinking": "disabled"}]
+
     async def test_complete_backed_fallback(self):
         provider = CompleteOnlyProvider()
         events = [e async for e in provider.stream_turn(messages=[])]
@@ -101,6 +132,7 @@ class TestBaseStreamTurnFallback:
 class TestStreamVoiceTurn:
     async def test_text_streamed_and_persisted(self, settings, session_manager, cost_tracker, tool_registry):
         settings.voice_turn_model = ""  # hermetic: a developer .env may set an override
+        settings.voice_max_response_tokens = 220  # hermetic: the default and a developer .env vary
         provider = ScriptedProvider([_text_turn("Gerne. ", "Einen Moment bitte.")])
         agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
 
@@ -154,7 +186,17 @@ class TestStreamVoiceTurn:
         and the fresh per-call session must not trigger the onboarding question."""
 
         class BlockingProvider(ScriptedProvider):
-            async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+            async def complete(
+                self,
+                messages,
+                tools=None,
+                model=None,
+                max_tokens=None,
+                temperature=None,
+                system=None,
+                reasoning_effort=None,
+                thinking=None,
+            ):
                 self.calls.append({"messages": list(messages)})
                 return LLMResponse(content="Gern auf Deutsch.", model="m", input_tokens=1, output_tokens=1)
 
@@ -763,3 +805,142 @@ class TestRepeatedToolCalls:
         await agent.handle_message("u1", "telegram", "Termine?")
 
         assert calls == ["google__list_events", "google__list_events"]
+
+
+# ── Voice effort and thinking (issue #345) ───────────────────
+
+
+def _reasoning_settings(settings, **values):
+    """Settings for a real Anthropic provider on Haiku 5.5, voice on the default provider."""
+    return settings.model_copy(
+        update={
+            "default_provider": "anthropic",
+            "default_model": "claude-haiku-5-5",
+            "anthropic_model": "",
+            "fallback_providers": [],
+            "voice_turn_model": "",
+            "voice_max_response_tokens": 220,
+            "reasoning_effort": "",
+            "thinking": "",
+            "voice_reasoning_effort": "",
+            "voice_thinking": "",
+            **values,
+        }
+    )
+
+
+class TestVoiceReasoningOverrides:
+    async def _voice_request(self, settings, session_manager, cost_tracker, tool_registry) -> dict:
+        async with sse.ScriptedAnthropic(settings, [([sse.text("Hi there.")], "end_turn")]) as llm:
+            agent = Agent(settings, llm.provider, session_manager, cost_tracker, tool_registry)
+            await _collect(agent, user_id="u1", channel="voice", text="Hi")
+        assert len(llm.requests) == 1
+        return llm.requests[0]
+
+    async def test_voice_turn_sends_the_voice_values(self, settings, session_manager, cost_tracker, tool_registry):
+        settings = _reasoning_settings(
+            settings,
+            reasoning_effort="high",
+            thinking="adaptive",
+            voice_reasoning_effort="low",
+            voice_thinking="disabled",
+        )
+        body = await self._voice_request(settings, session_manager, cost_tracker, tool_registry)
+
+        assert body["output_config"] == {"effort": "low"}
+        assert body["thinking"] == {"type": "disabled"}
+
+    async def test_empty_voice_values_inherit_the_global_ones(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        settings = _reasoning_settings(settings, reasoning_effort="medium", thinking="disabled")
+        body = await self._voice_request(settings, session_manager, cost_tracker, tool_registry)
+
+        assert body["output_config"] == {"effort": "medium"}
+        assert body["thinking"] == {"type": "disabled"}
+
+    async def test_nothing_set_sends_neither(self, settings, session_manager, cost_tracker, tool_registry):
+        settings = _reasoning_settings(settings)
+        body = await self._voice_request(settings, session_manager, cost_tracker, tool_registry)
+
+        assert body["model"] == "claude-haiku-5-5"
+        assert "output_config" not in body
+        assert "thinking" not in body
+
+    async def test_provider_prefixed_voice_model_gets_the_voice_values(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """voice_turn_model="azure:claude-haiku-5-5" runs on a separately built provider: it gets them too."""
+        from pincer.llm.router import LLMRouter
+
+        settings = _reasoning_settings(
+            settings,
+            default_model="claude-sonnet-4-5",
+            anthropic_compatible_provider="azure",
+            anthropic_compatible_base_url="https://example.invalid/anthropic",
+            voice_turn_model="azure:claude-haiku-5-5",
+            reasoning_effort="high",
+            voice_reasoning_effort="low",
+            voice_thinking="disabled",
+        )
+        async with sse.ScriptedAnthropic(settings, [([sse.text("Hi there.")], "end_turn")]) as azure:
+            router = LLMRouter.__new__(LLMRouter)  # skip __init__ (env-based)
+            router._settings = settings
+            router._pool = {"anthropic": ScriptedProvider([])}
+            _init_router_memos(router)
+
+            def fake_get_provider(name, model_hint=""):
+                assert (name, model_hint) == ("azure", "claude-haiku-5-5")
+                return azure.provider
+
+            router.get_provider = fake_get_provider  # type: ignore[method-assign]
+            agent = Agent(settings, router, session_manager, cost_tracker, tool_registry)
+            await _collect(agent, user_id="u1", channel="voice", text="Hi")
+
+        assert len(azure.requests) == 1
+        assert azure.requests[0]["model"] == "claude-haiku-5-5"
+        assert azure.requests[0]["output_config"] == {"effort": "low"}
+        assert azure.requests[0]["thinking"] == {"type": "disabled"}
+
+    async def test_language_guard_regeneration_keeps_the_chat_settings(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """The call's regeneration goes through the chat loop on the call's session (Q15c): global values."""
+        settings = _reasoning_settings(
+            settings,
+            reasoning_effort="high",
+            thinking="adaptive",
+            voice_reasoning_effort="low",
+            voice_thinking="disabled",
+        )
+        replies = [([sse.text("Hallo.")], "end_turn"), ([sse.text("Hello.")], "end_turn")]
+        async with sse.ScriptedAnthropic(settings, replies) as llm:
+            agent = Agent(settings, llm.provider, session_manager, cost_tracker, tool_registry)
+            await _collect(agent, user_id="+15550001", channel="voice", text="Hi", session_key="call-CA1")
+            await agent.handle_message(
+                user_id="+15550001", channel="voice", text="Reply in English.", session_key="call-CA1"
+            )
+
+        voice, regeneration = llm.requests
+        assert (voice["output_config"], voice["thinking"]) == ({"effort": "low"}, {"type": "disabled"})
+        assert regeneration["messages"][0]["content"] == "Hi"  # the call's own session
+        assert (regeneration["output_config"], regeneration["thinking"]) == (
+            {"effort": "high"},
+            {"type": "adaptive"},
+        )
+
+    async def test_chat_turns_ignore_the_voice_settings(self, settings, session_manager, cost_tracker, tool_registry):
+        settings = _reasoning_settings(
+            settings,
+            reasoning_effort="high",
+            thinking="adaptive",
+            voice_reasoning_effort="low",
+            voice_thinking="disabled",
+        )
+        async with sse.ScriptedAnthropic(settings, [([sse.text("Hello.")], "end_turn")]) as llm:
+            agent = Agent(settings, llm.provider, session_manager, cost_tracker, tool_registry)
+            await agent.handle_message(user_id="u1", channel="telegram", text="Hi")
+
+        assert len(llm.requests) == 1
+        assert llm.requests[0]["output_config"] == {"effort": "high"}
+        assert llm.requests[0]["thinking"] == {"type": "adaptive"}

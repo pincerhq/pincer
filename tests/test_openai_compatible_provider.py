@@ -294,6 +294,26 @@ async def test_complete_parses_tool_calls(openai_settings):
 
 
 @pytest.mark.asyncio
+async def test_complete_reports_length_stop_as_max_tokens(openai_settings):
+    """OpenAI's `length` is the same cut-off as Anthropic's `max_tokens` (issue #345)."""
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    fake_response = _make_chat_completion("A long answer that got cut o")
+    fake_response.choices[0].finish_reason = "length"
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=fake_response)
+        mock_cls.return_value = mock_client
+
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
+        result = await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.stop_reason == "max_tokens"
+    assert result.truncated
+
+
+@pytest.mark.asyncio
 async def test_connection_error_includes_provider_name(openai_settings):
     import openai
 
@@ -343,25 +363,7 @@ def _make_async_iterable(chunks):
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_content(openai_settings):
-    from pincer.llm.openai_common import OpenAICompatibleProvider
-
-    chunks = [_make_stream_chunk("Hello"), _make_stream_chunk(" world"), _make_stream_chunk(None)]
-
-    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create = _make_async_iterable(chunks)
-        mock_client.close = AsyncMock()
-        mock_cls.return_value = mock_client
-
-        provider = OpenAICompatibleProvider(openai_settings, "openai")
-        result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
-
-    assert result == ["Hello", " world"]
-
-
-@pytest.mark.asyncio
-async def test_stream_with_tools(openai_settings):
+async def test_stream_turn_with_tools(openai_settings):
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
     chunks = [_make_stream_chunk("ok")]
@@ -382,13 +384,13 @@ async def test_stream_with_tools(openai_settings):
 
         provider = OpenAICompatibleProvider(openai_settings, "openai")
         tools = [{"name": "my_tool", "description": "a tool", "input_schema": {"type": "object", "properties": {}}}]
-        result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)]
+        events = [e async for e in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)]
 
-    assert result == ["ok"]
+    assert [e.text for e in events if e.response is None] == ["ok"]
 
 
 @pytest.mark.asyncio
-async def test_stream_rate_limit_error(openai_settings):
+async def test_stream_turn_rate_limit_error(openai_settings):
     from pincer.exceptions import LLMRateLimitError
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
@@ -403,12 +405,12 @@ async def test_stream_rate_limit_error(openai_settings):
 
         provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
 @pytest.mark.asyncio
-async def test_stream_api_status_error(openai_settings):
+async def test_stream_turn_api_status_error(openai_settings):
     from pincer.exceptions import LLMError
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
@@ -423,7 +425,7 @@ async def test_stream_api_status_error(openai_settings):
 
         provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMError, match="500"):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
@@ -567,7 +569,7 @@ class TestStreamTurn:
             _ = [e async for e in getattr(provider, method)(messages=[], **call_kwargs)]
         return create.call_args.kwargs
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     @pytest.mark.parametrize("model", ["gpt-5-mini", "o3-mini", "gpt-6-luna", "gpt-6.1-sol"])
     async def test_reasoning_model_kwargs_normalized(self, method, model):
         provider = self._provider()
@@ -576,7 +578,7 @@ class TestStreamTurn:
         assert "max_tokens" not in kwargs
         assert "temperature" not in kwargs  # reasoning models accept only default
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     @pytest.mark.parametrize("model", ["gpt-4o-mini", "grok-3"])
     async def test_non_reasoning_model_kwargs_untouched(self, method, model):
         provider = self._provider()
@@ -588,7 +590,160 @@ class TestStreamTurn:
     async def test_stream_flags_set_by_caller(self):
         provider = self._provider()
         assert "stream" not in await self._sent_kwargs(provider, "complete")
-        kwargs = await self._sent_kwargs(provider, "stream")
-        assert kwargs["stream"] is True and "stream_options" not in kwargs
         kwargs = await self._sent_kwargs(provider, "stream_turn")
         assert kwargs["stream"] is True and kwargs["stream_options"] == {"include_usage": True}
+
+
+def test_history_conversion_ignores_thinking_blocks():
+    """Thinking blocks are Anthropic's; an OpenAI-wire request carries none of them (issue #345)."""
+    from pincer.llm.base import ThinkingBlock, ToolCall
+    from pincer.llm.openai_common import convert_messages_to_openai
+
+    def history(thinking_blocks: list[ThinkingBlock]) -> list[LLMMessage]:
+        return [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(
+                role=MessageRole.ASSISTANT,
+                content="Checking.",
+                tool_calls=[ToolCall(id="call_1", name="t", arguments={})],
+                thinking_blocks=thinking_blocks,
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="call_1"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="Done.", thinking_blocks=thinking_blocks),
+        ]
+
+    blocks = [
+        ThinkingBlock("thinking", thinking="SECRET-THOUGHT-7f3a", signature="SIG-7f3a"),
+        ThinkingBlock("redacted_thinking", data="REDACTED-7f3a"),
+    ]
+    converted = convert_messages_to_openai(history(blocks), system="sys")
+
+    assert converted == convert_messages_to_openai(history([]), system="sys")
+    assert "7f3a" not in repr(converted)
+
+
+# ── Effort and thinking settings (issue #345) ─────────────────────
+
+_HI = [LLMMessage(role=MessageRole.USER, content="hi")]
+_COMPLETION = {
+    "id": "c",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "x",
+    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+}
+_CHUNK = {
+    "id": "c",
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "x",
+    "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+}
+
+
+def _reasoning_settings(model: str, **update):
+    """OpenAI settings with the effort/thinking fields pinned (the developer's env never leaks in)."""
+    from pincer.config import Settings
+
+    base = Settings(
+        openai_api_key="sk-test",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="openai",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    return base.model_copy(update={"openai_model": model, "reasoning_effort": "", "thinking": "", **update})
+
+
+async def _sent_body(settings, method: str = "complete", **call_kwargs) -> dict:
+    """The request body the provider really sends for one call of `method`."""
+    import json
+
+    import httpx
+    from openai import AsyncOpenAI
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    bodies: list[dict] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body.get("stream"):
+            sse = f"data: {json.dumps(_CHUNK)}\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
+        return httpx.Response(200, json=_COMPLETION)
+
+    provider = OpenAICompatibleProvider(settings, "openai")
+    await provider._client.close()
+    provider._client = AsyncOpenAI(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    try:
+        if method == "complete":
+            await provider.complete(_HI, **call_kwargs)
+        else:
+            _ = [e async for e in getattr(provider, method)(_HI, **call_kwargs)]
+    finally:
+        await provider.close()
+    assert len(bodies) == 1
+    return bodies[0]
+
+
+class TestReasoningSettings:
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_global_effort_reaches_the_request(self, method):
+        body = await _sent_body(_reasoning_settings("gpt-5.4-mini", reasoning_effort="low"), method)
+
+        assert body["model"] == "gpt-5.4-mini"
+        assert body.get("reasoning_effort") == "low"
+
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_per_call_effort_replaces_the_global_one_and_none_keeps_it(self, method):
+        settings = _reasoning_settings("gpt-5.4-mini", reasoning_effort="high")
+
+        replaced = await _sent_body(settings, method, reasoning_effort="low")
+        kept = await _sent_body(settings, method, reasoning_effort=None)
+
+        assert (replaced.get("reasoning_effort"), kept.get("reasoning_effort")) == ("low", "high")
+
+    async def test_an_empty_per_call_effort_sends_nothing(self):
+        """`""` is a value (send nothing), unlike None (use the global setting)."""
+        settings = _reasoning_settings("gpt-5.4-mini", reasoning_effort="high", thinking="disabled")
+
+        body = await _sent_body(settings, "stream_turn", reasoning_effort="", thinking="")
+
+        assert body["model"] == "gpt-5.4-mini"
+        assert "reasoning_effort" not in body
+
+    async def test_disabled_turns_reasoning_off_on_gpt_5_1(self):
+        body = await _sent_body(_reasoning_settings("gpt-5.1", thinking="disabled"), "complete")
+
+        assert body.get("reasoning_effort") == "none"
+
+    async def test_a_dropped_setting_warns_once_per_model_and_value(self, caplog):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="pincer.llm.model_params")
+        settings = _reasoning_settings("deploy-warn-once-345", reasoning_effort="low")  # unique: the log is global
+
+        for _ in range(2):
+            assert "reasoning_effort" not in await _sent_body(settings, "complete")
+
+        lines = [
+            r.levelno
+            for r in caplog.records
+            if r.getMessage() == "Not sending reasoning_effort=low to deploy-warn-once-345: unrecognised model"
+        ]
+        assert lines == [logging.WARNING, logging.DEBUG]
+
+    async def test_empty_settings_on_an_unrecognised_model_log_nothing(self, caplog):
+        import logging
+
+        caplog.set_level(logging.DEBUG, logger="pincer.llm.model_params")
+
+        body = await _sent_body(_reasoning_settings("deploy-benign-345"), "complete")
+
+        assert body["model"] == "deploy-benign-345"
+        assert "reasoning_effort" not in body
+        assert not [r for r in caplog.records if "Not sending" in r.getMessage()]

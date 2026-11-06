@@ -11,10 +11,15 @@ import base64
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
+
+# The stop reason every provider reports when the output hit max_tokens
+STOP_REASON_MAX_TOKENS = "max_tokens"
 
 
 class MessageRole(StrEnum):
@@ -36,6 +41,20 @@ class ImageContent:
         return cls(data=base64.b64encode(raw).decode(), media_type=media_type)
 
 
+@dataclass(frozen=True, slots=True)
+class ThinkingBlock:
+    """One thinking or redacted-thinking block of a response, verbatim.
+
+    Kept only within the agent turn that produced it, and never saved, shown
+    or logged: the content fields stay out of the repr.
+    """
+
+    kind: Literal["thinking", "redacted_thinking"]
+    thinking: str = field(default="", repr=False)  # kind == "thinking"
+    signature: str = field(default="", repr=False)  # kind == "thinking"
+    data: str = field(default="", repr=False)  # kind == "redacted_thinking" (encrypted)
+
+
 @dataclass(slots=True)
 class LLMMessage:
     """Unified message format for all providers."""
@@ -45,6 +64,12 @@ class LLMMessage:
     images: list[ImageContent] = field(default_factory=list)
     tool_call_id: str | None = None  # For tool_result messages
     tool_calls: list[ToolCall] = field(default_factory=list)  # From assistant
+    # The response's thinking, sent back on the turn's later requests; never in to_dict
+    thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
+    # The response's content blocks as the API sent them, in order (thinking, text, tool_use
+    # interleaved). Set only when the response had thinking, so the next request can replay it
+    # as it was; never in to_dict.
+    content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal dict for session storage (JSON-serializable)."""
@@ -105,10 +130,26 @@ class LLMResponse:
     # Prompt-cache usage (Sprint 5, T5.4) — 0 when the provider doesn't report it
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
+    # Every content block in the order the API sent them; filled only when there is thinking
+    content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
+
+    @property
+    def truncated(self) -> bool:
+        """The output stopped on max_tokens: its last block may be incomplete."""
+        return self.stop_reason == STOP_REASON_MAX_TOKENS
+
+
+def strip_thinking(messages: list[LLMMessage]) -> None:
+    """Drop every message's thinking blocks, in place (end of an agent turn)."""
+    for message in messages:
+        if message.thinking_blocks:
+            message.thinking_blocks = []
+            message.content_blocks = []
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,24 +173,14 @@ class BaseLLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
-        """Send messages and get a complete response."""
-        ...
+        """Send messages and get a complete response.
 
-    @abstractmethod
-    def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-    ) -> AsyncIterator[str]:
-        """Stream text tokens as they arrive.
-
-        Declared as a plain method returning an async iterator (not ``async def``)
-        so async-generator implementations type-check cleanly as overrides.
+        ``pinned`` marks an internal structured call whose effort and thinking are fixed by
+        Pincer, not the operator's: a value the model can't take is then logged at DEBUG only.
         """
         ...
 
@@ -161,24 +192,33 @@ class BaseLLMProvider(ABC):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """Stream ONE turn: text tokens as they arrive, then the complete
         LLMResponse (with tool calls and usage) as the final event.
 
-        Unlike ``stream()`` this never loses tool calls, and unlike
-        ``complete()`` the caller sees text before generation finishes —
-        the voice latency pipeline (Sprint 5) depends on both properties.
+        Unlike ``complete()`` the caller sees text before generation finishes, and it
+        never loses tool calls: the voice latency pipeline (Sprint 5) and the chat
+        reply both rely on that.
 
-        ``reasoning_effort`` is a hint for reasoning models; providers that
-        have no such knob ignore it.
+        ``reasoning_effort`` and ``thinking`` (on every method) override the
+        global settings for this call; ``None`` means the global setting.
+        Providers translate them per model and drop what a model can't take.
 
         Default implementation falls back to ``complete()`` (one text event
         with the full content, then the response) so every provider works;
         providers with true incremental APIs override it.
         """
         response = await self.complete(
-            messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, system=system
+            messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
         )
         if response.content:
             yield StreamTurnEvent(text=response.content)

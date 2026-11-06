@@ -1,10 +1,70 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validator
 from pydantic_settings import NoDecode
+
+# "" = not set: nothing is sent and the model runs on its own default.
+ReasoningEffort = Literal["", "low", "medium", "high", "xhigh", "max"]
+ThinkingMode = Literal["", "adaptive", "disabled"]
+
+
+# The voice and summary overrides. "" inherits the global setting; "default" sends nothing, so the
+# model runs on its own default even when the global setting is set. "none" is refused: on OpenAI
+# it is itself a reasoning level (no reasoning), so it would be read as "off" and mean the opposite.
+NO_SETTING = "default"
+_NONE_REJECTED = (
+    f"'none' is not accepted: use '{NO_SETTING}' to send nothing (the model's own default), "
+    "or 'disabled' to turn thinking off."
+)
+
+
+def _reject_none(value: object) -> object:
+    if isinstance(value, str) and value.strip().lower() == "none":
+        raise ValueError(_NONE_REJECTED)
+    return value
+
+
+ReasoningEffortOverride = Annotated[
+    Literal["", "default", "low", "medium", "high", "xhigh", "max"], BeforeValidator(_reject_none)
+]
+ThinkingOverride = Annotated[Literal["", "default", "adaptive", "disabled"], BeforeValidator(_reject_none)]
+
+
+def call_effort(override: ReasoningEffortOverride) -> ReasoningEffort | None:
+    """The `reasoning_effort` argument of one call: None = the provider's global setting,
+    "" = send nothing."""
+    if override == "":
+        return None
+    return "" if override == NO_SETTING else cast("ReasoningEffort", override)
+
+
+def call_thinking(override: ThinkingOverride) -> ThinkingMode | None:
+    """The `thinking` argument of one call, as `call_effort`."""
+    if override == "":
+        return None
+    return "" if override == NO_SETTING else cast("ThinkingMode", override)
+
+
+def effective_effort(override: ReasoningEffortOverride, global_: ReasoningEffort) -> ReasoningEffort:
+    """The effort a call carries: what `call_effort` says, with the global setting for None."""
+    value = call_effort(override)
+    return global_ if value is None else value
+
+
+def effective_thinking(override: ThinkingOverride, global_: ThinkingMode) -> ThinkingMode:
+    """The thinking a call carries, as `effective_effort`."""
+    value = call_thinking(override)
+    return global_ if value is None else value
+
+
+# Internal JSON-extraction calls (call outcome, thread summary merge, onboarding answer) pin
+# these whatever the global settings are: their output limit is small and fixed, so a model
+# that thinks past it would cut the JSON off. The resolver drops what a model can't take.
+STRUCTURED_CALL_EFFORT: ReasoningEffort = "low"
+STRUCTURED_CALL_THINKING: ThinkingMode = "disabled"
 
 
 class LLMProvider(StrEnum):
@@ -87,6 +147,16 @@ class LLMSettings(BaseModel):
     )
     max_tokens: int = Field(default=8192, ge=1, le=128000)
     temperature: float = Field(default=0.5, ge=0.0, le=2.0)
+    reasoning_effort: ReasoningEffort = Field(
+        default="",
+        description="Effort for every request ('' = the model's default). Translated per model: stepped down "
+        "where a level is unsupported, dropped (warned once) where the model takes no effort",
+    )
+    thinking: ThinkingMode = Field(
+        default="",
+        description="'adaptive' turns thinking on, 'disabled' off, where the model allows it ('' = the model's "
+        "default). Thinking counts toward max_tokens",
+    )
 
     agent_name: str = Field(default="Pincer", description="Agent display name")
     system_prompt: str = Field(

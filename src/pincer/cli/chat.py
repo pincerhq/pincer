@@ -51,6 +51,7 @@ async def _chat_loop() -> None:
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
     await cost_tracker.initialize()
 
+    from pincer.config.llm import call_effort, call_thinking
     from pincer.llm.router import LLMRouter
 
     llm_router = LLMRouter()
@@ -78,6 +79,9 @@ async def _chat_loop() -> None:
                 session_manager=session_mgr,
                 summary_model=summary_model,
                 threshold=settings.summary_threshold,
+                # Empty means the global setting (the provider reads None that way), `none` sends nothing
+                reasoning_effort=call_effort(settings.summary_reasoning_effort),
+                thinking=call_thinking(settings.summary_thinking),
             )
 
     from pincer.tools.approval import ApprovalPolicy

@@ -1,7 +1,7 @@
 """
 Single entry point for LLM provider construction + failover.
 
-`LLMRouter` is itself a `BaseLLMProvider`: `complete()`/`stream()` try the primary
+`LLMRouter` is itself a `BaseLLMProvider`: `complete()`/`stream_turn()` try the primary
 provider and, on failure, fall over to a randomly-ordered failover provider. All
 provider construction lives here — `cli.py` and `api/_deps.py` only call
 `LLMRouter().get_llm()` / `.get_summarizer()`.
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
 
     # (provider name, model hint) → the provider, or why it can't be built
     BuildFn = Callable[[str, str], BaseLLMProvider | str]
@@ -352,13 +353,24 @@ class LLMRouter(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
         """Primary first, then failovers in random order. An explicit ``model``
         goes to the primary only: failovers use their own model (see ``stream_turn``)."""
         primary, failovers = self._primary_and_failovers()
         try:
             return await primary.complete(
-                messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, system=system
+                messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                reasoning_effort=reasoning_effort,
+                thinking=thinking,
+                pinned=pinned,
             )
         except (LLMError, LLMRateLimitError) as primary_err:
             for provider in random.sample(failovers, len(failovers)):
@@ -370,47 +382,13 @@ class LLMRouter(BaseLLMProvider):
                         max_tokens=max_tokens,
                         temperature=temperature,
                         system=system,
+                        reasoning_effort=reasoning_effort,
+                        thinking=thinking,
+                        pinned=pinned,
                     )
                 except (LLMError, LLMRateLimitError) as err:
                     logger.warning("Failover provider failed: %s — trying next", err)
                     continue
-            raise primary_err
-
-    async def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-    ) -> AsyncIterator[str]:
-        """Failover until the first token; an explicit ``model`` goes to the primary only."""
-        primary, failovers = self._primary_and_failovers()
-        ordered = [primary, *random.sample(failovers, len(failovers))]
-        primary_err: Exception | None = None
-        for index, provider in enumerate(ordered):
-            started = False
-            try:
-                async for token in provider.stream(
-                    messages,
-                    tools=tools,
-                    model=model if index == 0 else None,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system,
-                ):
-                    started = True
-                    yield token
-                return
-            except (LLMError, LLMRateLimitError) as err:
-                if index == 0:
-                    primary_err = err
-                if started:
-                    raise  # mid-stream failure propagates — no mid-stream failover
-                logger.warning("Stream provider %d failed before first token: %s — trying next", index, err)
-                continue
-        if primary_err is not None:
             raise primary_err
 
     async def stream_turn(
@@ -421,9 +399,10 @@ class LLMRouter(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
-        """Same failover discipline as stream(): providers are tried in order
+        """Failover discipline: providers are tried in order
         until one produces its first event; a mid-stream failure propagates.
 
         An explicit ``model`` is the primary's id (e.g. a voice turn's
@@ -443,6 +422,7 @@ class LLMRouter(BaseLLMProvider):
                     temperature=temperature,
                     system=system,
                     reasoning_effort=reasoning_effort,
+                    thinking=thinking,
                 ):
                     started = True
                     yield event

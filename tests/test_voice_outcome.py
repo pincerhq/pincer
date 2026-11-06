@@ -30,8 +30,27 @@ class FakeLLM:
         self._raises = raises
         self.calls: list[dict] = []
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
-        self.calls.append({"messages": messages, "system": system, "temperature": temperature})
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+        pinned=False,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "system": system,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "pinned": pinned,
+            }
+        )
         if self._raises:
             raise RuntimeError("LLM down")
         return SimpleNamespace(content=self._content)
@@ -397,6 +416,15 @@ class TestExtractOutcome:
 
     async def test_unparseable_returns_none(self):
         assert await extract_outcome(FakeLLM("garbage"), "AGENT: hello", "") is None
+
+    async def test_extraction_leaves_room_for_thinking(self):
+        """A model that thinks spends output tokens before the JSON (issue #345, Q18)."""
+        llm = FakeLLM(_json())
+
+        assert await extract_outcome(llm, "AGENT: hello", "") is not None
+
+        assert [call["max_tokens"] for call in llm.calls] == [2048]
+        assert [call["pinned"] for call in llm.calls] == [True]  # the pin is not the operator's setting
 
     async def test_empty_transcript_returns_none(self):
         llm = FakeLLM(_json())

@@ -24,7 +24,18 @@ class FakeLLM:
         self._content = content
         self._raises = raises
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+        pinned=False,
+    ):
         if self._raises:
             raise RuntimeError("LLM down")
         return SimpleNamespace(content=self._content)

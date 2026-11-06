@@ -220,11 +220,11 @@ def _kwargs(settings: Settings, model: str) -> dict:
 
 
 def test_reasoning_model_gets_completion_tokens_and_no_temperature():
-    kwargs = _kwargs(_azure_default(), "gpt-5-mini")
+    kwargs = _kwargs(_azure_default(reasoning_effort="", thinking=""), "gpt-5-mini")
     assert kwargs["max_completion_tokens"] == 220
     assert "max_tokens" not in kwargs
     assert "temperature" not in kwargs
-    assert "reasoning_effort" not in kwargs  # never on a plain (non-voice) request
+    assert "reasoning_effort" not in kwargs  # the global setting is empty here
 
 
 class _Sent(Exception):
@@ -235,7 +235,8 @@ async def _stream_turn_kwargs(model: str, effort: str | None) -> dict:
     """The request kwargs stream_turn sends (the request itself is cut short)."""
     from unittest.mock import AsyncMock
 
-    provider = OpenAICompatibleProvider(_azure_default(), "azure")
+    # Global effort/thinking pinned empty: the developer's .env must not leak in
+    provider = OpenAICompatibleProvider(_azure_default(reasoning_effort="", thinking=""), "azure")
     create = AsyncMock(side_effect=_Sent)
     provider._client.chat.completions.create = create  # type: ignore[method-assign]
     with pytest.raises(_Sent):
@@ -301,12 +302,6 @@ async def test_explicit_model_goes_to_the_primary_only():
                 raise LLMError("down")
             return router_mod.LLMResponse(content="ok", model=model or "", provider="")
 
-        async def stream(self, messages, tools=None, model=None, **kw):  # type: ignore[override]
-            self.models.append(model)
-            if self.fail:
-                raise LLMError("down")
-            yield "ok"
-
         async def stream_turn(self, messages, tools=None, model=None, **kw):  # type: ignore[override]
             self.models.append(model)
             if self.fail:
@@ -322,10 +317,9 @@ async def test_explicit_model_goes_to_the_primary_only():
     router._pool = {"azure": azure, "anthropic": anthropic}
 
     [e async for e in router.stream_turn([], model="gpt-5-mini")]
-    [t async for t in router.stream([], model="gpt-5-mini")]
     await router.complete([], model="gpt-5-mini")
-    assert azure.models == ["gpt-5-mini"] * 3
-    assert anthropic.models == [None] * 3
+    assert azure.models == ["gpt-5-mini"] * 2
+    assert anthropic.models == [None] * 2
 
 
 def test_router_and_dashboard_agree_after_another_hint_built_the_provider():
@@ -402,6 +396,11 @@ def test_wire_safe_model(name, model, expected):
         ("o1-preview", False),
         ("gpt-4o-mini", False),
         ("voice-fast", False),  # an Azure deployment name that doesn't look like a model id
+        # Responses API only (v1/chat/completions not supported), per their model pages (#345)
+        ("o1-pro", False),
+        ("o3-pro", False),
+        ("gpt-5-pro", False),
+        ("gpt-5.2-pro", False),
     ],
 )
 def test_openai_accepts_reasoning_effort(model, accepted):
@@ -411,11 +410,18 @@ def test_openai_accepts_reasoning_effort(model, accepted):
 
 
 async def test_effort_not_sent_to_a_model_that_rejects_it(caplog):
+    """Off the allow-list: nothing sent, one WARNING per model and value (#345 raised it from INFO)."""
     caplog.set_level(logging.INFO, logger="pincer.llm.openai_common")
     for _ in range(2):
         assert "reasoning_effort" not in await _stream_turn_kwargs("gpt-5-chat-latest", "low")
-    skipped = [r for r in caplog.records if "not sent" in r.getMessage() and r.levelno == logging.INFO]
-    assert len(skipped) == 1  # once per model id
+    skipped = [r for r in caplog.records if "Not sending reasoning_effort=low to gpt-5-chat-latest" in r.getMessage()]
+    assert [r.levelno for r in skipped] == [logging.WARNING]  # once per model and value
+
+
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+async def test_levels_above_high_step_to_xhigh_on_gpt_5_2_plus(effort):
+    """gpt-5.2+ takes xhigh; max steps down to it (#345)."""
+    assert (await _stream_turn_kwargs("gpt-5.4-mini", effort))["reasoning_effort"] == "xhigh"
 
 
 # ── LogOncePerKey ────────────────────────────────────────────────────────────

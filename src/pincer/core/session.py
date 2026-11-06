@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from pincer.llm.base import LLMMessage, MessageRole
+from pincer.llm.base import LLMMessage, MessageRole, strip_thinking
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import SessionService
@@ -81,6 +81,9 @@ class Session:
     # Set once an eviction's save has failed and been warned about, so a
     # session that keeps failing is not logged with a traceback every request.
     _eviction_failed: bool = field(default=False, init=False, repr=False, compare=False)
+    # Set while an agent turn runs on the session: its history must not change
+    # under the turn's thinking blocks, so add_message does not trim until the turn ends.
+    _turn_open: bool = field(default=False, init=False, repr=False, compare=False)
 
     # ── Onboarding (legacy flags, see ONBOARDING_COMPLETE_KEY) ──────────
 
@@ -118,14 +121,22 @@ class SessionManager:
     @asynccontextmanager
     async def turn(
         self, user_id: str, channel: str, session_key: str | None = None, pincer_user_id: str = ""
-    ) -> AsyncIterator[None]:
-        """Serialize turns and pin their session while they are active or queued."""
+    ) -> AsyncIterator[Session]:
+        """Run one agent turn on the session: serialize turns, pin the session while they are
+        active or queued, and yield it. The turn opens on entry and ends on exit (see
+        `begin_turn` / `end_turn`), so an entry point cannot forget either."""
         key = _resolve_session_key(user_id, channel, pincer_user_id, session_key)
         lock, users = self._turn_locks.get(key, (asyncio.Lock(), 0))
         self._turn_locks[key] = (lock, users + 1)
         try:
             async with lock:
-                yield
+                session = await self.get_or_create(user_id, channel, pincer_user_id, session_key)
+                self.begin_turn(session)
+                try:
+                    yield session
+                finally:
+                    # However the turn ended: drop its thinking and images, trim, save
+                    await self.end_turn(session)
         finally:
             current_lock, users = self._turn_locks[key]
             if users == 1:
@@ -218,28 +229,11 @@ class SessionManager:
         return session
 
     async def add_message(self, session: Session, message: LLMMessage) -> None:
-        """Add a message to session and auto-trim if needed."""
+        """Add a message to session and auto-trim if needed (at the turn's end while a turn is open)."""
         session.messages.append(message)
         session.updated_at = time.time()
-
-        if len(session.messages) > self._max_messages:
-            system_msgs = [m for m in session.messages if m.role == MessageRole.SYSTEM]
-            other_msgs = [m for m in session.messages if m.role != MessageRole.SYSTEM]
-            start = len(other_msgs) - (self._max_messages - len(system_msgs))
-            # Never start on a tool_result — it would be orphaned without its tool_use
-            while start < len(other_msgs) and other_msgs[start].role == MessageRole.TOOL_RESULT:
-                start += 1
-            # Never leave an orphaned tool_use right before the trim boundary
-            if start > 0 and other_msgs[start - 1].role == MessageRole.ASSISTANT and other_msgs[start - 1].tool_calls:
-                start -= 1
-            trimmed = other_msgs[start:]
-            session.messages = system_msgs + trimmed
-            logger.debug(
-                "Session %s trimmed to %d messages",
-                session.session_id,
-                len(session.messages),
-            )
-
+        if not session._turn_open:
+            self._trim(session)
         await self._persist(session)
 
     async def append_note(self, session_key: str, user_id: str, channel: str, text: str) -> None:
@@ -249,9 +243,53 @@ class SessionManager:
         A trailing assistant message is fine: the Anthropic serializer merges
         consecutive same-role messages, and OpenAI accepts them as they are.
         """
-        async with self.turn(user_id, channel, session_key=session_key):
-            session = await self.get_or_create(user_id, channel, session_key=session_key)
+        async with self.turn(user_id, channel, session_key=session_key) as session:
             await self.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+
+    def begin_turn(self, session: Session) -> None:
+        """An agent turn starts: until `end_turn`, adding messages never trims the session."""
+        session._turn_open = True
+
+    async def end_turn(self, session: Session) -> None:
+        """An agent turn ended (however it ended): drop what lives only within a turn
+        (thinking blocks, images), then trim to the cap and save if trimming cut anything.
+
+        A failed save is logged, not raised, so it never hides the turn's own error;
+        the trimmed session stays cached and the next save writes it.
+        """
+        strip_thinking(session.messages)
+        for message in session.messages:
+            if message.images:
+                message.images = []
+        session._turn_open = False
+        if not self._trim(session):
+            return
+        try:
+            await self._persist(session)
+        except Exception:
+            logger.warning("Could not save session %s after trimming it at the end of a turn", session.session_id)
+
+    def _trim(self, session: Session) -> bool:
+        """Cut the oldest messages past the cap, keeping tool pairs whole. True if anything was cut."""
+        if len(session.messages) <= self._max_messages:
+            return False
+        system_msgs = [m for m in session.messages if m.role == MessageRole.SYSTEM]
+        other_msgs = [m for m in session.messages if m.role != MessageRole.SYSTEM]
+        start = len(other_msgs) - (self._max_messages - len(system_msgs))
+        # Never start on a tool_result — it would be orphaned without its tool_use
+        while start < len(other_msgs) and other_msgs[start].role == MessageRole.TOOL_RESULT:
+            start += 1
+        # Never leave an orphaned tool_use right before the trim boundary
+        if start > 0 and other_msgs[start - 1].role == MessageRole.ASSISTANT and other_msgs[start - 1].tool_calls:
+            start -= 1
+        trimmed = other_msgs[start:]
+        session.messages = system_msgs + trimmed
+        logger.debug(
+            "Session %s trimmed to %d messages",
+            session.session_id,
+            len(session.messages),
+        )
+        return True
 
     async def save(self, session: Session) -> None:
         """Write the session out after its messages were changed in place."""

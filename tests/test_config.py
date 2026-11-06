@@ -241,3 +241,103 @@ def test_parse_slack_allowlist_empty() -> None:
 def test_parse_slack_allowlist_list_passthrough() -> None:
     result = Settings.parse_slack_allowlist(["U123", "U456"])
     assert result == ["U123", "U456"]
+
+
+def test_voice_max_response_tokens_defaults_to_1024(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Room for thinking by default (issue #345). Immune to the environment and to a developer's .env."""
+    monkeypatch.delenv("PINCER_VOICE_MAX_RESPONSE_TOKENS", raising=False)
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    assert s.voice_max_response_tokens == 1024
+
+
+@pytest.mark.parametrize(("value", "accepted"), [(31, False), (32, True), (128_000, True), (128_001, False)])
+def test_voice_max_response_tokens_bounds(tmp_path: Path, value: int, accepted: bool) -> None:
+    def build() -> Settings:
+        return Settings(
+            anthropic_api_key="sk-test",  # type: ignore[arg-type]
+            data_dir=tmp_path,
+            voice_max_response_tokens=value,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+
+    if accepted:
+        assert build().voice_max_response_tokens == value
+    else:
+        with pytest.raises(ValidationError, match="voice_max_response_tokens"):
+            build()
+
+
+def _settings_from_env(tmp_path: Path) -> Settings:
+    return Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+
+def test_effort_and_thinking_default_to_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset sends nothing, so the model keeps its own default (issue #345)."""
+    monkeypatch.delenv("PINCER_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("PINCER_THINKING", raising=False)
+    s = _settings_from_env(tmp_path)
+    assert (s.reasoning_effort, s.thinking) == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("env", "value"),
+    [
+        *(("PINCER_REASONING_EFFORT", v) for v in ("", "low", "medium", "high", "xhigh", "max")),
+        *(("PINCER_THINKING", v) for v in ("", "adaptive", "disabled")),
+        *(("PINCER_VOICE_REASONING_EFFORT", v) for v in ("", "low", "medium", "high", "xhigh", "max")),
+        *(("PINCER_VOICE_THINKING", v) for v in ("", "adaptive", "disabled")),
+        *(("PINCER_SUMMARY_REASONING_EFFORT", v) for v in ("", "low", "medium", "high", "xhigh", "max")),
+        *(("PINCER_SUMMARY_THINKING", v) for v in ("", "adaptive", "disabled")),
+    ],
+)
+def test_effort_and_thinking_accept_their_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str, value: str
+) -> None:
+    monkeypatch.setenv(env, value)
+    s = _settings_from_env(tmp_path)
+    assert getattr(s, env.removeprefix("PINCER_").lower()) == value
+
+
+@pytest.mark.parametrize(
+    ("env", "value"),
+    [
+        ("PINCER_REASONING_EFFORT", "minimal"),  # an OpenAI level, not a setting value
+        ("PINCER_REASONING_EFFORT", "LOW"),
+        ("PINCER_THINKING", "enabled"),
+        ("PINCER_THINKING", "on"),
+        ("PINCER_VOICE_THINKING", "enabled"),
+        ("PINCER_VOICE_THINKING", "on"),
+        ("PINCER_SUMMARY_REASONING_EFFORT", "minimal"),
+        ("PINCER_SUMMARY_REASONING_EFFORT", "LOW"),
+        ("PINCER_SUMMARY_THINKING", "enabled"),
+        ("PINCER_SUMMARY_THINKING", "on"),
+    ],
+)
+def test_effort_and_thinking_reject_other_values_at_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str, value: str
+) -> None:
+    monkeypatch.setenv(env, value)
+    with pytest.raises(ValidationError, match=env.removeprefix("PINCER_").lower()):
+        _settings_from_env(tmp_path)
+
+
+def test_voice_thinking_defaults_to_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset inherits PINCER_THINKING (issue #345)."""
+    monkeypatch.delenv("PINCER_VOICE_THINKING", raising=False)
+    assert _settings_from_env(tmp_path).voice_thinking == ""
+
+
+def test_summary_effort_and_thinking_default_to_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset inherits PINCER_REASONING_EFFORT / PINCER_THINKING (issue #345)."""
+    monkeypatch.delenv("PINCER_SUMMARY_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("PINCER_SUMMARY_THINKING", raising=False)
+    s = _settings_from_env(tmp_path)
+    assert (s.summary_reasoning_effort, s.summary_thinking) == ("", "")

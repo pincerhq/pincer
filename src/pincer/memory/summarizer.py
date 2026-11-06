@@ -15,12 +15,15 @@ from typing import TYPE_CHECKING
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
 
 if TYPE_CHECKING:
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
     from pincer.core.session import Session, SessionManager
     from pincer.llm.base import BaseLLMProvider
     from pincer.memory.base import BaseMemoryBackend
 
 logger = logging.getLogger(__name__)
 
+# Room for a model that thinks before it writes the summary (issue #345, Q17)
+_SUMMARY_MAX_TOKENS = 2048
 _SUMMARIZE_PROMPT = (
     "You are a conversation summarizer. Summarize the following conversation "
     "into a concise paragraph capturing the key topics, decisions, facts, and "
@@ -39,12 +42,18 @@ class Summarizer:
         session_manager: SessionManager,
         summary_model: str | None = None,
         threshold: int = 20,
+        *,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory_store
         self._sessions = session_manager
         self._summary_model = summary_model
         self._threshold = threshold
+        # The summary settings; None means the provider's global setting
+        self._reasoning_effort = reasoning_effort
+        self._thinking = thinking
 
     async def maybe_summarize(self, session: Session) -> bool:
         """
@@ -121,9 +130,11 @@ class Summarizer:
             response: LLMResponse = await self._llm.complete(
                 messages=[summary_request],
                 model=self._summary_model,
-                max_tokens=500,
+                max_tokens=_SUMMARY_MAX_TOKENS,
                 temperature=0.3,
                 system=_SUMMARIZE_PROMPT,
+                reasoning_effort=self._reasoning_effort,
+                thinking=self._thinking,
             )
             return response.content.strip()
         except Exception:

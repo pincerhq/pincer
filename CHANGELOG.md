@@ -9,6 +9,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### LLM: effort and thinking settings, thinking kept within a turn, cut-off responses handled safely (#345)
+
+A model response that stops on its output limit (`max_tokens`) may end in a
+tool call whose input is incomplete. Such a call is never run, on any channel.
+
+- The tool calls of a response cut off by `max_tokens` are not executed, and
+  the cut-off turn is not saved to the session. Chat turns fail with an LLM
+  error (`LLMOutputTruncatedError`) instead; a scheduled action returns its
+  usual "couldn't complete" message. A cut-off reply that is only text is
+  still delivered as before.
+- A reply cut off by `max_tokens` before it wrote any text (a thinking model
+  spent the whole budget on thinking) is treated the same way instead of being
+  delivered as an empty message: chat and streaming chat fail with
+  `LLMOutputTruncatedError`, and a scheduled action returns its "couldn't
+  complete" message. Raise `PINCER_MAX_TOKENS` if it happens. In streaming chat
+  the check is made on the streamed reply, the one the user receives: it is
+  now generated with `stream_turn`, so its stop reason is known.
+- A chat turn that already placed a phone call does not fail when a later
+  response is cut off: it returns the placed call and replies that the call
+  was placed and its result will follow, as for any other error after a
+  placed call (#345 with #303).
+- OpenAI-wire providers report a `length` stop as `max_tokens`, like
+  Anthropic, so the same protection applies there. A streamed tool call whose
+  arguments were cut off is no longer run with empty arguments.
+- On a phone call, a request cut off before it said anything is retried once,
+  silently, with four times the voice limit, capped at the voice model's own
+  output limit (at most 128000). A voice model whose output limit Pincer does
+  not know (a custom deployment name, a dated OpenAI snapshot, Opus 4.1) is
+  still retried silently, but only up to 4096 tokens, and only if that is
+  above the voice limit. If the retry doesn't help, or there is none, the caller hears the "could you say
+  that again?" line and the call continues. A reply cut off mid-sentence ends the turn with what was said.
+- Cut-off voice turns have their own counter: the third in a row plays the
+  goodbye line and ends the call (reason `repeated_llm_truncations`). A good
+  turn resets it. Other errors keep their own two-in-a-row rule, and the two
+  counters don't affect each other.
+- Cut-off voice turns are tagged `output_truncated` in telemetry and logged as
+  one WARNING line without a traceback. Silent retries count in the call's
+  `retry_count` and as an `llm_retry` event.
+- `PINCER_VOICE_MAX_RESPONSE_TOKENS` now defaults to 1024 (was 220) and
+  accepts up to 128000 (was 1024). It is the worst-case silence before a
+  reply, shared by the model's thinking and its speech.
+- A Claude model's thinking (including redacted thinking) is now passed back
+  unchanged, among the response's other blocks in the order the model wrote
+  them, on every follow-up request within the same turn, so the model
+  keeps its reasoning across tool calls. It is dropped when the turn ends and
+  is never saved in the session, shown, spoken or logged.
+- Within a turn, the history sent before that thinking no longer changes: a
+  failover passes it on unchanged, images stay on every request of the turn
+  (dropped when it ends, never saved), and the session is trimmed to
+  `PINCER_MAX_SESSION_MESSAGES` when the turn ends (it may exceed the cap by one turn's messages until then). When a turn
+  does change its tools or history (a skill load re-selects tools, a tool-pair
+  repair, the streaming chat's final text request), the turn's thinking is
+  dropped before the next request.
+- New `PINCER_REASONING_EFFORT` (`low` | `medium` | `high` | `xhigh` | `max`)
+  and `PINCER_THINKING` (`adaptive` | `disabled`) set effort and thinking for
+  every request. Empty (the default) sends nothing, so the model runs on its
+  own defaults as before. Each value is translated for the
+  model requested: `xhigh` steps down to `high` on Opus 4.5 and 4.6, and `max`
+  on Opus 4.5. `adaptive` drops `PINCER_TEMPERATURE` on the models that
+  otherwise take it (Opus and Sonnet 4.6). `disabled` is sent only where the
+  model allows it (Haiku 5.5, Sonnet 5, Sonnet 5.5, Opus 5) and at effort
+  `high` or below. A value the model doesn't take, or any value for a model id
+  Pincer doesn't recognise (e.g. a custom deployment name), is dropped, with
+  one WARNING per model and value. Thinking counts toward the output limit.
+- `PINCER_VOICE_REASONING_EFFORT` now applies to Claude models too and takes
+  the same five values; empty inherits `PINCER_REASONING_EFFORT`, and `default`
+  sends nothing (the model's own default) even when the global setting is set.
+  New `PINCER_VOICE_THINKING` does the same for `PINCER_THINKING` (`adaptive`
+  | `disabled` | `default`). The call's language-guard regeneration uses the
+  global values. `none` is rejected for these four settings with an error that
+  names `default`: on OpenAI `none` is itself a reasoning level, so it would not
+  mean "send nothing".
+- New `PINCER_SUMMARY_REASONING_EFFORT` and `PINCER_SUMMARY_THINKING` do the
+  same for conversation summaries, translated for the summary model; empty
+  inherits the global value and `default` sends nothing. `low` is the suggested value, on a summary model
+  that takes effort (e.g. `claude-haiku-5-5`; the default `claude-haiku-4-5`
+  drops it with a warning).
+- Internal calls leave room for a model that thinks: the conversation summary
+  may use up to 2048 output tokens (was 500), the onboarding answer extraction
+  1024 (was 200), the call-thread summary merge 2048 (was 700) and the call
+  outcome extraction 2048 (was 1000). Only generated tokens are billed.
+- The internal JSON-extraction calls (call outcome, call-thread summary merge,
+  onboarding answer extraction) always use effort `low` and thinking
+  `disabled`, whatever `PINCER_REASONING_EFFORT` / `PINCER_THINKING` say, so a
+  model that thinks can't use up their small output limit and lose the result.
+  Each model still gets only what it accepts (Opus 5.5 can't turn thinking off;
+  `low` still applies). If a model takes neither, nothing is sent and nothing
+  is warned about (DEBUG only). An operator's own `PINCER_VOICE_*` or
+  `PINCER_SUMMARY_*` value that a model drops still warns, whatever its value.
+  Conversation summaries keep `PINCER_SUMMARY_*`.
+- The minimum `anthropic` SDK is now 0.78.0 (was 0.49.0): older versions raise
+  a `TypeError` on the `output_config` and `thinking: adaptive` parameters
+  these settings send, which failover does not catch. The lock is unchanged (0.97.0).
+- On OpenAI reasoning models these settings become `reasoning_effort`, on every
+  call, mapped per model: o-series `low` to `high`; gpt-5 adds `minimal` for
+  `disabled`; gpt-5.1 sends `none` for `disabled`; gpt-5.2+ also takes `xhigh`
+  (`max` steps down to it). `disabled` is dropped on the o-series and codex
+  models, which have no level that turns reasoning off. Pro models (o1-pro,
+  o3-pro, gpt-5-pro, gpt-5.2-pro) are Responses-API-only, so Pincer can't
+  serve them, and no longer sends them `reasoning_effort` (#344 did).
+  `adaptive` is ignored on OpenAI. As before, only model ids on #344's list get
+  the parameter; for any other, a set value is now logged once at WARNING
+  (was INFO).
+- `pincer doctor` shows, for the default, voice and summary targets, the
+  provider and model and the effort and thinking each request really carries,
+  including step-downs. It warns, naming the setting to change, when a value is
+  dropped (not supported, unrecognised model, or not allowed at effort `xhigh` /
+  `max`), and when the voice model thinks while
+  `PINCER_VOICE_MAX_RESPONSE_TOKENS` is below 512. A voice or summary `default`
+  is reported as nothing sent ("model default"), whatever the global setting. The checks make no
+  API call and never report CRITICAL.
+- **Removed:** `BaseLLMProvider.stream()`, `LLMRouter.stream()` and the providers'
+  `stream()` methods. Nothing in Pincer called them any more: the chat reply and
+  the voice loop both use `stream_turn()`, which also returns tool calls and usage.
+  Callers of `stream()` should use `stream_turn()` (text arrives as events with
+  `text`, then one event with the final `response`). A custom `BaseLLMProvider`
+  no longer has to implement `stream()`; `complete()` and `close()` are enough,
+  because the base `stream_turn()` falls back to `complete()`.
+
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 
 Identities used to be pruned against the config at every start: removing a
@@ -1150,7 +1269,7 @@ itself before a customer does; nothing here required a customer to notice first.
 #### Multi-provider LLM architecture with random failover
 
 - **`LLMRouter`** — a single construction entry point (`pincer.llm.router`) that also *is* a `BaseLLMProvider`. `cli.py` and `api/_deps.py` now call `LLMRouter().get_llm()` / `.get_summarizer()`; adding a provider touches only `pincer/llm/`.
-- **1 + N failover** — configure a primary plus up to 3 failovers via `PINCER_FALLBACK_PROVIDERS`. On any `LLMError`/`LLMRateLimitError` (after a provider's own retries) the router falls over to a randomly-ordered failover, re-sampled per failure, and re-raises the primary's error if all fail. `stream()` fails over only before the first token. `LLMResponse.model` reflects the provider that actually served the response.
+- **1 + N failover** — configure a primary plus up to 3 failovers via `PINCER_FALLBACK_PROVIDERS`. On any `LLMError`/`LLMRateLimitError` (after a provider's own retries) the router falls over to a randomly-ordered failover, re-sampled per failure, and re-raises the primary's error if all fail. `stream_turn()` fails over only before the first event. `LLMResponse.model` reflects the provider that actually served the response.
 - **Compatible endpoints** — any OpenAI- or Anthropic-wire endpoint (Grok, Ollama, OpenRouter, LiteLLM, local proxies, gateways) is configured as a named compatible provider: `PINCER_OPENAI_COMPATIBLE_PROVIDER`/`_BASE_URL`/`_API_KEY` and the `PINCER_ANTHROPIC_COMPATIBLE_*` equivalents. A custom OpenAI-wire and a custom Anthropic-wire endpoint can run side by side.
 - **Per-provider models** — each provider carries its own model id (`PINCER_ANTHROPIC_MODEL`, `PINCER_OPENAI_MODEL`, `PINCER_OPENAI_COMPATIBLE_MODEL`, `PINCER_ANTHROPIC_COMPATIBLE_MODEL`), each defaulting to `PINCER_DEFAULT_MODEL` when unset. This makes failover correct: e.g. an `anthropic` primary on `claude-sonnet-4-5` can fall over to an Ollama endpoint on `llama3.2` instead of sending the Claude model id to Ollama.
 - **Cost attributed to the serving provider** — `LLMResponse.provider` carries the provider that actually served the response (the failover, when one is used), and cost/`is_free` are recorded against it rather than the configured primary. Fixes mis-billing on the failover path.

@@ -58,6 +58,8 @@ class EventName(StrEnum):
     LLM_REQUEST = "llm.request"
     LLM_FIRST_TOKEN = "llm.first_token"
     LLM_DONE = "llm.done"
+    #: A voice request stopped on max_tokens mid-sentence; the turn ended with what was spoken.
+    LLM_OUTPUT_TRUNCATED = "llm.output_truncated"
     SENTENCE_READY = "tts.sentence_ready"
     TTS_REQUEST = "tts.request"
     TTS_FIRST_AUDIO = "tts.first_audio"

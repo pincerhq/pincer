@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic_sse as sse
 import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
-from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ToolCall
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ThinkingBlock, ToolCall
 
 MODULE = "pincer.llm.anthropic_common"
 
@@ -279,29 +281,6 @@ async def test_convert_handles_images_tool_results(anthropic_settings):
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_text(anthropic_settings):
-    from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-
-    async def _text_stream():
-        for t in ["He", "llo"]:
-            yield t
-
-    stream_cm = MagicMock()
-    stream_cm.__aenter__ = AsyncMock(return_value=MagicMock(text_stream=_text_stream()))
-    stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-    with patch(f"{MODULE}.AsyncAnthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_client.messages.stream = MagicMock(return_value=stream_cm)
-        mock_cls.return_value = mock_client
-
-        provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
-        result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
-
-    assert result == ["He", "llo"]
-
-
-@pytest.mark.asyncio
 async def test_complete_retries_then_succeeds(anthropic_settings):
     import anthropic
 
@@ -399,7 +378,7 @@ async def test_complete_rate_limit_exhausted(anthropic_settings):
 
 
 @pytest.mark.asyncio
-async def test_stream_rate_limit_error(anthropic_settings):
+async def test_stream_turn_rate_limit_error(anthropic_settings):
     import anthropic
 
     from pincer.exceptions import LLMRateLimitError
@@ -417,12 +396,12 @@ async def test_stream_rate_limit_error(anthropic_settings):
 
         provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
         with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
 @pytest.mark.asyncio
-async def test_stream_status_error(anthropic_settings):
+async def test_stream_turn_status_error(anthropic_settings):
     import anthropic
 
     from pincer.exceptions import LLMError
@@ -440,7 +419,7 @@ async def test_stream_status_error(anthropic_settings):
 
         provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
         with pytest.raises(LLMError, match="stream error"):
-            async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
+            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
 
 
@@ -581,7 +560,7 @@ class TestTemperatureByModel:
         _ = [e async for e in getattr(provider, method)(messages, **call_kwargs)]
         return provider._client.messages.stream.call_args.kwargs
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_dropped_for_model_that_rejects_it(self, anthropic_settings, method):
         provider = self._provider(anthropic_settings)
         kwargs = await self._sent_kwargs(provider, method, model=self.REJECTS, temperature=0, max_tokens=150)
@@ -589,13 +568,13 @@ class TestTemperatureByModel:
         assert kwargs["model"] == self.REJECTS
         assert kwargs["max_tokens"] == 150
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_sent_for_model_that_accepts_it(self, anthropic_settings, method):
         provider = self._provider(anthropic_settings)
         kwargs = await self._sent_kwargs(provider, method, model=self.ACCEPTS, temperature=0)
         assert kwargs["temperature"] == 0  # an explicit 0 is not replaced by the default
 
-    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
     async def test_default_model_and_temperature(self, anthropic_settings, method):
         """No per-call model: the rule applies to the provider's default model."""
         anthropic_settings.anthropic_model = self.REJECTS
@@ -606,3 +585,383 @@ class TestTemperatureByModel:
         provider = self._provider(anthropic_settings)
         kwargs = await self._sent_kwargs(provider, method)
         assert kwargs["temperature"] == anthropic_settings.temperature
+
+
+# ── Thinking blocks (issue #345) ─────────────────────
+
+_THOUGHT = "SECRET-THOUGHT-7f3a"
+_SIGNATURE = "SIG-7f3a-signature"
+_REDACTED = "REDACTED-7f3a-data"
+_THINKING_BLOCKS = [
+    ThinkingBlock("thinking", thinking=_THOUGHT, signature=_SIGNATURE),
+    ThinkingBlock("redacted_thinking", data=_REDACTED),
+]
+_THINKING_API = [
+    {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+    {"type": "redacted_thinking", "data": _REDACTED},
+]
+_THINKING_REPLY = (
+    [sse.thinking(_THOUGHT, _SIGNATURE), sse.redacted(_REDACTED), sse.text("Hello!"), sse.tool_use("toolu_1", "t", {})],
+    "tool_use",
+)
+
+
+async def _sent_messages(settings, messages: list[LLMMessage]) -> list[dict]:
+    """The `messages` of the request the provider really sends for this history."""
+    async with sse.ScriptedAnthropic(settings, [([sse.text("ok")], "end_turn")]) as llm:
+        await llm.provider.complete(messages)
+    return llm.requests[0]["messages"]
+
+
+async def test_complete_keeps_thinking_blocks_verbatim_in_order(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_THINKING_REPLY]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.thinking_blocks == _THINKING_BLOCKS
+    assert result.content == "Hello!"
+    assert [tc.id for tc in result.tool_calls] == ["toolu_1"]
+
+
+async def test_stream_turn_keeps_thinking_blocks_and_never_streams_them_as_text(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_THINKING_REPLY]) as llm:
+        events = [e async for e in llm.provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")])]
+
+    assert "".join(e.text for e in events) == "Hello!"
+    final = events[-1].response
+    assert final is not None
+    assert final.thinking_blocks == _THINKING_BLOCKS
+    assert final.content == "Hello!"
+
+
+async def test_tool_call_turn_sends_thinking_first_then_text_then_tool_use(anthropic_settings):
+    call = ToolCall(id="toolu_1", name="t", arguments={"a": 1})
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(
+                role=MessageRole.ASSISTANT,
+                content="Checking.",
+                tool_calls=[call],
+                thinking_blocks=list(_THINKING_BLOCKS),
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [
+            *_THINKING_API,
+            {"type": "text", "text": "Checking."},
+            {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": 1}},
+        ],
+    }
+
+
+async def test_text_turn_sends_thinking_first_then_text(anthropic_settings):
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="Hello!", thinking_blocks=list(_THINKING_BLOCKS)),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1] == {"role": "assistant", "content": [*_THINKING_API, {"type": "text", "text": "Hello!"}]}
+
+
+async def test_text_turn_without_text_never_sends_thinking_alone(anthropic_settings):
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="", thinking_blocks=list(_THINKING_BLOCKS)),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1] == {"role": "assistant", "content": ""}  # exactly as without thinking
+
+
+async def test_merging_assistant_turns_keeps_each_messages_blocks_in_order(anthropic_settings):
+    call = ToolCall(id="toolu_1", name="t", arguments={})
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="One moment."),
+            LLMMessage(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[call], thinking_blocks=list(_THINKING_BLOCKS)
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "One moment."},
+            *_THINKING_API,
+            {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {}},
+        ],
+    }
+
+
+async def test_orphaned_tool_call_turn_is_dropped_with_its_thinking(anthropic_settings):
+    orphan = ToolCall(id="orphan", name="t", arguments={})
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[orphan], thinking_blocks=list(_THINKING_BLOCKS)
+            ),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent == [{"role": "user", "content": "hi\nagain"}]
+
+
+# ── Effort and thinking settings (issue #345) ─────────────────────
+
+_HI = [LLMMessage(role=MessageRole.USER, content="hi")]
+_OK_REPLY = ([sse.text("ok")], "end_turn")
+
+
+async def _sent_request(settings, method: str = "complete", **call_kwargs) -> dict:
+    """The request body the provider really sends for one call of `method`."""
+    async with sse.ScriptedAnthropic(settings, [_OK_REPLY]) as llm:
+        if method == "complete":
+            await llm.provider.complete(_HI, **call_kwargs)
+        else:
+            _ = [e async for e in getattr(llm.provider, method)(_HI, **call_kwargs)]
+    assert len(llm.requests) == 1
+    return llm.requests[0]
+
+
+class TestReasoningSettings:
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_global_effort_and_thinking_reach_the_request(self, anthropic_settings, method):
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "low", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, method)
+
+        assert body["model"] == "claude-haiku-5-5"
+        assert body["output_config"] == {"effort": "low"}
+        assert body["thinking"] == {"type": "adaptive"}
+
+    @pytest.mark.parametrize("model", ["claude-opus-4-6", "claude-sonnet-4-6"])
+    async def test_adaptive_thinking_drops_temperature(self, anthropic_settings, model):
+        """These models still take `temperature`, but not together with thinking (a 400)."""
+        settings = anthropic_settings.model_copy(update={"default_model": model, "thinking": "adaptive"})
+        body = await _sent_request(settings, temperature=0)
+
+        assert body["thinking"] == {"type": "adaptive"}
+        assert "temperature" not in body
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-opus-5-1",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-haiku-6",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-3-5-sonnet-20241022",
+        ],
+    )
+    async def test_empty_settings_send_what_they_sent_before(self, anthropic_settings, model):
+        settings = anthropic_settings.model_copy(update={"default_model": model})
+        assert (settings.reasoning_effort, settings.thinking) == ("", "")
+        body = await _sent_request(settings)
+
+        takes_temperature = model in ("claude-haiku-4-5-20251001", "claude-sonnet-4-5", "claude-opus-4-5")
+        takes_temperature |= model in ("claude-opus-4-6", "claude-sonnet-4-6", "claude-3-5-sonnet-20241022")
+        expected = {"model", "max_tokens", "messages", "stream"} | ({"temperature"} if takes_temperature else set())
+        assert set(body) == expected
+        if takes_temperature:
+            assert body["temperature"] == settings.temperature
+
+    @staticmethod
+    async def _two_requests(settings) -> None:
+        async with sse.ScriptedAnthropic(settings, [_OK_REPLY, _OK_REPLY]) as llm:
+            await llm.provider.complete(_HI)
+            await llm.provider.complete(_HI)
+        assert len(llm.requests) == 2
+
+    @pytest.mark.parametrize(
+        ("model", "update", "setting"),
+        [
+            # unrecognised: a deployment name that hides the Claude model
+            ("voice-fast-warn-once", {"reasoning_effort": "low"}, "reasoning_effort=low"),
+            # recognised, but the model rejects the setting
+            ("us.anthropic.claude-haiku-4-5-warn-once", {"thinking": "adaptive"}, "thinking=adaptive"),
+        ],
+    )
+    async def test_a_dropped_setting_warns_once(self, anthropic_settings, caplog, model, update, setting):
+        settings = anthropic_settings.model_copy(update={"default_model": model, **update})
+        with caplog.at_level(logging.DEBUG, logger="pincer"):
+            await self._two_requests(settings)
+
+        lines = [r for r in caplog.records if model in r.getMessage() and setting in r.getMessage()]
+        assert [r.levelno for r in lines] == [logging.WARNING, logging.DEBUG]
+
+    async def test_empty_settings_never_warn_for_an_unrecognised_model(self, anthropic_settings, caplog):
+        settings = anthropic_settings.model_copy(update={"default_model": "voice-fast-benign"})
+        with caplog.at_level(logging.DEBUG, logger="pincer"):
+            await self._two_requests(settings)
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_call_arguments_replace_the_global_settings(self, anthropic_settings, method):
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, method, reasoning_effort="low", thinking="disabled")
+
+        assert body["output_config"] == {"effort": "low"}
+        assert body["thinking"] == {"type": "disabled"}
+
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_none_arguments_keep_the_global_settings(self, anthropic_settings, method):
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, method, reasoning_effort=None, thinking=None)
+
+        assert body["output_config"] == {"effort": "high"}
+        assert body["thinking"] == {"type": "adaptive"}
+
+    async def test_empty_arguments_send_nothing_even_when_global_settings_are_set(self, anthropic_settings):
+        """`""` means "send nothing" for this call; only None falls back to the global setting."""
+        settings = anthropic_settings.model_copy(
+            update={"default_model": "claude-haiku-5-5", "reasoning_effort": "high", "thinking": "adaptive"}
+        )
+        body = await _sent_request(settings, reasoning_effort="", thinking="")
+
+        assert body["model"] == "claude-haiku-5-5"
+        assert "output_config" not in body
+        assert "thinking" not in body
+
+
+# ── Block order within a response (issue #345, review round 1) ─────────────────
+
+_SECOND_THOUGHT = "SECOND-THOUGHT-9c1d"
+_SECOND_SIGNATURE = "SIG-9c1d-signature"
+_INTERLEAVED_REPLY = (
+    [
+        sse.thinking(_THOUGHT, _SIGNATURE),
+        sse.text("Checking."),
+        sse.thinking(_SECOND_THOUGHT, _SECOND_SIGNATURE),
+        sse.tool_use("toolu_1", "t", {"a": 1}),
+    ],
+    "tool_use",
+)
+_INTERLEAVED_API = [
+    {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+    {"type": "text", "text": "Checking."},
+    {"type": "thinking", "thinking": _SECOND_THOUGHT, "signature": _SECOND_SIGNATURE},
+    {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": 1}},
+]
+
+
+def _saved_as_the_agent_does(result) -> LLMMessage:
+    return LLMMessage(
+        role=MessageRole.ASSISTANT,
+        content=result.content,
+        tool_calls=result.tool_calls,
+        thinking_blocks=list(result.thinking_blocks),
+        content_blocks=list(result.content_blocks),
+    )
+
+
+async def test_an_interleaved_response_is_replayed_in_the_order_it_was_generated(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [_INTERLEAVED_REPLY]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            _saved_as_the_agent_does(result),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert sent[1] == {"role": "assistant", "content": _INTERLEAVED_API}
+
+
+async def test_a_response_without_thinking_records_no_content_blocks(anthropic_settings):
+    async with sse.ScriptedAnthropic(anthropic_settings, [([sse.text("Hello!")], "end_turn")]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.content_blocks == []
+
+
+async def test_a_text_reply_with_thinking_in_the_middle_is_replayed_in_order(anthropic_settings):
+    reply = ([sse.text("One."), sse.thinking(_THOUGHT, _SIGNATURE), sse.text("Two.")], "end_turn")
+    async with sse.ScriptedAnthropic(anthropic_settings, [reply]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            _saved_as_the_agent_does(result),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1]["content"] == [
+        {"type": "text", "text": "One."},
+        {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+        {"type": "text", "text": "Two."},
+    ]
+
+
+async def test_a_message_edited_after_the_response_falls_back_to_thinking_first(anthropic_settings):
+    """Pair repair may drop a tool call from a saved message: the recorded order no longer fits it."""
+    async with sse.ScriptedAnthropic(anthropic_settings, [_INTERLEAVED_REPLY]) as llm:
+        result = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+    edited = _saved_as_the_agent_does(result)
+    edited.content = "Edited."
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            edited,
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_1"),
+        ],
+    )
+
+    assert [b["type"] for b in sent[1]["content"]] == ["thinking", "thinking", "text", "tool_use"]
+
+
+async def test_merging_assistant_messages_never_moves_a_later_thinking_ahead_of_an_earlier_text(anthropic_settings):
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="One moment."),
+            LLMMessage(role=MessageRole.ASSISTANT, content="Done.", thinking_blocks=list(_THINKING_BLOCKS)),
+            LLMMessage(role=MessageRole.USER, content="again"),
+        ],
+    )
+
+    assert sent[1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "One moment."}, *_THINKING_API, {"type": "text", "text": "Done."}],
+    }

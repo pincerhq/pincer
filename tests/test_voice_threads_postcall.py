@@ -58,7 +58,18 @@ class SequencedLLM:
         self._payloads = list(payloads)
         self.calls = 0
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+        pinned=False,
+    ):
         index = min(self.calls, len(self._payloads) - 1)
         self.calls += 1
         return SimpleNamespace(content=self._payloads[index])

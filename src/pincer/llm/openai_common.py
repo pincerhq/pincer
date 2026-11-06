@@ -15,10 +15,17 @@ from typing import TYPE_CHECKING, Any
 import openai
 from openai import AsyncOpenAI
 
-from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
-from pincer.llm.model_params import openai_accepts_reasoning_effort, openai_is_reasoning_model
+from pincer.llm.base import (
+    STOP_REASON_MAX_TOKENS,
+    BaseLLMProvider,
+    LLMMessage,
+    LLMResponse,
+    MessageRole,
+    StreamTurnEvent,
+    ToolCall,
+)
+from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -26,10 +33,9 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletion
 
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
-# One INFO line per model id that a configured reasoning_effort can't apply to
-_effort_skipped = LogOncePerKey(logger, logging.INFO)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -39,6 +45,8 @@ _effort_skipped = LogOncePerKey(logger, logging.INFO)
 # array_above_max_length) — Anthropic has no such cap, so callers sized for
 # the full registry must be truncated here rather than fail every request.
 OPENAI_MAX_TOOLS = 128
+# OpenAI's finish_reason when the output hit the token limit
+_FINISH_REASON_LENGTH = "length"
 
 
 def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -127,6 +135,14 @@ def convert_messages_to_openai(
     return result
 
 
+def _normalize_finish_reason(finish_reason: str | None) -> str:
+    """Report OpenAI's ``length`` as ``max_tokens``, like Anthropic, so one
+    truncation check covers both wires; other reasons pass through."""
+    if finish_reason == _FINISH_REASON_LENGTH:
+        return STOP_REASON_MAX_TOKENS
+    return finish_reason or ""
+
+
 def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     """Parse OpenAI ChatCompletion into unified LLMResponse."""
     choice = response.choices[0]
@@ -149,7 +165,7 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
         model=response.model,
         input_tokens=response.usage.prompt_tokens if response.usage else 0,
         output_tokens=response.usage.completion_tokens if response.usage else 0,
-        stop_reason=choice.finish_reason or "",
+        stop_reason=_normalize_finish_reason(choice.finish_reason),
     )
 
 
@@ -192,6 +208,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
+        # Read once: every request of a turn sends the same effort/thinking
+        self._reasoning_effort = settings.reasoning_effort
+        self._thinking = settings.thinking
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
@@ -211,16 +230,29 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None,
         temperature: float | None,
         system: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> dict[str, Any]:
         """Request kwargs shared by complete / stream / stream_turn."""
+        model = model or self._default_model
         kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
+            "model": model,
             "max_tokens": max_tokens or self._default_max_tokens,
             "temperature": temperature if temperature is not None else self._default_temperature,
             "messages": convert_messages_to_openai(messages, system),
         }
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
+        # A per-call value (voice, summary) replaces the global setting; None keeps it.
+        reasoning = resolve_and_warn(
+            ReasoningWire.OPENAI,
+            model,
+            self._reasoning_effort if reasoning_effort is None else reasoning_effort,
+            self._thinking if thinking is None else thinking,
+            pinned=pinned,
+        )
+        kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)
 
     async def complete(
@@ -231,8 +263,21 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs = self._build_kwargs(
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+            pinned=pinned,
+        )
 
         try:
             response = await self._call_with_retry(kwargs)
@@ -245,29 +290,6 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         result.provider = self._provider_name
         return result
 
-    async def stream(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        system: str | None = None,
-    ) -> AsyncIterator[str]:
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
-        kwargs["stream"] = True
-
-        try:
-            stream = await self._client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta and delta.content:
-                    yield delta.content
-        except openai.RateLimitError as e:
-            raise LLMRateLimitError(retry_after=5.0) from e
-        except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} stream error: {e.status_code} {e.message}") from e
-
     async def stream_turn(
         self,
         messages: list[LLMMessage],
@@ -276,27 +298,23 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         max_tokens: int | None = None,
         temperature: float | None = None,
         system: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): content deltas are
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
-        Anthropic implementation, so the voice pipeline can run either.
-        ``reasoning_effort`` is sent only to models known to take it
-        (``openai_accepts_reasoning_effort``)."""
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
-        if reasoning_effort:
-            request_model = str(kwargs["model"])
-            if openai_accepts_reasoning_effort(request_model):
-                kwargs["reasoning_effort"] = reasoning_effort
-            else:
-                _effort_skipped.log(
-                    request_model,
-                    "reasoning_effort %r not sent: %r is not a known OpenAI reasoning model id "
-                    "(on Azure the deployment name must look like one, e.g. gpt-5-mini)",
-                    reasoning_effort,
-                    request_model,
-                )
+        Anthropic implementation, so the voice pipeline can run either."""
+        kwargs = self._build_kwargs(
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+        )
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 
@@ -355,7 +373,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 provider=self._provider_name,
                 input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                stop_reason=finish_reason,
+                stop_reason=_normalize_finish_reason(finish_reason),
             )
         )
 

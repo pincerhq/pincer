@@ -4,6 +4,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
+from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtime)
+    ReasoningEffortOverride,
+    ThinkingOverride,
+)
+
+# The largest output a voice request may ask for: the 5.5 models' output limit
+VOICE_MAX_RESPONSE_TOKENS_CEILING = 128_000
+
 
 class ChannelSettings(BaseModel):
     # ── Telegram ─────────────────────────────────────────
@@ -256,18 +264,23 @@ class ChannelSettings(BaseModel):
         "Also switchable at runtime from the dashboard (PUT /api/voice/config).",
     )
     voice_max_response_tokens: int = Field(
-        default=220,
+        default=1024,
         ge=32,
-        le=1024,
-        description="max_tokens per voice turn — short spoken replies keep latency and streaming granularity tight",
+        le=VOICE_MAX_RESPONSE_TOKENS_CEILING,
+        description="max_tokens per voice request: the worst-case silence before a reply, shared by the "
+        "model's thinking and its speech. A request cut off before saying anything is retried once at 4x, "
+        "up to the model's own output limit (4096 when that limit is unknown).",
     )
-    # Voice turns only, and only on OpenAI reasoning models (GPT-5, o-series) on
-    # an OpenAI-wire provider. "" = not sent (the API default, "medium"), which
-    # can spend the short voice budget above on reasoning and leave no reply.
-    # "minimal" is left out: GPT-5.1+ and the o-series reject it.
-    voice_reasoning_effort: Literal["", "low", "medium", "high"] = Field(
+    # Voice turns only (issue #345): translated per model like PINCER_REASONING_EFFORT /
+    # PINCER_THINKING, which an empty value inherits. Not used by the call's
+    # language-guard regeneration, which runs on the chat settings (Q15c).
+    voice_reasoning_effort: ReasoningEffortOverride = Field(
         default="",
-        description="reasoning_effort for voice turns on OpenAI reasoning models ('' = API default)",
+        description="Effort for voice turns ('' = PINCER_REASONING_EFFORT, 'default' = send nothing)",
+    )
+    voice_thinking: ThinkingOverride = Field(
+        default="",
+        description="Thinking for voice turns: adaptive | disabled ('' = PINCER_THINKING, 'default' = send nothing)",
     )
     voice_stt_endpointing_ms: int = Field(
         default=0,

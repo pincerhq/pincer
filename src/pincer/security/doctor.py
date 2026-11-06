@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
+    from pincer.llm.model_params import ReasoningWire
 
 
 #: The shared API tokens removed in favour of per-identity auth (issue #228).
@@ -32,6 +34,8 @@ _REMOVED_VOICE_TOOL_VARS = (
     "PINCER_VOICE_TOOL_APPROVAL",
     "PINCER_VOICE_TOOL_APPROVAL_OVERRIDES",
 )
+# Below this voice token limit, a model that thinks may spend it all before speaking (issue #345)
+_VOICE_THINKING_MIN_TOKENS = 512
 
 
 class CheckStatus(StrEnum):
@@ -197,6 +201,11 @@ class SecurityDoctor:
         report.checks.append(self._check_schedule_action_types(settings))
         # Google Workspace (1 check, issue #297)
         report.checks.append(self._check_google_workspace(settings))
+        # LLM effort and thinking (4 checks, issue #345)
+        report.checks.append(self._check_llm_reasoning_default(settings))
+        report.checks.append(self._check_llm_reasoning_voice(settings))
+        report.checks.append(self._check_llm_reasoning_summary(settings))
+        report.checks.append(self._check_voice_thinking_token_limit(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2155,6 +2164,98 @@ class SecurityDoctor:
             category="google",
         )
 
+    # ── LLM effort and thinking (issue #345) ──────────────
+
+    def _check_llm_reasoning_default(self, cfg: Settings | None = None) -> CheckResult:
+        """What the default provider's requests carry for PINCER_REASONING_EFFORT / PINCER_THINKING."""
+        from pincer.llm.router import provider_default_model
+
+        cfg = self._cfg(cfg)
+        name = cfg.default_provider
+        return _reasoning_report(
+            "llm_reasoning_default",
+            cfg,
+            name,
+            provider_default_model(cfg, name),
+            cfg.reasoning_effort,
+            cfg.thinking,
+        )
+
+    def _check_llm_reasoning_voice(self, cfg: Settings | None = None) -> CheckResult:
+        """The same for voice turns: the provider and model the call really runs on, and the
+        voice settings, of which an empty one inherits the global setting."""
+        from pincer.config.llm import effective_effort, effective_thinking
+        from pincer.llm.router import plan_voice_turn
+
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult("llm_reasoning_voice", CheckStatus.SKIPPED, "Voice not enabled", category="llm")
+        plan = plan_voice_turn(cfg)  # builds the client object only: nothing is sent
+        return _reasoning_report(
+            "llm_reasoning_voice",
+            cfg,
+            plan.provider,
+            plan.effective_model,
+            effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort),
+            effective_thinking(cfg.voice_thinking, cfg.thinking),
+            ("PINCER_VOICE_REASONING_EFFORT", "PINCER_VOICE_THINKING"),
+        )
+
+    def _check_llm_reasoning_summary(self, cfg: Settings | None = None) -> CheckResult:
+        """The same for conversation summaries, on the model the summarizer asks for
+        (as `LLMRouter.get_summarizer` picks it)."""
+        from pincer.config.llm import effective_effort, effective_thinking
+        from pincer.llm.router import provider_default_model, summary_target, wire_safe_model
+
+        cfg = self._cfg(cfg)
+        name, model = summary_target(cfg)
+        return _reasoning_report(
+            "llm_reasoning_summary",
+            cfg,
+            name,
+            wire_safe_model(cfg, name, model) or provider_default_model(cfg, name),
+            effective_effort(cfg.summary_reasoning_effort, cfg.reasoning_effort),
+            effective_thinking(cfg.summary_thinking, cfg.thinking),
+            ("PINCER_SUMMARY_REASONING_EFFORT", "PINCER_SUMMARY_THINKING"),
+        )
+
+    def _check_voice_thinking_token_limit(self, cfg: Settings | None = None) -> CheckResult:
+        """Thinking and speech share the voice token limit: a model that thinks
+        can spend a small limit before saying a word."""
+        from pincer.config.llm import effective_effort, effective_thinking
+        from pincer.llm.model_params import model_thinks, resolve_reasoning
+        from pincer.llm.router import plan_voice_turn
+
+        name = "voice_thinking_token_limit"
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(name, CheckStatus.SKIPPED, "Voice not enabled", category="voice")
+        plan = plan_voice_turn(cfg)  # builds the client object only: nothing is sent
+        model = plan.effective_model
+        wire = _reasoning_wire(cfg, plan.provider)
+        thinks = None
+        if wire is not None:
+            effort = effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort)
+            params = resolve_reasoning(wire, model, effort, effective_thinking(cfg.voice_thinking, cfg.thinking))
+            thinks = model_thinks(wire, model, params)
+        limit = cfg.voice_max_response_tokens
+        if thinks is None:
+            return CheckResult(name, CheckStatus.PASS, f"Can't tell whether {model} thinks", category="voice")
+        if thinks and limit < _VOICE_THINKING_MIN_TOKENS:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"{model} thinks on voice turns, but the voice token limit is {limit}: "
+                "thinking can use it up before the caller hears a word",
+                fix_hint=(
+                    f"Raise PINCER_VOICE_MAX_RESPONSE_TOKENS to at least {_VOICE_THINKING_MIN_TOKENS}, "
+                    "or set PINCER_VOICE_THINKING=disabled where the model allows it"
+                ),
+                category="voice",
+            )
+        state = "thinks" if thinks else "doesn't think"
+        return CheckResult(name, CheckStatus.PASS, f"{model} {state}; voice token limit {limit}", category="voice")
+
     # ── Signal (Sprint 7.5) ───────────────────────────────
 
     def _check_signal_phone_set(self, cfg: Settings | None = None) -> CheckResult:
@@ -2795,3 +2896,86 @@ class SecurityDoctor:
             "Prompt injection detection is active on MCP tool outputs",
             category="mcp",
         )
+
+
+# ── LLM effort and thinking (issue #345) ──────────────────────────────────────
+
+
+def _reasoning_wire(cfg: Settings, name: str) -> ReasoningWire | None:
+    """The request format a provider name speaks, as the router builds it; None if unknown."""
+    from pincer.llm.model_params import ReasoningWire
+    from pincer.llm.router import is_openai_wire
+
+    if is_openai_wire(cfg, name):
+        return ReasoningWire.OPENAI
+    if name == "anthropic" or (name and name == cfg.anthropic_compatible_provider):
+        return ReasoningWire.ANTHROPIC
+    return None
+
+
+def _reasoning_report(
+    check: str,
+    cfg: Settings,
+    provider: str,
+    model: str,
+    effort: ReasoningEffort,
+    thinking: ThinkingMode,
+    env: tuple[str, str] = ("PINCER_REASONING_EFFORT", "PINCER_THINKING"),
+) -> CheckResult:
+    """What a target's requests carry, from the resolver the providers use. No API call.
+
+    ``env`` names the effort and thinking settings an operator changes for this target.
+    """
+    from pincer.llm.model_params import ReasoningWire, resolve_reasoning
+
+    if not (effort or thinking):
+        return CheckResult(
+            check,
+            CheckStatus.PASS,
+            f"{provider} {model}: nothing set; model default",
+            category="llm",
+        )
+    wire = _reasoning_wire(cfg, provider)
+    if wire is None:
+        return CheckResult(
+            check,
+            CheckStatus.WARNING,
+            f"Provider {provider!r} is not configured, so nothing can be resolved for {model}",
+            fix_hint="Name a configured provider: openai, anthropic, or a PINCER_*_COMPATIBLE_PROVIDER",
+            category="llm",
+        )
+    params = resolve_reasoning(wire, model, effort, thinking)
+    sent = []
+    sent_effort = params.fragment.get("output_config", {}).get("effort")
+    if sent_effort:
+        sent.append(
+            f"effort {sent_effort}" if sent_effort == effort else f"effort {effort} → {sent_effort} (stepped down)"
+        )
+    sent_thinking = params.fragment.get("thinking", {}).get("type")
+    if sent_thinking:
+        sent.append(f"thinking {sent_thinking}")
+    level = params.fragment.get("reasoning_effort")
+    turned_off = thinking == "disabled" and not any(d.setting == "thinking" for d in params.dropped)
+    if level and turned_off:
+        # One knob on OpenAI: `disabled` sends the level that turns reasoning off, over any effort
+        replaced = f" replaces effort {effort}" if effort else ""
+        sent.append(f"reasoning_effort {level} (thinking disabled{replaced})")
+    elif level:
+        sent.append(
+            f"reasoning_effort {level}" if level == effort else f"reasoning_effort {effort} → {level} (stepped down)"
+        )
+    if wire is ReasoningWire.OPENAI and thinking == "adaptive":
+        sent.append("thinking adaptive ignored (OpenAI models have no such setting)")
+    message = f"{provider} {model}: {', '.join(sent) or 'nothing sent'}"
+    if not params.dropped:
+        return CheckResult(check, CheckStatus.PASS, message, category="llm")
+    labels = {"reasoning_effort": "effort", "thinking": "thinking"}
+    notes = [f"{labels[d.setting]} {d.value} not sent: {d.reason}" for d in params.dropped]
+    to_change = [env[0] if d.setting == "reasoning_effort" else env[1] for d in params.dropped]
+    return CheckResult(
+        check,
+        CheckStatus.WARNING,
+        "; ".join([message, *notes]),
+        fix_hint=f"Change {' / '.join(dict.fromkeys(to_change))}, or use a model that takes the value",
+        category="llm",
+    )

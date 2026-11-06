@@ -74,7 +74,18 @@ class ScriptedExtractor:
         self.payload = payload
         self.calls = 0
 
-    async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=None,
+        temperature=None,
+        system=None,
+        reasoning_effort=None,
+        thinking=None,
+        pinned=False,
+    ):
         self.calls += 1
         self.last_user = messages[0].content
         return SimpleNamespace(content=json.dumps(self.payload, ensure_ascii=False))

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.exceptions import LLMOutputTruncatedError
 from pincer.observability.failure_codes import FailureCode, classify_failure
 from pincer.voice import call_end
 from pincer.voice.engine import (
@@ -74,6 +75,11 @@ _BENIGN_HANGUP_PHASES = _BENIGN_TIMEOUT_PHASES | {
 
 # Consecutive agent-brain errors tolerated before ending the call gracefully
 MAX_CONSECUTIVE_ERRORS = 2
+# Turn-trace failure label for a turn cut off by max_tokens
+_OUTPUT_TRUNCATED = "output_truncated"
+# Consecutive turns cut off by max_tokens before ending the call (issue #345, Q8d).
+# Counted apart from brain errors: neither counter moves the other.
+MAX_CONSECUTIVE_TRUNCATIONS = 3
 
 WATCHDOG_INTERVAL_S = 2.0
 
@@ -92,6 +98,16 @@ CALL_ROW_DRAIN_TIMEOUT_S = 10.0
 # the hand-off returns — long before the turn's trace is opened.
 
 
+def _log_truncated_turn(call_sid: str, error: LLMOutputTruncatedError) -> None:
+    """One WARNING line, no traceback: a cut-off is a limit to tune, not a crash."""
+    logger.warning(
+        "Voice turn [%s] cut off at max_tokens: %d of %d output tokens",
+        call_sid,
+        error.output_tokens,
+        error.max_tokens,
+    )
+
+
 class VoiceChannel(BaseChannel):
     """Phone call channel — bridges Twilio voice to the Pincer agent."""
 
@@ -106,6 +122,7 @@ class VoiceChannel(BaseChannel):
         self._response_queues: dict[str, asyncio.Queue[str]] = {}
         self._transcripts: dict[str, TranscriptLogger] = {}
         self._error_counts: dict[str, int] = {}
+        self._truncation_counts: dict[str, int] = {}
         self._active_turns: dict[str, asyncio.Task[None]] = {}
         # ConversationRelay barge-in: the turn it cancelled, and what Twilio
         # says the caller heard. A line that turn was still sending is logged
@@ -1318,6 +1335,7 @@ class VoiceChannel(BaseChannel):
         try:
             response = await self._handler(incoming)
             self._error_counts.pop(call_sid, None)
+            self._truncation_counts.pop(call_sid, None)
             if gate is not None and gate.suppress_llm_speech:
                 # The gate already spoke the outcome (verify question, hold,
                 # declined, deferred, error) — the model's wording is dropped.
@@ -1357,6 +1375,13 @@ class VoiceChannel(BaseChannel):
             if trace is not None:
                 trace.cancel("barge_in")
             raise
+        except LLMOutputTruncatedError as e:
+            _log_truncated_turn(call_sid, e)
+            if trace is not None:
+                trace.fail(_OUTPUT_TRUNCATED)
+            if self._turn_traces.get(call_sid) is trace:
+                self._turn_traces.pop(call_sid, None)
+            await self._handle_brain_error(call_sid, sm, truncated=True)
         except Exception:
             logger.exception("Error handling voice input for call %s", call_sid)
             if trace is not None:
@@ -1557,6 +1582,7 @@ class VoiceChannel(BaseChannel):
                     stamp("llm_done_ms")
                     full_text = chunk.content
             self._error_counts.pop(call_sid, None)
+            self._truncation_counts.pop(call_sid, None)
         except asyncio.CancelledError:
             # Barge-in: close any open CR utterance and stop cleanly.
             if open_stream:
@@ -1565,6 +1591,16 @@ class VoiceChannel(BaseChannel):
             if trace is not None:
                 trace.cancel("barge_in")
             raise
+        except LLMOutputTruncatedError as e:
+            _log_truncated_turn(call_sid, e)
+            if open_stream:
+                with contextlib.suppress(Exception):
+                    await self._say(call_sid, "", last=True)
+            await self._handle_brain_error(call_sid, sm, truncated=True)
+            if trace is not None:
+                trace.fail(_OUTPUT_TRUNCATED)
+            self._log_turn_latency(call_sid, state, turn_no, t0, {**agent_timings, **stamps}, streamed=True, error=True)
+            return
         except Exception:
             logger.exception("Streaming turn failed [%s]", call_sid)
             if open_stream:
@@ -1810,21 +1846,31 @@ class VoiceChannel(BaseChannel):
         except Exception:
             logger.debug("voice_latency.jsonl write failed", exc_info=True)
 
-    async def _handle_brain_error(self, call_sid: str, sm: CallStateMachine) -> None:
+    async def _handle_brain_error(self, call_sid: str, sm: CallStateMachine, *, truncated: bool = False) -> None:
         """LLM/tool failure mid-call: apologize; after repeated failures, end
-        the call gracefully instead of looping (T1.3)."""
+        the call gracefully instead of looping (T1.3).
+
+        ``truncated``: the turn was cut off by max_tokens (issue #345). It is
+        counted on its own counter against MAX_CONSECUTIVE_TRUNCATIONS and
+        leaves the brain-error counter alone.
+        """
         from pincer.voice.prompts import get_prompt
 
-        errors = self._error_counts.get(call_sid, 0) + 1
-        self._error_counts[call_sid] = errors
+        counts, limit, reason = (
+            (self._truncation_counts, MAX_CONSECUTIVE_TRUNCATIONS, "repeated_llm_truncations")
+            if truncated
+            else (self._error_counts, MAX_CONSECUTIVE_ERRORS, "repeated_errors")
+        )
+        errors = counts.get(call_sid, 0) + 1
+        counts[call_sid] = errors
         language, formality = self._call_language(call_sid)
 
-        if errors >= MAX_CONSECUTIVE_ERRORS:
+        if errors >= limit:
             apology = get_prompt("BRAIN_ERROR_FINAL", language, formality)
             if self._engine:
                 with contextlib.suppress(Exception):
                     await self._say(call_sid, apology, state=str(sm.phase))
-            sm.force_terminal(CallPhase.FAILED, reason="repeated_errors")
+            sm.force_terminal(CallPhase.FAILED, reason=reason)
             if self._engine:
                 with contextlib.suppress(Exception):
                     await self._engine.end_call(call_sid)
@@ -1859,6 +1905,7 @@ class VoiceChannel(BaseChannel):
 
             get_monitor_hub().end(call_sid)
         self._error_counts.pop(call_sid, None)
+        self._truncation_counts.pop(call_sid, None)
         self._interrupted_turns.pop(call_sid, None)
         self._cancel_causes.pop(call_sid, None)
         self._cancel_hangup(call_sid)
