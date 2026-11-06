@@ -724,6 +724,56 @@ async def test_a_streamed_reply_cut_off_before_placing_a_call_still_raises(
         _chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
 
 
+async def _stream_closed_without_a_final_response(**kwargs):
+    return
+    yield  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_a_stream_closed_without_text_or_a_final_response_is_an_error_not_an_empty_answer(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.stream_turn = _stream_closed_without_a_final_response
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError, match="ended without a final response"):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_closed_without_a_final_response_after_placing_a_call_still_returns_it(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
+    mock_llm.stream_turn = _stream_closed_without_a_final_response
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+
+@pytest.mark.asyncio
+async def test_streamed_text_is_delivered_and_saved_when_the_stream_closes_without_a_final_response(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    """The user has already seen these chunks: the reply is what was streamed."""
+
+    async def stream_turn(**kwargs):
+        yield StreamTurnEvent(text="Hello ")
+        yield StreamTurnEvent(text="there")
+
+    mock_llm.stream_turn = stream_turn
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with caplog.at_level(logging.WARNING, logger="pincer.core.agent"):
+        chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+    assert chunks[-1].content == "Hello there"
+    session = await session_manager.get_or_create("user1", "test")
+    assert session.messages[-1].role == MessageRole.ASSISTANT
+    assert session.messages[-1].content == "Hello there"
+    assert "without a final response" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker

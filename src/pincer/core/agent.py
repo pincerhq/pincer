@@ -1386,6 +1386,11 @@ class Agent:
                 # leaves no text, which must not be sent as an empty reply
                 if streamed is not None:
                     _refuse_truncated_output(streamed, self._settings.max_tokens)
+                elif not full_text:
+                    raise LLMError("stream_turn ended without a final response")
+                else:
+                    # The user already saw these chunks, so they are the reply
+                    logger.warning("stream_turn ended without a final response; replying with the streamed text")
         except LLMError as e:
             if not call_sids:
                 raise

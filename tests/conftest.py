@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -30,7 +30,7 @@ from pincer.config import Settings
 from pincer.config.database import DatabaseSettings
 from pincer.config.main import _RelaxedSettings
 from pincer.core.session import SessionManager
-from pincer.llm.base import BaseLLMProvider, LLMResponse
+from pincer.llm.base import BaseLLMProvider, LLMResponse, StreamTurnEvent
 from pincer.llm.cost_tracker import CostTracker
 from pincer.security.audit import AuditLogger
 from pincer.tools.registry import ToolRegistry
@@ -278,6 +278,21 @@ def mock_llm() -> AsyncMock:
         stop_reason="end_turn",
     )
     llm.close.return_value = None
+
+    async def stream_turn(*args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
+        # A spec'd mock's stream_turn iterates empty, and a stream that ends without a final response is an error
+        yield StreamTurnEvent(text="Hello! I'm Pincer.")
+        yield StreamTurnEvent(
+            response=LLMResponse(
+                content="Hello! I'm Pincer.",
+                model="test-model",
+                input_tokens=100,
+                output_tokens=50,
+                stop_reason="end_turn",
+            )
+        )
+
+    llm.stream_turn = stream_turn
     return llm
 
 
