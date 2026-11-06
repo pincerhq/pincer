@@ -658,6 +658,13 @@ class Agent:
         session_key: str | None = None,
         memory: bool = True,
     ) -> AgentResponse:
+        """Run one turn in its session; the arguments are described on ``_handle_message``.
+
+        ``session_key`` is the exact session key, overriding ``channel:user_id`` (voice: one
+        session per call, see ``stream_voice_turn``; web chat: one per conversation).
+        Onboarding is per user and channel whichever session the turn runs in, see
+        ``_onboarding_for_turn``.
+        """
         async with self._sessions.turn(user_id, channel, session_key) as session:
             return await self._handle_message(
                 user_id,
@@ -667,7 +674,6 @@ class Agent:
                 channel_user_id,
                 channel_name,
                 extra_system,
-                session_key,
                 memory,
                 session=session,
             )
@@ -681,7 +687,6 @@ class Agent:
         channel_user_id: str | None = None,
         channel_name: str | None = None,
         extra_system: str | None = None,
-        session_key: str | None = None,
         memory: bool = True,
         *,
         session: Session,
@@ -709,10 +714,6 @@ class Agent:
                 from the session key.  Defaults to ``channel`` when omitted.
             extra_system: Channel-supplied system-prompt addition for this turn
                 (e.g. voice live-call rules in the call language).
-            session_key: Exact session key, overriding ``channel:user_id``
-                (voice: one session per call, see ``stream_voice_turn``; web
-                chat: one per conversation). Onboarding is per user and channel
-                whichever session the turn runs in, see ``_onboarding_for_turn``.
             memory: False for a request that is not the user talking to Pincer
                 (a call summary, a knowledge-base question): no long-term
                 memory is searched or written (the session is not summarized
@@ -1173,9 +1174,7 @@ class Agent:
         async with (
             self._sessions.turn(user_id, channel, session_key) as session,
             aclosing(
-                self._handle_message_stream(
-                    user_id, channel, text, images, channel_user_id, session_key, memory, session=session
-                )
+                self._handle_message_stream(user_id, channel, text, images, channel_user_id, memory, session=session)
             ) as stream,
         ):
             async for chunk in stream:
@@ -1188,7 +1187,6 @@ class Agent:
         text: str,
         images: list[tuple[bytes, str]] | None = None,
         channel_user_id: str | None = None,
-        session_key: str | None = None,
         memory: bool = True,
         *,
         session: Session,
@@ -1202,8 +1200,8 @@ class Agent:
         ``channel_user_id``, when given, is the channel-native ID and is
         passed to tool execution so channel-bound tools (``send_file``,
         ``send_image``) address the user's real channel ID instead of the
-        cross-channel canonical ``user_id`` — see ``handle_message``, as are
-        ``session_key`` and ``memory``.
+        cross-channel canonical ``user_id`` — see ``handle_message``, as is
+        ``memory``.
         """
         self._last_active = (user_id, channel)
         memory = self._memory_for_turn(session, memory)
