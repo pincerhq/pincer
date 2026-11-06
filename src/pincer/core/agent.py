@@ -1440,8 +1440,11 @@ class Agent:
         asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
         try:
             if asking:
-                tail = "\n\n" + ONBOARDING_QUESTION_EN
-                full_text = full_text.rstrip() + tail
+                # Extend what the client already received: only the newlines still missing for a
+                # blank line before the question are added, never stripped from the reply
+                trailing = len(full_text) - len(full_text.rstrip("\n"))
+                tail = "\n" * max(0, 2 - trailing) + ONBOARDING_QUESTION_EN
+                full_text += tail
                 yield StreamChunk(StreamEventType.TEXT, tail)
 
             if full_text:

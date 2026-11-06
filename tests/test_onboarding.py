@@ -123,6 +123,32 @@ async def test_fresh_session_appends_question(
     assert (record.asked_session_id, record.completed_at) == ("test:user-fresh", None)
 
 
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("Hello", "Hello\n\n" + ONBOARDING_QUESTION_EN),
+        ("Hello\n", "Hello\n\n" + ONBOARDING_QUESTION_EN),
+        ("Hello\n\n", "Hello\n\n" + ONBOARDING_QUESTION_EN),
+        ("Hello\n\n\n", "Hello\n\n\n" + ONBOARDING_QUESTION_EN),
+        ("Hello  ", "Hello  \n\n" + ONBOARDING_QUESTION_EN),
+    ],
+)
+async def test_streamed_onboarding_tail_extends_the_text_the_client_received(
+    reply, expected, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """The question is separated from the reply by a blank line, and the chunks are an exact prefix of
+    what is saved: DONE == join(TEXT) == the saved message, whatever whitespace the reply ends in."""
+    _streams(mock_llm, reply)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    chunks = [c async for c in agent.handle_message_stream("user-tail", "test", "Hi!")]
+
+    texts = [c.content for c in chunks if c.type == StreamEventType.TEXT]
+    session = await session_manager.get_or_create("user-tail", "test")
+    assert chunks[-1].content.endswith(ONBOARDING_QUESTION_EN)  # the precondition: the question was asked
+    assert chunks[-1].content == "".join(texts) == session.messages[-1].content == expected
+
+
 @_PATHS
 async def test_first_message_in_conversation_prompts_and_records_asking_session(
     path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
