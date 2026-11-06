@@ -43,7 +43,11 @@ _FALLBACK_PAGE_SIZE = 1000
 _FALLBACK_MAX_PAGES = 10
 
 _PHONE_QUERY_RE = re.compile(r"^[\d\s+().\-/]+$")
-_MIN_PHONE_QUERY_DIGITS = 3
+# Phone queries match as a suffix of the stored number (or vice versa), so
+# they need enough digits not to hit unrelated numbers.
+_MIN_PHONE_QUERY_DIGITS = 6
+# Shorter name tokens (initials) are ignored; a query with none left is rejected.
+_MIN_TOKEN_LEN = 2
 
 
 def _fmt_contact(person: dict[str, Any]) -> str:
@@ -153,31 +157,95 @@ def _normalize(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _digits(text: str) -> str:
+    """Digits of a phone number without leading zeros (trunk / 00 international prefix)."""
+    return re.sub(r"\D", "", text).lstrip("0")
+
+
+def _is_phone_query(query: str) -> bool:
+    return bool(_PHONE_QUERY_RE.match(query.strip()))
+
+
+def _name_tokens(query: str) -> list[str]:
+    """Normalized query words long enough to match on."""
+    return [t for t in _normalize(query).split() if len(t) >= _MIN_TOKEN_LEN]
+
+
+def _query_error(query: str) -> str | None:
+    """Why ``query`` can't be searched for, or None if it can.
+
+    Rejected up front so a meaningless query never reaches the
+    "not a saved contact" verdict.
+    """
+    q = query.strip()
+    if not _normalize(q):
+        return "Error: the query is empty. Give a name, email address, phone number or organization."
+    if _is_phone_query(q):
+        if len(_digits(q)) < _MIN_PHONE_QUERY_DIGITS:
+            return f"Error: phone number searches need at least {_MIN_PHONE_QUERY_DIGITS} digits."
+        return None
+    if "@" in q:
+        if len(q.split("@", 1)[0]) < _MIN_TOKEN_LEN:
+            return "Error: email searches need the part before the @ (domain-only searches are not supported)."
+        return None
+    if not _name_tokens(q):
+        return f"Error: the query is too short. Give at least {_MIN_TOKEN_LEN} letters of a name."
+    return None
+
+
+def _email_parts(person: dict[str, Any]) -> list[tuple[str, str]]:
+    """(full address, local part), casefolded, for each email of the contact."""
+    parts = []
+    for e in person.get("emailAddresses", []):
+        address = e.get("value", "").strip().casefold()
+        if address:
+            parts.append((address, address.split("@", 1)[0]))
+    return parts
+
+
 def _person_words(person: dict[str, Any]) -> set[str]:
-    """Searchable words of a contact: names, nicknames, emails and organizations."""
+    """Words of a contact's names, nicknames, organizations and email local parts.
+
+    Email domains are left out: "com" or "example" must not match everyone.
+    """
     texts: list[str] = []
     for name in person.get("names", []):
         texts.extend(name.get(k, "") for k in ("givenName", "middleName", "familyName", "displayName"))
     texts.extend(n.get("value", "") for n in person.get("nicknames", []))
-    texts.extend(e.get("value", "") for e in person.get("emailAddresses", []))
     texts.extend(o.get("name", "") for o in person.get("organizations", []))
+    texts.extend(local for _, local in _email_parts(person))
     return {word for text in texts if text for word in _normalize(text).split()}
 
 
 def _person_matches(person: dict[str, Any], query: str) -> bool:
-    """True if every query token is contained in some word of the contact.
+    """True if ``query`` (already accepted by ``_query_error``) identifies this contact.
 
-    Phone-like queries (digits and separators only) match on phone digits.
+    - Phone queries: one number ends with the other (leading zeros ignored).
+    - Email queries (with "@"): the query is a prefix of a full address.
+    - Otherwise: the query is a prefix of an email local part ("jane.d"),
+      or every token of at least ``_MIN_TOKEN_LEN`` characters is a prefix
+      of some name, nickname, organization or local-part word.
     """
-    if _PHONE_QUERY_RE.match(query):
-        digits = re.sub(r"\D", "", query)
-        if len(digits) >= _MIN_PHONE_QUERY_DIGITS:
-            return any(digits in re.sub(r"\D", "", p.get("value", "")) for p in person.get("phoneNumbers", []))
-    tokens = _normalize(query).split()
+    q = query.strip()
+    if _is_phone_query(q):
+        wanted = _digits(q)
+        for phone in person.get("phoneNumbers", []):
+            have = _digits(phone.get("value", ""))
+            if len(have) >= _MIN_PHONE_QUERY_DIGITS and (have.endswith(wanted) or wanted.endswith(have)):
+                return True
+        return False
+
+    folded = q.casefold()
+    if "@" in folded:
+        return any(address.startswith(folded) for address, _ in _email_parts(person))
+    if any(local.startswith(folded) for _, local in _email_parts(person)):
+        return True
+
+    tokens = _name_tokens(q)
     if not tokens:
         return False
     words = _person_words(person)
-    return all(any(token in word for word in words) for token in tokens)
+    return all(any(word.startswith(token) for word in words) for token in tokens)
 
 
 async def _warmup_search_cache(svc: Any, wait_seconds: float) -> None:
@@ -190,8 +258,12 @@ async def _warmup_search_cache(svc: Any, wait_seconds: float) -> None:
     await asyncio.sleep(wait_seconds)
 
 
-async def _scan_connections(svc: Any, query: str, max_results: int) -> list[dict[str, Any]]:
-    """Page through people.connections.list and match ``query`` locally."""
+async def _scan_connections(svc: Any, query: str, max_results: int) -> tuple[list[dict[str, Any]], bool]:
+    """Page through people.connections.list and match ``query`` locally.
+
+    Returns (matches, complete). ``complete`` is False when the page cap was
+    hit with pages still left, so an empty result is not a definite "no".
+    """
     matches: list[dict[str, Any]] = []
     page_token = ""
     for _ in range(_FALLBACK_MAX_PAGES):
@@ -202,16 +274,17 @@ async def _scan_connections(svc: Any, query: str, max_results: int) -> list[dict
         }
         if page_token:
             kwargs["pageToken"] = page_token
-        result = await with_backoff(lambda kw=kwargs: svc.people().connections().list(**kw).execute())
+        request = svc.people().connections().list(**kwargs)
+        result = await with_backoff(request.execute)
         for person in result.get("connections", []):
             if _person_matches(person, query):
                 matches.append(person)
                 if len(matches) >= max_results:
-                    return matches
+                    return matches, True
         page_token = result.get("nextPageToken", "")
         if not page_token:
-            break
-    return matches
+            return matches, True
+    return matches, False
 
 
 def _fmt_search_results(people: list[dict[str, Any]]) -> str:
@@ -225,6 +298,9 @@ async def google__search_contacts(
     max_results: int = 20,
 ) -> str:
     """Search contacts by name, email, or phone."""
+    error = _query_error(query)
+    if error:
+        return error
     svc = await factory.get("contacts")
     page_size = max(1, min(int(max_results), _SEARCH_MAX_PAGE_SIZE))
 
@@ -244,7 +320,7 @@ async def google__search_contacts(
         return _fmt_search_results(people)
 
     try:
-        people = await _scan_connections(svc, query, page_size)
+        people, complete = await _scan_connections(svc, query, page_size)
     except Exception as e:
         logger.warning("Contacts fallback scan failed for %r: %s", query, e)
         return (
@@ -253,6 +329,12 @@ async def google__search_contacts(
         )
     if people:
         return _fmt_search_results(people)
+    if not complete:
+        scanned = _FALLBACK_MAX_PAGES * _FALLBACK_PAGE_SIZE
+        return (
+            f'No match in the first {scanned} Google Contacts for "{query}", and there are more that were not '
+            "scanned. Cannot confirm whether this person is a saved contact; try a more specific query."
+        )
     return (
         f'No match in Google Contacts for "{query}" (searched names, nicknames, emails, phones, organizations). '
         "This person is not a saved contact."
@@ -539,8 +621,8 @@ def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "query": {
                     "type": "string",
                     "description": (
-                        "Full or partial name (first or last name alone works), nickname, email address"
-                        " or part of it, phone number digits, or organization."
+                        "Full or partial name (first or last name alone works, at least 2 letters), nickname,"
+                        " email address or its beginning, phone number (at least 6 digits), or organization."
                     ),
                 },
                 "max_results": {
