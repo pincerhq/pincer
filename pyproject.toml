@@ -53,6 +53,7 @@ dependencies = [
     "tenacity>=9.0",
     "google-api-python-client>=2.160",
     "google-auth-oauthlib>=1.2",
+    "oauthlib>=4.0.1",
     "google-auth-httplib2>=0.2",
     "aiogoogle>=5.13",
     # Sprint 5: API Server
