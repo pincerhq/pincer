@@ -1255,112 +1255,112 @@ class Agent:
         response: LLMResponse | None = None
         call_sids: list[str] = []
 
-        # Tool-call iterations (non-streaming)
-        for _iteration in range(self._settings.max_tool_iterations):
-            # Proactive sanitization: fix orphaned pairs before they reach the API
-            await self._repair_tool_pairs(session)
-
-            try:
-                response = await self._llm.complete(
-                    messages=session.messages,
-                    tools=tool_schemas,
-                    system=system_prompt,
-                )
-            except BudgetExceededError:
-                yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
-                return
-            except LLMError as e:
-                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
-                if recovery is _PairRecovery.RETRY:
-                    sanitize_attempts += 1
-                    continue
-                if recovery is _PairRecovery.CLEARED:
-                    yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
-                    return
-                raise
-
-            # A blank cut-off here is fine: the final stream below is the reply, and is checked
-            _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
-
-            if not response.has_tool_calls:
-                break
-
-            logger.info(
-                "LLM requested tools: %s",
-                [tc.name for tc in response.tool_calls],
-            )
-            assistant_msg = LLMMessage(
-                role=MessageRole.ASSISTANT,
-                content=response.content,
-                tool_calls=response.tool_calls,
-                thinking_blocks=list(response.thinking_blocks),
-                content_blocks=list(response.content_blocks),
-            )
-            await self._sessions.add_message(session, assistant_msg)
-
-            iteration_had_error = False
-            skills_loaded: list[str] = []
-            for tool_call in response.tool_calls:
-                yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
-                result = await self._execute_tool(
-                    tool_call, user_id, channel, channel_user_id=channel_user_id, turn=turn
-                )
-                result_msg = LLMMessage(
-                    role=MessageRole.TOOL_RESULT,
-                    content=result.content,
-                    tool_call_id=result.tool_call_id,
-                )
-                await self._sessions.add_message(session, result_msg)
-                sid = _placed_call_sid(tool_call.name, result)
-                if sid and sid not in call_sids:
-                    call_sids.append(sid)
-                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, sid)
-                if result.is_error:
-                    iteration_had_error = True
-                elif (skill := _loaded_skill(tool_call, result)) is not None:
-                    skills_loaded.append(skill)
-            if skills_loaded:
-                reselected = await self._reselect_after_skills(
-                    self._tools.get_schemas(), text, session.messages, skills_loaded
-                )
-                if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                    # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                    strip_thinking(session.messages)
-                    tool_schemas = reselected
-                    system_prompt = await build_prompt(_schema_names(tool_schemas))
-
-            if iteration_had_error:
-                consecutive_errors += 1
-                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
-                    logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
-                    circuit_broken = True
-                    break
-            else:
-                consecutive_errors = 0
-        else:
-            fallback_content = response.content if response and response.content else "Max iterations reached."
-            yield StreamChunk(StreamEventType.DONE, fallback_content)
-            return
-
-        if circuit_broken:
-            fallback = (
-                response.content
-                if response and response.content
-                else "I'm having repeated tool failures. Let me respond with what I have."
-            )
-            if fallback:
-                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
-                await self._sessions.add_message(session, final_msg)
-            yield StreamChunk(StreamEventType.DONE, fallback)
-            return
-
-        # Stream the final response. It sends no tools, unlike the turn's earlier
-        # requests: that is a history edit for preserved thinking, so the turn's
-        # thinking is dropped before it (Q2c).
-        strip_thinking(session.messages)
         full_text = ""
-        streamed: LLMResponse | None = None
         try:
+            # Tool-call iterations (non-streaming)
+            for _iteration in range(self._settings.max_tool_iterations):
+                # Proactive sanitization: fix orphaned pairs before they reach the API
+                await self._repair_tool_pairs(session)
+
+                try:
+                    response = await self._llm.complete(
+                        messages=session.messages,
+                        tools=tool_schemas,
+                        system=system_prompt,
+                    )
+                except BudgetExceededError:
+                    yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
+                    return
+                except LLMError as e:
+                    recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                    if recovery is _PairRecovery.RETRY:
+                        sanitize_attempts += 1
+                        continue
+                    if recovery is _PairRecovery.CLEARED:
+                        yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
+                        return
+                    raise
+
+                # A blank cut-off here is fine: the final stream below is the reply, and is checked
+                _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
+
+                if not response.has_tool_calls:
+                    break
+
+                logger.info(
+                    "LLM requested tools: %s",
+                    [tc.name for tc in response.tool_calls],
+                )
+                assistant_msg = LLMMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                    thinking_blocks=list(response.thinking_blocks),
+                    content_blocks=list(response.content_blocks),
+                )
+                await self._sessions.add_message(session, assistant_msg)
+
+                iteration_had_error = False
+                skills_loaded: list[str] = []
+                for tool_call in response.tool_calls:
+                    yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
+                    result = await self._execute_tool(
+                        tool_call, user_id, channel, channel_user_id=channel_user_id, turn=turn
+                    )
+                    result_msg = LLMMessage(
+                        role=MessageRole.TOOL_RESULT,
+                        content=result.content,
+                        tool_call_id=result.tool_call_id,
+                    )
+                    await self._sessions.add_message(session, result_msg)
+                    sid = _placed_call_sid(tool_call.name, result)
+                    if sid and sid not in call_sids:
+                        call_sids.append(sid)
+                    yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name, sid)
+                    if result.is_error:
+                        iteration_had_error = True
+                    elif (skill := _loaded_skill(tool_call, result)) is not None:
+                        skills_loaded.append(skill)
+                if skills_loaded:
+                    reselected = await self._reselect_after_skills(
+                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                    )
+                    if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
+                        strip_thinking(session.messages)
+                        tool_schemas = reselected
+                        system_prompt = await build_prompt(_schema_names(tool_schemas))
+
+                if iteration_had_error:
+                    consecutive_errors += 1
+                    if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                        logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
+                        circuit_broken = True
+                        break
+                else:
+                    consecutive_errors = 0
+            else:
+                fallback_content = response.content if response and response.content else "Max iterations reached."
+                yield StreamChunk(StreamEventType.DONE, fallback_content)
+                return
+
+            if circuit_broken:
+                fallback = (
+                    response.content
+                    if response and response.content
+                    else "I'm having repeated tool failures. Let me respond with what I have."
+                )
+                if fallback:
+                    final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
+                    await self._sessions.add_message(session, final_msg)
+                yield StreamChunk(StreamEventType.DONE, fallback)
+                return
+
+            # Stream the final response. It sends no tools, unlike the turn's earlier
+            # requests: that is a history edit for preserved thinking, so the turn's
+            # thinking is dropped before it (Q2c).
+            strip_thinking(session.messages)
+            streamed: LLMResponse | None = None
             try:
                 async for event in self._llm.stream_turn(
                     messages=session.messages,

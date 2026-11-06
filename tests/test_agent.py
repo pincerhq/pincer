@@ -775,6 +775,67 @@ async def test_streamed_text_is_delivered_and_saved_when_the_stream_closes_witho
 
 
 @pytest.mark.asyncio
+async def test_a_streamed_turn_whose_next_request_fails_after_a_dial_still_returns_the_placed_call(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """The tool loop's own request fails after a dial: the ringing call must still reach the channel."""
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError("overloaded 529")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_cut_off_inside_a_tool_call_after_a_dial_still_returns_the_placed_call(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_dial()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
+
+    session = await session_manager.get_or_create("user1", "test")
+    assert all(tc.id != "tc3" for m in session.messages for tc in m.tool_calls)  # the cut-off call never ran
+    assert all(m.tool_call_id != "tc3" for m in session.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_whose_next_request_fails_before_any_dial_still_raises(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError("overloaded 529")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
+
+    with pytest.raises(LLMError, match="overloaded"):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_cut_off_inside_a_tool_call_before_any_dial_still_raises(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_dial()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
+
+    with pytest.raises(LLMOutputTruncatedError):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_over_budget_after_a_dial_keeps_the_budget_reply(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """A budget stop is not an LLM failure: it keeps its own reply, never the placed-call text."""
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], BudgetExceededError(5.0, 5.0)]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+
+    assert chunks[-1].type == StreamEventType.DONE
+    assert chunks[-1].content == "Daily budget limit reached."
+
+
+@pytest.mark.asyncio
 async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker
 ):
