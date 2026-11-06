@@ -120,6 +120,13 @@ tool call whose input is incomplete. Such a call is never run, on any channel.
   `PINCER_VOICE_MAX_RESPONSE_TOKENS` is below 512. A voice or summary `default`
   is reported as nothing sent ("model default"), whatever the global setting. The checks make no
   API call and never report CRITICAL.
+- **Removed:** `BaseLLMProvider.stream()`, `LLMRouter.stream()` and the providers'
+  `stream()` methods. Nothing in Pincer called them any more: the chat reply and
+  the voice loop both use `stream_turn()`, which also returns tool calls and usage.
+  Callers of `stream()` should use `stream_turn()` (text arrives as events with
+  `text`, then one event with the final `response`). A custom `BaseLLMProvider`
+  no longer has to implement `stream()`; `complete()` and `close()` are enough,
+  because the base `stream_turn()` falls back to `complete()`.
 
 #### BREAKING: identities follow `PINCER_IDENTITY_MANAGEMENT`, `PINCER_IDENTITY_MAP` is removed (#348)
 
@@ -1262,7 +1269,7 @@ itself before a customer does; nothing here required a customer to notice first.
 #### Multi-provider LLM architecture with random failover
 
 - **`LLMRouter`** — a single construction entry point (`pincer.llm.router`) that also *is* a `BaseLLMProvider`. `cli.py` and `api/_deps.py` now call `LLMRouter().get_llm()` / `.get_summarizer()`; adding a provider touches only `pincer/llm/`.
-- **1 + N failover** — configure a primary plus up to 3 failovers via `PINCER_FALLBACK_PROVIDERS`. On any `LLMError`/`LLMRateLimitError` (after a provider's own retries) the router falls over to a randomly-ordered failover, re-sampled per failure, and re-raises the primary's error if all fail. `stream()` fails over only before the first token. `LLMResponse.model` reflects the provider that actually served the response.
+- **1 + N failover** — configure a primary plus up to 3 failovers via `PINCER_FALLBACK_PROVIDERS`. On any `LLMError`/`LLMRateLimitError` (after a provider's own retries) the router falls over to a randomly-ordered failover, re-sampled per failure, and re-raises the primary's error if all fail. `stream_turn()` fails over only before the first event. `LLMResponse.model` reflects the provider that actually served the response.
 - **Compatible endpoints** — any OpenAI- or Anthropic-wire endpoint (Grok, Ollama, OpenRouter, LiteLLM, local proxies, gateways) is configured as a named compatible provider: `PINCER_OPENAI_COMPATIBLE_PROVIDER`/`_BASE_URL`/`_API_KEY` and the `PINCER_ANTHROPIC_COMPATIBLE_*` equivalents. A custom OpenAI-wire and a custom Anthropic-wire endpoint can run side by side.
 - **Per-provider models** — each provider carries its own model id (`PINCER_ANTHROPIC_MODEL`, `PINCER_OPENAI_MODEL`, `PINCER_OPENAI_COMPATIBLE_MODEL`, `PINCER_ANTHROPIC_COMPATIBLE_MODEL`), each defaulting to `PINCER_DEFAULT_MODEL` when unset. This makes failover correct: e.g. an `anthropic` primary on `claude-sonnet-4-5` can fall over to an Ollama endpoint on `llama3.2` instead of sending the Claude model id to Ollama.
 - **Cost attributed to the serving provider** — `LLMResponse.provider` carries the provider that actually served the response (the failover, when one is used), and cost/`is_free` are recorded against it rather than the configured primary. Fixes mis-billing on the failover path.
