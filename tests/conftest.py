@@ -682,8 +682,7 @@ async def migrated_url(migration_url: str, tmp_path: Path):
     from pincer.db import build_config
     from pincer.db.engine import dispose_engines, to_async_url
 
-    config = build_config(tmp_path / "unused.db")
-    config.set_main_option("sqlalchemy.url", migration_url)
+    config = build_config(tmp_path / "unused.db", migration_url)
     await asyncio.to_thread(command.upgrade, config, "head")
     yield to_async_url(migration_url)
     await dispose_engines()

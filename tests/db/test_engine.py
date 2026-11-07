@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import make_url, text
 from sqlalchemy.pool import NullPool
 
 from pincer.config.database import DatabaseSettings
@@ -146,6 +146,20 @@ def test_a_search_path_in_options_reaches_asyncpg_through_the_dsn():
     assert connect_args == {"dsn": "postgresql://?options=-csearch_path%3Dpincer"}
 
 
+@pytest.mark.parametrize(
+    "encoded", ["-c%20search_path%3Da%2Cb", "-c+search_path%3Da,b", "-csearch_path%3Da%20-cstatement_timeout%3D5s"]
+)
+def test_options_with_spaces_and_commas_reach_asyncpg_as_psycopg_reads_them(encoded):
+    """Both drivers must get the same value: psycopg reads SQLAlchemy's parsed
+    query, asyncpg re-parses the DSN rebuilt from it."""
+    from urllib.parse import parse_qs, urlsplit
+
+    target, connect_args = _asyncpg_connect_args(f"postgresql+asyncpg://u@h/d?options={encoded}")
+    parsed_by_psycopg = make_url(f"postgresql+psycopg://u@h/d?options={encoded}").query["options"]
+    assert parse_qs(urlsplit(connect_args["dsn"]).query) == {"options": [parsed_by_psycopg]}
+    assert " " in parsed_by_psycopg
+
+
 def test_a_url_without_options_adds_nothing_to_the_connection():
     """No schema named, nothing sent: Postgres's own `search_path` applies,
     including any `ALTER ROLE ... SET search_path` an operator has set."""
@@ -158,11 +172,14 @@ def test_a_key_asyncpg_connect_actually_accepts_reaches_it_unmoved():
     assert connect_args == {}
 
 
-async def test_a_percent_encoded_url_survives_the_alembic_config(monkeypatch, tmp_path):
-    """Alembic's config interpolates `%`; an encoded URL must come back intact."""
+def test_a_percent_encoded_url_survives_the_alembic_config(monkeypatch, tmp_path):
+    """Alembic's config interpolates `%`; an encoded URL must come back intact,
+    whether it comes from the setting or is passed in."""
     url = "postgresql+psycopg://u:p%40ss@h/d?options=-csearch_path%3Dpincer"
     monkeypatch.setenv("PINCER_DATABASE_URL", url)
     assert build_config(tmp_path / "p.db").get_main_option("sqlalchemy.url") == url
+    monkeypatch.delenv("PINCER_DATABASE_URL")
+    assert build_config(tmp_path / "p.db", url).get_main_option("sqlalchemy.url") == url
 
 
 async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
@@ -226,8 +243,7 @@ def test_postgres_migrations_run_in_utc_whatever_the_server_default(migration_ur
         return run_migrations(self, **kwargs)
 
     monkeypatch.setattr(EnvironmentContext, "run_migrations", spy)
-    cfg = build_config(tmp_path / "unused.db")
-    cfg.set_main_option("sqlalchemy.url", migration_url)
+    cfg = build_config(tmp_path / "unused.db", migration_url)
     with _server_default_timezone(migration_url, "Europe/Berlin"):
         command.upgrade(cfg, "head")
 
@@ -396,7 +412,8 @@ async def test_init_database_migrates_the_configured_database_and_names_it(monke
 @pytest.mark.parametrize("schema", [None, "pincer_alt"])
 async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monkeypatch, tmp_path, schema):
     """`?options=-csearch_path%3D<schema>` puts the migrations and the runtime
-    in that schema; without it, tables land in `public` as they always have."""
+    in that schema; without it, tables land in `public` as they always have.
+    `migration_url` is a throwaway database, dropped with the schema in it."""
     if not migration_url.startswith("postgresql"):
         pytest.skip("SQLite has no schemas")
     import sqlalchemy as sa
@@ -407,33 +424,56 @@ async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monk
 
     url = sa.engine.make_url(migration_url)
     admin = sa.create_engine(url, isolation_level="AUTOCOMMIT")
-    if schema is not None:
-        with admin.connect() as conn:
-            conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
-        url = url.update_query_dict({"options": f"-csearch_path={schema}"})
-    configured = url.render_as_string(hide_password=False)
-    monkeypatch.setenv("PINCER_DATABASE_URL", configured)
     try:
-        runtime_url = await init_database(tmp_path / "unused.db")
-        async with session_scope(runtime_url) as session:
-            await CostLogRepository(session).add(
-                CostLog(timestamp=1.0, provider="p", model="m", input_tokens=1, output_tokens=2, cost_usd=0.5),
-                refresh=False,
-            )
-        async with session_scope(runtime_url) as session:
-            assert await CostLogRepository(session).totals() == (0.5, 1, 1, 2)
-            assert (await session.exec(sa.text("SELECT current_schema()"))).scalar() == (schema or "public")
+        if schema is not None:
+            with admin.connect() as conn:
+                conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+            url = url.update_query_dict({"options": f"-csearch_path={schema}"})
+        monkeypatch.setenv("PINCER_DATABASE_URL", url.render_as_string(hide_password=False))
+        try:
+            runtime_url = await init_database(tmp_path / "unused.db")
+            async with session_scope(runtime_url) as session:
+                await CostLogRepository(session).add(
+                    CostLog(timestamp=1.0, provider="p", model="m", input_tokens=1, output_tokens=2, cost_usd=0.5),
+                    refresh=False,
+                )
+            async with session_scope(runtime_url) as session:
+                assert await CostLogRepository(session).totals() == (0.5, 1, 1, 2)
+                assert (await session.exec(sa.text("SELECT current_schema()"))).scalar() == (schema or "public")
+        finally:
+            await dispose_engines()
+        by_schema = _pincer_tables_by_schema(admin)
     finally:
-        await dispose_engines()
+        admin.dispose()
+    assert set(by_schema) == {schema or "public"}
+    assert by_schema[schema or "public"] > 10
 
-    tables_query = sa.text(
+
+@pytest.mark.parametrize("search_path", ["pincer_missing", "pincer_missing,public"])
+async def test_a_search_path_naming_a_missing_schema_is_refused_before_any_table_is_made(
+    migration_url, monkeypatch, tmp_path, search_path
+):
+    """A typo'd or never-created schema would otherwise fail on Postgres's
+    "no schema has been selected", or silently fall through to `public`."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no schemas")
+    import sqlalchemy as sa
+
+    url = sa.engine.make_url(migration_url).update_query_dict({"options": f"-csearch_path={search_path}"})
+    monkeypatch.setenv("PINCER_DATABASE_URL", url.render_as_string(hide_password=False))
+    with pytest.raises(RuntimeError, match="pincer_missing.*does not exist"):
+        await init_database(tmp_path / "unused.db")
+    admin = sa.create_engine(migration_url)
+    try:
+        assert _pincer_tables_by_schema(admin) == {}
+    finally:
+        admin.dispose()
+
+
+def _pincer_tables_by_schema(engine) -> dict[str, int]:
+    query = text(
         "SELECT table_schema, count(*) FROM information_schema.tables "
         "WHERE table_name LIKE 'pincer\\_%' GROUP BY table_schema"
     )
-    with admin.connect() as conn:
-        by_schema = dict(conn.execute(tables_query).all())
-        if schema is not None:
-            conn.execute(sa.text(f'DROP SCHEMA "{schema}" CASCADE'))
-    admin.dispose()
-    assert set(by_schema) == {schema or "public"}
-    assert by_schema[schema or "public"] > 10
+    with engine.connect() as conn:
+        return dict(conn.execute(query).all())

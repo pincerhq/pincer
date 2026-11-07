@@ -1079,8 +1079,7 @@ def _connect(url: str):
 
 
 def _config(url: str, tmp_path: Path):
-    cfg = build_config(tmp_path / "unused.db")
-    cfg.set_main_option("sqlalchemy.url", url)
+    cfg = build_config(tmp_path / "unused.db", url)
     return cfg
 
 
@@ -1924,8 +1923,7 @@ from alembic import command
 
 from pincer.db import build_config
 
-cfg = build_config(Path(sys.argv[2]) / "unused.db")
-cfg.set_main_option("sqlalchemy.url", sys.argv[1])
+cfg = build_config(Path(sys.argv[2]) / "unused.db", sys.argv[1])
 command.upgrade(cfg, "head")
 """
 

@@ -131,16 +131,21 @@ def get_sync_url(db_path: Path) -> str:
     return f"sqlite:///{db_path}"
 
 
-def build_config(db_path: Path) -> Config:
+def build_config(db_path: Path, url: str | None = None) -> Config:
+    """The Alembic config for `db_path`'s database, or for `url` when given.
+
+    Pass a URL here rather than calling `set_main_option("sqlalchemy.url", ...)`
+    on the result: the config is a ConfigParser, which reads `%` as
+    interpolation, so a percent-encoded URL (`?options=-csearch_path%3Dpincer`,
+    a password with `%40`) set unescaped fails to parse. Escaped here, it
+    reaches `env.py` as written.
+    """
     # Built programmatically rather than relying on alembic.ini's on-disk
     # `script_location` discovery, so migrations can run without an ini file
     # present on the filesystem next to wherever the package is installed.
     cfg = Config()
-    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    # The config is a ConfigParser, which reads `%` as interpolation: escaped,
-    # so a percent-encoded URL (`?options=-csearch_path%3Dpincer`, a password
-    # with `%40`) reaches `env.py` as written instead of failing to parse.
-    cfg.set_main_option("sqlalchemy.url", get_sync_url(db_path).replace("%", "%%"))
+    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR).replace("%", "%%"))
+    cfg.set_main_option("sqlalchemy.url", (url or get_sync_url(db_path)).replace("%", "%%"))
     return cfg
 
 
