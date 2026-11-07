@@ -54,6 +54,12 @@ SQLITE_BUSY_TIMEOUT_MS = 5000
 #: `connect_timeout`, `keepalives`, `hostaddr`) is *not* specially parsed —
 #: it falls through to a raw Postgres server setting, which is wrong for a
 #: client-side option, so those are rejected instead of moved.
+#:
+#: `options` is the exception that proves the rule: it is not client-side but
+#: a startup parameter Postgres itself parses (`-c name=value` pairs), so the
+#: raw server setting asyncpg makes of it is exactly what libpq would send.
+#: It is how a DSN picks a non-`public` schema:
+#: `?options=-csearch_path%3Dpincer`.
 _LIBPQ_DSN_KEYS = frozenset(
     {
         "sslmode",
@@ -66,6 +72,7 @@ _LIBPQ_DSN_KEYS = frozenset(
         "ssl_min_protocol_version",
         "ssl_max_protocol_version",
         "application_name",
+        "options",
     }
 )
 
@@ -130,7 +137,10 @@ def build_config(db_path: Path) -> Config:
     # present on the filesystem next to wherever the package is installed.
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", get_sync_url(db_path))
+    # The config is a ConfigParser, which reads `%` as interpolation: escaped,
+    # so a percent-encoded URL (`?options=-csearch_path%3Dpincer`, a password
+    # with `%40`) reaches `env.py` as written instead of failing to parse.
+    cfg.set_main_option("sqlalchemy.url", get_sync_url(db_path).replace("%", "%%"))
     return cfg
 
 

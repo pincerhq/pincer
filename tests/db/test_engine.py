@@ -129,9 +129,7 @@ def test_channel_binding_is_dropped_unless_it_is_required():
         _asyncpg_connect_args("postgresql+asyncpg://u@h/d?channel_binding=require")
 
 
-@pytest.mark.parametrize(
-    "key", ["connect_timeout", "keepalives", "keepalives_idle", "hostaddr", "gssencmode", "options"]
-)
+@pytest.mark.parametrize("key", ["connect_timeout", "keepalives", "keepalives_idle", "hostaddr", "gssencmode"])
 def test_libpq_keys_asyncpg_cannot_honour_are_rejected_not_silently_dropped(key):
     """These are neither an asyncpg.connect() keyword nor one the DSN parser
     special-cases, so moving them into the DSN would silently turn them into
@@ -140,10 +138,31 @@ def test_libpq_keys_asyncpg_cannot_honour_are_rejected_not_silently_dropped(key)
         _asyncpg_connect_args(f"postgresql+asyncpg://u@h/d?{key}=10")
 
 
+def test_a_search_path_in_options_reaches_asyncpg_through_the_dsn():
+    """libpq's `options` is a startup parameter Postgres parses itself, so the
+    server setting asyncpg makes of it is what picks a non-`public` schema."""
+    target, connect_args = _asyncpg_connect_args("postgresql+asyncpg://u@h/d?options=-csearch_path%3Dpincer")
+    assert dict(target.query) == {}
+    assert connect_args == {"dsn": "postgresql://?options=-csearch_path%3Dpincer"}
+
+
+def test_a_url_without_options_adds_nothing_to_the_connection():
+    """No schema named, nothing sent: Postgres's own `search_path` applies,
+    including any `ALTER ROLE ... SET search_path` an operator has set."""
+    assert _asyncpg_connect_args("postgresql+asyncpg://u@h/d")[1] == {}
+
+
 def test_a_key_asyncpg_connect_actually_accepts_reaches_it_unmoved():
     target, connect_args = _asyncpg_connect_args("postgresql+asyncpg://u@h/d?command_timeout=5")
     assert dict(target.query) == {"command_timeout": "5"}
     assert connect_args == {}
+
+
+async def test_a_percent_encoded_url_survives_the_alembic_config(monkeypatch, tmp_path):
+    """Alembic's config interpolates `%`; an encoded URL must come back intact."""
+    url = "postgresql+psycopg://u:p%40ss@h/d?options=-csearch_path%3Dpincer"
+    monkeypatch.setenv("PINCER_DATABASE_URL", url)
+    assert build_config(tmp_path / "p.db").get_main_option("sqlalchemy.url") == url
 
 
 async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
@@ -372,3 +391,49 @@ async def test_init_database_migrates_the_configured_database_and_names_it(monke
         assert {"pincer_alembic_version", "pincer_memories", "pincer_telephony_calls"} <= tables
     finally:
         await dispose_engines()
+
+
+@pytest.mark.parametrize("schema", [None, "pincer_alt"])
+async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monkeypatch, tmp_path, schema):
+    """`?options=-csearch_path%3D<schema>` puts the migrations and the runtime
+    in that schema; without it, tables land in `public` as they always have."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no schemas")
+    import sqlalchemy as sa
+
+    from pincer.db.session import session_scope
+    from pincer.models.costs import CostLog
+    from pincer.repositories.costs import CostLogRepository
+
+    url = sa.engine.make_url(migration_url)
+    admin = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+    if schema is not None:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+        url = url.update_query_dict({"options": f"-csearch_path={schema}"})
+    configured = url.render_as_string(hide_password=False)
+    monkeypatch.setenv("PINCER_DATABASE_URL", configured)
+    try:
+        runtime_url = await init_database(tmp_path / "unused.db")
+        async with session_scope(runtime_url) as session:
+            await CostLogRepository(session).add(
+                CostLog(timestamp=1.0, provider="p", model="m", input_tokens=1, output_tokens=2, cost_usd=0.5),
+                refresh=False,
+            )
+        async with session_scope(runtime_url) as session:
+            assert await CostLogRepository(session).totals() == (0.5, 1, 1, 2)
+            assert (await session.exec(sa.text("SELECT current_schema()"))).scalar() == (schema or "public")
+    finally:
+        await dispose_engines()
+
+    tables_query = sa.text(
+        "SELECT table_schema, count(*) FROM information_schema.tables "
+        "WHERE table_name LIKE 'pincer\\_%' GROUP BY table_schema"
+    )
+    with admin.connect() as conn:
+        by_schema = dict(conn.execute(tables_query).all())
+        if schema is not None:
+            conn.execute(sa.text(f'DROP SCHEMA "{schema}" CASCADE'))
+    admin.dispose()
+    assert set(by_schema) == {schema or "public"}
+    assert by_schema[schema or "public"] > 10
