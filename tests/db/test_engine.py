@@ -470,6 +470,36 @@ async def test_a_search_path_naming_a_missing_schema_is_refused_before_any_table
         admin.dispose()
 
 
+@pytest.mark.parametrize("search_path", [None, '"$user",pincer_missing'])
+async def test_a_schema_named_after_the_role_is_used_as_postgres_would(
+    migration_url, monkeypatch, tmp_path, search_path
+):
+    """`"$user"` resolves to the role's own schema when it exists: with `public`
+    dropped, the default path still has somewhere to put the tables, and any
+    entry after it is never consulted."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no schemas")
+    import sqlalchemy as sa
+
+    url = sa.engine.make_url(migration_url)
+    admin = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            role = conn.execute(sa.text("SELECT current_user")).scalar()
+            conn.execute(sa.text(f'DROP SCHEMA public CASCADE; CREATE SCHEMA "{role}" AUTHORIZATION "{role}"'))
+        if search_path is not None:
+            url = url.update_query_dict({"options": f"-csearch_path={search_path}"})
+        monkeypatch.setenv("PINCER_DATABASE_URL", url.render_as_string(hide_password=False))
+        try:
+            await init_database(tmp_path / "unused.db")
+        finally:
+            await dispose_engines()
+        by_schema = _pincer_tables_by_schema(admin)
+    finally:
+        admin.dispose()
+    assert set(by_schema) == {role}
+
+
 def _pincer_tables_by_schema(engine) -> dict[str, int]:
     query = text(
         "SELECT table_schema, count(*) FROM information_schema.tables "
