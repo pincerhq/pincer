@@ -173,6 +173,48 @@ def _upgrade_lock(engine: Engine) -> Iterator[None]:
                 logger.warning("Could not end the migration lock's transaction; its connection is gone", exc_info=True)
 
 
+def _check_search_path(engine: Engine) -> None:
+    """Refuse a `search_path` that names a schema missing from the database.
+
+    Postgres skips such an entry silently: with `-csearch_path=pincr` (a typo,
+    or a schema nobody created) the first migration fails with "no schema has
+    been selected to create in", and with `pincr,public` every table quietly
+    lands in `public`. Only `"$user"` may be missing, as it is by default; when
+    a schema named after the role exists and the role may use it, Postgres
+    takes it and the entries after it are never consulted, so neither are they
+    here.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect() as conn:
+        search_path = conn.exec_driver_sql("SHOW search_path").scalar() or ""
+        for entry in (part.strip() for part in search_path.split(",")):
+            if not entry:
+                continue
+            if entry == '"$user"':
+                # Postgres resolves it to `current_user`, and skips it unless
+                # that schema exists and the role has USAGE on it.
+                user_schema = sa.text(
+                    "SELECT coalesce(has_schema_privilege(to_regnamespace(quote_ident(current_user)), 'USAGE'), false)"
+                )
+                if conn.execute(user_schema).scalar():
+                    break
+                continue
+            # `to_regnamespace` folds case and strips quotes as the path does.
+            if conn.execute(sa.text("SELECT to_regnamespace(:entry) IS NOT NULL"), {"entry": entry}).scalar():
+                break
+            raise RuntimeError(
+                f"The search_path ({search_path}) names schema {entry}, which does not exist in this database. "
+                f"Create it (CREATE SCHEMA {entry} AUTHORIZATION <role>) or fix the `options` in "
+                "PINCER_DATABASE_URL, or the role's or database's search_path"
+            )
+        if conn.exec_driver_sql("SELECT current_schema()").scalar() is None:
+            raise RuntimeError(
+                f"None of the schemas in the search_path ({search_path}) exists in this database; "
+                "create one or name an existing one with `options` in PINCER_DATABASE_URL"
+            )
+
+
 def _get_url() -> str:
     """Resolve the target DB URL.
 
@@ -201,6 +243,7 @@ def run_migrations_online() -> None:
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     try:
+        _check_search_path(connectable)
         with _upgrade_lock(connectable):
             _bootstrap_version_table(connectable, {script.revision for script in context.script.walk_revisions()})
             with connectable.connect() as connection:

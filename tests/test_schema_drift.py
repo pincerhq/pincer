@@ -35,8 +35,7 @@ _OPTS = {
 
 
 def _migrate_to_head(url: str, tmp_path: Path) -> sa.Engine:
-    cfg = build_config(tmp_path / "unused.db")
-    cfg.set_main_option("sqlalchemy.url", url)
+    cfg = build_config(tmp_path / "unused.db", url)
     command.upgrade(cfg, "head")
     return sa.create_engine(url)
 
