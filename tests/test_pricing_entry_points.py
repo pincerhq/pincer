@@ -262,3 +262,38 @@ def test_doctor_prints_the_block_to_paste_as_text_not_markup(pricing_dir: Path) 
     result = runner.invoke(app, ["doctor"], terminal_width=400)
 
     assert '[pricing."claude-a"]' in result.output
+
+
+@pytest.mark.parametrize("multiplier", ["0", "-1"])
+def test_run_refuses_an_invalid_provider_multiplier(
+    pricing_dir: Path, monkeypatch: pytest.MonkeyPatch, multiplier: str
+) -> None:
+    started: list[Any] = []
+    monkeypatch.setattr("pincer.cli.run.start_daemon", lambda *a: started.append(a))
+    _price(pricing_dir, "claude-a")
+    (pricing_dir / "pincer.local.toml").write_text(
+        f'[pricing.provider."anthropic"]\nmultiplier = {multiplier}\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["run", "-d"], terminal_width=400)
+
+    assert result.exit_code == 1
+    assert result.output == (
+        "Configuration error: Invalid [pricing] entries in pincer.toml / pincer.local.toml:\n"
+        f'  - pricing.provider."anthropic": multiplier must be a number > 0, got {multiplier}\n'
+    )
+    assert started == []
+
+
+def test_run_starts_with_a_valid_provider_multiplier(pricing_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list[Any] = []
+    monkeypatch.setattr("pincer.cli.run.start_daemon", lambda *a: started.append(a))
+    _price(pricing_dir, "claude-a")
+    (pricing_dir / "pincer.local.toml").write_text(
+        '[pricing.provider."anthropic"]\nmultiplier = 1.1\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["run", "-d"])
+
+    assert result.exit_code == 0, result.output
+    assert len(started) == 1

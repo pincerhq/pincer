@@ -83,7 +83,7 @@ class CostService:
         `is_free` (e.g. a keyless local endpoint) forces zero cost.
         """
         try:
-            cost = 0.0 if is_free else self._price(model, input_tokens, output_tokens)
+            cost = 0.0 if is_free else self._price(provider, model, input_tokens, output_tokens)
         except UnpricedModelError:
             # The startup check prices every model Pincer will call, so this is a model it
             # was never told about: loud, and never stored at an invented $0 (issue #357).
@@ -130,10 +130,10 @@ class CostService:
         )
         return cost
 
-    def _price(self, model: str, input_tokens: int, output_tokens: int) -> float:
+    def _price(self, provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
         if self._prices is None:
             raise RuntimeError("CostService has no price table: pass prices= to record LLM calls")
-        return self._prices.cost(model, input_tokens, output_tokens)
+        return self._prices.cost(provider, model, input_tokens, output_tokens)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
         async with session_scope(self._url) as session:

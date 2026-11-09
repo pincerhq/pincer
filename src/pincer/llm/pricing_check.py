@@ -6,7 +6,7 @@ standalone API) and by `pincer doctor`; never on settings construction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pincer.config.pricing import PricingError, load_price_table, paste_block
@@ -68,6 +68,9 @@ class PricingReport:
     errors: list[str]
     missing: dict[str, list[ModelUse]]
     models: list[str]  # every model checked, once, in the order Pincer uses them
+    # `[pricing.provider."x"]` names matching no configured provider: their multiplier applies
+    # to nothing. Worth a doctor warning, never a reason to refuse.
+    unknown_providers: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -103,7 +106,8 @@ def check_pricing(settings: Settings, config_dir: Path | None = None) -> Pricing
     for use in uses:
         if use.model not in table:
             missing.setdefault(use.model, []).append(use)
-    return PricingReport([], missing, list(dict.fromkeys(u.model for u in uses)))
+    unknown = sorted(set(table.multipliers) - known_provider_names(settings))
+    return PricingReport([], missing, list(dict.fromkeys(u.model for u in uses)), unknown)
 
 
 def pricing_problems(settings: Settings, config_dir: Path | None = None) -> str | None:

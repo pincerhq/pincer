@@ -2202,6 +2202,17 @@ class SecurityDoctor:
             if report.models
             else "No model Pincer will call is billed (keyless endpoints only)"
         )
+        if report.unknown_providers:
+            from pincer.llm.router import known_provider_names
+
+            named = ", ".join(f'[pricing.provider."{name}"]' for name in report.unknown_providers)
+            return CheckResult(
+                "llm_pricing",
+                CheckStatus.WARNING,
+                f"{message}; but {named} names no configured provider, so its multiplier applies to nothing",
+                fix_hint=f"Use a configured provider name: {', '.join(sorted(known_provider_names(self._cfg(cfg))))}",
+                category="llm",
+            )
         return CheckResult("llm_pricing", CheckStatus.PASS, message, category="llm")
 
     def _check_llm_reasoning_default(self, cfg: Settings | None = None) -> CheckResult:

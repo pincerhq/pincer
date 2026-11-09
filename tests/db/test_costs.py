@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from pincer.config.pricing import PriceTable, Rates
+from pincer.config.pricing import PriceTable, Rates, load_price_table
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.exceptions import BudgetExceededError
@@ -147,3 +147,18 @@ async def test_an_unpriced_model_raises_logs_and_stores_nothing(url, caplog):
         ("ERROR", "No [pricing] entry for model 'gpt-4o-2024-08-06' (provider openai): the call is not recorded")
     ]
     assert (await service.get_summary()).total_calls == 0
+
+
+async def test_a_provider_multiplier_prices_only_that_providers_calls(url, tmp_path):
+    (tmp_path / "pincer.toml").write_text(
+        '[pricing."claude-sonnet-5-5"]\n'
+        "input = 2.0\ncache_write = 2.5\ncache_write_1h = 4.0\ncache_read = 0.1\noutput = 10.0\n\n"
+        '[pricing.provider."foundry"]\nmultiplier = 1.1\n',
+        encoding="utf-8",
+    )
+    service = CostService(url, prices=load_price_table(tmp_path))
+    plain = await service.record("anthropic", "claude-sonnet-5-5", 10_000, 1_000)
+    zoned = await service.record("foundry", "claude-sonnet-5-5", 10_000, 1_000)
+    assert plain == pytest.approx(0.03, abs=1e-12)
+    assert zoned == pytest.approx(0.033, abs=1e-12)
+    assert (await service.get_summary()).total_usd == pytest.approx(0.063, abs=1e-12)  # what was stored

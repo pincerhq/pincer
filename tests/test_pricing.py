@@ -26,7 +26,7 @@ def test_the_shipped_section_prices_claude_opus_4_6_and_haiku_5_5(shipped: Price
     assert haiku is not None
     assert (opus.input, opus.output) == (5.0, 25.0)
     assert (haiku.input, haiku.output) == (0.10, 0.50)
-    assert shipped.cost("claude-opus-4-6", 1_000_000, 1_000_000) == pytest.approx(30.0)
+    assert shipped.cost("anthropic", "claude-opus-4-6", 1_000_000, 1_000_000) == pytest.approx(30.0)
 
 
 def test_tests_read_their_own_pricing_never_the_repository_config() -> None:
@@ -38,6 +38,8 @@ def test_tests_read_their_own_pricing_never_the_repository_config() -> None:
 
 
 _CLAUDE_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-07"
+# Rows given their long-prompt tier in slice 2 were re-read on 2026-11-09
+_CLAUDE_SOURCE_LONG = "https://platform.claude.com/docs/en/about-claude/pricing, fetched 2026-11-09"
 _OPENAI_SOURCE = "https://developers.openai.com/api/docs/pricing (Standard), fetched 2026-11-09"
 
 # input / 5-minute write / 1-hour write / cache read / output, USD per million tokens. Claude: the
@@ -64,7 +66,7 @@ _SHIPPED: dict[str, tuple[tuple[float, float, float, float, float], str]] = {
         ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929"],
         ((3, 3.75, 6, 0.30, 15), _CLAUDE_SOURCE),
     ),
-    "claude-haiku-5-5": ((0.10, 0.125, 0.20, 0.01, 0.50), _CLAUDE_SOURCE),
+    "claude-haiku-5-5": ((0.10, 0.125, 0.20, 0.01, 0.50), _CLAUDE_SOURCE_LONG),
     **dict.fromkeys(["claude-haiku-4-5", "claude-haiku-4-5-20251001"], ((1, 1.25, 2, 0.10, 5), _CLAUDE_SOURCE)),
     "gpt-6-astra": ((10, 12.5, 25, 1, 50), _OPENAI_SOURCE),
     "gpt-6.1-sol": ((2, 2.5, 5, 0.10, 10), _OPENAI_SOURCE),
@@ -85,6 +87,32 @@ _SHIPPED: dict[str, tuple[tuple[float, float, float, float, float], str]] = {
     "o3": ((2, 2, 2, 0.50, 8), _OPENAI_SOURCE),
     "o3-pro": ((20, 20, 20, 20, 80), _OPENAI_SOURCE),  # no cached-input price listed
 }
+
+
+# The long-prompt tier (Q6/Q17): threshold in prompt tokens, then the rates in the order above.
+# Claude: Haiku 5.5 only ("for prompts over 100,000 tokens"). OpenAI: "Long context: >272K input
+# tokens" on every shipped model the page gives a long column; gpt-5.4 charges no writes.
+_SHIPPED_LONG: dict[str, tuple[int, tuple[float, float, float, float, float]]] = {
+    "claude-haiku-5-5": (100_000, (0.50, 0.625, 1, 0.05, 2.50)),
+    "gpt-6-astra": (272_000, (20, 25, 50, 2, 75)),
+    "gpt-6.1-sol": (272_000, (4, 5, 10, 0.20, 15)),
+    "gpt-6-sol": (272_000, (4, 5, 10, 0.40, 15)),
+    "gpt-6.1-terra": (272_000, (2, 2.5, 5, 0.10, 7.50)),
+    "gpt-6-luna": (272_000, (0.20, 0.25, 0.50, 0.02, 0.75)),
+    "gpt-5.4": (272_000, (5, 5, 5, 0.50, 22.50)),
+}
+
+
+def test_every_shipped_long_prompt_tier_resolves_to_its_own_rates(shipped: PriceTable) -> None:
+    tiers = {model: rates.long_context for model, rates in shipped.entries.items() if rates.long_context}
+    assert sorted(tiers) == sorted(_SHIPPED_LONG)
+    for model, (above, rates) in _SHIPPED_LONG.items():
+        long = tiers[model]
+        got = long.rates
+        assert long.above == above, model
+        assert (got.input, got.cache_write, got.cache_write_1h, got.cache_read, got.output) == pytest.approx(rates), (
+            model
+        )
 
 
 def test_every_shipped_model_resolves_to_its_own_rates(shipped: PriceTable) -> None:
@@ -124,7 +152,7 @@ def test_resolution_is_by_exact_name_only(shipped: PriceTable) -> None:
         assert shipped.rates(spelling) is None, spelling
         assert spelling not in shipped
     with pytest.raises(UnpricedModelError) as raised:
-        shipped.cost("claude-opus-4-5-latest", 10, 10)
+        shipped.cost("anthropic", "claude-opus-4-5-latest", 10, 10)
     assert raised.value.model == "claude-opus-4-5-latest"
 
 
@@ -234,3 +262,145 @@ def test_a_pricing_key_that_is_not_a_table_is_refused(tmp_path: Path) -> None:
     with pytest.raises(PricingError) as raised:
         load_price_table(tmp_path)
     assert raised.value.errors == ["pincer.toml: [pricing] must be a table of model entries"]
+
+
+# ── Slice 2: long-prompt rates and the provider multiplier ─────────────────────
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "expected"),
+    [(100_000, 0.0105), (100_001, 0.0525005)],  # base 0.10/0.50 at the threshold, long 0.50/2.50 above it
+)
+def test_haiku_5_5_switches_to_its_long_rates_only_above_100k(
+    shipped: PriceTable, prompt_tokens: int, expected: float
+) -> None:
+    assert shipped.cost("anthropic", "claude-haiku-5-5", prompt_tokens, 1_000) == pytest.approx(expected, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "expected"),
+    [(272_000, 0.277), (272_001, 0.551502)],  # base 1/5 at the threshold, long 2/7.50 above it
+)
+def test_gpt_6_1_terra_switches_to_its_long_rates_only_above_272k(
+    shipped: PriceTable, prompt_tokens: int, expected: float
+) -> None:
+    assert shipped.cost("azure", "gpt-6.1-terra", prompt_tokens, 1_000) == pytest.approx(expected, abs=1e-12)
+
+
+def _with_providers(tmp_path: Path, providers: str) -> PriceTable:
+    shutil.copy(REPO_ROOT / "pincer.toml", tmp_path / "pincer.toml")
+    _write(tmp_path / "pincer.local.toml", providers)
+    return load_price_table(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("multiplier", "prompt_tokens", "expected"),
+    [
+        (1.1, 100_001, 0.0525005 * 1.1),  # Data Zone: the long tier scales too
+        (0.8, 100_000, 0.0105 * 0.8),  # a negotiated discount, base tier
+        (0.8, 100_001, 0.0525005 * 0.8),
+    ],
+)
+def test_a_provider_multiplier_scales_whichever_tier_applies(
+    tmp_path: Path, multiplier: float, prompt_tokens: int, expected: float
+) -> None:
+    table = _with_providers(tmp_path, f'[pricing.provider."foundry"]\nmultiplier = {multiplier}\n')
+    assert table.cost("foundry", "claude-haiku-5-5", prompt_tokens, 1_000) == pytest.approx(expected, abs=1e-12)
+    assert table.cost("anthropic", "claude-haiku-5-5", prompt_tokens, 1_000) == pytest.approx(
+        expected / multiplier, abs=1e-12
+    )
+
+
+def test_a_local_provider_table_replaces_only_that_provider(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "pincer.toml",
+        f'[pricing."m"]\n{_FULL}\n[pricing.provider."zone"]\nmultiplier = 1.1\n\n'
+        '[pricing.provider."deal"]\nmultiplier = 0.9\n',
+    )
+    _write(tmp_path / "pincer.local.toml", '[pricing.provider."zone"]\nmultiplier = 1.2\n')
+    table = load_price_table(tmp_path)
+    assert table.multipliers == {"zone": 1.2, "deal": 0.9}
+    assert "provider" not in table  # the provider section is never a model entry
+
+
+@pytest.mark.parametrize(
+    ("provider", "error"),
+    [
+        ("multiplier = 0\n", 'pricing.provider."azure": multiplier must be a number > 0, got 0'),
+        ("multiplier = -1.1\n", 'pricing.provider."azure": multiplier must be a number > 0, got -1.1'),
+        ('multiplier = "1.1"\n', "pricing.provider.\"azure\": multiplier must be a number > 0, got '1.1'"),
+        ("multiplier = true\n", 'pricing.provider."azure": multiplier must be a number > 0, got True'),
+        ("multiplier = nan\n", 'pricing.provider."azure": multiplier must be a number > 0, got nan'),
+        ("multiplier = inf\n", 'pricing.provider."azure": multiplier must be a number > 0, got inf'),
+        ("", 'pricing.provider."azure": missing multiplier'),  # an empty table is a typo, not 1.0
+        ("multiplier = 1.1\nfactor = 2\n", "pricing.provider.\"azure\": unknown field 'factor'"),
+    ],
+)
+def test_an_invalid_provider_multiplier_is_refused_naming_the_field(tmp_path: Path, provider: str, error: str) -> None:
+    _write(tmp_path / "pincer.toml", f'[pricing."m"]\n{_FULL}\n[pricing.provider."azure"]\n{provider}')
+    with pytest.raises(PricingError) as raised:
+        load_price_table(tmp_path)
+    assert raised.value.errors == [error]
+
+
+@pytest.mark.parametrize(
+    ("toml", "error"),
+    [
+        ('[pricing.provider]\n"azure" = 1.1\n', 'pricing.provider."azure": must be a table, e.g. multiplier = 1.1'),
+        ("[pricing]\nprovider = 1.1\n", "pincer.toml: pricing.provider must be a table of provider settings"),
+    ],
+)
+def test_a_provider_section_of_the_wrong_shape_is_refused(tmp_path: Path, toml: str, error: str) -> None:
+    _write(tmp_path / "pincer.toml", toml)
+    with pytest.raises(PricingError) as raised:
+        load_price_table(tmp_path)
+    assert raised.value.errors == [error]
+
+
+def test_provider_and_model_errors_are_reported_together(tmp_path: Path) -> None:
+    _write(tmp_path / "pincer.toml", '[pricing."a"]\ninput = 1.0\n')
+    _write(tmp_path / "pincer.local.toml", '[pricing.provider."azure"]\nmultiplier = 0\n')
+    with pytest.raises(PricingError) as raised:
+        load_price_table(tmp_path)
+    assert raised.value.errors == [
+        'pricing."a": missing cache_write, cache_write_1h, cache_read, output',
+        'pricing.provider."azure": multiplier must be a number > 0, got 0',
+    ]
+
+
+_LONG = "input = 2.0, cache_write = 2.5, cache_write_1h = 4.0, cache_read = 0.2, output = 10.0"
+
+
+@pytest.mark.parametrize(
+    ("long_context", "error"),
+    [
+        ("3", 'pricing."m".long_context: must be a table: { above = <tokens>, input = ..., output = ... }'),
+        (
+            "{ above = 100, input = 2.0 }",
+            'pricing."m".long_context: missing cache_write, cache_write_1h, cache_read, output',
+        ),
+        (f"{{ {_LONG} }}", 'pricing."m".long_context: missing above'),
+        (
+            f"{{ above = 0, {_LONG} }}",
+            'pricing."m".long_context: above must be a whole number of tokens > 0, got 0',
+        ),
+        (
+            f"{{ above = 1.5, {_LONG} }}",
+            'pricing."m".long_context: above must be a whole number of tokens > 0, got 1.5',
+        ),
+        (
+            f"{{ above = true, {_LONG} }}",
+            'pricing."m".long_context: above must be a whole number of tokens > 0, got True',
+        ),
+        (
+            f"{{ above = 100, {_LONG.replace('output = 10.0', 'output = -1')} }}",
+            'pricing."m".long_context: output must be a number >= 0, got -1',
+        ),
+        (f'{{ above = 100, {_LONG}, source = "x" }}', "pricing.\"m\".long_context: unknown field 'source'"),
+    ],
+)
+def test_an_invalid_long_context_is_refused_naming_the_field(tmp_path: Path, long_context: str, error: str) -> None:
+    _write(tmp_path / "pincer.toml", f'[pricing."m"]\n{_FULL}long_context = {long_context}\n')
+    with pytest.raises(PricingError) as raised:
+        load_price_table(tmp_path)
+    assert raised.value.errors == [error]

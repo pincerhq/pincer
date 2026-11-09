@@ -298,3 +298,38 @@ def test_doctor_runs_the_pricing_check(tmp_path: Path, monkeypatch) -> None:  # 
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
     report = SecurityDoctor(config_dir=_priced(tmp_path, "claude-a"), data_dir=tmp_path).run_all()
     assert [(c.name, c.status.value) for c in report.checks if c.name == "llm_pricing"] == [("llm_pricing", "pass")]
+
+
+def _with_multiplier(tmp_path: Path, provider: str) -> Path:
+    _priced(tmp_path, "claude-a")
+    (tmp_path / "pincer.local.toml").write_text(
+        f'[pricing.provider."{provider}"]\nmultiplier = 1.1\n', encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_a_multiplier_for_no_configured_provider_starts_and_doctor_warns(tmp_path: Path) -> None:
+    from pincer.security.doctor import CheckResult, CheckStatus
+
+    config = _with_multiplier(tmp_path, "foundy")
+    assert pricing_problems(_settings(), config) is None  # never a reason to refuse
+    assert _doctor_check(config, _settings()) == CheckResult(
+        "llm_pricing",
+        CheckStatus.WARNING,
+        'Every model Pincer will call has a price: claude-a; but [pricing.provider."foundy"] names no '
+        "configured provider, so its multiplier applies to nothing",
+        fix_hint="Use a configured provider name: anthropic, openai",
+        category="llm",
+    )
+
+
+def test_a_multiplier_for_a_configured_provider_passes(tmp_path: Path) -> None:
+    from pincer.security.doctor import CheckResult, CheckStatus
+
+    config = _with_multiplier(tmp_path, "foundry")
+    settings = _settings(
+        anthropic_compatible_provider="foundry", anthropic_compatible_base_url="https://example.invalid"
+    )
+    assert _doctor_check(config, settings) == CheckResult(
+        "llm_pricing", CheckStatus.PASS, "Every model Pincer will call has a price: claude-a", category="llm"
+    )
