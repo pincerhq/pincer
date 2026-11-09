@@ -780,6 +780,7 @@ class SecurityDoctor:
         """§10.2: self-test — build the call-context schema set for every call
         kind and assert no Tier X tool is in it. FAIL (critical) if one is."""
         settings = self._cfg(cfg)
+        from pincer.utils.csv_list import split_csv
         from pincer.voice.tool_policy import (
             CALLER_GUEST,
             CALLER_USER,
@@ -789,7 +790,6 @@ class SecurityDoctor:
             call_context_schemas,
             callable_tools,
             match_tool_patterns,
-            parse_csv,
             unmatched_guest_tool_entries,
         )
 
@@ -798,7 +798,7 @@ class SecurityDoctor:
         # its literal entries, and a few never-listed names (unknown must be
         # denied, never admitted).
         probe_names = set(TIERS) | set(callable_tools()) | {"shell_exec", "python_exec", "unknown__tool"}
-        probe_names |= set(match_tool_patterns(guest_list)) | set(parse_csv(guest_list))
+        probe_names |= set(match_tool_patterns(guest_list)) | set(split_csv(guest_list))
         schemas = [{"name": name} for name in sorted(probe_names)]
 
         probes = [("receptionist", "inbound", CALLER_GUEST)]

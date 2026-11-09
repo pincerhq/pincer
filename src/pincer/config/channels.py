@@ -8,6 +8,7 @@ from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtim
     ReasoningEffortOverride,
     ThinkingOverride,
 )
+from pincer.utils.csv_list import split_csv
 
 # The largest output a voice request may ask for: the 5.5 models' output limit
 VOICE_MAX_RESPONSE_TOKENS_CEILING = 128_000
@@ -557,9 +558,7 @@ class ChannelSettings(BaseModel):
     @classmethod
     def parse_slack_allowlist(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
-            if not v.strip():
-                return []
-            return [uid.strip() for uid in v.split(",") if uid.strip()]
+            return split_csv(v)
         return v
 
     @field_validator("thread_inbound_context", mode="before")

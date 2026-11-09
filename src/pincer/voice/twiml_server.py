@@ -19,6 +19,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
 from starlette.websockets import WebSocketState
 
+from pincer.utils.csv_list import split_csv
 from pincer.voice.call_locks import one_call_update_at_a_time
 from pincer.voice.twiml_builder import CALL_SID_PLACEHOLDER
 from pincer.voice.webhook_auth import (
@@ -186,7 +187,7 @@ async def voice_webhook(request: Request) -> Response:
 
     allowed = _settings.voice_allowed_callers.strip()
     if allowed != "*":
-        allowed_set = {n.strip() for n in allowed.split(",")}
+        allowed_set = set(split_csv(allowed))
         if caller not in allowed_set:
             logger.warning("Rejected call from %s (not in allowlist)", caller)
             # This returns before `telemetry.inbound_webhook()` below, so without
@@ -252,7 +253,7 @@ async def voice_webhook(request: Request) -> Response:
 
 def _blocklist(settings: Any) -> set[str]:
     raw = str(getattr(settings, "voice_blocklist", "") or "")
-    return {n.strip() for n in raw.split(",") if n.strip()}
+    return set(split_csv(raw))
 
 
 def _active_inbound_count() -> int:

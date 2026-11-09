@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 from pincer.integrations.google.email_guard import EmailGuard, EmailVerdict
 from pincer.integrations.google.models import fmt_list, fmt_message_full, fmt_message_summary
 from pincer.integrations.google.quota import with_backoff
+from pincer.utils.csv_list import split_csv
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,8 +45,7 @@ def _check_recipients(guard: EmailGuard, address_fields: list[str]) -> tuple[str
     """
     all_addrs: list[str] = []
     for field in address_fields:
-        if field:
-            all_addrs.extend(a.strip() for a in field.split(",") if a.strip())
+        all_addrs.extend(split_csv(field))
 
     results = guard.check_all(all_addrs)
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -194,7 +196,7 @@ async def slack__update_user_group(
 
         # Update members if provided
         if users:
-            user_list = [u.strip() for u in users.split(",") if u.strip()]
+            user_list = split_csv(users)
             await client.bot.usergroups_users_update(usergroup=usergroup, users=user_list)
             return f"User group {g.get('name', usergroup)} updated, members set to: " + ", ".join(user_list)
         return f"User group updated: {g.get('name', usergroup)}"

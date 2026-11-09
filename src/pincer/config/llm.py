@@ -6,6 +6,8 @@ from typing import Annotated, Literal, cast
 from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validator
 from pydantic_settings import NoDecode
 
+from pincer.utils.csv_list import split_csv
+
 # "" = not set: nothing is sent and the model runs on its own default.
 ReasoningEffort = Literal["", "low", "medium", "high", "xhigh", "max"]
 ThinkingMode = Literal["", "adaptive", "disabled"]
@@ -131,9 +133,7 @@ class LLMSettings(BaseModel):
     @classmethod
     def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
-            if not v.strip():
-                return []
-            return [name.strip() for name in v.split(",") if name.strip()]
+            return split_csv(v)
         return v
 
     default_model: str = Field(
