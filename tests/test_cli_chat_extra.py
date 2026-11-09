@@ -54,7 +54,7 @@ def _patch_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost_usd: float
     mock_response = MagicMock()
     mock_response.text = "Hello there"
     mock_response.cost_usd = cost_usd
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(cancel_compactions=AsyncMock())
     mock_agent.handle_message = AsyncMock(return_value=mock_response)
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)

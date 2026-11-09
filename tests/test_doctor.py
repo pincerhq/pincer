@@ -33,8 +33,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
-    # + 1 LLM pricing (issue #357)
-    assert len(report.checks) == 70
+    # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
+    assert len(report.checks) == 71
 
     assert 0 <= report.score <= 100
 
@@ -2184,3 +2184,21 @@ def test_llm_reasoning_shows_none_sent_with_tools_to_gpt_6_and_not_for_summaries
     assert (
         SecurityDoctor()._check_llm_reasoning_summary(cfg).message == "openai gpt-6.1-terra: nothing set; model default"
     )
+
+
+@pytest.mark.parametrize(
+    ("update", "status", "message"),
+    [
+        ({}, CheckStatus.PASS, "History compacted past 80,000 prompt tokens, to about 50,000"),
+        (
+            {"summary_threshold": 20},
+            CheckStatus.WARNING,
+            "PINCER_SUMMARY_THRESHOLD no longer has an effect: history is compacted by prompt tokens "
+            "(PINCER_COMPACT_AT_TOKENS / PINCER_COMPACT_TO_TOKENS)",
+        ),
+    ],
+)
+def test_llm_compaction_warns_about_a_summary_threshold_still_set(update, status, message):
+    result = SecurityDoctor()._check_llm_compaction(_llm_cfg(**update))
+
+    assert (result.status, result.message, result.category) == (status, message, "llm")

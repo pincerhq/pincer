@@ -230,7 +230,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result: list[dict[str, Any]] = []
         for msg in messages:
             if msg.role == MessageRole.SYSTEM:
-                continue  # system handled separately
+                # A history summary (the system prompt is the `system` parameter): sent as a
+                # user text block of its own, merged with the next user turn below
+                result.append({"role": "user", "content": [{"type": "text", "text": msg.content}]})
+                continue
 
             if msg.role == MessageRole.TOOL_RESULT:
                 result.append(

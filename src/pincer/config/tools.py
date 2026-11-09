@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import NoDecode
 
 from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtime)
@@ -113,7 +113,22 @@ class ToolSettings(BaseModel):
         description="Thinking for conversation summaries: adaptive | disabled "
         "('' = PINCER_THINKING, 'default' = send nothing)",
     )
-    summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
+    # Deprecated: history is compacted by prompt tokens now (issue #357, Q20). Kept so a value
+    # still set is warned about at startup rather than silently ignored.
+    summary_threshold: int | None = Field(
+        default=None, description="Deprecated, no effect: see compact_at_tokens / compact_to_tokens"
+    )
+    compact_at_tokens: int = Field(
+        default=80_000,
+        ge=1_000,
+        description="Compact a session's history after a turn whose last request's whole prompt "
+        "(uncached input, cache writes and reads) was over this many tokens",
+    )
+    compact_to_tokens: int = Field(
+        default=50_000,
+        ge=1_000,
+        description="The whole prompt a compaction aims for: the oldest messages become a summary until it fits",
+    )
 
     # ── Image Generation ──────────────────────────────────
     image_provider: str = Field(
@@ -175,3 +190,12 @@ class ToolSettings(BaseModel):
         if v not in APPROVAL_MODES:
             raise ValueError(f"approval_policy must be one of: {', '.join(sorted(APPROVAL_MODES))}")
         return v
+
+    @model_validator(mode="after")
+    def check_compaction_target(self) -> Self:
+        if self.compact_to_tokens >= self.compact_at_tokens:
+            raise ValueError(
+                f"compact_to_tokens ({self.compact_to_tokens}) must be below "
+                f"compact_at_tokens ({self.compact_at_tokens})"
+            )
+        return self

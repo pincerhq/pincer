@@ -116,6 +116,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logging.getLogger(__name__).info("Teams sub-app mounted at /api/apps/teams")
 
     yield
+    from pincer.core.agent import Agent
+
+    agent = getattr(app.state, "agent", None)
+    if isinstance(agent, Agent):
+        # A summary still running is cancelled and leaves its session as it was
+        await agent.cancel_compactions()
     try:
         from pincer.voice.telemetry import runtime as telephony_telemetry
 

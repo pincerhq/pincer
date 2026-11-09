@@ -50,7 +50,6 @@ if TYPE_CHECKING:
     from pincer.llm.router import LLMRouter
     from pincer.mcp import MCPClientManager
     from pincer.memory.base import BaseMemoryBackend
-    from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
     from pincer.services.skills import SkillService
@@ -188,7 +187,6 @@ class CoreComponents:
     llm_router: LLMRouter
     llm: BaseLLMProvider
     memory_store: BaseMemoryBackend | None
-    summarizer: Summarizer | None
     tools: ToolRegistry
     skill_service: SkillService
     mcp_manager: MCPClientManager | None
@@ -220,7 +218,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
     from pincer.core.session import SessionManager
     from pincer.db.engine import init_database
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
     from pincer.tools.bootstrap import register_default_tools
@@ -251,10 +248,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
 
     # Initialize memory system
     memory_store: BaseMemoryBackend | None = None
-    summarizer: Summarizer | None = None
 
     # Create LLM provider (primary + optional random failover)
-    from pincer.config.llm import call_effort, call_thinking
     from pincer.llm.router import LLMRouter
 
     llm_router = LLMRouter()
@@ -263,17 +258,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
-        summary_llm, summary_model = llm_router.get_summarizer()
-        summarizer = Summarizer(
-            llm=summary_llm,
-            memory_store=memory_store,
-            session_manager=session_mgr,
-            summary_model=summary_model,
-            threshold=settings.summary_threshold,
-            # Empty means the global setting (the provider reads None that way), `none` sends nothing
-            reasoning_effort=call_effort(settings.summary_reasoning_effort),
-            thinking=call_thinking(settings.summary_thinking),
-        )
         console.print("[green]Memory system enabled[/green]")
 
     # Register channel-independent tools (shell_exec, files, browser,
@@ -651,7 +635,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
             )
             await memory_store.close()
             memory_store = None
-            summarizer = None
 
     # After the MCP fallback above: a tool bound to a memory backend that was
     # just closed would fail every time the model calls it.
@@ -661,6 +644,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
         register_language_tools(tools, memory_store)
 
     # Create agent
+    from pincer.core.compaction import build_compactor
+
     agent = Agent(
         settings=settings,
         llm=llm,
@@ -668,7 +653,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         cost_tracker=cost_tracker,
         tool_registry=tools,
         memory_store=memory_store,
-        summarizer=summarizer,
+        compactor=build_compactor(settings, llm_router, cost_tracker, session_mgr, memory_store),
     )
     agent.skill_service = skill_service
     if mcp_manager:
@@ -691,7 +676,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
         llm_router=llm_router,
         llm=llm,
         memory_store=memory_store,
-        summarizer=summarizer,
         tools=tools,
         skill_service=skill_service,
         mcp_manager=mcp_manager,
@@ -1006,6 +990,9 @@ def _stop_core_on_shutdown(shutdown: _Shutdown, core: CoreComponents) -> None:
     shutdown.on_stop("browser", close_browser_if_installed)
     if core.mcp_manager:
         shutdown.on_stop("MCP clients", core.mcp_manager.stop)
+    # Registered last, so it runs first of these: a summary still running is cancelled before
+    # the LLM client and the sessions it would use close, and leaves its session as it was.
+    shutdown.on_stop("history compactions", core.agent.cancel_compactions)
 
 
 def _reserve_stop(shutdown: _Shutdown, name: str) -> Callable[[Callable[[], Awaitable[object]]], None]:

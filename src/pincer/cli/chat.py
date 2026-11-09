@@ -8,7 +8,6 @@ from pincer.cli._shared import _create_memory_backend, _setup_logging, console, 
 
 if TYPE_CHECKING:
     from pincer.memory.base import BaseMemoryBackend
-    from pincer.memory.summarizer import Summarizer
 
 
 async def chat() -> None:
@@ -42,9 +41,9 @@ async def _chat_loop() -> None:
     # Reuse the same agent setup as `run` but minimal
     from pincer.config.pricing import load_price_table
     from pincer.core.agent import Agent
+    from pincer.core.compaction import build_compactor
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.summarizer import Summarizer
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.registry import ToolRegistry
 
@@ -53,14 +52,12 @@ async def _chat_loop() -> None:
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()
 
-    from pincer.config.llm import call_effort, call_thinking
     from pincer.llm.router import LLMRouter
 
     llm_router = LLMRouter()
     llm = llm_router.get_llm()
 
     memory_store: BaseMemoryBackend | None = None
-    summarizer: Summarizer | None = None
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
@@ -73,18 +70,6 @@ async def _chat_loop() -> None:
             )
             await memory_store.close()
             memory_store = None
-        else:
-            summary_llm, summary_model = llm_router.get_summarizer()
-            summarizer = Summarizer(
-                llm=summary_llm,
-                memory_store=memory_store,
-                session_manager=session_mgr,
-                summary_model=summary_model,
-                threshold=settings.summary_threshold,
-                # Empty means the global setting (the provider reads None that way), `none` sends nothing
-                reasoning_effort=call_effort(settings.summary_reasoning_effort),
-                thinking=call_thinking(settings.summary_thinking),
-            )
 
     from pincer.tools.approval import ApprovalPolicy
 
@@ -100,7 +85,7 @@ async def _chat_loop() -> None:
         cost_tracker=cost_tracker,
         tool_registry=tools,
         memory_store=memory_store,
-        summarizer=summarizer,
+        compactor=build_compactor(settings, llm_router, cost_tracker, session_mgr, memory_store),
     )
 
     user_id = "cli_user"
@@ -144,6 +129,7 @@ async def _chat_loop() -> None:
                 console.print(f"[dim]${response.cost_usd:.4f}[/dim]")
             console.print()
     finally:
+        await agent.cancel_compactions()
         await llm.close()
         await session_mgr.close()
         await cost_tracker.close()

@@ -607,10 +607,10 @@ No frameworks. No abstractions. `async/await` + the Anthropic SDK.
 ```
 pincer/
 ├── src/pincer/
-│   ├── core/         agent.py, session.py, config.py, soul.py, identity.py
+│   ├── core/         agent.py, session.py, compaction.py, config.py, soul.py, identity.py
 │   ├── llm/          anthropic, openai, grok, ollama, router, cost_tracker
 │   ├── channels/     telegram, whatsapp, discord, slack, email, voice, signal, web
-│   ├── memory/       store (SQLite+FTS5), embeddings, entities, summarizer
+│   ├── memory/       store (SQLite+FTS5), embeddings, entities
 │   ├── tools/        registry, sandbox, approval, builtin/ (24 core tools)
 │   ├── skills/       loader, scanner (AST), signer
 │   ├── image/        router, provider_fal, provider_gemini, types

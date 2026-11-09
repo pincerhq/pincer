@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
+from pincer.core.compaction import LastRequest
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -70,12 +71,12 @@ if TYPE_CHECKING:
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
+    from pincer.core.compaction import Compactor
     from pincer.core.session import Session, SessionManager
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
     from pincer.memory.base import BaseMemoryBackend
-    from pincer.memory.summarizer import Summarizer
     from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
     from pincer.tools.selection import ToolSelector
@@ -620,7 +621,7 @@ class Agent:
         cost_tracker: CostTracker,
         tool_registry: ToolRegistry,
         memory_store: BaseMemoryBackend | None = None,
-        summarizer: Summarizer | None = None,
+        compactor: Compactor | None = None,
         approval_callback: ApprovalCallback | None = None,
         tool_event_callback: ToolEventCallback | None = None,
     ) -> None:
@@ -630,7 +631,9 @@ class Agent:
         self._costs = cost_tracker
         self._tools = tool_registry
         self._memory = memory_store
-        self._summarizer = summarizer
+        self._compactor = compactor
+        # The compaction running per session id, after its turn (see `_schedule_compaction`)
+        self._compactions: dict[str, asyncio.Task[None]] = {}
         self._approval_callback = approval_callback
         self._tool_event_callback = tool_event_callback
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
@@ -710,14 +713,48 @@ class Agent:
             logger.exception("ask_user callback failed")
             return f"[Error contacting user: {e}]"
 
-    async def _maybe_summarize(self, session: Session) -> None:
-        # Memory is degradable: a failing memory server must not cost the user their reply.
-        if not self._summarizer:
+    @staticmethod
+    def _note_request(
+        session: Session, response: LLMResponse, system: str | None, tools: list[dict[str, Any]] | None
+    ) -> None:
+        """Remember what the request `response` answers sent: the turn's last one decides compaction."""
+        overhead = len(system or "") + (len(json.dumps(tools)) if tools else 0)
+        session.last_request = LastRequest(response.usage.prompt_tokens, len(session.messages), overhead)
+
+    def _schedule_compaction(self, session: Session) -> None:
+        """After a turn: compact the session in the background when its prompt went over the limit."""
+        last, session.last_request = session.last_request, None
+        if self._compactor is None or last is None or not self._compactor.due(last):
             return
+        running = self._compactions.get(session.session_id)
+        if running is not None and not running.done():
+            return
+        task = asyncio.create_task(self._compact(self._compactor, session, last))
+        self._compactions[session.session_id] = task
+        task.add_done_callback(lambda done: self._compaction_done(session.session_id, done))
+
+    def _compaction_done(self, key: str, task: asyncio.Task[None]) -> None:
+        if self._compactions.get(key) is task:
+            del self._compactions[key]
+
+    @staticmethod
+    async def _compact(compactor: Compactor, session: Session, last: LastRequest) -> None:
         try:
-            await self._summarizer.maybe_summarize(session)
+            await compactor.compact(session, last)
         except Exception:
-            logger.warning("Session summarization failed", exc_info=True)
+            logger.warning("Compacting session %s failed", session.session_id, exc_info=True)
+
+    async def wait_compactions(self) -> None:
+        """Wait for every compaction still running."""
+        while pending := [task for task in self._compactions.values() if not task.done()]:
+            await asyncio.gather(*pending)
+
+    async def cancel_compactions(self) -> None:
+        """Stop every compaction still running (shutdown): a cancelled one leaves its session as it was."""
+        tasks = list(self._compactions.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle_message(
         self,
@@ -739,7 +776,7 @@ class Agent:
         ``_onboarding_for_turn``.
         """
         async with self._sessions.turn(user_id, channel, session_key) as session:
-            return await self._handle_message(
+            result = await self._handle_message(
                 user_id,
                 channel,
                 text,
@@ -750,6 +787,8 @@ class Agent:
                 memory,
                 session=session,
             )
+        self._schedule_compaction(session)
+        return result
 
     async def _handle_message(
         self,
@@ -817,10 +856,6 @@ class Agent:
             images=img_contents,
         )
         await self._sessions.add_message(session, user_msg)
-
-        # Summarize if conversation is getting long (the summary is a memory)
-        if memory:
-            await self._maybe_summarize(session)
 
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
@@ -890,6 +925,7 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
+                self._note_request(session, response, system_prompt, tool_schemas)
                 # The image stays on every request of the turn: dropping it
                 # would change the history under the turn's thinking blocks.
                 # end_turn drops it (images are never persisted).
@@ -1222,14 +1258,22 @@ class Agent:
     ) -> AsyncGenerator[StreamChunk]:
         from contextlib import aclosing
 
-        async with (
-            self._sessions.turn(user_id, channel, session_key) as session,
-            aclosing(
-                self._handle_message_stream(user_id, channel, text, images, channel_user_id, memory, session=session)
-            ) as stream,
-        ):
-            async for chunk in stream:
-                yield chunk
+        session: Session | None = None
+        try:
+            async with (
+                self._sessions.turn(user_id, channel, session_key) as session,
+                aclosing(
+                    self._handle_message_stream(
+                        user_id, channel, text, images, channel_user_id, memory, session=session
+                    )
+                ) as stream,
+            ):
+                async for chunk in stream:
+                    yield chunk
+        finally:
+            # Also when the client stops reading after DONE
+            if session is not None:
+                self._schedule_compaction(session)
 
     async def _record_cost(self, response: LLMResponse, session_id: str | None) -> float:
         """Record one completed request against the provider that served it (may be
@@ -1284,9 +1328,6 @@ class Agent:
         )
         await self._sessions.add_message(session, user_msg)
 
-        if memory:
-            await self._maybe_summarize(session)
-
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
         tool_schemas = (
             await self._select_tools(self._tools.get_schemas(), text, session.messages)
@@ -1338,6 +1379,7 @@ class Agent:
                         tools=tool_schemas,
                         system=system_prompt,
                     )
+                    self._note_request(session, response, system_prompt, tool_schemas)
                 except LLMError as e:
                     recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
                     if recovery is _PairRecovery.RETRY:
@@ -1457,6 +1499,7 @@ class Agent:
                     # The reply is the stream, so its stop reason decides: a budget spent on thinking
                     # leaves no text, which must not be sent as an empty reply
                     if streamed is not None:
+                        self._note_request(session, streamed, system_prompt, None)
                         total_cost += await self._record_cost(streamed, session.session_id)
                         _refuse_truncated_output(streamed, self._settings.max_tokens)
                     if full_text.strip():
@@ -1513,23 +1556,29 @@ class Agent:
     ) -> AsyncGenerator[StreamChunk]:
         from contextlib import aclosing
 
-        async with (
-            self._sessions.turn(user_id, channel, session_key) as session,
-            aclosing(
-                self._stream_voice_turn(
-                    user_id,
-                    channel,
-                    text,
-                    extra_system=extra_system,
-                    channel_user_id=channel_user_id,
-                    timings=timings,
-                    session_key=session_key,
-                    session=session,
-                )
-            ) as stream,
-        ):
-            async for chunk in stream:
-                yield chunk
+        session: Session | None = None
+        try:
+            async with (
+                self._sessions.turn(user_id, channel, session_key) as session,
+                aclosing(
+                    self._stream_voice_turn(
+                        user_id,
+                        channel,
+                        text,
+                        extra_system=extra_system,
+                        channel_user_id=channel_user_id,
+                        timings=timings,
+                        session_key=session_key,
+                        session=session,
+                    )
+                ) as stream,
+            ):
+                async for chunk in stream:
+                    yield chunk
+        finally:
+            # After the caller heard the reply, off the call's critical path
+            if session is not None:
+                self._schedule_compaction(session)
 
     async def _stream_voice_turn(
         self,
@@ -1573,12 +1622,10 @@ class Agent:
         self._last_active = (user_id, channel)
         user_msg = LLMMessage(role=MessageRole.USER, content=text)
         await self._sessions.add_message(session, user_msg)
-        # NOTE: no summarizer here — it is an LLM call on the voice critical
-        # path (seconds of dead air when it triggers mid-conversation).
         # add_message does not trim while the turn is open: SessionManager.turn()
         # trims to max_session_messages when the turn ends. Growth within one turn
-        # is bounded by max_tool_iterations; text channels keep the richer
-        # summarize-then-trim flow.
+        # is bounded by max_tool_iterations. Compaction runs after the turn, off the
+        # call's critical path (see stream_voice_turn).
 
         turn = await self._begin_turn(user_id)
         # Sprint 11: in call context the bound gate owns the EXACT tool set
@@ -1723,6 +1770,7 @@ class Agent:
                     )
                 if response is None:  # provider stream ended without a final event
                     raise LLMError("stream_turn ended without a final response")
+                self._note_request(session, response, system_prompt, tool_schemas)
 
                 if timings is not None:
                     # Cache visibility: did the tools-prefix prompt cache hit?

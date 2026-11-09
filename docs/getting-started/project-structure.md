@@ -103,9 +103,9 @@
 - Circuit breaker for consecutive tool failures
 - Anthropic provider-level message validation (`_validate_api_messages`)
 
-### Session Hardening (`core/session.py`, `memory/summarizer.py`)
+### Session Hardening (`core/session.py`, `core/compaction.py`)
 - Trim logic prevents orphaned tool_use at session boundaries
-- Summarizer split-point logic keeps tool_use/tool_result pairs together
+- Compaction cut points keep tool_use/tool_result pairs together
 
 ### Database Migrations (`pincer/db/migrations/`)
 Schema is managed by Alembic, applied automatically on startup. Migrations
@@ -260,6 +260,7 @@ pincer/
 │   │
 │   ├── core/                       # Agent brain
 │   │   ├── agent.py                # ReAct loop, streaming, tool execution, sanitization
+│   │   ├── compaction.py           # History compaction by prompt tokens (summary, pair-safe)
 │   │   ├── events.py               # Event system (stub)
 │   │   ├── identity.py             # Cross-channel identity resolver + config seeding
 │   │   └── session.py              # Session management (SQLite-backed, trim-safe)
@@ -284,8 +285,7 @@ pincer/
 │   │   └── cost_tracker.py         # Per-model cost tracking & budget limits
 │   │
 │   ├── memory/                     # Persistent memory system
-│   │   ├── store.py                # SQLite + FTS5 + vector similarity
-│   │   └── summarizer.py           # Conversation summarization (pair-safe)
+│   │   └── store.py                # SQLite + FTS5 + vector similarity
 │   │
 │   ├── tools/                      # Tool system (24 core built-ins + skills loader; see docs/TOOLS_CATALOG.md)
 │   │   ├── registry.py             # Registration, schema gen, dispatch
@@ -374,6 +374,7 @@ pincer/
 |--------|-------------|
 | `core/agent.py` | ReAct loop with tool execution, streaming, circuit breaker, budget enforcement, session sanitization |
 | `core/session.py` | SQLite-backed session persistence with trim-safe message history |
+| `core/compaction.py` | History compaction by prompt tokens: the oldest messages become one summary (pair-safe) |
 | `core/identity.py` | Cross-channel identity resolver with config-driven seeding |
 | `config.py` | Pydantic Settings with env vars, validation, API key auto-detection |
 | `cli/main.py` | Typer CLI entry point — registers `run`, `config`, `cost`, `google`, `signal`, `slack`, `whatsapp`, `audit`, `memory`, `schedule`, `db`, `mcp` |
@@ -387,7 +388,6 @@ pincer/
 | `llm/router.py` | LLMRouter — single construction entry point + random 1+N failover |
 | `llm/cost_tracker.py` | Per-model token cost tracking with daily budget limits |
 | `memory/store.py` | SQLite memory store with FTS5 full-text search |
-| `memory/summarizer.py` | Conversation summarization with pair-safe splitting |
 | `tools/registry.py` | Tool registration, auto-schema from type hints, execution dispatch |
 | `tools/builtin/browser.py` | Playwright-based web browsing |
 | `tools/builtin/email_tool.py` | IMAP/SMTP — check/send/search with credential validation |
@@ -454,7 +454,7 @@ pincer/
 - **Tool Registry** — Tools are registered with JSON schemas auto-generated from Python type hints. The LLM picks tools, the registry dispatches.
 - **Persistent Memory** — SQLite with FTS5 full-text search for long-term recall across sessions.
 - **Cost Controls** — Per-model token pricing with daily budget limits to prevent runaway API costs.
-- **Session Management** — Conversation history persisted in SQLite, with automatic summarization and pair-safe trimming.
+- **Session Management** — Conversation history persisted in SQLite, with compaction by prompt tokens and pair-safe trimming.
 - **Streaming** — Token-by-token streaming to Telegram with live message editing.
 - **Proactive Agent** — Scheduled tasks (morning briefings, email alerts, calendar reminders) delivered via channel router without user prompting.
 - **Session Sanitization** — Automatic repair of corrupted message histories (orphaned tool_use/tool_result pairs) before every LLM call.

@@ -867,7 +867,7 @@ class TestGpt6Family:
         assert "reasoning_effort" not in body
 
     async def test_a_gpt_6_summary_model_sends_its_configured_effort(self, tmp_path):
-        """The summarizer sends no tools, so PINCER_SUMMARY_REASONING_EFFORT=high reaches the request,
+        """A compaction summary sends no tools, so PINCER_SUMMARY_REASONING_EFFORT=high reaches the request,
         and the startup check lets it start (ruling Q13)."""
         import json
 
@@ -876,10 +876,10 @@ class TestGpt6Family:
         from pydantic import SecretStr
 
         from pincer.config.llm import call_effort, call_thinking
+        from pincer.core.compaction import Compactor, LastRequest
         from pincer.core.session import Session
         from pincer.llm.openai_common import OpenAICompatibleProvider
         from pincer.llm.pricing_check import pricing_problems
-        from pincer.memory.summarizer import Summarizer
 
         settings = _reasoning_settings(
             "gpt-5-mini",
@@ -906,12 +906,18 @@ class TestGpt6Family:
         provider._client = AsyncOpenAI(
             api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
         )
-        summarizer = Summarizer(
+        costs = AsyncMock()
+        costs.budget_reached.return_value = False
+        compactor = Compactor(
             provider,
+            "gpt-6.1-terra",
+            costs,
             AsyncMock(),
             AsyncMock(),
-            summary_model="gpt-6.1-terra",
-            threshold=5,
+            provider="openai",
+            is_free=False,
+            at_tokens=80_000,
+            to_tokens=50_000,
             reasoning_effort=call_effort(settings.summary_reasoning_effort),
             thinking=call_thinking(settings.summary_thinking),
         )
@@ -919,7 +925,8 @@ class TestGpt6Family:
             "s1", "u1", "test", messages=[LLMMessage(role=MessageRole.USER, content=f"m{i}") for i in range(6)]
         )
         try:
-            assert await summarizer.maybe_summarize(session) is True
+            last = LastRequest(prompt_tokens=100_000, sent_messages=6, overhead_chars=0)
+            assert await compactor.compact(session, last) is True
         finally:
             await provider.close()
 

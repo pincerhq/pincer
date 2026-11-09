@@ -90,7 +90,7 @@ class LLMSettings(BaseModel):
     summary_provider: str | None = Field(
         default=None,
         description=(
-            "Provider used by the Summarizer; defaults to the primary. Built on demand from its "
+            "Provider that writes history compaction summaries; defaults to the primary. Built on demand from its "
             "credentials when it is not in the failover pool"
         ),
     )
@@ -187,5 +187,5 @@ class LLMSettings(BaseModel):
         default=50,
         ge=10,
         le=500,
-        description="Max messages in session before trimming",
+        description="Past this many messages a session is cut to the newest 3/5 of them (50 -> 30)",
     )

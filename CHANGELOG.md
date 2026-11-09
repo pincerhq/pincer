@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### History compacted by prompt tokens; summaries reach Claude (#357)
+
+- After a turn whose last LLM request's whole prompt (uncached input, cache
+  writes and cache reads) was over `PINCER_COMPACT_AT_TOKENS` (default
+  80,000), the oldest messages are replaced by one summary, so the prompt comes
+  down to about `PINCER_COMPACT_TO_TOKENS` (default 50,000; it must be below
+  the limit). Tool calls stay with their results and the latest exchange is
+  kept word for word. Chat, web chat and voice all do it, after the reply is
+  delivered; a turn arriving meanwhile is not held up.
+- The summary is sent to the model as a message of its own on both providers.
+  Claude never received the old `[Previous conversation summary]` messages; it
+  does now. A session saved by the old summarizer may hold several of them:
+  Claude receives them all until its first compaction folds them into one.
+- The summary call's cost is recorded like any other LLM call. It is saved as
+  a memory only when memory is on, never for a memory-free conversation. When
+  the daily budget is spent or the summary fails, the oldest messages are
+  dropped instead.
+- The every-20-messages summary is gone, and with it
+  `PINCER_SUMMARY_THRESHOLD`: when it is still set, Pincer logs a warning at
+  startup and `pincer doctor` reports it; it has no effect.
+- Past `PINCER_MAX_SESSION_MESSAGES` (default 50) a session is now cut to the
+  newest three fifths of it (30) in one go, instead of by one message every
+  turn.
+
 #### Onboarding: no database read per turn for existing users (#271)
 
 Users who were onboarded before the `pincer_onboarding` table existed, and

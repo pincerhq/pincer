@@ -9,7 +9,6 @@ import pytest_asyncio
 from pincer.core.agent import Agent, AgentResponse, StreamChunk, StreamEventType
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.memory.store import MemoryStore
-from pincer.memory.summarizer import Summarizer
 
 # ── Memory Store Tests ────────────────────────────────────────
 
@@ -108,11 +107,47 @@ async def test_get_recent_memories(memory_store: MemoryStore) -> None:
     assert len(recent) == 3
 
 
-# ── Summarizer Tests ─────────────────────────────────────────
+# ── Compaction summaries (issue #357 slice 9) ────────────────
+
+
+class _NoCosts:
+    """A cost tracker for summary-request tests: records nothing, no budget spent."""
+
+    async def record(self, **_kwargs) -> float:
+        return 0.0
+
+    async def budget_reached(self) -> bool:
+        return False
+
+
+async def _compact(llm, memory_store, session_manager, user_id: str, **compactor_kwargs) -> bool:
+    """Eight short messages, compacted as if the last request's prompt was 100K tokens."""
+    from pincer.core.compaction import Compactor, LastRequest
+
+    options = {"summary_model": None, **compactor_kwargs}
+    compactor = Compactor(
+        llm,
+        options.pop("summary_model"),
+        _NoCosts(),  # type: ignore[arg-type]
+        session_manager,
+        memory_store,
+        provider="anthropic",
+        is_free=False,
+        at_tokens=80_000,
+        to_tokens=50_000,
+        **options,
+    )
+    session = await session_manager.get_or_create(user_id, "test")
+    for i in range(8):
+        role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
+        await session_manager.add_message(session, LLMMessage(role=role, content=f"Message {i}"))
+    return await compactor.compact(session, LastRequest(prompt_tokens=100_000, sent_messages=8, overhead_chars=0))
 
 
 @pytest.mark.asyncio
-async def test_summarizer_triggers_on_threshold(memory_store: MemoryStore, session_manager, settings) -> None:
+async def test_a_compaction_summary_is_a_searchable_memory(
+    memory_store: MemoryStore, session_manager, settings
+) -> None:
     mock_llm = AsyncMock(spec=BaseLLMProvider)
     mock_llm.complete.return_value = LLMResponse(
         content="Summary: User discussed Python and AI topics.",
@@ -121,44 +156,12 @@ async def test_summarizer_triggers_on_threshold(memory_store: MemoryStore, sessi
         output_tokens=30,
     )
 
-    summarizer = Summarizer(
-        llm=mock_llm,
-        memory_store=memory_store,
-        session_manager=session_manager,
-        threshold=6,
-    )
-
-    session = await session_manager.get_or_create("user1", "test")
-    for i in range(8):
-        role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
-        await session_manager.add_message(session, LLMMessage(role=role, content=f"Message {i}"))
-
-    did_summarize = await summarizer.maybe_summarize(session)
-    assert did_summarize is True
+    assert await _compact(mock_llm, memory_store, session_manager, "user1") is True
     assert mock_llm.complete.call_count == 1
 
-    # Summary should be stored as a memory
     results = await memory_store.search_text("Summary", user_id="user1")
     assert len(results) >= 1
     assert any(m.category == "conversation_summary" for m in results)
-
-
-@pytest.mark.asyncio
-async def test_summarizer_skips_short_conversation(memory_store: MemoryStore, session_manager, settings) -> None:
-    mock_llm = AsyncMock(spec=BaseLLMProvider)
-    summarizer = Summarizer(
-        llm=mock_llm,
-        memory_store=memory_store,
-        session_manager=session_manager,
-        threshold=20,
-    )
-
-    session = await session_manager.get_or_create("user2", "test")
-    await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="hi"))
-
-    did_summarize = await summarizer.maybe_summarize(session)
-    assert did_summarize is False
-    mock_llm.complete.assert_not_called()
 
 
 # ── Summary effort and thinking (issue #345) ───────────────────────────
@@ -183,23 +186,12 @@ def _summary_settings(**update):
     return base.model_copy(update={**pinned, **update})
 
 
-async def _summary_request(settings, memory_store, session_manager, **summarizer_kwargs) -> dict:
-    """The request body a real summary sends, through the scripted Anthropic transport."""
+async def _summary_request(settings, memory_store, session_manager, **compactor_kwargs) -> dict:
+    """The request body a real compaction summary sends, through the scripted Anthropic transport."""
     import anthropic_sse as sse
 
     async with sse.ScriptedAnthropic(settings, [([sse.text("Summary.")], "end_turn")]) as llm:
-        summarizer = Summarizer(
-            llm=llm.provider,
-            memory_store=memory_store,
-            session_manager=session_manager,
-            threshold=6,
-            **summarizer_kwargs,
-        )
-        session = await session_manager.get_or_create("user-s", "test")
-        for i in range(8):
-            role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
-            await session_manager.add_message(session, LLMMessage(role=role, content=f"Message {i}"))
-        assert await summarizer.maybe_summarize(session) is True
+        assert await _compact(llm.provider, memory_store, session_manager, "user-s", **compactor_kwargs) is True
     assert len(llm.requests) == 1
     return llm.requests[0]
 

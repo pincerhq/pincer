@@ -736,7 +736,7 @@ All variables use `PINCER_` prefix.
 | `PINCER_ANTHROPIC_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |
 | `PINCER_ANTHROPIC_COMPATIBLE_API_KEY` | | Optional key for that endpoint |
 | `PINCER_ANTHROPIC_COMPATIBLE_MODEL` | | Model for that endpoint |
-| `PINCER_SUMMARY_PROVIDER` | primary | Pool provider used by the Summarizer |
+| `PINCER_SUMMARY_PROVIDER` | primary | Pool provider that writes history compaction summaries |
 
 ### Channels
 | Variable | Default | Description |

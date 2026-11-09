@@ -209,6 +209,7 @@ class SecurityDoctor:
         report.checks.append(self._check_llm_reasoning_summary(settings))
         report.checks.append(self._check_voice_thinking_token_limit(settings))
         report.checks.append(self._check_llm_pricing(settings))
+        report.checks.append(self._check_llm_compaction(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2167,6 +2168,27 @@ class SecurityDoctor:
         )
 
     # ── LLM effort and thinking (issue #345) ──────────────
+
+    def _check_llm_compaction(self, cfg: Settings | None = None) -> CheckResult:
+        """History compaction by prompt tokens (issue #357): the removed message-count
+        summary setting, when still set, is reported as having no effect."""
+        from pincer.core.compaction import SUMMARY_THRESHOLD_DEPRECATED
+
+        cfg = self._cfg(cfg)
+        if cfg.summary_threshold is not None:
+            return CheckResult(
+                "llm_compaction",
+                CheckStatus.WARNING,
+                SUMMARY_THRESHOLD_DEPRECATED,
+                fix_hint="Remove PINCER_SUMMARY_THRESHOLD from .env",
+                category="llm",
+            )
+        return CheckResult(
+            "llm_compaction",
+            CheckStatus.PASS,
+            f"History compacted past {cfg.compact_at_tokens:,} prompt tokens, to about {cfg.compact_to_tokens:,}",
+            category="llm",
+        )
 
     def _check_llm_pricing(self, cfg: Settings | None = None) -> CheckResult:
         """Every model Pincer will call has a valid `[pricing]` entry (issue #357); the same

@@ -274,7 +274,7 @@ class LLMRouter(BaseLLMProvider):
         return self
 
     def get_summarizer(self) -> tuple[BaseLLMProvider, str | None]:
-        """Provider and model for the Summarizer (see `summary_target`).
+        """Provider and model for compaction summaries (see `summary_target`).
 
         A provider outside the pool is built on demand. ``None`` as the model
         means "the provider's own default model".

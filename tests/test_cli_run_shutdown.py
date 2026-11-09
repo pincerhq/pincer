@@ -257,6 +257,7 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
         cost_tracker=AsyncMock(),
         memory_store=None,
         audit_logger=None,
+        agent=SimpleNamespace(cancel_compactions=_Part("history compactions", stopped).stop),
     )
     # Registered in the order the agent starts them.
     shutdown = run_module._Shutdown()
@@ -281,6 +282,7 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
         "triggers",
         "signal",
         "MCP server",
+        "history compactions",  # after the channels drained, before the LLM client and sessions close
         "MCP clients",
         "database engines",
     ]
