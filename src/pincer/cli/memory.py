@@ -6,6 +6,7 @@ import typer
 from async_typer import AsyncTyper
 
 from pincer.cli._shared import console
+from pincer.utils.csv_list import split_csv
 
 memory_app = AsyncTyper(
     name="memory", help="Manage local sqlite based conversation memory. MCP servers are not supported yet!"
@@ -98,7 +99,7 @@ async def _memory_list(user_id: str | None, tags_str: str | None, limit: int, of
     store = SqlMemoryBackend(settings.db_path)
     await store.initialize()
 
-    tag_list = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
+    tag_list = split_csv(tags_str) or None
     memories = await store.list_memories(user_id=user_id, limit=limit, offset=offset, tags=tag_list)
 
     if not memories:

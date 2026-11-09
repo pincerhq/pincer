@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from starlette.requests import HTTPConnection
 
@@ -195,7 +197,7 @@ def cors_origins(settings: Any) -> list[str]:
     configured = [
         str(getattr(settings, "dashboard_url", "") or ""),
         str(getattr(settings, "web_chat_url", "") or ""),
-        *[o.strip() for o in str(getattr(settings, "cors_extra_origins", "") or "").split(",")],
+        *split_csv(getattr(settings, "cors_extra_origins", None)),
     ]
     origins = list(configured) if is_production(settings) else [*_LOCALHOST_ORIGINS, *configured]
 

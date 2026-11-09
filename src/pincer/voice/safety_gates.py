@@ -31,6 +31,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     import aiosqlite
 
@@ -556,8 +558,7 @@ def quiet_hours_resume(settings: Settings | Any, now: datetime | None = None) ->
 
 
 def _quiet_hours_exempt(settings: Settings | Any, user_id: str) -> bool:
-    raw = str(getattr(settings, "voice_quiet_hours_override_users", "") or "")
-    allowed = {u.strip() for u in raw.split(",") if u.strip()}
+    allowed = set(split_csv(getattr(settings, "voice_quiet_hours_override_users", None)))
     return bool(user_id) and user_id in allowed
 
 

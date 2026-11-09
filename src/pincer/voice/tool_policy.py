@@ -30,6 +30,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -203,11 +205,9 @@ def callable_tools() -> frozenset[str]:
     return frozenset(name for name, tier in TIERS.items() if tier != TIER_X)
 
 
-# ── Config parsing ───────────────────────────────────────────────────
-
-
-def parse_csv(raw: str) -> list[str]:
-    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
+def _guest_entries(raw: object) -> list[str]:
+    """Entries of a guest-tools CSV; a non-str (a settings stand-in) is coerced, never raised on."""
+    return split_csv(raw if isinstance(raw, str) else str(raw or ""))
 
 
 def _entry_matches(entry: str) -> frozenset[str]:
@@ -221,14 +221,14 @@ def match_tool_patterns(raw: str) -> frozenset[str]:
     a Tier X or unlisted name never matches, whatever the pattern.
     """
     matched: set[str] = set()
-    for entry in parse_csv(raw):
+    for entry in _guest_entries(raw):
         matched |= _entry_matches(entry)
     return frozenset(matched)
 
 
 def unmatched_guest_tool_entries(raw: str) -> list[str]:
     """``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` entries that match no R/W tool (doctor WARNING)."""
-    return [entry for entry in parse_csv(raw) if not _entry_matches(entry)]
+    return [entry for entry in _guest_entries(raw) if not _entry_matches(entry)]
 
 
 def caller_class_of(state: CallState) -> str:
@@ -274,7 +274,7 @@ def allowed_tools_for_call(
         # unset field on a settings stand-in) must not empty the guest scope.
         raw = getattr(settings, "voice_guests_tools_allowed", "")
         guest_list = raw if isinstance(raw, str) else ""
-        if parse_csv(guest_list):
+        if split_csv(guest_list):
             scope = set(match_tool_patterns(guest_list))
         else:
             scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
@@ -459,7 +459,6 @@ __all__ = [
     "decide",
     "match_tool_patterns",
     "max_writes_per_call",
-    "parse_csv",
     "receptionist_booking_mode",
     "set_verbal_confirmation",
     "tier_of",

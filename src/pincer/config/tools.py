@@ -9,6 +9,7 @@ from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtim
     ReasoningEffortOverride,
     ThinkingOverride,
 )
+from pincer.utils.csv_list import split_csv
 
 
 class ToolSettings(BaseModel):
@@ -163,7 +164,7 @@ class ToolSettings(BaseModel):
     @classmethod
     def parse_tool_selection_default(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
-            return [name.strip() for name in v.split(",") if name.strip()]
+            return split_csv(v)
         return v
 
     @field_validator("approval_policy", mode="before")

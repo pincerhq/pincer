@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -174,7 +176,7 @@ async def slack__upload_file(
 async def slack__share_file(client: SlackClient, file: str, channels: str) -> str:
     """Share an existing file to additional channels (comma-separated channel IDs)."""
     try:
-        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+        channel_list = split_csv(channels)
         # Post a message with the file attached to each channel
         results = []
         for ch in channel_list:

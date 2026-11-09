@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -177,7 +179,7 @@ async def slack__leave_channel(client: SlackClient, channel: str) -> str:
 async def slack__invite_to_channel(client: SlackClient, channel: str, users: str) -> str:
     """Invite one or more users (comma-separated IDs) to a channel."""
     try:
-        user_list = [u.strip() for u in users.split(",") if u.strip()]
+        user_list = split_csv(users)
         await client.bot.conversations_invite(channel=channel, users=user_list)
         return f"Invited {', '.join(user_list)} to channel {channel}."
     except Exception as exc:
@@ -206,7 +208,7 @@ async def slack__open_dm(client: SlackClient, user: str) -> str:
 async def slack__open_group_dm(client: SlackClient, users: str) -> str:
     """Open a multi-person DM (MPIM) with comma-separated user IDs."""
     try:
-        user_list = [u.strip() for u in users.split(",") if u.strip()]
+        user_list = split_csv(users)
         resp = await client.bot.conversations_open(users=user_list)
         c = resp.get("channel", {})
         return f"Group DM opened: {c.get('id', '?')} with {', '.join(user_list)}"

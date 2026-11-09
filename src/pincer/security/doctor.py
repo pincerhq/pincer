@@ -19,6 +19,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
@@ -789,7 +791,6 @@ class SecurityDoctor:
             call_context_schemas,
             callable_tools,
             match_tool_patterns,
-            parse_csv,
             unmatched_guest_tool_entries,
         )
 
@@ -798,7 +799,7 @@ class SecurityDoctor:
         # its literal entries, and a few never-listed names (unknown must be
         # denied, never admitted).
         probe_names = set(TIERS) | set(callable_tools()) | {"shell_exec", "python_exec", "unknown__tool"}
-        probe_names |= set(match_tool_patterns(guest_list)) | set(parse_csv(guest_list))
+        probe_names |= set(match_tool_patterns(guest_list)) | set(split_csv(guest_list))
         schemas = [{"name": name} for name in sorted(probe_names)]
 
         probes = [("receptionist", "inbound", CALLER_GUEST)]

@@ -37,6 +37,7 @@ from pincer.integrations.google.calendar_tz import (
 )
 from pincer.integrations.google.models import fmt_list
 from pincer.integrations.google.quota import with_backoff
+from pincer.utils.csv_list import split_csv
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -325,7 +326,7 @@ async def google__check_freebusy(
         else None
     )
     t_min, t_max = _range(time_min, time_max, zone, defaults=True)
-    items = [{"id": e.strip()} for e in emails.split(",") if e.strip()]
+    items = [{"id": e} for e in split_csv(emails)]
     body: dict[str, Any] = {"timeMin": t_min, "timeMax": t_max, "items": items}
     result = await with_backoff(lambda: svc.freebusy().query(body=body).execute())
     calendars = result.get("calendars", {})
@@ -466,7 +467,7 @@ async def google__create_event(
         # Embed the existing Meet link as the location so it shows in calendar
         body["location"] = meet_link
     if attendees:
-        body["attendees"] = [{"email": e.strip()} for e in attendees.split(",") if e.strip()]
+        body["attendees"] = [{"email": e} for e in split_csv(attendees)]
 
     conf_data_version = 0
     if add_meet_link and not meet_link:
