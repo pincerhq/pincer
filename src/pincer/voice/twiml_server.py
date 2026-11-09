@@ -252,8 +252,7 @@ async def voice_webhook(request: Request) -> Response:
 
 
 def _blocklist(settings: Any) -> set[str]:
-    raw = str(getattr(settings, "voice_blocklist", "") or "")
-    return set(split_csv(raw))
+    return set(split_csv(getattr(settings, "voice_blocklist", None)))
 
 
 def _active_inbound_count() -> int:

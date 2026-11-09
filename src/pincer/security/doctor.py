@@ -19,6 +19,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.utils.csv_list import split_csv
+
 if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
@@ -780,7 +782,6 @@ class SecurityDoctor:
         """§10.2: self-test — build the call-context schema set for every call
         kind and assert no Tier X tool is in it. FAIL (critical) if one is."""
         settings = self._cfg(cfg)
-        from pincer.utils.csv_list import split_csv
         from pincer.voice.tool_policy import (
             CALLER_GUEST,
             CALLER_USER,

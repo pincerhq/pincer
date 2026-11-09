@@ -47,7 +47,7 @@ _SPACED_WORD_CHAR = rf"[^\W{_NO_SPACE_SCRIPTS}]"
 
 
 def parse_group_triggers(raw: str) -> tuple[str, ...]:
-    """Split a comma-separated trigger setting into trimmed, non-empty entries."""
+    """``split_csv`` as a tuple, so the result is hashable for the ``lru_cache`` below."""
     return tuple(split_csv(raw))
 
 

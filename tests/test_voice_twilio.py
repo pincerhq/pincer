@@ -97,6 +97,22 @@ class TestWebhookEndpoint:
         assert "not authorized" in response.text
         mock_engine.on_call_start.assert_not_called()
 
+    @pytest.mark.parametrize("allowed", ["", "   ", "+10000000000,", ",+10000000000"])
+    def test_blank_caller_is_rejected_by_any_allowlist(self, client, mock_settings, mock_engine, allowed):
+        """A withheld caller ID never matches an allowlist, even a blank or trailing-comma one.
+
+        Before split_csv, "" or "+1...," parsed to a set containing "", so a call
+        with an empty From was let through. Only "*" admits every caller.
+        """
+        mock_settings.voice_allowed_callers = allowed
+        response = client.post(
+            "/api/apps/twilio/webhook",
+            data={"CallSid": "CA_blank", "From": "", "To": "+14155559876"},
+        )
+        assert response.status_code == 200
+        assert "not authorized" in response.text
+        mock_engine.on_call_start.assert_not_called()
+
     def test_rejected_caller_is_still_recorded(self, client, mock_settings, mock_engine, monkeypatch):
         """A blocked caller must not vanish from the dashboard.
 

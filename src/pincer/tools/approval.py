@@ -152,7 +152,7 @@ def parse_tool_names(value: object) -> frozenset[str]:
     if isinstance(value, str):
         return frozenset(split_csv(value))
     if isinstance(value, (list, tuple, set, frozenset)):
-        return frozenset(str(name).strip() for name in value if str(name).strip())
+        return frozenset(s for name in value if (s := str(name).strip()))
     return frozenset()
 
 

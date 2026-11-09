@@ -558,8 +558,7 @@ def quiet_hours_resume(settings: Settings | Any, now: datetime | None = None) ->
 
 
 def _quiet_hours_exempt(settings: Settings | Any, user_id: str) -> bool:
-    raw = str(getattr(settings, "voice_quiet_hours_override_users", "") or "")
-    allowed = set(split_csv(raw))
+    allowed = set(split_csv(getattr(settings, "voice_quiet_hours_override_users", None)))
     return bool(user_id) and user_id in allowed
 
 

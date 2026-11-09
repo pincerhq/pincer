@@ -197,7 +197,7 @@ def cors_origins(settings: Any) -> list[str]:
     configured = [
         str(getattr(settings, "dashboard_url", "") or ""),
         str(getattr(settings, "web_chat_url", "") or ""),
-        *split_csv(str(getattr(settings, "cors_extra_origins", "") or "")),
+        *split_csv(getattr(settings, "cors_extra_origins", None)),
     ]
     origins = list(configured) if is_production(settings) else [*_LOCALHOST_ORIGINS, *configured]
 

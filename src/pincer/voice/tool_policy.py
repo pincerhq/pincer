@@ -205,6 +205,11 @@ def callable_tools() -> frozenset[str]:
     return frozenset(name for name, tier in TIERS.items() if tier != TIER_X)
 
 
+def _guest_entries(raw: object) -> list[str]:
+    """Entries of a guest-tools CSV; a non-str (a settings stand-in) is coerced, never raised on."""
+    return split_csv(raw if isinstance(raw, str) else str(raw or ""))
+
+
 def _entry_matches(entry: str) -> frozenset[str]:
     return frozenset(name for name, tier in TIERS.items() if tier != TIER_X and fnmatch.fnmatchcase(name, entry))
 
@@ -216,14 +221,14 @@ def match_tool_patterns(raw: str) -> frozenset[str]:
     a Tier X or unlisted name never matches, whatever the pattern.
     """
     matched: set[str] = set()
-    for entry in split_csv(raw):
+    for entry in _guest_entries(raw):
         matched |= _entry_matches(entry)
     return frozenset(matched)
 
 
 def unmatched_guest_tool_entries(raw: str) -> list[str]:
     """``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` entries that match no R/W tool (doctor WARNING)."""
-    return [entry for entry in split_csv(raw) if not _entry_matches(entry)]
+    return [entry for entry in _guest_entries(raw) if not _entry_matches(entry)]
 
 
 def caller_class_of(state: CallState) -> str:
