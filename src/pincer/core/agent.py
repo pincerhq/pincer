@@ -19,7 +19,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
@@ -630,6 +630,7 @@ class Agent:
         # DEBUG repeats, INFO on recovery), not once per message.
         self._mcp_list_outage = LogOnce(logger, recovery="Fetching the MCP server list for prompt recovered")
         self._memory_outage = LogOnce(logger, recovery="Fetching memories for prompt recovered")
+        self._close_known_outage = LogOnce(logger, recovery="Closing onboarding for known users recovered")
         # Voice calls whose resolved provider/model was already logged (once per call)
         self._voice_model_logged: set[str] = set()
 
@@ -2113,7 +2114,11 @@ class Agent:
         ``channel`` itself (Slack and Teams threads) are onboarded per thread.
 
         A user with no row yet is read from the flags their session carried
-        before the table existed, so nobody onboarded then is asked again.
+        before the table existed, so nobody onboarded then is asked again. That
+        first read also writes a completed row for a user who will never be
+        asked (onboarded before the table, or with history older than any turn,
+        see `_should_close_existing`), so their later turns hit the completed
+        cache and read nothing.
 
         Voice is never onboarded: nobody onboards mid-phone-call, and with a
         session per call every call's first turn would look like a new user.
@@ -2133,12 +2138,51 @@ class Agent:
                 return _NO_ONBOARDING
             return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
         if session.is_onboarded():
+            await self._close_known_onboarding(user_id, channel, "legacy")
             return _NO_ONBOARDING
         if session.onboarding_prompt_already_sent():
             return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
         # New: nothing stored for this user on the channel, in any session.
         new = session.is_fresh() and not await self._sessions.has_stored_sessions(user_id, channel)
+        if not new and await self._should_close_existing(user_id, channel):
+            await self._close_known_onboarding(user_id, channel, "existing")
         return _Onboarding(prompt=new, ingest=False)
+
+    async def _should_close_existing(self, user_id: str, channel: str) -> bool:
+        """True when a user who is not new may be closed as ``existing``: they
+        have a stored session on the channel created more than the answer
+        window (24 h) ago.
+
+        Stored history alone is not enough. A brand-new user's first turn
+        saves its user message, then runs the model for seconds before it
+        asks; another turn for them (another conversation, maybe another
+        process) sees that history meanwhile, and closing the gate then would
+        make the asking turn's `claim_prompt` lose, so its question would show
+        but its answer go unread. No turn lasts the answer window, so history
+        older than that was never written by a turn still asking. A user whose
+        history is all newer keeps one read per turn until it is older.
+        """
+        cutoff = time.time() - _ONBOARDING_ANSWER_WINDOW_S
+        return await self._sessions.has_stored_sessions(user_id, channel, created_before=cutoff)
+
+    async def _close_known_onboarding(self, user_id: str, channel: str, reason: Literal["legacy", "existing"]) -> None:
+        """Write a completed row for a user who will never be asked, so later
+        turns skip the read. Only an optimisation: a failed write is logged
+        (once per outage) and the turn goes on."""
+        try:
+            closed = await self._sessions.onboarding.complete_known(user_id, channel, now=time.time(), reason=reason)
+        except Exception:
+            self._close_known_outage.log(
+                "onboarding.close_known_failed user=%s channel=%s reason=%s",
+                user_id,
+                channel,
+                reason,
+                exc_info=True,
+            )
+            return
+        self._close_known_outage.clear()
+        if closed:
+            logger.info("onboarding.closed_known user=%s channel=%s reason=%s", user_id, channel, reason)
 
     async def _reserve_onboarding_prompt(self, onboarding: _Onboarding, user_id: str, channel: str) -> bool:
         """Hold the right to ask, before the question is appended.

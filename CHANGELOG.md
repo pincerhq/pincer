@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Onboarding: no database read per turn for existing users (#271)
+
+Users who were onboarded before the `pincer_onboarding` table existed, and
+users with history from before onboarding, have no row in it, so every one of
+their messages read the table (sometimes twice) to find that out again. On
+their first message after the upgrade they now get a completed row
+(`closed_by` `legacy` or `existing`, logged once as `onboarding.closed_known`),
+and onboarding reads no database on their later turns. An `existing` row is
+written only once the user's oldest stored session on the channel is more than
+a day old, so a turn still asking a brand-new user is never cut off; until
+then those users read the table on each turn, as before. The row is permanent:
+a user who later deletes all their sessions is not asked, where before they
+would have looked new. If the write fails, a warning is logged once per outage
+and the turn goes on as before.
+
 #### LLM: effort and thinking settings, thinking kept within a turn, cut-off responses handled safely (#345)
 
 A model response that stops on its output limit (`max_tokens`) may end in a

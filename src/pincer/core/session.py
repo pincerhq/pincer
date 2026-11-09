@@ -176,10 +176,11 @@ class SessionManager:
             raise RuntimeError("SessionManager not initialized")
         return self._onboarding
 
-    async def has_stored_sessions(self, user_id: str, channel: str) -> bool:
+    async def has_stored_sessions(self, user_id: str, channel: str, *, created_before: float | None = None) -> bool:
         """True when the user has any session stored on the channel, conversations included
-        (memory-free ones aside, see `Session.is_memory_free`)."""
-        return await self._store.has_any(user_id, channel)
+        (memory-free ones aside, see `Session.is_memory_free`); with `created_before`,
+        only one created before that time."""
+        return await self._store.has_any(user_id, channel, created_before=created_before)
 
     async def get_or_create(
         self,
