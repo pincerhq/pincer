@@ -112,9 +112,20 @@ class OnboardingService(DatabaseService):
 
     async def record_empty_reply(self, user_id: str, channel: str, *, max_empty: int, now: float) -> bool:
         """Count a reply with no answer in it; True when that closed the gate."""
+        return await self._count(user_id, channel, max_count=max_empty, now=now, reason="empty")
+
+    async def record_failed_late_read(self, user_id: str, channel: str, *, max_reads: int, now: float) -> bool:
+        """Count a read after the answer window whose extraction call failed.
+        It shares `attempts` with empty replies, and the `max_reads`-th closes
+        the gate as expired. True when the gate is closed afterwards."""
+        return await self._count(user_id, channel, max_count=max_reads, now=now, reason="expired")
+
+    async def _count(
+        self, user_id: str, channel: str, *, max_count: int, now: float, reason: Literal["empty", "expired"]
+    ) -> bool:
         async with session_scope(self._url) as session:
             closed = await OnboardingRepository(session).count_empty_reply(
-                user_id, channel, max_empty=max_empty, now=now
+                user_id, channel, max_empty=max_count, now=now, reason=reason
             )
         if closed:
             _remember_completed(self._url, user_id, channel)

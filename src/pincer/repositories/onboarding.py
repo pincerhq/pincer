@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from sqlalchemy import case, update
+from sqlalchemy import case, func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -13,6 +13,10 @@ from pincer.repositories.base import BaseRepository
 from pincer.repositories.sessions import rekeyed_session_id
 
 _TABLE = Onboarding.__table__  # type: ignore[attr-defined]
+
+# `closed_by` values a later answer may replace: both close the gate after a
+# read that found no answer, while a concurrent message may still hold one.
+_ANSWER_TAKES_OVER = ("empty", "expired")
 
 
 class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
@@ -29,12 +33,11 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         self, user_id: str, channel: str, completed_at: float, *, reason: Literal["answer", "expired"]
     ) -> bool:
         """Close the gate, recording why in `closed_by` ("answer" or "expired").
-        An answer may take over an empty or expired closure: both follow a read
-        that found no answer, and a concurrent message may still hold one.
-        Nothing takes over an answer, and any other closed row is kept."""
+        An answer may take over an `_ANSWER_TAKES_OVER` closure; nothing takes
+        over an answer, and any other closed row is kept."""
         eligible = _TABLE.c.completed_at.is_(None)
         if reason == "answer":
-            eligible = eligible | col(Onboarding.closed_by).in_(("empty", "expired"))
+            eligible = eligible | _TABLE.c.closed_by.in_(_ANSWER_TAKES_OVER)
         result = await self.session.exec(
             upsert(
                 dialect_of(self.session),
@@ -50,12 +53,15 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
-    async def count_empty_reply(self, user_id: str, channel: str, *, max_empty: int, now: float) -> bool:
-        """Count a reply that held no answer; the `max_empty`-th one closes the
-        gate. True when the gate is closed afterwards.
+    async def count_empty_reply(
+        self, user_id: str, channel: str, *, max_empty: int, now: float, reason: Literal["empty", "expired"] = "empty"
+    ) -> bool:
+        """Count a read that settled nothing; the `max_empty`-th one closes the
+        gate with `reason` as its `closed_by`. True when the gate is closed
+        afterwards.
 
-        A row created here (a user asked before the table existed) takes `now`
-        as its `asked_at`, so its answer window runs from the first reply seen.
+        A row without an `asked_at` (a user asked before the table existed)
+        takes `now` as one, so its answer window runs from the first reply seen.
         """
         await self.session.exec(
             upsert(
@@ -67,13 +73,14 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
                     "attempts": 1,
                     "asked_at": now,
                     "completed_at": now if max_empty <= 1 else None,
-                    "closed_by": "empty" if max_empty <= 1 else None,
+                    "closed_by": reason if max_empty <= 1 else None,
                 },
                 index_elements=["user_id", "channel"],
                 set_={
                     "attempts": _TABLE.c.attempts + 1,
+                    "asked_at": func.coalesce(_TABLE.c.asked_at, now),
                     "completed_at": case((_TABLE.c.attempts + 1 >= max_empty, now), else_=None),
-                    "closed_by": case((_TABLE.c.attempts + 1 >= max_empty, "empty"), else_=None),
+                    "closed_by": case((_TABLE.c.attempts + 1 >= max_empty, reason), else_=None),
                 },
                 where=_TABLE.c.completed_at.is_(None),
             )

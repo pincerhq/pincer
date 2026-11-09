@@ -9,7 +9,6 @@ from pincer.db.session import session_scope
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
-from pincer.repositories.onboarding import OnboardingRepository
 from pincer.repositories.sessions import SessionRepository
 from pincer.services import onboarding as onboarding_module
 from pincer.services.identity import IdentityService
@@ -52,13 +51,6 @@ async def _store_session(
         created_at=created_at,
         updated_at=created_at,
     )
-
-
-async def _closed_by(url: str, user_id: str, channel: str) -> str | None:
-    async with session_scope(url) as session:
-        row = await OnboardingRepository(session).get((user_id, channel))
-    assert row is not None
-    return row.closed_by
 
 
 async def test_an_unknown_user_has_no_record(url):
@@ -142,8 +134,7 @@ async def test_an_answer_can_take_over_an_expiry(url):
 
     record = await service.get("u", "web")
     assert record is not None
-    assert record.completed_at == 30.0
-    assert await _closed_by(url, "u", "web") == "answer"
+    assert (record.completed_at, record.closed_by) == (30.0, "answer")
 
 
 @pytest.mark.parametrize("first", ["answer", "expired"])
@@ -158,8 +149,7 @@ async def test_nothing_takes_over_an_answer(url, first):
 
     record = await service.get("u", "web")
     assert record is not None
-    assert (record.attempts, record.completed_at) == (1, 20.0)
-    assert await _closed_by(url, "u", "web") == "answer"
+    assert (record.attempts, record.completed_at, record.closed_by) == (1, 20.0, "answer")
 
 
 async def test_an_empty_reply_without_a_row_inserts_one(url):
@@ -172,6 +162,35 @@ async def test_an_empty_reply_without_a_row_inserts_one(url):
     record = await service.get("u", "web")
     assert record is not None
     assert (record.asked_session_id, record.asked_at, record.attempts, record.completed_at) == (None, 20.0, 1, None)
+
+
+async def test_an_empty_reply_starts_the_window_of_a_row_without_one(url):
+    """A row stored before `asked_at` was set on insert gets one on its next
+    empty reply, so its answer window can run out too."""
+    service = OnboardingService(url)
+    async with get_engine(url).begin() as conn:
+        await conn.execute(
+            Onboarding.__table__.insert().values(user_id="u", channel="web", attempts=0)  # type: ignore[attr-defined]
+        )
+
+    await service.record_empty_reply("u", "web", max_empty=3, now=20.0)
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_at, record.attempts) == (20.0, 1)
+
+
+async def test_failed_late_reads_close_the_gate_as_expired(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    assert await service.record_failed_late_read("u", "web", max_reads=2, now=20.0) is False
+    assert await service.record_failed_late_read("u", "web", max_reads=2, now=30.0) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at, record.closed_by) == (2, 30.0, "expired")
+    assert await service.complete_answer("u", "web", now=40.0) is True
 
 
 async def test_a_later_empty_reply_keeps_the_start_time(url):

@@ -710,11 +710,13 @@ mounting a directory. Install the new `remote-skills` extra
   mostly travel planning" was lost. Now that message is read like any other:
   an answer completes onboarding and writes the profile, and anything else
   closes the gate as expired. A failed extraction call leaves the gate open,
-  so the next message gets the same read. An answer may now take over an
-  expired close, as it already could an empty one, so a concurrent task
-  message cannot drop it. A row created for a user asked before the
-  onboarding table existed now records its first reply's time as `asked_at`,
-  so it expires like any other.
+  so the next message gets the same read. Such failures add to the
+  empty-reply count, and the gate closes as expired when that count reaches
+  two, so a persistently failing extractor stops being called. An answer may now take
+  over an expired close, as it already could an empty one, so a concurrent
+  task message cannot drop it. A row with no `asked_at` (a user asked before
+  the onboarding table existed) takes the time of its next empty reply as
+  one, so it expires like any other.
 - **Voice: an interrupted line is no longer reported as a delivery failure,
   and a German "Na, das war's. Tschüss." ends the call (#301).** Every agent
   transcript line now records its delivery outcome and the reason in the new
