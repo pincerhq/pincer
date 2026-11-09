@@ -32,11 +32,11 @@ class SessionService(DatabaseService):
                 row = await repo.newest_for(user_id, channel, exclude_prefix=f"{session_id}:")
             return None if row is None else _as_dict(row)
 
-    async def has_any(self, user_id: str, channel: str) -> bool:
+    async def has_any(self, user_id: str, channel: str, *, created_before: float | None = None) -> bool:
         """True when the channel user has any stored session, conversations included
-        (memory-free ones aside)."""
+        (memory-free ones aside); with `created_before`, one created before then."""
         async with session_scope(self._url) as session:
-            return await SessionRepository(session).exists_for(user_id, channel)
+            return await SessionRepository(session).exists_for(user_id, channel, created_before=created_before)
 
     async def save(
         self,

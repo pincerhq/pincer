@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from pincer.db.session import session_scope
 from pincer.repositories.onboarding import OnboardingRepository
 from pincer.services.base import DatabaseService
+
+if TYPE_CHECKING:
+    from pincer.models.onboarding import ClosedBy
 
 # (database url, user id, channel) pairs known to be done with onboarding, so
 # their turns read nothing. Done is final, short of a rename (`forget_user`).
@@ -43,6 +47,7 @@ class OnboardingRecord:
     asked_at: float | None
     completed_at: float | None
     attempts: int
+    closed_by: ClosedBy | None
 
 
 class OnboardingService(DatabaseService):
@@ -61,7 +66,7 @@ class OnboardingService(DatabaseService):
                 return None
             if row.completed_at is not None:
                 _remember_completed(self._url, user_id, channel)
-            return OnboardingRecord(row.asked_session_id, row.asked_at, row.completed_at, row.attempts)
+            return OnboardingRecord(row.asked_session_id, row.asked_at, row.completed_at, row.attempts, row.closed_by)
 
     async def claim_prompt(self, user_id: str, channel: str, session_id: str, *, now: float) -> bool:
         """Record that `session_id` asked the question. False when another turn
@@ -79,7 +84,9 @@ class OnboardingService(DatabaseService):
         """Claim an answer, including after an empty close; expiry and answers are final."""
         return await self._complete(user_id, channel, now=now, reason="answer")
 
-    async def complete_known(self, user_id: str, channel: str, *, now: float, reason: str) -> bool:
+    async def complete_known(
+        self, user_id: str, channel: str, *, now: float, reason: Literal["legacy", "existing"]
+    ) -> bool:
         """Close the gate for a user who will never be asked: onboarded before
         the table existed (``reason="legacy"``), or with history from before
         onboarding (``reason="existing"``). Writing the row once lets their
@@ -96,7 +103,7 @@ class OnboardingService(DatabaseService):
             _remember_completed(self._url, user_id, channel)
         return inserted
 
-    async def _complete(self, user_id: str, channel: str, *, now: float, reason: str) -> bool:
+    async def _complete(self, user_id: str, channel: str, *, now: float, reason: Literal["answer", "expired"]) -> bool:
         async with session_scope(self._url) as session:
             won = await OnboardingRepository(session).mark_completed(user_id, channel, now, reason=reason)
         _remember_completed(self._url, user_id, channel)

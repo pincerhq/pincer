@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import case, update
 from sqlmodel import col, select
@@ -25,7 +25,9 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
-    async def mark_completed(self, user_id: str, channel: str, completed_at: float, *, reason: str) -> bool:
+    async def mark_completed(
+        self, user_id: str, channel: str, completed_at: float, *, reason: Literal["answer", "expired"]
+    ) -> bool:
         """Close the gate, recording why in `closed_by` ("answer" or "expired").
         Only an answer may take over an empty-reply closure; any other closed
         row is kept."""

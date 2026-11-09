@@ -9,7 +9,7 @@ from pincer.db.session import session_scope
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
-from pincer.repositories.onboarding import OnboardingRepository
+from pincer.repositories.sessions import SessionRepository
 from pincer.services import onboarding as onboarding_module
 from pincer.services.identity import IdentityService
 from pincer.services.onboarding import OnboardingService
@@ -40,7 +40,7 @@ async def url(db_url: str):
 
 
 async def _store_session(
-    url: str, session_id: str, *, user_id: str, channel: str = "web", metadata: str = "{}"
+    url: str, session_id: str, *, user_id: str, channel: str = "web", metadata: str = "{}", created_at: float = 1.0
 ) -> None:
     await SessionService(url).save(
         session_id=session_id,
@@ -48,8 +48,8 @@ async def _store_session(
         channel=channel,
         messages="[]",
         metadata=metadata,
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=created_at,
+        updated_at=created_at,
     )
 
 
@@ -158,13 +158,6 @@ async def test_completing_without_a_row_inserts_one(url):
     assert (record.asked_session_id, record.completed_at) == (None, 20.0)
 
 
-async def _closed_by(url: str, user_id: str, channel: str) -> str | None:
-    async with session_scope(url) as session:
-        row = await OnboardingRepository(session).get((user_id, channel))
-    assert row is not None
-    return row.closed_by
-
-
 @pytest.mark.parametrize("reason", ["legacy", "existing"])
 async def test_closing_a_known_user_creates_a_completed_row(url, reason):
     """A user who will never be asked gets a completed row, and why."""
@@ -175,7 +168,7 @@ async def test_closing_a_known_user_creates_a_completed_row(url, reason):
     record = await service.get("u", "web")
     assert record is not None
     assert (record.asked_session_id, record.asked_at, record.completed_at, record.attempts) == (None, None, 20.0, 0)
-    assert await _closed_by(url, "u", "web") == reason
+    assert record.closed_by == reason
 
 
 async def test_closing_a_known_user_leaves_an_open_row_as_it_is(url):
@@ -201,8 +194,9 @@ async def test_closing_a_known_user_leaves_a_closed_row_as_it_is(url, closed_by)
 
     assert await service.complete_known("u", "web", now=20.0, reason="legacy") is False
 
-    assert (await service.get("u", "web")).completed_at == 10.0  # type: ignore[union-attr]
-    assert await _closed_by(url, "u", "web") == closed_by
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.completed_at, record.closed_by) == (10.0, closed_by)
 
 
 async def test_closing_a_known_user_fills_the_completed_cache(url):
@@ -244,6 +238,18 @@ async def test_stored_sessions_leave_out_memory_free_conversations(url):
     assert await service.has_any("u", "web") is False
     assert await service.has_any("v", "web") is True
     assert await service.has_any("w", "web") is True
+
+
+async def test_stored_sessions_created_before_count_only_older_ones(url):
+    await _store_session(url, "web:u", user_id="u", created_at=10.0)
+    await _store_session(url, f"web:v:{_CONVERSATION}", user_id="v", created_at=5.0, metadata='{"memory_free": "true"}')
+
+    async with session_scope(url) as session:
+        repo = SessionRepository(session)
+        assert await repo.exists_for("u", "web", created_before=10.5) is True
+        assert await repo.exists_for("u", "web", created_before=10.0) is False
+        assert await repo.exists_for("u", "web", created_before=None) is True
+        assert await repo.exists_for("v", "web", created_before=10.0) is False  # memory-free, however old
 
 
 async def test_renaming_moves_onboarding_and_its_asking_session(url):
