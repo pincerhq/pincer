@@ -61,7 +61,7 @@ class LastRequest:
 
 def _chars(message: LLMMessage) -> int:
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
-    return len(message.content) + len(calls)
+    return len(message.context) + len(message.content) + len(calls)
 
 
 def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int) -> int:

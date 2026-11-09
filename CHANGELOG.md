@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### The system prompt stays the same for a whole conversation (#357)
+
+- Recalled memories and the current date and time are no longer part of the
+  system prompt. They are sent with the user's message, as a separate text
+  block before the user's words, so the system prompt only changes when one of
+  its stable parts does (skills, MCP servers, tools offered, preferred
+  language, channel instructions). Chat, web chat and voice all do it; each
+  voice utterance carries its own block. Scheduled (headless) runs keep the
+  time in their own prompt.
+- The block is saved with the session and sent again unchanged on every later
+  request, also after a restart. Sessions saved before this change load as
+  they are. History shown to people (web chat history, memory export and
+  search) holds only the user's words, and compaction summarizes only them.
+- OpenAI-compatible endpoints receive such a user message as a list of text
+  parts. Ollama splits the parts into consecutive user messages; LM Studio is
+  untested with text-only parts.
+
 #### History compacted by prompt tokens; summaries reach Claude (#357)
 
 - After a turn whose last LLM request's whole prompt (uncached input, cache

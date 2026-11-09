@@ -432,10 +432,11 @@ async def test_agent_with_memory(settings, session_manager, cost_tracker, tool_r
     assert isinstance(result, AgentResponse)
     assert result.text
 
-    # Verify the LLM was called with memory-augmented system prompt
+    # The recalled memory rides on the user message, not the system prompt (issue #357, Q14)
     call_args = mock_llm.complete.call_args
-    system = call_args.kwargs.get("system", "")
-    assert "Python" in system
+    [user_message] = [m for m in call_args.kwargs["messages"] if m.role == MessageRole.USER]
+    assert "User loves Python programming" in user_message.context
+    assert "User loves Python programming" not in call_args.kwargs["system"]
 
     await mem_store.close()
 

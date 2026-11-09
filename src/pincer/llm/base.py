@@ -72,6 +72,11 @@ class LLMMessage:
     # interleaved). Set only when the response had thinking, so the next request can replay it
     # as it was; never in to_dict.
     content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # Pincer's per-turn context for a user message (recalled memories, the current time), kept out
+    # of the system prompt so that stays identical for the whole conversation. Sent as its own text
+    # block before the user's words, saved with the session and replayed as it was; never shown
+    # to people as history (the user's words are `content`).
+    context: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal dict for session storage (JSON-serializable)."""
@@ -80,6 +85,8 @@ class LLMMessage:
             d["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
             d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
+        if self.context:
+            d["context"] = self.context
         return d
 
     @classmethod
@@ -90,6 +97,7 @@ class LLMMessage:
             content=d.get("content", ""),
             tool_call_id=d.get("tool_call_id"),
             tool_calls=tool_calls,
+            context=d.get("context", ""),
         )
 
 

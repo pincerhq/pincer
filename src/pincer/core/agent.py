@@ -850,15 +850,17 @@ class Agent:
             for raw, media_type in images:
                 img_contents.append(ImageContent.from_bytes(raw, media_type))
 
+        turn = await self._begin_turn(user_id, session_key=session.session_id)
         user_msg = LLMMessage(
             role=MessageRole.USER,
             content=text,
             images=img_contents,
+            context=await self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
         )
         await self._sessions.add_message(session, user_msg)
 
-        # Build system prompt with relevant memories — inject the onboarding
-        # followup instruction only on the turn that handles the user's reply.
+        # Inject the onboarding followup instruction only on the turn that
+        # handles the user's reply.
         extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
         if extra_system:
             extra_parts.append(extra_system)
@@ -880,16 +882,12 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        turn = await self._begin_turn(user_id, session_key=session.session_id)
-
         async def build_prompt(tool_names: list[str] | None) -> str:
             return await self._build_system_prompt(
                 user_id,
-                text,
                 extra_system="\n\n".join(extra_parts) or None,
                 skip_memory=not memory,
                 tool_names=tool_names,
-                user_timezone=turn.timezone,
                 preferred_language=(channel_name or channel) != "voice",
             )
 
@@ -1136,8 +1134,10 @@ class Agent:
             candidates = [s for s in candidates if s.get("name") in allowed_tools] or None
         tool_schemas = await self._select_tools(candidates, prompt) if candidates is not None else None
         turn = await self._begin_turn(user_id)
+        # No session, so no cache to keep: the time stays in this run's own prompt
+        time_block = current_time_block(self._settings, turn.timezone)
         system_prompt = await self._build_system_prompt(
-            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas), user_timezone=turn.timezone
+            user_id, extra_system=time_block, skip_memory=True, tool_names=_schema_names(tool_schemas)
         )
 
         final_text = ""
@@ -1213,10 +1213,9 @@ class Agent:
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
                             user_id,
-                            prompt,
+                            extra_system=time_block,
                             skip_memory=True,
                             tool_names=_schema_names(tool_schemas),
-                            user_timezone=turn.timezone,
                         )
 
                 if iteration_had_error:
@@ -1321,10 +1320,12 @@ class Agent:
             for raw, media_type in images:
                 img_contents.append(ImageContent.from_bytes(raw, media_type))
 
+        turn = await self._begin_turn(user_id, session_key=session.session_id)
         user_msg = LLMMessage(
             role=MessageRole.USER,
             content=text,
             images=img_contents,
+            context=await self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
         )
         await self._sessions.add_message(session, user_msg)
 
@@ -1340,16 +1341,12 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        turn = await self._begin_turn(user_id, session_key=session.session_id)
-
         async def build_prompt(tool_names: list[str]) -> str:
             return await self._build_system_prompt(
                 user_id,
-                text,
                 extra_system=extra_system,
                 skip_memory=not memory,
                 tool_names=tool_names,
-                user_timezone=turn.timezone,
             )
 
         system_prompt = await build_prompt(_schema_names(tool_schemas))
@@ -1620,14 +1617,17 @@ class Agent:
 
         turn_started = time.monotonic()
         self._last_active = (user_id, channel)
-        user_msg = LLMMessage(role=MessageRole.USER, content=text)
+        turn = await self._begin_turn(user_id)
+        # Each utterance carries its own memories and time, so the call's system
+        # prompt stays the same while its extra_system does (Q15).
+        context = await self._turn_context(user_id, text, memory=True, user_timezone=turn.timezone)
+        user_msg = LLMMessage(role=MessageRole.USER, content=text, context=context)
         await self._sessions.add_message(session, user_msg)
         # add_message does not trim while the turn is open: SessionManager.turn()
         # trims to max_session_messages when the turn ends. Growth within one turn
         # is bounded by max_tool_iterations. Compaction runs after the turn, off the
         # call's critical path (see stream_voice_turn).
 
-        turn = await self._begin_turn(user_id)
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
         # when no gate is bound (legacy callers, tests).
@@ -1644,10 +1644,8 @@ class Agent:
         # sends (issue #300).
         system_prompt = await self._build_system_prompt(
             user_id,
-            text,
             extra_system=extra_system,
             tool_names=_schema_names(tool_schemas),
-            user_timezone=turn.timezone,
             preferred_language=False,
         )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 1024) or 1024)
@@ -1991,23 +1989,24 @@ class Agent:
     async def _build_system_prompt(
         self,
         user_id: str,
-        user_text: str,
         *,
         extra_system: str | None = None,
         skip_memory: bool = False,
         tool_names: Collection[str] | None = None,
-        user_timezone: str | None = None,
         preferred_language: bool = True,
     ) -> str:
-        """Build system prompt, injecting relevant memories if available.
+        """Build the system prompt: only parts that stay the same for a whole
+        conversation until one of them changes (issue #357, Q14). Recalled
+        memories and the current time change every turn, so they travel on the
+        user message instead (``_turn_context``).
 
         ``tool_names`` are the tools sent with this turn (the tool hints and
         the MCP server block follow them); ``None`` means the whole registry.
-        ``user_timezone`` is the turn's already-resolved identity zone
-        (``None`` = look it up).
-        ``preferred_language`` False leaves out the user's stored language:
-        a voice call speaks the one language pinned on the call (its
-        LANGUAGE_POLICY), and an outbound call's other party is not the user.
+        ``skip_memory`` leaves out the user's stored language (a memory-free
+        turn reads nothing from memory).
+        ``preferred_language`` False leaves it out too: a voice call speaks
+        the one language pinned on the call (its LANGUAGE_POLICY), and an
+        outbound call's other party is not the user.
         """
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
         offered = None if tool_names is None else set(tool_names)
@@ -2084,55 +2083,43 @@ class Agent:
             except Exception:
                 self._mcp_list_outage.log("Failed to fetch MCP server list for prompt", exc_info=True)
 
-        # The model has no clock and will invent today's date if nothing states
-        # it (see core/clock.py). Appended on every return path below, and last
-        # so it is the most recent thing the model reads before the messages.
-        if user_timezone is None:
-            user_timezone = await self._user_timezone(user_id)
-        time_block = current_time_block(self._settings, user_timezone)
-
-        def _with_extra(prompt: str) -> str:
-            parts = [prompt]
-            if extra_system:
-                parts.append(extra_system)
-            parts.append(time_block)
-            return "\n\n".join(parts)
-
-        if not self._memory or skip_memory:
-            return _with_extra(base_prompt)
-
-        store = self._memory
-
-        async def search() -> str | None:
-            """The memories block ("" for none), or None when the search fails."""
+        language = None
+        if self._memory and not skip_memory and preferred_language:
+            # Read directly, not through the memory search: a message that
+            # shares no word with the profile must still get its language.
             try:
-                memories = await store.search_text(user_text, user_id=user_id, limit=3)
+                language = await get_preferred_language(self._memory, user_id)
+            except Exception:
+                logger.warning("Failed to read the preferred language for prompt", exc_info=True)
+        if language:
+            base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
+        if extra_system:
+            base_prompt += "\n\n" + extra_system
+        return base_prompt
+
+    async def _turn_context(self, user_id: str, text: str, *, memory: bool, user_timezone: str) -> str:
+        """The context sent with the user's message: memories recalled for
+        ``text`` (with ``memory``), then the current time.
+
+        Computed once per turn and kept on the message, so every later request
+        replays it unchanged and the system prompt stays identical (Q15). The
+        model has no clock and will invent today's date if nothing states it
+        (see core/clock.py). A failed search costs only the memories.
+        """
+        parts: list[str] = []
+        if self._memory and memory:
+            try:
+                memories = await self._memory.search_text(text, user_id=user_id, limit=3)
                 block = "\n".join(f"- {m.content}" for m in memories)
             except Exception:
                 # Inside the handler, so the outage warning carries the traceback.
                 self._memory_outage.log("Failed to fetch memories for prompt", exc_info=True)
-                return None
-            self._memory_outage.clear()
-            return block
-
-        async def read_language() -> str | None:
-            # Read directly, not through the search: a message that shares no
-            # word with the profile must still get its language. Either read
-            # failing costs only its own block.
-            if not preferred_language:
-                return None
-            try:
-                return await get_preferred_language(store, user_id)
-            except Exception:
-                logger.warning("Failed to read the preferred language for prompt", exc_info=True)
-                return None
-
-        memory_block, language = await asyncio.gather(search(), read_language())
-        if memory_block:
-            base_prompt += f"\n\n{MEMORY_BLOCK_HEADER}\n{memory_block}"
-        if language:
-            base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
-        return _with_extra(base_prompt)
+            else:
+                self._memory_outage.clear()
+                if block:
+                    parts.append(f"{MEMORY_BLOCK_HEADER}\n{block}")
+        parts.append(current_time_block(self._settings, user_timezone))
+        return "\n\n".join(parts)
 
     @staticmethod
     def _memory_for_turn(session: Session, memory: bool) -> bool:

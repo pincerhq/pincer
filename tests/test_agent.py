@@ -1626,8 +1626,9 @@ async def test_unavailable_memories_warn_and_still_reply(
 
     assert "Hello! I'm Pincer." in result.text
     memory.search_text.assert_awaited()
-    system_prompt = mock_llm.complete.call_args.kwargs["system"]
-    assert MEMORY_BLOCK_HEADER not in system_prompt
+    context = _sent_user_context(mock_llm)
+    assert MEMORY_BLOCK_HEADER not in context
+    assert context.startswith("[Current date and time]")  # a failed search costs only the memories
 
     warnings = [
         r
@@ -2034,6 +2035,11 @@ async def test_a_conversation_without_memory_stays_without_it(
     memory.store_memory.assert_not_awaited()
 
 
+def _sent_user_context(llm: Any) -> str:
+    """The context (memories, time) on the user message of the last request."""
+    return next(m for m in llm.complete.call_args.kwargs["messages"] if m.role == MessageRole.USER).context
+
+
 async def test_a_turn_with_memory_still_reads_and_writes_it(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
@@ -2046,7 +2052,7 @@ async def test_a_turn_with_memory_still_reads_and_writes_it(
 
     memory.search_text.assert_awaited()
     memory.store_memory.assert_awaited_once()
-    assert "the user's private fact" in mock_llm.complete.call_args.kwargs["system"]
+    assert "the user's private fact" in _sent_user_context(mock_llm)
 
 
 async def test_memory_block_is_labelled_unverified(settings, mock_llm, session_manager, cost_tracker, tool_registry):
@@ -2057,8 +2063,7 @@ async def test_memory_block_is_labelled_unverified(settings, mock_llm, session_m
 
     await agent.handle_message("user1", "test", "who is Jane?")
 
-    system_prompt = mock_llm.complete.call_args.kwargs["system"]
-    assert f"{MEMORY_BLOCK_HEADER}\n- Jane Doe is a friend" in system_prompt
+    assert f"{MEMORY_BLOCK_HEADER}\n- Jane Doe is a friend" in _sent_user_context(mock_llm)
     assert "not verified against Contacts" in MEMORY_BLOCK_HEADER
 
 
@@ -2421,7 +2426,7 @@ async def test_stored_preferred_language_reaches_the_prompt_without_a_search_hit
     memory.list_memories.assert_awaited_with(user_id="user1", category="profile", limit=1)
     system_prompt = mock_llm.complete.call_args.kwargs["system"]
     assert "[User preferred language: uk]" in system_prompt
-    assert MEMORY_BLOCK_HEADER not in system_prompt
+    assert MEMORY_BLOCK_HEADER not in _sent_user_context(mock_llm)
 
 
 async def test_no_preferred_language_line_without_a_profile(
@@ -2461,6 +2466,5 @@ async def test_failed_language_read_keeps_the_memories(
 
     await agent.handle_message("user1", "test", "hello")
 
-    system_prompt = mock_llm.complete.call_args.kwargs["system"]
-    assert "likes tea" in system_prompt
-    assert "[User preferred language:" not in system_prompt
+    assert "likes tea" in _sent_user_context(mock_llm)
+    assert "[User preferred language:" not in mock_llm.complete.call_args.kwargs["system"]

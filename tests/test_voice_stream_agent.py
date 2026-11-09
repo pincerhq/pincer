@@ -923,7 +923,7 @@ class TestVoiceReasoningOverrides:
 
         voice, regeneration = llm.requests
         assert (voice["output_config"], voice["thinking"]) == ({"effort": "low"}, {"type": "disabled"})
-        assert regeneration["messages"][0]["content"] == "Hi"  # the call's own session
+        assert regeneration["messages"][0]["content"][-1] == {"type": "text", "text": "Hi"}  # the call's own session
         assert (regeneration["output_config"], regeneration["thinking"]) == (
             {"effort": "high"},
             {"type": "adaptive"},

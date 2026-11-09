@@ -281,9 +281,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 result.append({"role": "assistant", "content": replayed})
                 continue
 
-            # Standard text or text+image
-            if msg.images:
+            # Standard text or text+image, after Pincer's context block when there is one
+            if msg.images or msg.context:
                 content_parts: list[dict[str, Any]] = []
+                if msg.context:
+                    content_parts.append({"type": "text", "text": msg.context})
                 for img in msg.images:
                     content_parts.append(
                         {

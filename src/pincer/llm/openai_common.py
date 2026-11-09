@@ -116,8 +116,11 @@ def convert_messages_to_openai(
                     "tool_calls": tool_calls_api,
                 }
             )
-        elif msg.images:
+        elif msg.images or msg.context:
+            # Pincer's context block first, then the images, then the user's words
             content_parts: list[dict[str, Any]] = []
+            if msg.context:
+                content_parts.append({"type": "text", "text": msg.context})
             for img in msg.images:
                 content_parts.append(
                     {
