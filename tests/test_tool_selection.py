@@ -102,8 +102,9 @@ def _fallback_logs(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 
 @pytest.fixture
 def openai_settings(settings: Settings) -> Settings:
-    """The shared settings with an OpenAI-wire (128-tool capped) default provider."""
-    return settings.model_copy(update={"default_provider": "openai"})
+    """The shared settings with an OpenAI-wire (128-tool capped) default provider; no headroom, so a
+    selection fills the whole cap (the headroom has its own tests)."""
+    return settings.model_copy(update={"default_provider": "openai", "tool_selection_headroom": 0})
 
 
 async def test_at_or_below_limit_returns_schemas_unchanged(openai_settings: Settings) -> None:
@@ -130,7 +131,7 @@ async def test_an_openai_failover_turns_selection_on(settings: Settings) -> None
     selected = await _selector(FakeManager(FakeIndexSession(["filler_150"])), settings).select(
         _schemas(_registry_names()), "x"
     )
-    assert len(selected) == 127
+    assert len(selected) == 127 - 27  # the default headroom
 
 
 async def test_selection_tiers_budget_and_registry_order(openai_settings: Settings) -> None:
@@ -394,3 +395,41 @@ async def test_serve_agent_gets_a_selector_without_mcp(
     finally:
         await agent._sessions.close()
         await agent._costs.close()
+
+
+def test_headroom_must_leave_room_below_the_tool_cap() -> None:
+    from pydantic import ValidationError
+
+    from pincer.config.tools import ToolSettings
+
+    defaults = ToolSettings()
+    assert (defaults.tool_selection_max, defaults.tool_selection_headroom) == (127, 27)
+    assert ToolSettings(tool_selection_headroom=0).tool_selection_headroom == 0
+    with pytest.raises(
+        ValidationError, match=r"tool_selection_headroom \(127\) must be below tool_selection_max \(127\)"
+    ):
+        ToolSettings(tool_selection_headroom=127)
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        ToolSettings(tool_selection_headroom=-1)
+
+
+async def test_a_fresh_selection_leaves_the_headroom_free(openai_settings: Settings) -> None:
+    ranking = [f"filler_{i:03d}" for i in range(180)]
+    settings = openai_settings.model_copy(update={"tool_selection_headroom": 27})
+    selector = _selector(FakeManager(FakeIndexSession(ranking)), settings)
+
+    selected = _names(await selector.select(_schemas(_registry_names()), "hello"))
+
+    assert len(selected) == 127 - 27
+    assert set(HEAD) <= set(selected)
+
+
+async def test_a_kept_tool_no_longer_registered_leaves_the_list(openai_settings: Settings) -> None:
+    """An MCP server that went away takes its tools out; the rest keep their order, new tools follow."""
+    settings = openai_settings.model_copy(update={"tool_selection_headroom": 27})
+    selector = _selector(FakeManager(FakeIndexSession(["filler_150", "filler_005"])), settings)
+    kept = ["filler_005", "slack__gone", "filler_001"]
+
+    selected = _names(await selector.select(_schemas(_registry_names()), "hello", kept=kept))
+
+    assert selected == ["filler_005", "filler_001", *HEAD, "filler_150"]

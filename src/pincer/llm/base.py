@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
@@ -16,12 +18,35 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 from pincer.config.pricing import TokenUsage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 # The stop reason every provider reports when the output hit max_tokens
 STOP_REASON_MAX_TOKENS = "max_tokens"
+# Where the requests of the current conversation get their prompt cache key (issue #357, Q21):
+# set by the agent around a turn, read by providers that route on it (OpenAI's prompt_cache_key)
+_prompt_cache_key_source: ContextVar[Callable[[], str] | None] = ContextVar("pincer_prompt_cache_key", default=None)
+
+
+@contextmanager
+def prompt_cache_session(key: Callable[[], str]) -> Iterator[None]:
+    """Requests made inside get the conversation's cache key from ``key``, called only when a
+    provider asks for it (so a key is minted only for a provider that sends one)."""
+    token = _prompt_cache_key_source.set(key)
+    try:
+        yield
+    finally:
+        try:
+            _prompt_cache_key_source.reset(token)
+        except ValueError:  # an async generator closed from another context: just clear it there
+            _prompt_cache_key_source.set(None)
+
+
+def prompt_cache_key() -> str:
+    """The current conversation's prompt cache key; "" outside a conversation."""
+    source = _prompt_cache_key_source.get()
+    return source() if source is not None else ""
 
 
 class MessageRole(StrEnum):

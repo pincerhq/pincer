@@ -25,6 +25,7 @@ from pincer.llm.base import (
     StreamTurnEvent,
     TokenCounts,
     ToolCall,
+    prompt_cache_key,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
 
@@ -232,6 +233,10 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 f"endpoint will reject. Set {env} to a model this endpoint supports."
             )
 
+        from pincer.llm.router import is_free_provider  # the router imports this module
+
+        # A keyless local endpoint has no paid cache to key and may reject unknown fields
+        self._sends_cache_key = not is_free_provider(settings, provider)
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
@@ -272,6 +277,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         }
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
+        if self._sends_cache_key and (cache_key := prompt_cache_key()):
+            # One key per conversation routes its requests to the same cache (issue #357, Q21)
+            kwargs["prompt_cache_key"] = cache_key
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
         reasoning = resolve_and_warn(
             ReasoningWire.OPENAI,

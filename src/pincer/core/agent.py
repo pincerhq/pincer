@@ -44,6 +44,7 @@ from pincer.llm.base import (
     MessageRole,
     ToolCall,
     ToolResult,
+    prompt_cache_session,
     strip_thinking,
 )
 from pincer.llm.model_params import model_max_output_tokens
@@ -112,6 +113,11 @@ _TOOL_FAILURES_TEXT = "I'm having repeated tool failures. Let me respond with wh
 _RATE_LIMIT_ATTEMPTS = 3
 _RATE_LIMIT_DEFAULT_WAIT_S = 5.0  # when the provider names no retry-after
 _RATE_LIMIT_MAX_WAIT_S = 60.0
+# Session metadata: the conversation's prompt cache key, a UUIDv7 minted on its first request
+# that sends one (issue #357, Q21: never derived from the session id, which names the user)
+PROMPT_CACHE_KEY = "prompt_cache_key"
+# Session metadata: the names of the tools the conversation sends, in order (a JSON list)
+TOOL_LIST_KEY = "tool_list"
 # One line per chat turn: its requests' tokens by type, so caching can be watched per turn (issue #357)
 _TURN_LOG = (
     "Chat turn: session=%s requests=%d input=%d cache_read=%d cache_write_5m=%d cache_write_1h=%d output=%d cost=$%.6f"
@@ -329,6 +335,14 @@ class _Onboarding:
 
 
 _NO_ONBOARDING = _Onboarding(prompt=False, ingest=False)
+
+
+def _cache_key(session: Session) -> str:
+    """The session's prompt cache key, minted and kept in its metadata on first use."""
+    key = session.metadata.get(PROMPT_CACHE_KEY)
+    if not key:
+        key = session.metadata[PROMPT_CACHE_KEY] = new_id()
+    return key
 
 
 def _log_turn(session_id: str, requests: int, usage: TokenUsage, cost: float) -> None:
@@ -788,17 +802,18 @@ class Agent:
         ``_onboarding_for_turn``.
         """
         async with self._sessions.turn(user_id, channel, session_key) as session:
-            result = await self._handle_message(
-                user_id,
-                channel,
-                text,
-                images,
-                channel_user_id,
-                channel_name,
-                extra_system,
-                memory,
-                session=session,
-            )
+            with prompt_cache_session(lambda: _cache_key(session)):
+                result = await self._handle_message(
+                    user_id,
+                    channel,
+                    text,
+                    images,
+                    channel_user_id,
+                    channel_name,
+                    extra_system,
+                    memory,
+                    session=session,
+                )
         self._schedule_compaction(session)
         return result
 
@@ -887,7 +902,7 @@ class Agent:
         elif call_gate is not None:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
-            tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session.messages)
+            tool_schemas = await self._turn_tools(session, self._tools.get_schemas(), text)
         logger.debug(
             "Tools available (%d): %s",
             len(tool_schemas or []),
@@ -1052,7 +1067,7 @@ class Agent:
 
                 if skills_loaded and call_gate is None:
                     reselected = await self._reselect_after_skills(
-                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                        self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
                         # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
@@ -1284,8 +1299,9 @@ class Agent:
                     )
                 ) as stream,
             ):
-                async for chunk in stream:
-                    yield chunk
+                with prompt_cache_session(lambda: _cache_key(session)):
+                    async for chunk in stream:
+                        yield chunk
         finally:
             # Also when the client stops reading after DONE
             if session is not None:
@@ -1371,9 +1387,7 @@ class Agent:
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
         tool_schemas = (
-            await self._select_tools(self._tools.get_schemas(), text, session.messages)
-            if self._tools.has_tools
-            else None
+            await self._turn_tools(session, self._tools.get_schemas(), text) if self._tools.has_tools else None
         )
         logger.debug(
             "Tools available (%d): %s",
@@ -1507,7 +1521,7 @@ class Agent:
                         skills_loaded.append(skill)
                 if skills_loaded:
                     reselected = await self._reselect_after_skills(
-                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                        self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
                         # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
@@ -1607,8 +1621,9 @@ class Agent:
                     )
                 ) as stream,
             ):
-                async for chunk in stream:
-                    yield chunk
+                with prompt_cache_session(lambda: _cache_key(session)):
+                    async for chunk in stream:
+                        yield chunk
         finally:
             # After the caller heard the reply, off the call's critical path
             if session is not None:
@@ -1973,6 +1988,7 @@ class Agent:
         history: list[LLMMessage] | None = None,
         *,
         query: str | None = None,
+        kept: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Trim a chat turn's tools to tool_selection_max via the tool selector (see tools/selection.py).
 
@@ -1985,7 +2001,21 @@ class Agent:
         recent = [tc.name for msg in (history or [])[-_RECENT_TOOL_MESSAGES:] for tc in msg.tool_calls]
         if query is None:
             query = _selection_query(text, history)
-        return await self.tool_selector.select(schemas, query, reversed(recent))
+        if kept is None:
+            return await self.tool_selector.select(schemas, query, reversed(recent))
+        return await self.tool_selector.select(schemas, query, reversed(recent), kept=kept)
+
+    async def _turn_tools(
+        self, session: Session, schemas: list[dict[str, Any]], text: str, *, query: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The tools a conversation's turn sends: with selection on, its kept list (session metadata)
+        with this turn's new tools appended, so the tools sent before stay a cached prefix (#357, Q21)."""
+        if self.tool_selector is None or not self.tool_selector.applies(schemas):
+            return await self._select_tools(schemas, text, session.messages, query=query)
+        kept = json.loads(session.metadata.get(TOOL_LIST_KEY, "[]"))
+        selected = await self._select_tools(schemas, text, session.messages, query=query, kept=kept)
+        session.metadata[TOOL_LIST_KEY] = json.dumps(_schema_names(selected))
+        return selected
 
     async def _reselect_after_skills(
         self,
@@ -1993,6 +2023,7 @@ class Agent:
         text: str,
         history: list[LLMMessage],
         skills: list[str],
+        session: Session | None = None,
     ) -> list[dict[str, Any]]:
         """Select a turn's tools again from ``candidates`` once skills loaded mid-turn, ranking on their text first.
 
@@ -2002,6 +2033,8 @@ class Agent:
         hints keep following the tools sent.
         """
         query = "\n".join([*(s[:_SELECTION_EXTRA_CHARS] for s in skills), text])
+        if session is not None:  # a conversation's: appended to its tool list
+            return await self._turn_tools(session, candidates, text, query=query)
         return await self._select_tools(candidates, text, history, query=query)
 
     async def _user_timezone(self, user_id: str) -> str:

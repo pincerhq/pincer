@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### OpenAI requests carry one cache key per conversation; its tool list only grows (#357)
+
+- Every OpenAI request of a conversation (chat, web chat, voice) carries the
+  same `prompt_cache_key`, so its requests reach the same prompt cache. The key
+  is a random UUIDv7 minted on the conversation's first such request and kept
+  with the session, so it survives a restart. It is never derived from the
+  session or user id. Keyless local endpoints (Ollama, LM Studio) get no key.
+  Summaries and scheduled runs send none.
+- With tool selection on (an OpenAI-wire provider and more than
+  `PINCER_TOOL_SELECTION_MAX` tools), a conversation keeps the list of tools it
+  sends, also across a restart. Each later turn, and a skill loaded mid-turn,
+  appends the tools it needs at the end, so the tools already sent stay a cached
+  prefix. A first selection now fills `PINCER_TOOL_SELECTION_MAX` minus the new
+  `PINCER_TOOL_SELECTION_HEADROOM` (default 27, so 100 tools, not 127). Only
+  when appending would pass the max is the list selected afresh.
+
 #### Claude caches tools and system prompt for an hour, the conversation for five minutes (#357)
 
 - Anthropic requests with tools now mark the last tool and the end of the

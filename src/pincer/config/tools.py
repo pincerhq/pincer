@@ -69,6 +69,15 @@ class ToolSettings(BaseModel):
         le=127,
         description="Most tools sent per chat turn (OpenAI rejects more than 128; 127 keeps a margin)",
     )
+    tool_selection_headroom: int = Field(
+        default=27,
+        ge=0,
+        description=(
+            "Room a conversation's tool list keeps for later turns: a fresh selection sends "
+            "tool_selection_max - headroom tools, and each later turn appends the new tools it needs at the end "
+            "(the cached prefix stays); only past tool_selection_max is the list selected afresh"
+        ),
+    )
     tool_selection_timeout: float = Field(
         default=3.0,
         gt=0,
@@ -190,6 +199,15 @@ class ToolSettings(BaseModel):
         if v not in APPROVAL_MODES:
             raise ValueError(f"approval_policy must be one of: {', '.join(sorted(APPROVAL_MODES))}")
         return v
+
+    @model_validator(mode="after")
+    def check_tool_selection_headroom(self) -> Self:
+        if self.tool_selection_headroom >= self.tool_selection_max:
+            raise ValueError(
+                f"tool_selection_headroom ({self.tool_selection_headroom}) must be below "
+                f"tool_selection_max ({self.tool_selection_max})"
+            )
+        return self
 
     @model_validator(mode="after")
     def check_compaction_target(self) -> Self:
