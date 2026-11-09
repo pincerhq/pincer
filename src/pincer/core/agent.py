@@ -35,7 +35,7 @@ from pincer.core.onboarding import (
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.db.ids import new_id
-from pincer.exceptions import LLMError, LLMOutputTruncatedError, ToolNotFoundError
+from pincer.exceptions import LLMError, LLMOutputTruncatedError, LLMRateLimitError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from pincer.config.llm import ReasoningEffort, ThinkingMode
     from pincer.core.compaction import Compactor
     from pincer.core.session import Session, SessionManager
+    from pincer.llm.base import StreamTurnEvent
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
@@ -104,6 +105,13 @@ _LOAD_SKILL_TOOL = "load_skill"
 _CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
+# How a web chat turn ends when no request answers its last tools
+_MAX_ITERATIONS_TEXT = "Max iterations reached."
+_TOOL_FAILURES_TEXT = "I'm having repeated tool failures. Let me respond with what I have."
+# A web chat step refused with a 429 before its first event is asked again, as `complete` does
+_RATE_LIMIT_ATTEMPTS = 3
+_RATE_LIMIT_DEFAULT_WAIT_S = 5.0  # when the provider names no retry-after
+_RATE_LIMIT_MAX_WAIT_S = 60.0
 # One line per chat turn: its requests' tokens by type, so caching can be watched per turn (issue #357)
 _TURN_LOG = (
     "Chat turn: session=%s requests=%d input=%d cache_read=%d cache_write_5m=%d cache_write_1h=%d output=%d cost=$%.6f"
@@ -410,15 +418,14 @@ def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
 
 
-def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_text_ok: bool = False) -> None:
+def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
     """Raise instead of using a response cut off by max_tokens that cannot be used.
 
     Two cuts are unusable. A cut-off tool call may have incomplete input, so none of the
     calls run and the assistant turn is not saved. A cut with no text at all means the
     whole budget went on thinking: delivering it would send the user an empty reply.
     Text that was cut off mid-sentence is still delivered. The log names the tools, never
-    their arguments. `blank_text_ok` lets a blank cut through: the streaming chat's tool
-    loop uses it, because its reply is the final stream, which is checked on its own.
+    their arguments.
     """
     if not response.truncated:
         return
@@ -429,7 +436,7 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_te
             max_tokens,
             [tc.name for tc in response.tool_calls],
         )
-    elif not response.content.strip() and not blank_text_ok:
+    elif not response.content.strip():
         logger.warning(
             "LLM output cut off at max_tokens (%d of %d tokens) before any text: no reply to deliver",
             response.output_tokens,
@@ -440,27 +447,13 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_te
     raise LLMOutputTruncatedError(response.output_tokens, max_tokens)
 
 
-def _tool_loop_fallback(response: LLMResponse | None, max_tokens: int, why: str) -> str:
-    """The text to reply with when the final stream gave none: the tool loop's last response.
-
-    That response (it has no tool call: the loop ended on it) is often a complete answer. It
-    is used unless it was cut off (`_refuse_truncated_output`, no `blank_text_ok`) or is blank;
-    then this raises, and the caller's handler maps that to the placed-call reply if a call
-    was placed. `why` names the stream's ending in the log.
-    """
-    if response is None:
-        logger.warning("No usable fallback after the final stream %s: no tool-loop response", why)
-        raise LLMError(f"the final stream {why} and there is no tool-loop response")
-    try:
-        _refuse_truncated_output(response, max_tokens)
-    except LLMError:
-        logger.warning("No usable fallback after the final stream %s: tool-loop cut off", why)
-        raise
-    if not response.content.strip():
-        logger.warning("No usable fallback after the final stream %s: tool-loop has no text", why)
-        raise LLMError(f"the final stream {why} and the tool-loop response has no text")
-    logger.warning("Using the tool-loop response as the reply: the final stream %s", why)
-    return response.content
+def _step_separator(streamed: str) -> str:
+    """What goes between the text a turn already streamed and a later step's first text: only
+    the newlines still missing for a blank line. Nothing before the turn's first text."""
+    if not streamed.strip():
+        return ""
+    trailing = len(streamed) - len(streamed.rstrip("\n"))
+    return "\n" * max(0, 2 - trailing)
 
 
 class _RepeatedCallGuard:
@@ -1310,6 +1303,26 @@ class Agent:
             is_free=self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False,
         )
 
+    async def _stream_step(
+        self, messages: list[LLMMessage], tools: list[dict[str, Any]] | None, system: str
+    ) -> AsyncGenerator[StreamTurnEvent]:
+        """One web chat step: `stream_turn`, asked again on a 429 raised before its first event.
+        Nothing has streamed then, so the retry is safe; a 429 after it propagates."""
+        for attempt in range(_RATE_LIMIT_ATTEMPTS):
+            started = False
+            try:
+                async for event in self._llm.stream_turn(messages=messages, tools=tools, system=system):
+                    started = True
+                    yield event
+                return
+            except LLMRateLimitError as e:
+                if started or attempt == _RATE_LIMIT_ATTEMPTS - 1:
+                    raise
+                after = _RATE_LIMIT_DEFAULT_WAIT_S if e.retry_after is None else e.retry_after
+                wait = min(after * (2**attempt), _RATE_LIMIT_MAX_WAIT_S)
+                logger.warning("Rate limited before the first event, retrying in %.1fs (attempt %d)", wait, attempt + 1)
+                await asyncio.sleep(wait)
+
     async def _handle_message_stream(
         self,
         user_id: str,
@@ -1324,8 +1337,11 @@ class Agent:
         """
         Process a user message, yielding StreamChunks as the response is generated.
 
-        Tool-call iterations use complete() (non-streaming). Only the final
-        text response is streamed token-by-token.
+        Every step is one streamed request with the turn's tools and system prompt
+        (issue #357): its text reaches the client as it is generated, its tool calls
+        run, and the step without tool calls is the reply. Text a later step streams
+        follows earlier text after a blank line. DONE carries everything streamed; the
+        saved reply is the last step's text, since earlier text is saved with its calls.
 
         ``channel_user_id``, when given, is the channel-native ID and is
         passed to tool execution so channel-bound tools (``send_file``,
@@ -1382,44 +1398,76 @@ class Agent:
         total_cost = 0.0
         turn_usage = TokenUsage()
         turn_requests = 0
-        refused = False  # the budget refused a request: the turn ends with the budget reply
 
-        full_text = ""
+        full_text = ""  # everything the client received this turn
+        reply = ""  # the reply: saved as the turn's final assistant message
+        step_text = ""  # what the current step streamed
+        ending: str | None = None  # no request answers the turn's last tools
         try:
-            # Tool-call iterations (non-streaming)
+            # One streamed request per step, each with the turn's tools and system prompt
             for _iteration in range(self._settings.max_tool_iterations):
                 # Checked before every request, as on the non-stream path
                 if await self._costs.budget_reached():
-                    refused = True
+                    reply = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+                    if separator := _step_separator(full_text):
+                        yield StreamChunk(StreamEventType.TEXT, separator)
+                    full_text += separator + reply
+                    yield StreamChunk(StreamEventType.TEXT, reply)
                     break
 
                 # Proactive sanitization: fix orphaned pairs before they reach the API
                 await self._repair_tool_pairs(session)
 
+                step_text = ""
+                separator = _step_separator(full_text)
+                step: LLMResponse | None = None
                 try:
-                    response = await self._llm.complete(
-                        messages=session.messages,
-                        tools=tool_schemas,
-                        system=system_prompt,
-                    )
-                    self._note_request(session, response, system_prompt, tool_schemas)
-                except LLMError as e:
-                    recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
-                    if recovery is _PairRecovery.RETRY:
-                        sanitize_attempts += 1
-                        continue
-                    if recovery is _PairRecovery.CLEARED:
-                        yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
-                        return
-                    raise
-
+                    async for event in self._stream_step(session.messages, tool_schemas, system_prompt):
+                        if event.response is not None:
+                            step = event.response
+                        elif event.text:
+                            if separator and not step_text:
+                                full_text += separator
+                                yield StreamChunk(StreamEventType.TEXT, separator)
+                            step_text += event.text
+                            full_text += event.text
+                            yield StreamChunk(StreamEventType.TEXT, event.text)
+                except Exception as e:
+                    if isinstance(e, LLMError) and not step_text:
+                        recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                        if recovery is _PairRecovery.RETRY:
+                            sanitize_attempts += 1
+                            continue
+                        if recovery is _PairRecovery.CLEARED:
+                            yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
+                            return
+                    logger.exception("Stream failed after %d chars", len(step_text))
+                    if not step_text.strip():
+                        raise
+                    # The user already saw these chunks, so they are the reply
+                    logger.warning("Keeping the %d streamed chars as the reply", len(step_text))
+                    reply = step_text
+                    break
+                if step is None:
+                    if not step_text.strip():
+                        raise LLMError("stream_turn ended without a final response")
+                    # The user already saw these chunks, so they are the reply
+                    logger.warning("stream_turn ended without a final response; replying with the streamed text")
+                    reply = step_text
+                    break
+                response = step
+                self._note_request(session, response, system_prompt, tool_schemas)
                 total_cost += await self._record_cost(response, session.session_id)
                 turn_usage += response.usage
                 turn_requests += 1
-                # A blank cut-off here is fine: the final stream below is the reply, and is checked
-                _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
+                _refuse_truncated_output(response, self._settings.max_tokens)
 
                 if not response.has_tool_calls:
+                    if not step_text.strip():
+                        # An empty reply is never sent: the outer handler turns this into
+                        # the placed-call text when a call is ringing
+                        raise LLMError("the reply step completed with no text")
+                    reply = step_text
                     break
 
                 logger.info(
@@ -1434,6 +1482,7 @@ class Agent:
                     content_blocks=list(response.content_blocks),
                 )
                 await self._sessions.add_message(session, assistant_msg)
+                step_text = ""  # saved with its tool calls
 
                 iteration_had_error = False
                 skills_loaded: list[str] = []
@@ -1475,71 +1524,24 @@ class Agent:
                 else:
                     consecutive_errors = 0
             else:
-                fallback_content = response.content if response and response.content else "Max iterations reached."
-                yield StreamChunk(StreamEventType.DONE, fallback_content, cost_usd=total_cost)
-                return
-
+                ending = _MAX_ITERATIONS_TEXT  # not saved, as before
             if circuit_broken:
-                fallback = (
-                    response.content
-                    if response and response.content
-                    else "I'm having repeated tool failures. Let me respond with what I have."
-                )
-                if fallback:
-                    final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
-                    await self._sessions.add_message(session, final_msg)
-                yield StreamChunk(StreamEventType.DONE, fallback, cost_usd=total_cost)
-                return
+                ending = _TOOL_FAILURES_TEXT
 
-            # Stream the final response. It sends no tools, unlike the turn's earlier
-            # requests: that is a history edit for preserved thinking, so the turn's
-            # thinking is dropped before it (Q2c).
-            strip_thinking(session.messages)
-            streamed: LLMResponse | None = None
-            if refused or await self._costs.budget_reached():  # the streamed reply is a request too
-                full_text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
-                yield StreamChunk(StreamEventType.TEXT, full_text)
-            else:
-                try:
-                    async for event in self._llm.stream_turn(
-                        messages=session.messages,
-                        system=system_prompt,
-                    ):
-                        if event.response is not None:
-                            streamed = event.response
-                        elif event.text:
-                            full_text += event.text
-                            yield StreamChunk(StreamEventType.TEXT, event.text)
-                except Exception:
-                    logger.exception("Final stream failed after %d chars", len(full_text))
-                    if full_text.strip():
-                        logger.warning("Keeping the %d streamed chars as the reply", len(full_text))
-                    else:
-                        # The tool loop let a blank cut-off through because this stream was the reply;
-                        # it must not become the reply now that the stream failed.
-                        fallback = _tool_loop_fallback(response, self._settings.max_tokens, "failed")
-                        full_text += fallback
-                        yield StreamChunk(StreamEventType.TEXT, fallback)
+            if ending is not None:
+                # No request answers the last tools: the reply is the last step's text, already
+                # streamed, or a canned line sent now
+                if response is not None and response.content.strip():
+                    ending = response.content
                 else:
-                    # The reply is the stream, so its stop reason decides: a budget spent on thinking
-                    # leaves no text, which must not be sent as an empty reply
-                    if streamed is not None:
-                        self._note_request(session, streamed, system_prompt, None)
-                        total_cost += await self._record_cost(streamed, session.session_id)
-                        turn_usage += streamed.usage
-                        turn_requests += 1
-                        _refuse_truncated_output(streamed, self._settings.max_tokens)
-                    if full_text.strip():
-                        if streamed is None:
-                            # The user already saw these chunks, so they are the reply
-                            logger.warning(
-                                "stream_turn ended without a final response; replying with the streamed text"
-                            )
-                    else:
-                        why = "completed with no text" if streamed is not None else "closed without a final response"
-                        fallback = _tool_loop_fallback(response, self._settings.max_tokens, why)
-                        full_text += fallback
-                        yield StreamChunk(StreamEventType.TEXT, fallback)
+                    if separator := _step_separator(full_text):
+                        yield StreamChunk(StreamEventType.TEXT, separator)
+                    full_text += separator + ending
+                    yield StreamChunk(StreamEventType.TEXT, ending)
+                if circuit_broken:
+                    await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=ending))
+                yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
+                return
         except Exception:
             if not call_sids:
                 raise
@@ -1550,14 +1552,18 @@ class Agent:
             tail = ("\n\n" if full_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
             full_text += tail
             yield StreamChunk(StreamEventType.TEXT, tail)
+            # The failed step's text is in no saved message: it goes with the notice
+            reply = step_text + ("\n\n" if step_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
 
         # ── Save the reply, with the warm question on a fresh session ──────
         # Saved and recorded before the client sees the question: a disconnect
-        # while it streams still leaves the user asked.
-        saved = await self._save_reply(session, onboarding, user_id, channel, full_text, streamed=True)
-        if saved != full_text:
-            yield StreamChunk(StreamEventType.TEXT, saved[len(full_text) :])
-            full_text = saved
+        # while it streams still leaves the user asked. The reply only: text
+        # streamed before a tool call is saved with that call.
+        saved = await self._save_reply(session, onboarding, user_id, channel, reply, streamed=True)
+        if saved != reply:
+            tail = saved[len(reply) :]
+            full_text += tail
+            yield StreamChunk(StreamEventType.TEXT, tail)
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:

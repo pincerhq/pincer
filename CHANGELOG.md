@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 1-hour writes are priced at the model's `cache_write_1h` rate.
 - Each chat and web chat turn logs one INFO line with its requests' uncached
   input, cache reads, 5-minute and 1-hour cache writes, output and cost.
+- Web chat sends one streamed request per step, each with the turn's tools and
+  system prompt, so every request reads the cache. Before, it asked once more
+  without tools and threw the earlier answer away: a plain turn was 2 requests
+  and one tool round 3; now they are 1 and 2. Text written before a tool call
+  now reaches the chat, followed by a blank line. A rate limit (429) before a
+  step's first token is retried, as on the other chat path.
 
 #### The system prompt stays the same for a whole conversation (#357)
 

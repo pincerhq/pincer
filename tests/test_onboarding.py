@@ -62,11 +62,24 @@ def _streams(llm: AsyncMock, text: str) -> None:
     llm.stream_turn = stream_turn
 
 
+def _streams_from_complete(llm: AsyncMock) -> None:
+    """Web chat streams each step (slice 13): answer it as complete() is scripted to, and record it
+    there, so complete()'s calls count every request on either path."""
+
+    async def stream_turn(**kwargs: object) -> AsyncIterator[StreamTurnEvent]:
+        response = await llm.complete(**kwargs)
+        if response.content:
+            yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
+
+    llm.stream_turn = stream_turn
+
+
 def _scripted_llm(*replies: str | Exception) -> AsyncMock:
-    """An LLM whose complete() answers in order; its stream replays nothing new."""
+    """An LLM whose requests answer in order, on either path."""
     llm = AsyncMock()
     llm.complete.side_effect = [r if isinstance(r, Exception) else _llm_text(r) for r in replies]
-    _streams(llm, "Streamed reply.")
+    _streams_from_complete(llm)
     return llm
 
 
@@ -840,7 +853,7 @@ async def test_existing_user_new_conversation_is_separate_and_not_prompted(
 ):
     """A web chat conversation is its own session, and a user with history in
     their main one is not asked who they are when they open "New chat"."""
-    _streams(mock_llm, "Hello! I'm Pincer.")
+    _streams_from_complete(mock_llm)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     await _store_history(session_manager, "user-t", "web", created_at=_long_ago())
     key = conversation_key("user-t", "web", "thread-1")
@@ -907,7 +920,7 @@ async def test_legacy_onboarded_session_is_not_asked(
     path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
     """Onboarded before the table existed: never asked again, nothing ingested."""
-    _streams(mock_llm, "Hello! I'm Pincer.")
+    _streams_from_complete(mock_llm)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     await _store_history(
         session_manager, "user-o", "web", **{ONBOARDING_PROMPT_SENT_KEY: "true", ONBOARDING_COMPLETE_KEY: "true"}

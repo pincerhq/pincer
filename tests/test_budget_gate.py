@@ -254,47 +254,47 @@ async def _streamed_turn(agent: Agent, text: str = "hi") -> list[Any]:
     return [chunk async for chunk in agent.handle_message_stream("user", "web", text, memory=False)]
 
 
-async def test_a_plain_streamed_turn_records_both_its_requests(  # type: ignore[no-untyped-def]
+async def test_a_plain_streamed_turn_records_its_one_request(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
-    """The tool loop's toolless answer is discarded and the reply streamed by a second request: both are spent."""
+    """Every step of a web chat turn is one streamed request (slice 13)."""
     settings, tracker = await budgeted(100.0)
-    llm = _scripted_llm(_response(), _response())
+    llm = _scripted_llm(_response())
     agent = Agent(settings, llm, session_manager, tracker, tool_registry)
 
     chunks = await _streamed_turn(agent)
 
-    assert (llm.complete.await_count, len(llm.streams)) == (1, 1)
-    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST), pytest.approx(_CALL_COST)]
+    assert (llm.complete.await_count, len(llm.streams)) == (0, 1)
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)]
     assert chunks[-1].content == "Done."
-    assert chunks[-1].cost_usd == pytest.approx(0.014)
+    assert chunks[-1].cost_usd == pytest.approx(_CALL_COST)
 
 
-async def test_a_streamed_turn_with_one_tool_round_records_three_requests(  # type: ignore[no-untyped-def]
+async def test_a_streamed_turn_with_one_tool_round_records_two_requests(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
-    """Tool call, the toolless answer the stream replaces, then the streamed reply."""
+    """The tool call, then the streamed reply."""
     settings, tracker = await budgeted(100.0)
-    llm = _scripted_llm(_response(_greet(1)), _response(), _response())
+    llm = _scripted_llm(_response(_greet(1)), _response())
     agent = Agent(settings, llm, session_manager, tracker, tool_registry)
 
     chunks = await _streamed_turn(agent)
 
-    assert (llm.complete.await_count, len(llm.streams)) == (2, 1)
-    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 3
-    assert chunks[-1].cost_usd == pytest.approx(0.021)
+    assert (llm.complete.await_count, len(llm.streams)) == (0, 2)
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
+    assert chunks[-1].cost_usd == pytest.approx(0.014)
 
 
 async def test_a_streamed_tool_loop_that_crosses_the_budget_stops_before_its_next_request(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
     settings, tracker = await budgeted(0.01)
-    llm = _scripted_llm(_response(_greet(1)), _response(_greet(2)), _response(), _response())
+    llm = _scripted_llm(_response(_greet(1)), _response(_greet(2)), _response())
     agent = Agent(settings, llm, session_manager, tracker, tool_registry)
 
     chunks = await _streamed_turn(agent, "greet Ann twice")
 
-    assert (llm.complete.await_count, len(llm.streams)) == (2, 0)
+    assert (llm.complete.await_count, len(llm.streams)) == (0, 2)
     assert [c.content for c in chunks if c.type.value == "text"] == [_budget_text(0.01)]
     assert (chunks[-1].content, chunks[-1].cost_usd) == (_budget_text(0.01), pytest.approx(0.014))
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
@@ -305,36 +305,39 @@ async def test_a_streamed_tool_loop_that_crosses_the_budget_stops_before_its_nex
     assert session.messages[-1].content == _budget_text(0.01)
 
 
-async def test_the_final_stream_is_not_requested_once_the_tool_loop_reached_the_budget(  # type: ignore[no-untyped-def]
+async def test_the_reply_step_after_a_tool_round_is_refused_at_the_budget(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
-    """$0.007 seeded + the toolless $0.007 answer = $0.014, the budget: the streamed reply is a request too."""
+    """$0.007 seeded + the $0.007 tool call = $0.014, the budget: the reply step is a request too."""
     settings, tracker = await budgeted(0.014)
     await _seed(tmp_path, _CALL)
-    llm = _scripted_llm(_response(), _response())
+    llm = _scripted_llm(_response(_greet(1)), _response())
     agent = Agent(settings, llm, session_manager, tracker, tool_registry)
 
     chunks = await _streamed_turn(agent)
 
-    assert (llm.complete.await_count, len(llm.streams)) == (1, 0)
+    assert (llm.complete.await_count, len(llm.streams)) == (0, 1)
     assert (chunks[-1].content, chunks[-1].cost_usd) == (_budget_text(0.014), pytest.approx(_CALL_COST))
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
+    session = await session_manager.get_or_create("user", "web")
+    assert [m.tool_call_id for m in session.messages if m.tool_call_id] == ["tc1"]
+    assert session.messages[-1].content == _budget_text(0.014)
 
 
 async def test_the_web_chat_done_event_carries_the_cost_of_the_turn_s_recorded_requests(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
     settings, tracker = await budgeted(0.0)
-    llm = _scripted_llm(_response(_greet(1)), _response(), _response())
+    llm = _scripted_llm(_response(_greet(1)), _response())
     agent = Agent(settings, llm, session_manager, tracker, tool_registry)
 
     events = await _web_chat(agent)
 
     assert [name for name, _ in events] == ["tool", "tool", "chunk", "done"]
     stored = await _stored_costs(tmp_path)
-    assert len(stored) == 3
+    assert len(stored) == 2
     assert events[-1] == ("done", {"text": "Done.", "cost_usd": pytest.approx(sum(stored), abs=1e-12)})
-    assert events[-1][1]["cost_usd"] == pytest.approx(0.021)
+    assert events[-1][1]["cost_usd"] == pytest.approx(0.014)
 
 
 # ── Phone calls (slice 6): a call in progress runs; a new one may not start ──

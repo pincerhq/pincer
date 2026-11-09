@@ -216,8 +216,7 @@ async def test_web_chat_turns_send_one_system_prompt_and_the_context_on_the_user
 ):
     await _onboarded(session_manager)
     memory = _memory({"turn 1": "likes green tea", "turn 2": "lives in Lviv"})
-    # Each streamed turn asks with tools first, then streams the reply (until slice 13)
-    replies = [([text(f"Reply {n}")], "end_turn") for n in (1, 1, 2, 2)]
+    replies = [([text(f"Reply {n}")], "end_turn") for n in (1, 2)]
     async with ScriptedAnthropic(settings, replies) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, ToolRegistry(), memory_store=memory)
         for turn, at in (("turn 1", _TURN_1_AT), ("turn 2", _TURN_2_AT)):
@@ -231,7 +230,8 @@ async def test_web_chat_turns_send_one_system_prompt_and_the_context_on_the_user
     context, words = newest["content"]
     assert words == {"type": "text", "text": "turn 2"}
     assert context["text"].startswith(f"{MEMORY_BLOCK_HEADER}\n- lives in Lviv\n\n{_TIME_HEADER}\n")
-    assert _raw_messages(llm.raw_requests[3])[0] == _raw_messages(llm.raw_requests[0])[0]
+    assert len(llm.raw_requests) == 2
+    assert _raw_messages(llm.raw_requests[1])[0] == _raw_messages(llm.raw_requests[0])[0]
 
 
 async def test_each_voice_utterance_carries_its_own_context_under_one_system_prompt(

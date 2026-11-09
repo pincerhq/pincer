@@ -558,6 +558,36 @@ def _cut_off_before_any_text(text: str = "") -> LLMResponse:
     )
 
 
+def _steps_from(complete: AsyncMock):
+    """A `stream_turn` whose steps answer as `complete` is scripted to. Web chat streams every
+    step (slice 13); each request is still recorded on `complete`, and a scripted exception is
+    raised before the step's first event."""
+
+    async def stream_turn(**kwargs):
+        response = await complete(**kwargs)
+        if response.content:
+            yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
+
+    return stream_turn
+
+
+def _steps(*streams):
+    """A `stream_turn` whose n-th request is the n-th of `streams`."""
+    pending = iter(streams)
+
+    async def stream_turn(**kwargs):
+        async for event in next(pending)(**kwargs):
+            yield event
+
+    return stream_turn
+
+
+def _dialled():
+    """The step that dials twice (the first dial fails on the limit, the second rings CA9)."""
+    return _stream_of(StreamTurnEvent(response=_two_dials_then_text()[0]))
+
+
 @pytest.mark.asyncio
 async def test_a_reply_cut_off_before_any_text_is_an_error_not_an_empty_answer(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
@@ -609,65 +639,6 @@ async def test_a_streamed_reply_cut_off_before_any_text_raises(
         _chunks = [c async for c in agent.handle_message_stream("user1", "test", "think hard")]
 
 
-def _stream_turn_fails_before_its_first_event(mock_llm) -> None:
-    async def stream_turn(**kwargs):
-        raise RuntimeError("connection reset")
-        yield  # pragma: no cover
-
-    mock_llm.stream_turn = stream_turn
-
-
-@pytest.mark.asyncio
-async def test_a_failed_final_stream_never_falls_back_to_a_cut_off_blank_response(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
-    """The tool loop lets a blank cut-off through because the final stream is the reply; when that
-    stream fails before its first event, the fallback must not send the blank response as the reply."""
-    mock_llm.complete.side_effect = [_cut_off_before_any_text()]
-    _stream_turn_fails_before_its_first_event(mock_llm)
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with pytest.raises(LLMOutputTruncatedError):
-        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "think hard", memory=False)]
-
-
-@pytest.mark.asyncio
-async def test_a_failed_final_stream_never_falls_back_to_a_blank_response(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
-    mock_llm.complete.side_effect = [
-        LLMResponse(content="", model="test", input_tokens=80, output_tokens=1, stop_reason="end_turn")
-    ]
-    _stream_turn_fails_before_its_first_event(mock_llm)
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with pytest.raises(LLMError):
-        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
-
-
-@pytest.mark.asyncio
-async def test_a_failed_final_stream_falls_back_to_the_tool_loop_text(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
-    mock_llm.complete.side_effect = [
-        LLMResponse(content="Hello there", model="test", input_tokens=80, output_tokens=5, stop_reason="end_turn")
-    ]
-    _stream_turn_fails_before_its_first_event(mock_llm)
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
-
-    assert chunks[-1].type == StreamEventType.DONE
-    assert chunks[-1].content == "Hello there"
-
-
-def _dials_then_a_blank_reply() -> list[LLMResponse]:
-    """The tool loop: a batch of dials, then a response with no tool call and no text (the stream is the reply)."""
-    dials, _ringing = _two_dials_then_text()
-    blank = LLMResponse(content="", model="test", input_tokens=80, output_tokens=1, stop_reason="end_turn")
-    return [dials, blank]
-
-
 async def _assert_the_placed_call_text_is_the_reply(agent, session_manager) -> None:
     chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
 
@@ -684,23 +655,19 @@ async def test_a_streamed_reply_cut_off_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker
 ):
     """As on the non-stream path: a ringing call must reach the channel, so the cut-off ends the turn with a reply."""
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-
-    async def stream_turn(**kwargs):
-        yield StreamTurnEvent(response=_cut_off_before_any_text())
-
-    mock_llm.stream_turn = stream_turn
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_before_any_text()]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
 
 
 @pytest.mark.asyncio
-async def test_a_failed_final_stream_after_placing_a_call_still_returns_it(
+async def test_a_step_failing_before_any_event_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker
 ):
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-    _stream_turn_fails_before_its_first_event(mock_llm)
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], RuntimeError("connection reset")]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
@@ -711,12 +678,8 @@ async def test_a_streamed_reply_cut_off_before_placing_a_call_still_raises(
     settings, mock_llm, session_manager, cost_tracker
 ):
     """The first dial fails (the limit), so no call was placed."""
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-
-    async def stream_turn(**kwargs):
-        yield StreamTurnEvent(response=_cut_off_before_any_text())
-
-    mock_llm.stream_turn = stream_turn
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_before_any_text()]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
 
     with pytest.raises(LLMOutputTruncatedError):
@@ -732,11 +695,10 @@ async def _stream_closed_without_a_final_response(**kwargs):
 async def test_a_stream_closed_without_text_or_a_final_response_is_an_error_not_an_empty_answer(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("")]
     mock_llm.stream_turn = _stream_closed_without_a_final_response
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
-    with pytest.raises(LLMError, match="closed without a final response"):
+    with pytest.raises(LLMError, match="ended without a final response"):
         _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
 
 
@@ -744,8 +706,7 @@ async def test_a_stream_closed_without_text_or_a_final_response_is_an_error_not_
 async def test_a_stream_closed_without_a_final_response_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker
 ):
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-    mock_llm.stream_turn = _stream_closed_without_a_final_response
+    mock_llm.stream_turn = _steps(_dialled(), _stream_closed_without_a_final_response)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
@@ -780,6 +741,7 @@ async def test_a_streamed_turn_whose_next_request_fails_after_a_dial_still_retur
 ):
     """The tool loop's own request fails after a dial: the ringing call must still reach the channel."""
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError("overloaded 529")]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
@@ -790,6 +752,7 @@ async def test_a_streamed_turn_cut_off_inside_a_tool_call_after_a_dial_still_ret
     settings, mock_llm, session_manager, cost_tracker
 ):
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_dial()]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
@@ -804,6 +767,7 @@ async def test_a_streamed_turn_whose_next_request_fails_before_any_dial_still_ra
     settings, mock_llm, session_manager, cost_tracker
 ):
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError("overloaded 529")]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
 
     with pytest.raises(LLMError, match="overloaded"):
@@ -815,6 +779,7 @@ async def test_a_streamed_turn_cut_off_inside_a_tool_call_before_any_dial_still_
     settings, mock_llm, session_manager, cost_tracker
 ):
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], _cut_off_dial()]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
 
     with pytest.raises(LLMOutputTruncatedError):
@@ -833,6 +798,7 @@ async def test_a_streamed_turn_over_budget_after_a_dial_keeps_the_budget_reply(
     dial = _two_dials_then_text()[0]
     dial.request_model, dial.input_tokens, dial.output_tokens = "test-fixture-model", 1_000, 0
     mock_llm.complete.side_effect = [dial, _two_dials_then_text()[1]]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     tracker = CostTracker(tmp_path / "test.db", daily_budget=0.007, prices=load_price_table())
     await tracker.initialize()
     agent = Agent(
@@ -871,7 +837,6 @@ _BLANK_FINAL = StreamTurnEvent(
 async def test_a_completed_stream_with_no_text_is_an_error_not_an_empty_answer(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("")]
     mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
@@ -883,7 +848,6 @@ async def test_a_completed_stream_with_no_text_is_an_error_not_an_empty_answer(
 async def test_a_completed_stream_of_only_whitespace_is_an_error(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("")]
     mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="  "), StreamTurnEvent(text="\n"), _BLANK_FINAL)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
@@ -895,7 +859,6 @@ async def test_a_completed_stream_of_only_whitespace_is_an_error(
 async def test_whitespace_streamed_with_no_final_response_is_an_error(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("")]
     mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="  \n"))
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
@@ -907,8 +870,7 @@ async def test_whitespace_streamed_with_no_final_response_is_an_error(
 async def test_a_completed_blank_stream_after_placing_a_call_still_returns_it(
     settings, mock_llm, session_manager, cost_tracker
 ):
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-    mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
+    mock_llm.stream_turn = _steps(_dialled(), _stream_of(_BLANK_FINAL))
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
@@ -959,8 +921,9 @@ async def test_the_placed_call_text_is_appended_to_text_already_streamed(
         output_tokens=4096,
         stop_reason="max_tokens",
     )
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="Ringing now"), StreamTurnEvent(response=cut_off))
+    mock_llm.stream_turn = _steps(
+        _dialled(), _stream_of(StreamTurnEvent(text="Ringing now"), StreamTurnEvent(response=cut_off))
+    )
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     texts, done, saved = await _placed_call_reply_chunks(agent, session_manager)
@@ -974,8 +937,7 @@ async def test_the_placed_call_text_is_appended_to_text_already_streamed(
 async def test_the_placed_call_text_follows_blank_streamed_text_without_a_separator(
     settings, mock_llm, session_manager, cost_tracker
 ):
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-    mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="  "), _BLANK_FINAL)
+    mock_llm.stream_turn = _steps(_dialled(), _stream_of(StreamTurnEvent(text="  "), _BLANK_FINAL))
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     texts, done, saved = await _placed_call_reply_chunks(agent, session_manager)
@@ -986,8 +948,7 @@ async def test_the_placed_call_text_follows_blank_streamed_text_without_a_separa
 
 @pytest.mark.asyncio
 async def test_the_placed_call_text_alone_when_nothing_was_streamed(settings, mock_llm, session_manager, cost_tracker):
-    mock_llm.complete.side_effect = _dials_then_a_blank_reply()
-    mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
+    mock_llm.stream_turn = _steps(_dialled(), _stream_of(_BLANK_FINAL))
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     texts, done, saved = await _placed_call_reply_chunks(agent, session_manager)
@@ -1005,11 +966,7 @@ def _stream_that_fails_after(*texts: str):
     return stream_turn
 
 
-def _tool_loop_reply(content: str) -> LLMResponse:
-    return LLMResponse(content=content, model="test", input_tokens=80, output_tokens=5, stop_reason="end_turn")
-
-
-async def _final_stream_log(agent, caplog) -> tuple[str, str]:
+async def _streamed_log(agent, caplog) -> tuple[str, str]:
     """(the DONE text, everything the agent logged) of one streamed turn."""
     with caplog.at_level(logging.INFO, logger="pincer.core.agent"):
         chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
@@ -1017,51 +974,47 @@ async def _final_stream_log(agent, caplog) -> tuple[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_final_stream_logs_that_it_kept_the_streamed_text(
+async def test_a_failed_step_logs_that_it_kept_the_streamed_text(
     settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("Hello there")]
     mock_llm.stream_turn = _stream_that_fails_after("Hel")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
-    done, log = await _final_stream_log(agent, caplog)
+    done, log = await _streamed_log(agent, caplog)
 
     assert done == "Hel"  # the precondition: the partial text is the reply
-    assert "Final stream failed after 3 chars" in log
+    assert "Stream failed after 3 chars" in log
     assert "Keeping the 3 streamed chars" in log
-    assert "tool-loop" not in log  # the reply did not come from the tool loop
 
 
 @pytest.mark.asyncio
-async def test_a_failed_final_stream_logs_that_it_used_the_tool_loop_response(
+async def test_a_step_that_fails_before_any_text_raises_and_logs_it(
     settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("Hello there")]
-    _stream_turn_fails_before_its_first_event(mock_llm)
+    """Nothing reached the client, so there is no reply to keep."""
+    mock_llm.stream_turn = _stream_that_fails_after()
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
-    done, log = await _final_stream_log(agent, caplog)
-
-    assert done == "Hello there"
-    assert "Final stream failed after 0 chars" in log
-    assert "Using the tool-loop response" in log
-    assert "Keeping" not in log
-
-
-@pytest.mark.asyncio
-async def test_a_failed_final_stream_logs_that_it_had_no_fallback(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
-):
-    mock_llm.complete.side_effect = [_tool_loop_reply("")]
-    _stream_turn_fails_before_its_first_event(mock_llm)
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with caplog.at_level(logging.INFO, logger="pincer.core.agent"), pytest.raises(LLMError):
+    with caplog.at_level(logging.INFO, logger="pincer.core.agent"), pytest.raises(RuntimeError):
         _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
 
-    assert "Final stream failed after 0 chars" in caplog.text
-    assert "No usable fallback" in caplog.text
-    assert "Using the tool-loop response" not in caplog.text
+    assert "Stream failed after 0 chars" in caplog.text
+    assert "Keeping" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_streams_only_whitespace_and_then_fails_raises(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """Whitespace is not a reply worth keeping: the failure is raised, not hidden behind it."""
+    mock_llm.stream_turn = _stream_that_fails_after("  \n")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
+
+    session = await session_manager.get_or_create("user1", "test")
+    assert [m.role for m in session.messages] == [MessageRole.USER]  # no blank reply saved
 
 
 class _SdkError(Exception):
@@ -1080,6 +1033,7 @@ async def test_a_streamed_turn_that_raises_a_non_llm_error_after_a_dial_still_re
     settings, mock_llm, session_manager, cost_tracker, make_error
 ):
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], make_error()]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
@@ -1119,6 +1073,7 @@ async def test_a_non_llm_error_with_no_call_placed_is_re_raised_unchanged(
     """The very same exception object comes out: not wrapped, not converted to an LLMError."""
     boom = make_error()
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], boom]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry([_DIAL_RESULTS[0]] * 2))
 
     with pytest.raises(type(boom)) as raised:
@@ -1133,6 +1088,7 @@ async def test_a_non_llm_error_after_a_dial_is_logged_with_its_traceback(
     settings, mock_llm, session_manager, cost_tracker, run, caplog
 ):
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], _SdkError("socket closed")]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     with caplog.at_level(logging.WARNING, logger="pincer.core.agent"):
@@ -1178,13 +1134,14 @@ async def test_a_cancelled_streamed_turn_after_a_dial_is_not_swallowed(
     settings, mock_llm, session_manager, cost_tracker
 ):
     mock_llm.complete.side_effect = [_two_dials_then_text()[0], asyncio.CancelledError()]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     with pytest.raises(asyncio.CancelledError):
         await _run_streamed(agent)
 
 
-async def _final_stream_reply(agent) -> tuple[list[str], str]:
+async def _streamed_reply(agent) -> tuple[list[str], str]:
     """(the TEXT chunks, the DONE text) of one streamed turn, after checking that DONE == join(TEXT) == saved."""
     chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
     assert chunks[-1].type == StreamEventType.DONE
@@ -1201,85 +1158,14 @@ def _completed(content: str, stop_reason: str = "end_turn") -> StreamTurnEvent:
     )
 
 
-def _streams_with_no_text() -> list:
-    """The ways a final stream can end with nothing to say, each paired with its reason in the log."""
-    return [
-        pytest.param(_stream_of(_BLANK_FINAL), id="completed-blank"),
-        pytest.param(_stream_of(), id="no-final-response"),
-        pytest.param(_stream_of(StreamTurnEvent(text="  \n")), id="no-final-response-whitespace"),
-        pytest.param(_stream_that_fails_after(), id="failed-before-any-text"),
-    ]
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream_turn", _streams_with_no_text())
-async def test_a_final_stream_with_no_text_uses_the_tool_loop_text_as_a_chunk(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, stream_turn
-):
-    """The tool loop's last response already is a complete answer (comments 4494473533 and 4494473550)."""
-    mock_llm.complete.side_effect = [_tool_loop_reply("Tool text")]
-    mock_llm.stream_turn = stream_turn
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    texts, done = await _final_stream_reply(agent)
-
-    assert texts[-1] == "Tool text"  # sent as a chunk, not only in DONE
-    assert done.endswith("Tool text")
-    assert done.strip() == "Tool text"  # a whitespace chunk already sent may precede it
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream_turn", _streams_with_no_text())
-async def test_a_final_stream_with_no_text_and_a_blank_tool_loop_response_is_an_error(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, stream_turn, caplog
-):
-    mock_llm.complete.side_effect = [_tool_loop_reply("")]
-    mock_llm.stream_turn = stream_turn
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with caplog.at_level(logging.WARNING, logger="pincer.core.agent"), pytest.raises(LLMError):
-        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
-
-    assert "No usable fallback" in caplog.text
-    assert "tool-loop has no text" in caplog.text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream_turn", _streams_with_no_text())
-async def test_a_final_stream_with_no_text_never_falls_back_to_a_cut_off_tool_loop_response(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, stream_turn
-):
-    mock_llm.complete.side_effect = [_cut_off_before_any_text()]  # a blank cut-off, let through by the tool loop
-    mock_llm.stream_turn = stream_turn
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with pytest.raises(LLMOutputTruncatedError):
-        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("final", [_cut_off_before_any_text(), _cut_off_before_any_text("")], ids=["a", "b"])
-async def test_a_cut_off_final_stream_raises_even_when_the_tool_loop_has_a_complete_answer(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, final
-):
-    """A cut-off final stream is not 'no text': it keeps raising, with no fallback."""
-    mock_llm.complete.side_effect = [_tool_loop_reply("Tool text")]
-    mock_llm.stream_turn = _stream_of(StreamTurnEvent(response=final))
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with pytest.raises(LLMOutputTruncatedError):
-        _chunks = [c async for c in agent.handle_message_stream("user1", "test", "hi", memory=False)]
-
-
-@pytest.mark.asyncio
-async def test_a_cut_off_final_stream_with_text_is_delivered(
+async def test_a_reply_step_cut_off_with_text_is_delivered(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    mock_llm.complete.side_effect = [_tool_loop_reply("Tool text")]
     mock_llm.stream_turn = _stream_of(StreamTurnEvent(text="Hel"), _completed("Hel", "max_tokens"))
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
-    texts, done = await _final_stream_reply(agent)
+    texts, done = await _streamed_reply(agent)
 
     assert (texts, done) == (["Hel"], "Hel")
 
@@ -1289,42 +1175,14 @@ async def test_streamed_text_is_the_reply_when_the_stream_fails_or_closes_withou
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
     for stream_turn in (_stream_that_fails_after("Hel"), _stream_of(StreamTurnEvent(text="Hel"))):
-        mock_llm.complete.side_effect = [_tool_loop_reply("Tool text")]
         mock_llm.stream_turn = stream_turn
         agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
-        texts, done = await _final_stream_reply(agent)
+        texts, done = await _streamed_reply(agent)
 
-        assert (texts, done) == (["Hel"], "Hel")  # never replaced by the tool-loop text
+        assert (texts, done) == (["Hel"], "Hel")
         session = await session_manager.get_or_create("user1", "test")
         session.messages.clear()
-
-
-@pytest.mark.asyncio
-async def test_a_whitespace_partial_is_kept_and_followed_by_the_tool_loop_text(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
-    """The whitespace was already sent as a chunk, so it stays: DONE == join(TEXT) == saved."""
-    mock_llm.complete.side_effect = [_tool_loop_reply("Hello there")]
-    mock_llm.stream_turn = _stream_that_fails_after("  ")
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    texts, done = await _final_stream_reply(agent)
-
-    assert texts == ["  ", "Hello there"]
-    assert done == "  Hello there"
-
-
-@pytest.mark.asyncio
-async def test_a_completed_blank_stream_after_a_dial_with_a_cut_off_tool_loop_response_gets_the_notice(
-    settings, mock_llm, session_manager, cost_tracker
-):
-    dials, _ringing = _two_dials_then_text()
-    mock_llm.complete.side_effect = [dials, _cut_off_before_any_text()]
-    mock_llm.stream_turn = _stream_of(_BLANK_FINAL)
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
-
-    await _assert_the_placed_call_text_is_the_reply(agent, session_manager)
 
 
 @pytest.mark.asyncio
@@ -1343,6 +1201,7 @@ async def test_a_turn_cut_off_before_any_text_after_placing_a_call_still_returns
 @pytest.mark.asyncio
 async def test_a_streamed_dial_done_carries_the_placed_call_sid(settings, mock_llm, session_manager, cost_tracker):
     mock_llm.complete.side_effect = _two_dials_then_text()
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
 
     done = [
@@ -1376,6 +1235,7 @@ async def test_stream_tool_context_prefers_channel_user_id(settings, mock_llm, s
         ),
     ]
 
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
     async for _chunk in agent.handle_message_stream(
         user_id="canonical-r_lutsiv",
@@ -1765,6 +1625,9 @@ async def _run_turn(agent: Agent, text: str, *, streaming: bool) -> str:
     """One turn through handle_message or handle_message_stream; returns the reply."""
     if not streaming:
         return (await agent.handle_message("user1", "test", text)).text
+    llm = agent._llm
+    assert isinstance(llm, AsyncMock)
+    llm.stream_turn = _steps_from(llm.complete)
     chunks = [c async for c in agent.handle_message_stream(user_id="user1", channel="test", text=text)]
     return "".join(c.content for c in chunks if c.type == StreamEventType.DONE)
 
@@ -1996,6 +1859,7 @@ async def test_a_turn_without_memory_neither_reads_nor_writes_it(
     stored there, not even as a session summary."""
     memory = AsyncMock()
     memory.search_text.return_value = [SimpleNamespace(content="the user's private fact")]
+    mock_llm.stream_turn = _steps_from(mock_llm.complete)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
 
     for text in ("summarize call one", "summarize call two"):
@@ -2009,6 +1873,7 @@ async def test_a_turn_without_memory_neither_reads_nor_writes_it(
     memory.search_text.assert_not_awaited()
     memory.store_memory.assert_not_awaited()
     memory.add_profile.assert_not_awaited()
+    assert mock_llm.complete.await_count == 2  # precondition: both turns' requests are checked
     for call in mock_llm.complete.call_args_list:
         assert "the user's private fact" not in call.kwargs["system"]
 
@@ -2120,6 +1985,7 @@ async def test_tool_selector_sets_tools_and_prompt_hints(settings, mock_llm, ses
     )
 
     if streaming:
+        mock_llm.stream_turn = _steps_from(mock_llm.complete)
         async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="Ruf mich an"):
             pass
     else:
@@ -2219,6 +2085,7 @@ async def test_loading_a_skill_reselects_tools_mid_turn(settings, mock_llm, sess
     ]
 
     if streaming:
+        mock_llm.stream_turn = _steps_from(mock_llm.complete)
         async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="Budget?"):
             pass
     else:
@@ -2258,6 +2125,7 @@ async def test_failed_skill_load_keeps_the_turns_tools(settings, mock_llm, sessi
     mock_llm.complete.side_effect = _load_skill_then_answer()
 
     if streaming:
+        mock_llm.stream_turn = _steps_from(mock_llm.complete)
         async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="Budget?"):
             pass
     else:

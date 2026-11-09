@@ -325,12 +325,6 @@ async def test_transcribe_voice_success() -> None:
 @pytest.mark.asyncio
 async def test_agent_stream_simple(settings, session_manager, cost_tracker, tool_registry) -> None:
     mock_llm = AsyncMock(spec=BaseLLMProvider)
-    mock_llm.complete.return_value = LLMResponse(
-        content="Final text",
-        model="test",
-        input_tokens=50,
-        output_tokens=20,
-    )
 
     async def fake_stream(**kwargs):
         for token in ["Hello", " ", "world", "!"]:
@@ -358,25 +352,23 @@ async def test_agent_stream_simple(settings, session_manager, cost_tracker, tool
 @pytest.mark.asyncio
 async def test_agent_stream_with_tools(settings, session_manager, cost_tracker, tool_registry) -> None:
     mock_llm = AsyncMock(spec=BaseLLMProvider)
-    mock_llm.complete.side_effect = [
-        LLMResponse(
-            content="",
-            tool_calls=[ToolCall(id="tc1", name="greet", arguments={"name": "World"})],
-            model="test",
-            input_tokens=50,
-            output_tokens=30,
-            stop_reason="tool_use",
-        ),
-        LLMResponse(
-            content="Done with tools",
-            model="test",
-            input_tokens=80,
-            output_tokens=20,
-            stop_reason="end_turn",
-        ),
-    ]
+    tool_step = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc1", name="greet", arguments={"name": "World"})],
+        model="test",
+        input_tokens=50,
+        output_tokens=30,
+        stop_reason="tool_use",
+    )
+    steps = 0
 
     async def fake_stream(**kwargs):
+        # Each step is one streamed request (slice 13): the tool call, then the reply
+        nonlocal steps
+        steps += 1
+        if steps == 1:
+            yield StreamTurnEvent(response=tool_step)
+            return
         for token in ["The ", "greeting ", "worked!"]:
             yield StreamTurnEvent(text=token)
         yield StreamTurnEvent(

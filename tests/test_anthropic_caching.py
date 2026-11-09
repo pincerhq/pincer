@@ -201,9 +201,9 @@ async def test_a_chat_turn_logs_its_cache_reads_and_writes(agent_llm, session_ma
     )
 
 
-async def test_a_streamed_chat_turn_logs_every_request_including_the_final_stream(agent_llm, session_manager, caplog):
-    final = ([text("Green tea it is.")], "end_turn", {"input_tokens": 3200})
-    llm, make_agent = agent_llm([*_TOOL_ROUND, final])
+async def test_a_streamed_chat_turn_logs_its_requests_like_a_chat_turn(agent_llm, session_manager, caplog):
+    """One streamed request per step (slice 13): the same tool round logs what the chat turn logs."""
+    llm, make_agent = agent_llm(_TOOL_ROUND)
     with caplog.at_level(logging.INFO, logger="pincer.core.agent"):
         async with llm:
             chunks = [c async for c in make_agent().handle_message_stream("user1", "test", "which tea?", memory=False)]
@@ -212,11 +212,11 @@ async def test_a_streamed_chat_turn_logs_every_request_including_the_final_strea
     done = chunks[-1]
     assert done.type is StreamEventType.DONE
     assert done.cost_usd > 0
-    assert len(llm.requests) == 3
+    assert len(llm.requests) == 2
     [line] = _turn_lines(caplog)
     assert line == (
-        f"Chat turn: session={session.session_id} requests=3 input=3210 cache_read=3100 "
-        f"cache_write_5m=140 cache_write_1h=2900 output=15 cost=${done.cost_usd:.6f}"
+        f"Chat turn: session={session.session_id} requests=2 input=10 cache_read=3100 "
+        f"cache_write_5m=140 cache_write_1h=2900 output=10 cost=${done.cost_usd:.6f}"
     )
 
 
