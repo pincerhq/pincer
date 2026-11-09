@@ -401,6 +401,124 @@ def test_usable_root_failed_listing_names_the_storage_settings(uri: str, expecte
         assert name in str(exc_info.value)
 
 
+# ── open_usable_skills_root: Azure with hierarchical namespace (ADLS Gen2) ───
+
+_FAKE_AZURE_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=https;AccountName=pincertest;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net"
+)
+
+
+class _HnsAzureClient(cloudpathlib_local.LocalAzureBlobClient):
+    """A mock Azure client that behaves like an HNS account: listing a missing
+    directory raises 404 (the DFS `get_paths` API) instead of returning nothing,
+    and `mkdir` creates a real directory."""
+
+    def __init__(self, *args, mkdir_error: Exception | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.mkdir_calls: list[str] = []
+        self.mkdir_error = mkdir_error
+
+    def _list_dir(self, cloud_path, recursive=False):
+        from azure.core.exceptions import ResourceNotFoundError
+
+        if not self._cloud_path_to_local(cloud_path).is_dir():
+            raise ResourceNotFoundError("The specified path does not exist. ErrorCode:PathNotFound")
+        yield from super()._list_dir(cloud_path, recursive=recursive)
+
+    def _mkdir(self, cloud_path, parents=False, exist_ok=False) -> None:
+        self.mkdir_calls.append(str(cloud_path))
+        if self.mkdir_error is not None:
+            raise self.mkdir_error
+        self._cloud_path_to_local(cloud_path).mkdir(parents=parents, exist_ok=exist_ok)
+
+
+@pytest.fixture
+def hns_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Factory for `_HnsAzureClient`, installed as the client skill roots get."""
+    pytest.importorskip("azure.core")
+    # The mock path's mkdir is a no-op; the real AzureBlobPath.mkdir calls the client.
+    monkeypatch.setattr(
+        cloudpathlib_local.LocalAzureBlobPath,
+        "mkdir",
+        lambda self, parents=False, exist_ok=False, **_: self.client._mkdir(self, parents=parents, exist_ok=exist_ok),
+    )
+
+    def make(**kwargs: object) -> _HnsAzureClient:
+        client = _HnsAzureClient(
+            connection_string=_FAKE_AZURE_CONNECTION_STRING,
+            local_storage_dir=tmp_path / "azure-storage",
+            local_cache_dir=tmp_path / "azure-cache",
+            **kwargs,
+        )
+        (tmp_path / "azure-storage" / "3days").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("pincer.tools.skills.storage._build_client", lambda *_a: client)
+        return client
+
+    return make
+
+
+def test_usable_root_hns_missing_root_is_created(hns_client, tmp_path: Path) -> None:
+    client = hns_client()
+    root = open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    assert str(root) == "az://3days/skills"
+    assert client.mkdir_calls == ["az://3days/skills"]
+    assert list(root.iterdir()) == []
+
+
+def test_usable_root_hns_missing_root_without_write_access_starts_empty(
+    hns_client, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from azure.core.exceptions import HttpResponseError
+
+    from pincer.tools.skills.index import SkillIndex
+
+    client = hns_client(mkdir_error=HttpResponseError("This request is not authorized", response=None))
+    with caplog.at_level(logging.WARNING, logger="pincer.tools.skills.storage"):
+        root = open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    assert client.mkdir_calls == ["az://3days/skills"]
+    assert "does not exist and could not be created (HttpResponseError" in caplog.text
+
+    index = SkillIndex(bundled_dir=None, user_dir=root, max_per_root=100)
+    index.discover(strict=True)
+    assert index.all_skills() == []
+
+
+def test_usable_root_hns_existing_root_is_listed_not_created(hns_client, tmp_path: Path) -> None:
+    client = hns_client()
+    skill_md = client.CloudPath("az://3days/skills/demo/SKILL.md")
+    skill_md.write_text("---\nname: demo\ndescription: d\n---\nbody\n", encoding="utf-8")
+    with patch.object(_HnsAzureClient, "_list_dir", autospec=True, side_effect=_HnsAzureClient._list_dir) as listing:
+        root = open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    assert client.mkdir_calls == []
+    listing.assert_called()
+    assert [p.name for p in root.iterdir()] == ["demo"]
+
+
+@pytest.mark.parametrize("failing", ["_list_dir", "_is_dir"])
+def test_usable_root_hns_access_errors_still_refuse_to_start(hns_client, tmp_path: Path, failing: str) -> None:
+    from azure.core.exceptions import ClientAuthenticationError
+
+    client = hns_client()
+    client.CloudPath("az://3days/skills/demo/SKILL.md").write_text("x", encoding="utf-8")
+    with (
+        patch.object(_HnsAzureClient, failing, side_effect=ClientAuthenticationError("Server failed to authenticate")),
+        pytest.raises(SkillLoadError, match="is not usable: ClientAuthenticationError.*PINCER_STORAGE_AZURE"),
+    ):
+        open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    assert client.mkdir_calls == []
+
+
+@pytest.mark.parametrize("backend", ["s3", "azure", "gs"])
+def test_usable_root_flat_backends_missing_prefix_starts(mock_cloud_client, backend: str) -> None:
+    client = mock_cloud_client(backend)
+    scheme = {"s3": "s3", "azure": "az", "gs": "gs"}[backend]
+    client.CloudPath(f"{scheme}://bucket/other/SKILL.md").write_text("x", encoding="utf-8")
+    missing = client.CloudPath(f"{scheme}://bucket/skills")
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=missing):
+        assert open_usable_skills_root(f"{scheme}://bucket/skills", _settings()) == missing
+    assert list(missing.iterdir()) == []
+
+
 def test_client_construction_error_names_the_storage_settings(tmp_path: Path) -> None:
     with (
         patch("boto3.Session", side_effect=RuntimeError("The config profile (team) could not be found")),

@@ -717,6 +717,15 @@ mounting a directory. Install the new `remote-skills` extra
   task message cannot drop it. A row with no `asked_at` (a user asked before
   the onboarding table existed) takes the time of its next empty reply as
   one, so it expires like any other.
+- **Remote skills: a missing skills folder on Azure ADLS Gen2 no longer stops
+  startup.** On a storage account with hierarchical namespace, listing a folder
+  that does not exist fails with `PathNotFound` instead of returning nothing,
+  so `PINCER_SKILLS_DIR=az://<container>/<folder>` for a folder not created yet
+  refused to start ("Skills root … is not usable: ResourceNotFoundError").
+  Startup now creates a missing cloud skills root. If it cannot (read-only
+  access), pincer starts with no user skills and logs a warning. Bad
+  credentials, a missing container or an unreachable endpoint still refuse to
+  start.
 - **Voice: an interrupted line is no longer reported as a delivery failure,
   and a German "Na, das war's. Tschüss." ends the call (#301).** Every agent
   transcript line now records its delivery outcome and the reason in the new
