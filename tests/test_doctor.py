@@ -2081,8 +2081,13 @@ def test_llm_reasoning_summary_on_an_openai_provider_uses_its_own_model():
             {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-5"},
             CheckStatus.WARNING,
         ),
+        # gpt-6 thinks by default, but voice turns carry tools, so they send none (issue #357)
+        (
+            {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-6.1-terra"},
+            CheckStatus.PASS,
+        ),
     ],
-    ids=["thinks-150", "thinks-600", "disabled-150", "between-tools-150", "gpt-5.1-150", "gpt-5-150"],
+    ids=["thinks-150", "thinks-600", "disabled-150", "between-tools-150", "gpt-5.1-150", "gpt-5-150", "gpt-6-150"],
 )
 def test_voice_thinking_token_limit(update, status):
     result = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(**update))
@@ -2161,3 +2166,21 @@ def test_llm_reasoning_voice_is_skipped_when_voice_is_off():
     result = SecurityDoctor()._check_llm_reasoning_voice(_llm_cfg(voice_enabled=False, voice_outbound_enabled=False))
 
     assert result.status == CheckStatus.SKIPPED
+
+
+def test_llm_reasoning_shows_none_sent_with_tools_to_gpt_6_and_not_for_summaries():
+    """Chat and voice turns carry tools, so gpt-6 gets none even with nothing set; summaries carry none."""
+    cfg = _llm_cfg(
+        openai_api_key="sk-test",
+        default_provider="openai",
+        openai_model="gpt-6.1-terra",
+        summary_provider="openai",
+        summary_model="gpt-6.1-terra",
+    )
+    sent = "openai gpt-6.1-terra: nothing set; sends reasoning_effort none with tools (gpt-6 on Chat Completions)"
+
+    assert SecurityDoctor()._check_llm_reasoning_default(cfg).message == sent
+    assert SecurityDoctor()._check_llm_reasoning_voice(cfg).message == sent
+    assert (
+        SecurityDoctor()._check_llm_reasoning_summary(cfg).message == "openai gpt-6.1-terra: nothing set; model default"
+    )

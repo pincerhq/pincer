@@ -333,3 +333,166 @@ def test_a_multiplier_for_a_configured_provider_passes(tmp_path: Path) -> None:
     assert _doctor_check(config, settings) == CheckResult(
         "llm_pricing", CheckStatus.PASS, "Every model Pincer will call has a price: claude-a", category="llm"
     )
+
+
+# ── gpt-6 on Chat Completions (slice 7, ruling Q13) ──────────────────────────
+# Chat Completions takes function tools on gpt-6 only at reasoning_effort "none". Chat and
+# voice send tools; the summary model does not.
+
+_GPT6_FOOTER = (
+    "Why: Pincer talks to OpenAI models through Chat Completions, which lets gpt-6 models use tools only "
+    "with reasoning off. The summary model uses no tools, so PINCER_SUMMARY_REASONING_EFFORT still applies to it.\n"
+    "When it changes: reasoning with tools comes with the Responses API (#358)."
+)
+_THEN = "Pincer then turns reasoning off for this model's tool requests."
+
+
+def _gpt6(model: str = "gpt-6.1-terra", **overrides: object) -> Settings:
+    """OpenAI as the default provider with a gpt-6 chat model, a priced summary model, voice off."""
+    base: dict[str, object] = {
+        "default_provider": "openai",
+        "anthropic_api_key": "",
+        "openai_api_key": "sk-test",
+        "openai_model": model,
+        "summary_model": "",
+        "reasoning_effort": "",
+        "thinking": "",
+        "voice_reasoning_effort": "",
+        "voice_thinking": "",
+        "summary_reasoning_effort": "",
+    }
+    base.update(overrides)
+    return _settings(**base)
+
+
+def _gpt6_priced(tmp_path: Path) -> Path:
+    return _priced(tmp_path, "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-5-mini")
+
+
+def test_a_chat_effort_on_gpt_6_refuses_and_unset_starts(tmp_path: Path) -> None:
+    assert pricing_problems(_gpt6(reasoning_effort="high"), _gpt6_priced(tmp_path)) == (
+        "1 gpt-6 setting won't work with tools:\n"
+        "  - chat on openai, gpt-6.1-terra: PINCER_REASONING_EFFORT is high.\n"
+        f"    Fix: unset PINCER_REASONING_EFFORT; {_THEN}\n" + _GPT6_FOOTER
+    )
+    assert pricing_problems(_gpt6(), _gpt6_priced(tmp_path)) is None
+
+
+def test_a_voice_effort_on_gpt_6_refuses_and_unset_starts(tmp_path: Path) -> None:
+    refused = _gpt6("gpt-5-mini", voice_enabled=True, voice_turn_model="gpt-6.1-terra", voice_reasoning_effort="high")
+    assert pricing_problems(refused, _gpt6_priced(tmp_path)) == (
+        "1 gpt-6 setting won't work with tools:\n"
+        "  - voice on openai, gpt-6.1-terra: PINCER_VOICE_REASONING_EFFORT is high.\n"
+        f"    Fix: unset PINCER_VOICE_REASONING_EFFORT; {_THEN}\n" + _GPT6_FOOTER
+    )
+    started = refused.model_copy(update={"voice_reasoning_effort": ""})
+    assert pricing_problems(started, _gpt6_priced(tmp_path)) is None
+
+
+def test_a_chat_effort_inherited_by_voice_names_the_voice_fix_and_default_starts(tmp_path: Path) -> None:
+    inherited = _gpt6("gpt-5-mini", voice_enabled=True, voice_turn_model="gpt-6.1-terra", reasoning_effort="high")
+    assert pricing_problems(inherited, _gpt6_priced(tmp_path)) == (
+        "1 gpt-6 setting won't work with tools:\n"
+        "  - voice on openai, gpt-6.1-terra: PINCER_REASONING_EFFORT is high, and voice inherits it.\n"
+        "    Fix: set PINCER_VOICE_REASONING_EFFORT=default (or unset PINCER_REASONING_EFFORT); "
+        f"{_THEN}\n" + _GPT6_FOOTER
+    )
+    default = inherited.model_copy(update={"voice_reasoning_effort": "default"})
+    assert pricing_problems(default, _gpt6_priced(tmp_path)) is None
+
+
+def test_an_effort_that_thinking_disabled_turns_to_none_starts(tmp_path: Path) -> None:
+    """Refused on what would be sent: disabled replaces high with none (lead ruling 3, 2026-11-09)."""
+    assert pricing_problems(_gpt6(reasoning_effort="high", thinking="disabled"), _gpt6_priced(tmp_path)) is None
+    assert pricing_problems(_gpt6(reasoning_effort="high"), _gpt6_priced(tmp_path)) is not None
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+def test_a_gpt_6_model_with_no_none_refuses_for_chat_at_any_effort_and_starts_as_summary(
+    tmp_path: Path, model: str
+) -> None:
+    line = (
+        f"  - chat on openai, {model}: this model can't use tools at all, because its reasoning can't be turned off.\n"
+        f"    Fix: use gpt-6.1-terra, gpt-6-sol, gpt-6-luna or a gpt-5 model for chat; {model} is fine as the "
+        "summary model.\n"
+    )
+    for effort in ("", "low"):
+        message = pricing_problems(_gpt6(model, reasoning_effort=effort), _gpt6_priced(tmp_path))
+        assert message == "1 gpt-6 setting won't work with tools:\n" + line + _GPT6_FOOTER, effort
+    summary = _gpt6("gpt-5-mini", summary_model=model, summary_reasoning_effort="high")
+    assert pricing_problems(summary, _gpt6_priced(tmp_path)) is None
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+def test_a_gpt_6_model_with_no_none_refuses_for_voice_and_starts_as_summary(tmp_path: Path, model: str) -> None:
+    voice = _gpt6("gpt-5-mini", voice_enabled=True, voice_turn_model=model)
+    assert pricing_problems(voice, _gpt6_priced(tmp_path)) == (
+        "1 gpt-6 setting won't work with tools:\n"
+        f"  - voice on openai, {model}: this model can't use tools at all, because its reasoning can't be turned off.\n"
+        f"    Fix: use gpt-6.1-terra, gpt-6-sol, gpt-6-luna or a gpt-5 model for voice; {model} is fine as the "
+        "summary model.\n" + _GPT6_FOOTER
+    )
+    summary = voice.model_copy(update={"voice_turn_model": "", "summary_model": model})
+    assert pricing_problems(summary, _gpt6_priced(tmp_path)) is None
+
+
+def test_a_free_keyless_endpoint_is_checked_for_gpt_6_effort(tmp_path: Path) -> None:
+    """Free endpoints skip the price check, not this one: the 400 comes from the model (lead ruling 4)."""
+    free = _gpt6(
+        "gpt-5-mini",
+        default_provider="gw",
+        openai_api_key="",
+        openai_compatible_provider="gw",
+        openai_compatible_base_url="http://localhost:9999/v1",
+        openai_compatible_api_key="",
+        openai_compatible_model="gpt-6.1-terra",
+        reasoning_effort="low",
+    )
+    assert pricing_problems(free, _priced(tmp_path)) == (
+        "1 gpt-6 setting won't work with tools:\n"
+        "  - chat on gw, gpt-6.1-terra: PINCER_REASONING_EFFORT is low.\n"
+        f"    Fix: unset PINCER_REASONING_EFFORT; {_THEN}\n" + _GPT6_FOOTER
+    )
+    assert pricing_problems(free.model_copy(update={"reasoning_effort": ""}), _priced(tmp_path)) is None
+
+
+def test_doctor_reports_a_gpt_6_conflict_and_passes_its_twin(tmp_path: Path) -> None:
+    from pincer.security.doctor import CheckResult, CheckStatus
+
+    priced = _gpt6_priced(tmp_path)
+    assert _doctor_check(priced, _gpt6(reasoning_effort="high")) == CheckResult(
+        "llm_pricing",
+        CheckStatus.CRITICAL,
+        "gpt-6 settings that won't work with tools: chat on openai, gpt-6.1-terra: PINCER_REASONING_EFFORT is high; "
+        "Pincer will not start",
+        fix_hint=f"Fix: unset PINCER_REASONING_EFFORT; {_THEN}\n" + _GPT6_FOOTER,
+        category="llm",
+    )
+    assert _doctor_check(priced, _gpt6()).status is CheckStatus.PASS
+
+
+def test_doctor_reports_a_gpt_6_conflict_next_to_a_missing_price(tmp_path: Path) -> None:
+    from pincer.security.doctor import CheckStatus
+
+    result = _doctor_check(_priced(tmp_path, "gpt-5-mini"), _gpt6(reasoning_effort="high"))
+    assert result.status is CheckStatus.CRITICAL
+    assert result.message.startswith(
+        "No price for 1 model Pincer will call: gpt-6.1-terra (chat on openai, summary on openai); "
+    )
+    assert (
+        "gpt-6 settings that won't work with tools: chat on openai, gpt-6.1-terra: PINCER_REASONING_EFFORT is high;"
+        in result.message
+    )
+
+
+def test_several_conflicts_are_listed_once_each_with_one_explanation(tmp_path: Path) -> None:
+    settings = _gpt6(reasoning_effort="high", voice_enabled=True, voice_turn_model="gpt-6.1-sol")
+    assert pricing_problems(settings, _gpt6_priced(tmp_path)) == (
+        "2 gpt-6 settings won't work with tools:\n"
+        "  - chat on openai, gpt-6.1-terra: PINCER_REASONING_EFFORT is high.\n"
+        f"    Fix: unset PINCER_REASONING_EFFORT; {_THEN}\n"
+        "  - voice on openai, gpt-6.1-sol: this model can't use tools at all, "
+        "because its reasoning can't be turned off.\n"
+        "    Fix: use gpt-6.1-terra, gpt-6-sol, gpt-6-luna or a gpt-5 model for voice; gpt-6.1-sol is fine as the "
+        "summary model.\n" + _GPT6_FOOTER
+    )

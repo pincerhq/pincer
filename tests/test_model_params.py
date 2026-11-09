@@ -234,6 +234,13 @@ _OPENAI_TABLE: dict[str, tuple[tuple[str | None, ...], str]] = {
     "gpt-5.1-codex-mini": (_UP_TO_HIGH, _DROP),
     "gpt-5.2": (_UP_TO_XHIGH, "none"),
     "gpt-5.4-mini": (_UP_TO_XHIGH, "none"),
+    # gpt-6 family: every level up to max; astra and gpt-6.1-sol have no none (model pages, 2026-11-09)
+    "gpt-6.1-terra": (_EFFORTS, "none"),
+    "gpt-6-sol": (_EFFORTS, "none"),
+    "gpt-6-luna": (_EFFORTS, "none"),
+    "gpt-6.1-sol": (_EFFORTS, _DROP),
+    "gpt-6-astra": (_EFFORTS, _DROP),
+    "gpt-6-nova": (_NO_EFFORT, _UNRECOGNISED),  # an unlisted gpt-6 name stays off the allow-list
     # Pro models are Responses API only: not served over Chat Completions
     "o3-pro": (_NO_EFFORT, _UNRECOGNISED),
     "gpt-5-pro": (_NO_EFFORT, _UNRECOGNISED),
@@ -288,6 +295,8 @@ def test_resolve_reasoning_per_openai_model(model, effort, thinking):
         ("ft:gpt-5.1:org::x", "gpt-5.1"),  # fine-tune
         ("gpt-5-2025-08-07", "gpt-5"),  # a date is not a minor version
         ("GPT-5.2", "gpt-5.2"),
+        ("openai/gpt-6.1-terra", "gpt-6.1-terra"),
+        ("gpt-6-luna-2026-10-01", "gpt-6-luna"),
     ],
 )
 def test_resolve_reasoning_recognises_openai_id_forms(model, bare):
@@ -420,6 +429,12 @@ def test_resolve_and_warn_stays_quiet_when_nothing_is_dropped(caplog):
         ("gpt-5-nano", 128_000),
         ("gpt-5.1", 128_000),
         ("gpt-5.2", 128_000),
+        # gpt-6 family: "128,000 max output tokens" on each model page, fetched 2026-11-09
+        ("gpt-6.1-terra", 128_000),
+        ("gpt-6-sol", 128_000),
+        ("gpt-6-luna", 128_000),
+        ("gpt-6.1-sol", 128_000),
+        ("gpt-6-astra", 128_000),
         ("openai/gpt-4o-mini", 16_384),
         ("ft:gpt-4o-mini:acme::abc123", 16_384),
     ],

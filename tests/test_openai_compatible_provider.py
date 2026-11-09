@@ -804,3 +804,126 @@ async def test_the_prompt_is_split_into_uncached_input_and_cache_tokens(method, 
     if details is not None:
         usage["prompt_tokens_details"] = details
     assert await _usage_of(method, usage) == expected
+
+
+# One function tool: gpt-6 on Chat Completions takes it only at reasoning_effort "none"
+# (live probe on Azure OpenAI, 2026-11-09: no effort or "low" -> 400, "none" -> 200).
+_WEATHER_TOOL = [
+    {
+        "name": "get_weather",
+        "description": "Weather for a city",
+        "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    }
+]
+
+
+class TestGpt6Family:
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_a_tool_turn_with_no_effort_sends_none(self, method):
+        body = await _sent_body(_reasoning_settings("gpt-6.1-terra"), method, tools=_WEATHER_TOOL)
+
+        assert body["model"] == "gpt-6.1-terra"
+        assert body["reasoning_effort"] == "none"
+        assert body["max_completion_tokens"] == 8192
+        assert "temperature" not in body
+        assert "max_tokens" not in body
+
+    async def test_a_turn_without_tools_and_no_effort_sends_nothing(self):
+        """The summary call: no tools, so the model reasons at its own default."""
+        body = await _sent_body(_reasoning_settings("gpt-6.1-terra"), "complete")
+
+        assert "reasoning_effort" not in body
+
+    async def test_a_gpt_5_tool_turn_with_no_effort_still_sends_nothing(self):
+        body = await _sent_body(_reasoning_settings("gpt-5.4-mini"), "complete", tools=_WEATHER_TOOL)
+
+        assert "reasoning_effort" not in body
+
+    async def test_a_per_call_default_on_a_tool_turn_sends_none(self):
+        """Voice's `default` override arrives as "" (send nothing): with tools that is a 400, so none."""
+        settings = _reasoning_settings("gpt-6.1-terra", reasoning_effort="high")
+
+        body = await _sent_body(settings, "stream_turn", tools=_WEATHER_TOOL, reasoning_effort="", thinking="")
+
+        assert body["reasoning_effort"] == "none"
+
+    async def test_an_explicit_effort_is_sent_as_set(self):
+        """The startup check refuses this for chat and voice; the leaf itself never rewrites it."""
+        body = await _sent_body(_reasoning_settings("gpt-6.1-terra", reasoning_effort="high"), "complete")
+
+        assert body["reasoning_effort"] == "high"
+
+    async def test_thinking_disabled_sends_none_over_an_effort(self):
+        settings = _reasoning_settings("gpt-6.1-terra", reasoning_effort="high", thinking="disabled")
+
+        body = await _sent_body(settings, "complete", tools=_WEATHER_TOOL)
+
+        assert body["reasoning_effort"] == "none"
+
+    async def test_astra_has_no_off_level_so_a_tool_turn_sends_nothing(self):
+        """No none to send; the startup check refuses astra for chat and voice."""
+        body = await _sent_body(_reasoning_settings("gpt-6-astra"), "complete", tools=_WEATHER_TOOL)
+
+        assert "reasoning_effort" not in body
+
+    async def test_a_gpt_6_summary_model_sends_its_configured_effort(self, tmp_path):
+        """The summarizer sends no tools, so PINCER_SUMMARY_REASONING_EFFORT=high reaches the request,
+        and the startup check lets it start (ruling Q13)."""
+        import json
+
+        import httpx
+        from openai import AsyncOpenAI
+        from pydantic import SecretStr
+
+        from pincer.config.llm import call_effort, call_thinking
+        from pincer.core.session import Session
+        from pincer.llm.openai_common import OpenAICompatibleProvider
+        from pincer.llm.pricing_check import pricing_problems
+        from pincer.memory.summarizer import Summarizer
+
+        settings = _reasoning_settings(
+            "gpt-5-mini",
+            summary_model="gpt-6.1-terra",
+            summary_reasoning_effort="high",
+            anthropic_api_key=SecretStr(""),  # the chat check covers openai only
+            voice_enabled=False,
+            voice_outbound_enabled=False,
+        )
+        rates = "input = 1.0\ncache_write = 1.0\ncache_write_1h = 1.0\ncache_read = 1.0\noutput = 1.0\n"
+        (tmp_path / "pincer.toml").write_text(
+            "".join(f'[pricing."{m}"]\n{rates}' for m in ("gpt-5-mini", "gpt-6.1-terra")), encoding="utf-8"
+        )
+        assert pricing_problems(settings, tmp_path) is None
+
+        bodies: list[dict] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json=_COMPLETION)
+
+        provider = OpenAICompatibleProvider(settings, "openai")
+        await provider._client.close()
+        provider._client = AsyncOpenAI(
+            api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        )
+        summarizer = Summarizer(
+            provider,
+            AsyncMock(),
+            AsyncMock(),
+            summary_model="gpt-6.1-terra",
+            threshold=5,
+            reasoning_effort=call_effort(settings.summary_reasoning_effort),
+            thinking=call_thinking(settings.summary_thinking),
+        )
+        session = Session(
+            "s1", "u1", "test", messages=[LLMMessage(role=MessageRole.USER, content=f"m{i}") for i in range(6)]
+        )
+        try:
+            assert await summarizer.maybe_summarize(session) is True
+        finally:
+            await provider.close()
+
+        [body] = bodies
+        assert body["model"] == "gpt-6.1-terra"
+        assert body["reasoning_effort"] == "high"
+        assert "tools" not in body

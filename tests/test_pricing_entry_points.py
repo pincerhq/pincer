@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from pincer.cli import app
@@ -300,3 +301,65 @@ def test_run_starts_with_a_valid_provider_multiplier(pricing_dir: Path, monkeypa
 
     assert result.exit_code == 0, result.output
     assert len(started) == 1
+
+
+# ── gpt-6 effort on Chat Completions (slice 7): the same refusal, the same entry points ──
+
+GPT6_REFUSAL = (
+    "Configuration error: 1 gpt-6 setting won't work with tools:\n"
+    "  - chat on openai, gpt-6.1-terra: PINCER_REASONING_EFFORT is high.\n"
+    "    Fix: unset PINCER_REASONING_EFFORT; Pincer then turns reasoning off for this model's tool requests.\n"
+    "Why: Pincer talks to OpenAI models through Chat Completions, which lets gpt-6 models use tools only "
+    "with reasoning off. The summary model uses no tools, so PINCER_SUMMARY_REASONING_EFFORT still applies to it.\n"
+    "When it changes: reasoning with tools comes with the Responses API (#358).\n"
+)
+
+
+@pytest.fixture
+def gpt6_dir(pricing_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`pricing_dir` with terra as the openai chat and summary model and PINCER_REASONING_EFFORT=high."""
+    settings = _settings(tmp_path).model_copy(
+        update={
+            "default_provider": "openai",
+            "anthropic_api_key": SecretStr(""),
+            "openai_api_key": SecretStr("sk-test"),
+            "openai_model": "gpt-6.1-terra",
+            "summary_model": "",
+            "reasoning_effort": "high",
+            "thinking": "",
+        }
+    )
+    monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+    _price(pricing_dir, "gpt-6.1-terra")
+    return pricing_dir
+
+
+@pytest.mark.parametrize("args", [["run"], ["run", "-d"], ["run", "--daemon-child"], ["chat"]])
+def test_run_and_chat_refuse_a_gpt_6_chat_effort(
+    gpt6_dir: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    started: list[Any] = []
+    monkeypatch.setattr("pincer.cli.run.start_daemon", lambda *a: started.append(a))
+    monkeypatch.setattr("pincer.cli.run._setup_logging", lambda *a: started.append(a))
+    monkeypatch.setattr("pincer.core.session.SessionManager.initialize", lambda self: started.append(self))
+
+    result = runner.invoke(app, args, terminal_width=400)
+
+    assert result.exit_code == 1
+    assert result.output == GPT6_REFUSAL
+    assert started == []
+
+
+def test_the_standalone_api_refuses_a_gpt_6_chat_effort(
+    gpt6_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    app_, builds = _standalone_app(monkeypatch, tmp_path)
+
+    with pytest.raises(RuntimeError) as raised, TestClient(app_):
+        pass
+
+    assert str(raised.value) == GPT6_REFUSAL.removeprefix("Configuration error: ").rstrip("\n")
+    assert builds == []

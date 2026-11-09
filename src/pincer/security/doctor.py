@@ -2172,7 +2172,7 @@ class SecurityDoctor:
         """Every model Pincer will call has a valid `[pricing]` entry (issue #357); the same
         check `pincer run` refuses to start on."""
         from pincer.config.pricing import paste_block
-        from pincer.llm.pricing_check import check_pricing
+        from pincer.llm.pricing_check import GPT6_TOOLS_EXPLANATION, check_pricing
 
         report = check_pricing(self._cfg(cfg), self.config_dir)
         if report.errors:
@@ -2183,18 +2183,29 @@ class SecurityDoctor:
                 fix_hint="Fix the [pricing] section of pincer.toml / pincer.local.toml",
                 category="llm",
             )
+        problems: list[str] = []
+        hints: list[str] = []
         if report.missing:
             listed = ", ".join(
                 f"{model} ({', '.join(f'{u.role} on {u.provider}' for u in uses)})"
                 for model, uses in report.missing.items()
             )
             count = f"{len(report.missing)} model{'s' if len(report.missing) > 1 else ''}"
+            problems.append(f"No price for {count} Pincer will call: {listed}")
+            hints.append(
+                "Add to pincer.local.toml and fill in the rates (USD per million tokens):\n"
+                + paste_block(report.missing)
+            )
+        if report.conflicts:
+            listed = " ".join(c.line() for c in report.conflicts).rstrip(".")  # the "; " join ends the sentence
+            problems.append(f"gpt-6 settings that won't work with tools: {listed}")
+            hints.append("\n".join([*(f"Fix: {c.fix}" for c in report.conflicts), GPT6_TOOLS_EXPLANATION]))
+        if problems:
             return CheckResult(
                 "llm_pricing",
                 CheckStatus.CRITICAL,
-                f"No price for {count} Pincer will call: {listed}; Pincer will not start",
-                fix_hint="Add to pincer.local.toml and fill in the rates (USD per million tokens):\n"
-                + paste_block(report.missing),
+                "; ".join(problems) + "; Pincer will not start",
+                fix_hint="\n\n".join(hints),
                 category="llm",
             )
         message = (
@@ -2228,6 +2239,7 @@ class SecurityDoctor:
             provider_default_model(cfg, name),
             cfg.reasoning_effort,
             cfg.thinking,
+            with_tools=True,
         )
 
     def _check_llm_reasoning_voice(self, cfg: Settings | None = None) -> CheckResult:
@@ -2248,6 +2260,7 @@ class SecurityDoctor:
             effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort),
             effective_thinking(cfg.voice_thinking, cfg.thinking),
             ("PINCER_VOICE_REASONING_EFFORT", "PINCER_VOICE_THINKING"),
+            with_tools=True,
         )
 
     def _check_llm_reasoning_summary(self, cfg: Settings | None = None) -> CheckResult:
@@ -2285,7 +2298,9 @@ class SecurityDoctor:
         thinks = None
         if wire is not None:
             effort = effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort)
-            params = resolve_reasoning(wire, model, effort, effective_thinking(cfg.voice_thinking, cfg.thinking))
+            thinking = effective_thinking(cfg.voice_thinking, cfg.thinking)
+            # Voice turns carry tools: a gpt-6 model then gets none (issue #357)
+            params = resolve_reasoning(wire, model, effort, thinking, with_tools=True)
             thinks = model_thinks(wire, model, params)
         limit = cfg.voice_max_response_tokens
         if thinks is None:
@@ -2970,20 +2985,21 @@ def _reasoning_report(
     effort: ReasoningEffort,
     thinking: ThinkingMode,
     env: tuple[str, str] = ("PINCER_REASONING_EFFORT", "PINCER_THINKING"),
+    *,
+    with_tools: bool = False,
 ) -> CheckResult:
     """What a target's requests carry, from the resolver the providers use. No API call.
 
     ``env`` names the effort and thinking settings an operator changes for this target.
+    ``with_tools``: the target's requests carry tools (chat and voice; summaries don't).
     """
-    from pincer.llm.model_params import ReasoningWire, resolve_reasoning
+    from pincer.llm.model_params import ReasoningWire, openai_tools_need_off, resolve_reasoning
 
     if not (effort or thinking):
-        return CheckResult(
-            check,
-            CheckStatus.PASS,
-            f"{provider} {model}: nothing set; model default",
-            category="llm",
-        )
+        default = "model default"
+        if with_tools and _reasoning_wire(cfg, provider) is ReasoningWire.OPENAI and openai_tools_need_off(model):
+            default = "sends reasoning_effort none with tools (gpt-6 on Chat Completions)"
+        return CheckResult(check, CheckStatus.PASS, f"{provider} {model}: nothing set; {default}", category="llm")
     wire = _reasoning_wire(cfg, provider)
     if wire is None:
         return CheckResult(

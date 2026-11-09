@@ -276,6 +276,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
             pinned=pinned,
+            with_tools=bool(tools),
         )
         kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)
