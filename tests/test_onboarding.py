@@ -28,7 +28,6 @@ from pincer.core.session import (
     conversation_key,
 )
 from pincer.db.engine import get_database_url
-from pincer.exceptions import BudgetExceededError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
 from pincer.memory.store import MemoryStore
 from pincer.repositories.onboarding import OnboardingRepository
@@ -431,7 +430,7 @@ async def test_a_failing_extractor_after_a_day_stops_being_called(
 
     async def extract(prompt: str) -> LLMResponse:
         extractions.append(prompt)
-        raise BudgetExceededError("over budget")
+        raise RuntimeError("extractor down")
 
     agent = Agent(
         settings, _extracting_llm(extract), session_manager, cost_tracker, tool_registry, memory_store=memory_store
@@ -1229,7 +1228,7 @@ async def test_an_extraction_error_leaves_the_gate_untouched(
         "Got it.",
         RuntimeError("LLM down"),
         "Still here.",
-        BudgetExceededError(spent=5.0, limit=5.0),
+        TimeoutError("LLM timed out"),
         "Nice to meet you, Carol.",
         '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
     )

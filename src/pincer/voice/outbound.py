@@ -21,6 +21,9 @@ from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, trunca
 from pincer.voice.twilio_rest import DialOutcomeUnknown
 
 TOOL_NAME = "make_phone_call"
+# What every surface gets back when the daily budget is reached (Q12). The
+# dashboard maps it to 402 (api/voice._ERROR_STATUS).
+BUDGET_REFUSAL = "Error: daily budget reached, call not placed."
 # The line a placed call's result names it on. Only a placed call's result has
 # it; an "Error..." result may name a SID in passing, but no report follows it.
 _CALL_SID_LINE = "Call SID: {}"
@@ -145,6 +148,24 @@ async def _audit_block(decision: Any, number: str, user_id: str, channel: str) -
         )
     except Exception:  # pragma: no cover — auditing must not break the gate
         logger.debug("Audit logging of blocked call failed", exc_info=True)
+
+
+async def _refuse_over_budget(settings: Any, number: str, user_id: str, language: str) -> str:
+    """No dial: log it, and close a call record with reason `budget` (no CallSid, so a pending key)."""
+    from pincer.observability.failure_codes import FailureCode
+    from pincer.voice.language import resolve_call_language
+    from pincer.voice.telemetry import hooks as telemetry
+
+    logger.warning("make_phone_call refused for user %s: daily budget reached", user_id)
+    trace_key = f"pending-{uuid4().hex}"
+    telemetry.dial_requested(
+        trace_key,
+        to_number=number,
+        engine=str(getattr(settings, "voice_engine", "") or ""),
+        language=resolve_call_language(settings, language),
+    )
+    await telemetry.dial_refused(trace_key, failure_code=FailureCode.BUDGET.value, reason="budget")
+    return BUDGET_REFUSAL
 
 
 def _voice_engine() -> Any:
@@ -348,6 +369,13 @@ async def make_phone_call(
 
     ctx = context or {}
     user_id = ctx.get("user_id", "unknown")
+
+    # Q12: over the daily budget a new call may not start. Checked before the
+    # daily limit and the outbound gate, so a refusal uses neither.
+    from pincer.services.costs import daily_budget_reached
+
+    if await daily_budget_reached(settings):
+        return await _refuse_over_budget(settings, validated, user_id, language)
 
     if not _check_daily_limit(user_id, settings.voice_outbound_max_daily):
         logger.info("make_phone_call aborted: per-user daily limit reached for user %s", user_id)

@@ -42,6 +42,7 @@ OTHER = "+4915199999999"
 def settings(tmp_path) -> MagicMock:
     cfg = MagicMock()
     cfg.db_path = str(tmp_path / "pincer.db")
+    cfg.daily_budget_usd = 0.0  # no LLM budget: these tests are about the outbound gate
     cfg.voice_enabled = True
     cfg.voice_outbound_enabled = True
     cfg.voice_webhook_base_url = "https://voice.example.com"

@@ -30,15 +30,6 @@ class LLMOutputTruncatedError(LLMError):
         super().__init__(f"LLM output cut off at max_tokens ({output_tokens} of {max_tokens} tokens)")
 
 
-class BudgetExceededError(PincerError):
-    """Daily cost budget exceeded."""
-
-    def __init__(self, spent: float, limit: float):
-        self.spent = spent
-        self.limit = limit
-        super().__init__(f"Budget exceeded: ${spent:.4f} / ${limit:.2f}")
-
-
 class ToolError(PincerError):
     """A tool execution failed."""
 

@@ -31,6 +31,9 @@ def apply_test_paths(settings: Any, tmp_dir: pathlib.Path | None = None) -> Any:
     settings.price_conversationrelay_per_min = 0.0
     settings.price_deepgram_per_min = 0.0
     settings.price_elevenlabs_per_1k_chars = 0.0
+    # A new call checks the daily LLM budget first (issue #357); a MagicMock budget
+    # cannot be compared, and 0 means no budget.
+    settings.daily_budget_usd = 0.0
     # Sprint 13: every call start now resolves its thread. A MagicMock
     # `thread_match_window_days` coerces to 1 and a MagicMock
     # `thread_inbound_context` stringifies to junk, so both are set for real —

@@ -335,3 +335,307 @@ async def test_the_web_chat_done_event_carries_the_cost_of_the_turn_s_recorded_r
     assert len(stored) == 3
     assert events[-1] == ("done", {"text": "Done.", "cost_usd": pytest.approx(sum(stored), abs=1e-12)})
     assert events[-1][1]["cost_usd"] == pytest.approx(0.021)
+
+
+# ── Phone calls (slice 6): a call in progress runs; a new one may not start ──
+
+_REJECT_BUSY = '<Response><Reject reason="busy"/></Response>'
+
+
+@pytest.fixture
+async def phone_settings(settings: Settings) -> Callable[..., Awaitable[Settings]]:
+    """A factory: `await phone_settings(budget, spent=n)` gives settings whose own database
+    (settings.db_path, the one the webhook and the dial read) holds n calls' spend."""
+    from pincer.db import ensure_schema_current
+
+    async def make(budget: float, *, spent: int = 0) -> Settings:
+        ensure_schema_current(settings.db_path)
+        service = CostService(get_database_url(settings.db_path), prices=load_price_table())
+        for _ in range(spent):
+            await service.record("anthropic", _MODEL, _CALL)
+        return settings.model_copy(update={"daily_budget_usd": budget, "voice_allowed_callers": "*"})
+
+    return make
+
+
+@pytest.fixture
+def voice_routes(monkeypatch: pytest.MonkeyPatch) -> Callable[[Settings], tuple[httpx.AsyncClient, AsyncMock]]:
+    """The real Twilio router on a mock engine; the module globals are restored afterwards."""
+    from unittest.mock import MagicMock
+
+    from fastapi import FastAPI
+
+    from pincer.voice import twiml_server
+
+    for name in ("_engine", "_settings", "_memory"):
+        monkeypatch.setattr(twiml_server, name, getattr(twiml_server, name))
+
+    def make(settings: Settings) -> tuple[httpx.AsyncClient, AsyncMock]:
+        engine = AsyncMock()
+        engine.get_active_calls = MagicMock(return_value={})
+        engine.get_call_state = MagicMock(return_value=None)
+        twiml_server.init_voice_routes(engine, settings)
+        app = FastAPI()
+        app.include_router(twiml_server.twilio_router)
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test"), engine
+
+    return make
+
+
+async def _inbound(client: httpx.AsyncClient, call_sid: str = "CA_b") -> httpx.Response:
+    async with client:
+        return await client.post(
+            "/api/apps/twilio/webhook", data={"CallSid": call_sid, "From": "+14155551234", "To": "+14155559876"}
+        )
+
+
+async def test_an_inbound_call_over_the_budget_is_rejected_busy_before_it_is_answered(  # type: ignore[no-untyped-def]
+    phone_settings, voice_routes
+) -> None:
+    client, engine = voice_routes(await phone_settings(0.007, spent=1))
+
+    response = await _inbound(client)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/xml")
+    assert response.content == _REJECT_BUSY.encode()
+    engine.on_call_start.assert_not_awaited()
+
+
+@pytest.fixture
+async def telemetry(settings: Settings) -> AsyncIterator[Path]:
+    """The live telephony telemetry runtime, on the settings' own database."""
+    from pincer.db import ensure_schema_current
+    from pincer.voice.telemetry import runtime
+    from pincer.voice.telemetry.recorder import get_recorder
+
+    ensure_schema_current(settings.db_path)
+    runtime.reset_for_tests(db_path=str(settings.db_path))
+    await get_recorder().start()
+    yield settings.db_path
+    await runtime.shutdown()
+    runtime.reset_for_tests()
+
+
+async def _settle() -> None:
+    """Make every telemetry write so far durable."""
+    from pincer.voice.telemetry.recorder import get_recorder
+    from pincer.voice.telemetry.tracer import drain_pending
+
+    await drain_pending()
+    await get_recorder().flush()
+
+
+async def _telephony_call(db_path: Path, provider_call_id: str) -> dict[str, Any] | None:
+    from pincer.voice.telemetry import queries
+
+    await _settle()
+    return await queries.get_call(db_path, provider_call_id)
+
+
+def _refusal(call: dict[str, Any] | None) -> tuple[Any, ...]:
+    assert call is not None, "the refusal left no call record"
+    return (call["status"], call["outcome"], call["failure_code"], call["termination_reason"])
+
+
+async def test_an_inbound_call_rejected_over_the_budget_is_logged_and_recorded_with_reason_budget(  # type: ignore[no-untyped-def]
+    phone_settings, voice_routes, telemetry, caplog
+) -> None:
+    from pincer.services.voice import CallsService
+
+    settings = await phone_settings(0.007, spent=1)
+    client, _ = voice_routes(settings)
+
+    with caplog.at_level("WARNING", logger="pincer.voice.twiml_server"):
+        await _inbound(client, "CA_b")
+
+    assert "Inbound call CA_b declined: daily budget reached" in caplog.messages
+    row = await (await CallsService.for_path(settings.db_path)).get("CA_b")
+    assert row is not None
+    assert (row["direction"], row["failure_code"]) == ("inbound", "budget")
+    assert _refusal(await _telephony_call(telemetry, "CA_b")) == ("failed", "declined", "budget", "budget")
+
+
+@pytest.mark.parametrize(("budget", "spent"), [(0.014, 1), (0.0, 3)], ids=["below-the-budget", "no-budget"])
+async def test_an_inbound_call_under_the_budget_is_answered(  # type: ignore[no-untyped-def]
+    phone_settings, voice_routes, budget, spent
+) -> None:
+    client, engine = voice_routes(await phone_settings(budget, spent=spent))
+
+    response = await _inbound(client)
+
+    assert b"<Connect>" in response.content
+    engine.on_call_start.assert_awaited_once()
+
+
+_DIAL_REFUSAL = "Error: daily budget reached, call not placed."
+
+
+@pytest.fixture
+def dialling(monkeypatch: pytest.MonkeyPatch, fake_twilio_rest: Any) -> Callable[[Settings], Settings]:
+    """`dialling(settings)`: outbound calling on, the process settings, and no engine in this process,
+    so a placed call reaches `fake_twilio_rest.creates`. The per-user daily counts start empty."""
+    from pydantic import SecretStr
+
+    from pincer.voice import outbound
+
+    monkeypatch.setattr("pincer.voice.twiml_server._engine", None)
+    monkeypatch.setattr(outbound, "_daily_outbound_counts", {})
+
+    def make(settings: Settings) -> Settings:
+        voice = settings.model_copy(
+            update={
+                "voice_enabled": True,
+                "voice_outbound_enabled": True,
+                "voice_webhook_base_url": "https://example.com",
+                "twilio_account_sid": "AC123",
+                "twilio_auth_token": SecretStr("token"),
+                "twilio_phone_number": "+15550001111",
+            }
+        )
+        monkeypatch.setattr("pincer.config.get_settings", lambda: voice)
+        return voice
+
+    return make
+
+
+async def _dial(user_id: str = "u1") -> str:
+    from pincer.voice.outbound import make_phone_call
+
+    return await make_phone_call(
+        "+14155551234", "Confirm the dentist appointment", context={"user_id": user_id, "channel": "telegram"}
+    )
+
+
+async def _outbound_rows(db_path: Path) -> list[dict[str, Any]]:
+    from pincer.voice.telemetry import queries
+
+    await _settle()
+    page = await queries.search_calls(db_path, queries.CallFilters.for_hours(1))
+    return [c for c in page["calls"] if c["direction"] == "outbound"]
+
+
+async def test_the_dial_tool_over_the_budget_places_no_call_and_returns_the_refusal(  # type: ignore[no-untyped-def]
+    phone_settings, dialling, fake_twilio_rest, telemetry, caplog
+) -> None:
+    from pincer.voice import outbound
+
+    dialling(await phone_settings(0.007, spent=1))
+
+    with caplog.at_level("WARNING", logger="pincer.voice.outbound"):
+        result = await _dial("u1")
+
+    assert result == _DIAL_REFUSAL
+    assert fake_twilio_rest.creates == []
+    assert outbound._daily_outbound_counts == {}, "a refused call must not count toward the daily limit"
+    assert "make_phone_call refused for user u1: daily budget reached" in caplog.messages
+    rows = await _outbound_rows(telemetry)
+    assert len(rows) == 1
+    assert rows[0]["provider_call_id"].startswith("pending-")
+    assert _refusal(rows[0]) == ("failed", "declined", "budget", "budget")
+
+
+@pytest.mark.parametrize(("budget", "spent"), [(0.014, 1), (0.0, 3)], ids=["below-the-budget", "no-budget"])
+async def test_the_dial_tool_under_the_budget_places_the_call(  # type: ignore[no-untyped-def]
+    phone_settings, dialling, fake_twilio_rest, budget, spent
+) -> None:
+    dialling(await phone_settings(budget, spent=spent))
+
+    result = await _dial()
+
+    assert result.startswith("Call initiated successfully.")
+    assert len(fake_twilio_rest.creates) == 1
+
+
+async def test_a_dashboard_call_over_the_budget_is_a_402_with_the_refusal(  # type: ignore[no-untyped-def]
+    phone_settings, dialling, fake_twilio_rest
+) -> None:
+    """A spend limit, not a rate limit (429) and not a Twilio failure (502)."""
+    from fastapi import FastAPI
+
+    from pincer.api.voice import router
+
+    dialling(await phone_settings(0.007, spent=1))
+    app = FastAPI()
+    app.include_router(router)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/voice/calls",
+            json={"target_number": "+14155551234", "purpose": "Confirm the dentist appointment"},
+        )
+
+    assert (response.status_code, response.json()) == (402, {"detail": "daily budget reached, call not placed."})
+    assert fake_twilio_rest.creates == []
+
+
+async def test_a_dial_asked_for_by_the_request_that_crossed_the_budget_is_refused_and_the_turn_ends(  # type: ignore[no-untyped-def]
+    phone_settings, dialling, fake_twilio_rest, session_manager
+) -> None:
+    """The dialling request ($0.007) brings spend to the budget: the real dial tool refuses,
+    the refusal is the tool's result, and the loop stops before its next request."""
+    from pincer.llm.base import MessageRole
+    from pincer.tools.registry import ToolRegistry
+    from pincer.voice.outbound import make_phone_call
+
+    settings = dialling(await phone_settings(0.007))
+    tracker = CostTracker(settings.db_path, daily_budget=0.007, prices=load_price_table())
+    await tracker.initialize()
+    registry = ToolRegistry()
+    registry.register(
+        name="make_phone_call",
+        description="Places a call",
+        handler=make_phone_call,
+        parameters={
+            "type": "object",
+            "properties": {"target_number": {"type": "string"}, "purpose": {"type": "string"}},
+            "required": ["target_number", "purpose"],
+        },
+    )
+    dial = ToolCall(
+        id="tc1",
+        name="make_phone_call",
+        arguments={"target_number": "+14155551234", "purpose": "Confirm the dentist appointment"},
+    )
+    llm = _scripted_llm(_response([dial]), _response())
+    agent = Agent(settings, llm, session_manager, tracker, registry)
+
+    try:
+        result = await agent.handle_message("user1", "test", "call the dentist", memory=False)
+    finally:
+        await tracker.close()
+
+    assert fake_twilio_rest.creates == []
+    assert llm.complete.await_count == 1
+    assert (result.text, result.call_sids) == (_budget_text(0.007), [])
+    session = await session_manager.get_or_create("user1", "test")
+    tool_results = [m.content for m in session.messages if m.role == MessageRole.TOOL_RESULT]
+    assert tool_results == [_DIAL_REFUSAL]
+
+
+async def test_an_utterance_in_a_call_in_progress_runs_and_is_recorded_over_the_budget(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """Q11: a call in progress is never gated, warned or cut off, and budget figures are never spoken."""
+    from pincer.core.agent import StreamEventType
+
+    settings, tracker = await budgeted(0.007)
+    await _seed(tmp_path, _CALL, _CALL)  # $0.014: over the limit before the utterance
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    chunks = [c async for c in agent.stream_voice_turn("user", "voice", "hi", session_key="CA_live")]
+
+    assert len(llm.streams) == 1
+    spoken = [c.content for c in chunks if c.type == StreamEventType.TEXT]
+    assert (spoken, chunks[-1].type, chunks[-1].content) == (["Done."], StreamEventType.DONE, "Done.")
+    assert not any("budget" in c.content.lower() or "$" in c.content for c in chunks)
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 3
+
+
+def test_nothing_is_refused_by_an_exception_after_the_call_any_more() -> None:
+    """The budget is checked before a call and every completed call is recorded, so the old
+    post-call refusal (and its catchers, which spoke the budget figures on a call) is gone."""
+    import pincer.exceptions
+
+    assert not hasattr(pincer.exceptions, "BudgetExceededError")

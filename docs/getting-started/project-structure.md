@@ -404,7 +404,7 @@ pincer/
 | `tasks/context.py` | Process-global deliverer/proactive/triggers for actor bodies |
 | `tasks/delivery.py` | `Deliverer`/`ResultEmitter`/`ResultRelay` — pub-sub result delivery bridge for split deployments |
 | `tools/builtin/schedule_tool.py` | Chat-driven `schedule_create/list/remove/toggle` tools |
-| `exceptions.py` | Custom exceptions (`BudgetExceededError`, `LLMError`, `ToolNotFoundError`, `ChannelNotConnectedError`) |
+| `exceptions.py` | Custom exceptions (`LLMError`, `ToolNotFoundError`, `ChannelNotConnectedError`) |
 
 | `mcp/` | MCP platform — client (consume external MCP servers) + server (expose Pincer tools via MCP); sandboxed stdio subprocesses; streamable-http transport; OAuth 2.1; audit trail; registry client (MCP Registry + ClawHub); 225 tests |
 | `integrations/google/` | Google Workspace — 113 tools (Gmail 19, Calendar 12, Drive 16, Docs 8, Sheets 10, Slides 6, Meet 27, Tasks 8, Contacts 7); InstalledAppFlow OAuth; 30-min service cache; exponential backoff; pagination; standalone FastMCP server on port 18900; 131 tests |

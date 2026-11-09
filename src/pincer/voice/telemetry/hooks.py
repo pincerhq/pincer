@@ -169,8 +169,30 @@ async def dial_unknown(temp_id: str, *, error: str) -> None:
     )
 
 
+async def dial_refused(temp_id: str, *, failure_code: str, reason: str) -> None:
+    """Pincer refused the dial before asking Twilio (e.g. the daily budget).
+
+    Terminal immediately, like a rejection: nothing was placed, so nothing else
+    would ever close this row. A policy decline, not a technical failure.
+    """
+    await _finish_dial(
+        temp_id,
+        EventName.CALL_DECLINED,
+        reason,
+        termination_reason=reason,
+        outcome="declined",
+        failure_code=failure_code,
+    )
+
+
 async def _finish_dial(
-    temp_id: str, name: EventName, error: str, *, termination_reason: str, outcome: str = ""
+    temp_id: str,
+    name: EventName,
+    error: str,
+    *,
+    termination_reason: str,
+    outcome: str = "",
+    failure_code: str = FailureCode.TWILIO_API.value,
 ) -> None:
     tracer = runtime.tracer_for(temp_id)
     if tracer is None:
@@ -180,7 +202,7 @@ async def _finish_dial(
         await tracer.finish(
             status="failed",
             outcome=outcome,
-            failure_code=FailureCode.TWILIO_API.value,
+            failure_code=failure_code,
             termination_reason=termination_reason,
             duration_s=0.0,
         )

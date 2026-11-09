@@ -34,7 +34,7 @@ from pincer.core.onboarding import (
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.db.ids import new_id
-from pincer.exceptions import BudgetExceededError, LLMError, LLMOutputTruncatedError, ToolNotFoundError
+from pincer.exceptions import LLMError, LLMOutputTruncatedError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -1744,12 +1744,6 @@ class Agent:
                             full_text += event.text
                             request_text += event.text
                             yield StreamChunk(StreamEventType.TEXT, event.text)
-                except BudgetExceededError:
-                    if llm_span is not None:
-                        llm_span.close(_SpanStatus.DENIED, reason="budget")
-                    budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
-                    yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
-                    return
                 except LLMError as e:
                     if llm_span is not None:
                         llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
@@ -1784,18 +1778,16 @@ class Agent:
                     if response.model:
                         timings.setdefault("turn_model", response.model)
 
-                try:
-                    provider = response.provider or self._settings.default_provider
-                    is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                    await self._costs.record(
-                        provider=provider,
-                        model=response.request_model or response.model,
-                        usage=response.usage,
-                        session_id=session.session_id,
-                        is_free=is_free,
-                    )
-                except BudgetExceededError:
-                    pass  # this turn already ran; the next turn hits the budget gate
+                # A call in progress is never gated (Q11): this utterance ran, so it is recorded
+                provider = response.provider or self._settings.default_provider
+                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+                await self._costs.record(
+                    provider=provider,
+                    model=response.request_model or response.model,
+                    usage=response.usage,
+                    session_id=session.session_id,
+                    is_free=is_free,
+                )
 
                 if not response.truncated:
                     break

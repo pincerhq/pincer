@@ -39,6 +39,7 @@ def mock_settings(tmp_path):
     settings.voice_webhook_base_url = "https://example.com"
     settings.voice_language = "en-US"
     settings.voice_allowed_callers = "*"
+    settings.daily_budget_usd = 0.0  # no LLM budget: a new call checks it first
     settings.twilio_auth_token = MagicMock()
     settings.twilio_auth_token.get_secret_value.return_value = ""
     return settings

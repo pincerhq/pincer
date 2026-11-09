@@ -1412,6 +1412,8 @@ async def contacts(contacts_service: ContactsServiceDep) -> list[Contact]:
 # map the known ones to meaningful HTTP status codes for the app.
 _ERROR_STATUS: list[tuple[str, int]] = [
     ("not enabled", 403),
+    # The daily LLM budget (outbound.BUDGET_REFUSAL): a spend limit, not a rate limit
+    ("daily budget reached", 402),
     ("disabled", 403),
     ("Invalid phone number", 422),
     ("Daily outbound call limit", 429),

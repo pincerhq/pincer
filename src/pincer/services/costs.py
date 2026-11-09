@@ -255,6 +255,12 @@ class CostService:
         )
 
 
+async def daily_budget_reached(settings: Settings) -> bool:
+    """The budget check for a phone call about to start (inbound webhook, outbound dial),
+    on the configured database and daily budget. A call in progress is never checked."""
+    return await CostService(get_database_url(settings.db_path), settings.daily_budget_usd).budget_reached()
+
+
 async def get_cost_service() -> CostService:
     """FastAPI dependency: the configured database and daily budget."""
     return await CostService.from_settings()
