@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from pincer.db.engine import get_engine
+from pincer.db.session import session_scope
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
+from pincer.repositories.onboarding import OnboardingRepository
 from pincer.services import onboarding as onboarding_module
 from pincer.services.identity import IdentityService
 from pincer.services.onboarding import OnboardingService
@@ -154,6 +156,62 @@ async def test_completing_without_a_row_inserts_one(url):
     record = await service.get("u", "web")
     assert record is not None
     assert (record.asked_session_id, record.completed_at) == (None, 20.0)
+
+
+async def _closed_by(url: str, user_id: str, channel: str) -> str | None:
+    async with session_scope(url) as session:
+        row = await OnboardingRepository(session).get((user_id, channel))
+    assert row is not None
+    return row.closed_by
+
+
+@pytest.mark.parametrize("reason", ["legacy", "existing"])
+async def test_closing_a_known_user_creates_a_completed_row(url, reason):
+    """A user who will never be asked gets a completed row, and why."""
+    service = OnboardingService(url)
+
+    assert await service.complete_known("u", "web", now=20.0, reason=reason) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.asked_at, record.completed_at, record.attempts) == (None, None, 20.0, 0)
+    assert await _closed_by(url, "u", "web") == reason
+
+
+async def test_closing_a_known_user_leaves_an_open_row_as_it_is(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    assert await service.complete_known("u", "web", now=20.0, reason="existing") is False
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.asked_at, record.completed_at) == ("web:u", 10.0, None)
+
+
+@pytest.mark.parametrize("closed_by", ["answer", "expired", "empty"])
+async def test_closing_a_known_user_leaves_a_closed_row_as_it_is(url, closed_by):
+    service = OnboardingService(url)
+    if closed_by == "empty":
+        await service.record_empty_reply("u", "web", max_empty=1, now=10.0)
+    elif closed_by == "answer":
+        await service.complete_answer("u", "web", now=10.0)
+    else:
+        await service.complete("u", "web", now=10.0)
+
+    assert await service.complete_known("u", "web", now=20.0, reason="legacy") is False
+
+    assert (await service.get("u", "web")).completed_at == 10.0  # type: ignore[union-attr]
+    assert await _closed_by(url, "u", "web") == closed_by
+
+
+async def test_closing_a_known_user_fills_the_completed_cache(url):
+    service = OnboardingService(url)
+    assert service.is_completed_cached("u", "web") is False
+
+    await service.complete_known("u", "web", now=20.0, reason="existing")
+
+    assert service.is_completed_cached("u", "web") is True
 
 
 async def test_the_record_is_per_user_and_channel(url):

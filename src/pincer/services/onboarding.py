@@ -73,15 +73,32 @@ class OnboardingService(DatabaseService):
 
     async def complete(self, user_id: str, channel: str, *, now: float) -> bool:
         """Close an open gate, for example when the answer window expires."""
-        return await self._complete(user_id, channel, now=now, answer=False)
+        return await self._complete(user_id, channel, now=now, reason="expired")
 
     async def complete_answer(self, user_id: str, channel: str, *, now: float) -> bool:
         """Claim an answer, including after an empty close; expiry and answers are final."""
-        return await self._complete(user_id, channel, now=now, answer=True)
+        return await self._complete(user_id, channel, now=now, reason="answer")
 
-    async def _complete(self, user_id: str, channel: str, *, now: float, answer: bool) -> bool:
+    async def complete_known(self, user_id: str, channel: str, *, now: float, reason: str) -> bool:
+        """Close the gate for a user who will never be asked: onboarded before
+        the table existed (``reason="legacy"``), or with history from before
+        onboarding (``reason="existing"``). Writing the row once lets their
+        later turns hit the completed cache instead of reading the table.
+
+        Insert only: an existing row, open or closed, is left as it is, since
+        an open one means another turn has just asked. False when one existed.
+        """
         async with session_scope(self._url) as session:
-            won = await OnboardingRepository(session).mark_completed(user_id, channel, now, answer=answer)
+            inserted = await OnboardingRepository(session).insert_if_absent(
+                {"user_id": user_id, "channel": channel, "completed_at": now, "closed_by": reason}
+            )
+        if inserted:
+            _remember_completed(self._url, user_id, channel)
+        return inserted
+
+    async def _complete(self, user_id: str, channel: str, *, now: float, reason: str) -> bool:
+        async with session_scope(self._url) as session:
+            won = await OnboardingRepository(session).mark_completed(user_id, channel, now, reason=reason)
         _remember_completed(self._url, user_id, channel)
         return won
 

@@ -25,12 +25,13 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
-    async def mark_completed(self, user_id: str, channel: str, completed_at: float, *, answer: bool = False) -> bool:
-        """Close the gate; an answer may take over an empty-reply closure."""
+    async def mark_completed(self, user_id: str, channel: str, completed_at: float, *, reason: str) -> bool:
+        """Close the gate, recording why in `closed_by` ("answer" or "expired").
+        Only an answer may take over an empty-reply closure; any other closed
+        row is kept."""
         eligible = _TABLE.c.completed_at.is_(None)
-        if answer:
+        if reason == "answer":
             eligible = eligible | (_TABLE.c.closed_by == "empty")
-        reason = "answer" if answer else "expired"
         result = await self.session.exec(
             upsert(
                 dialect_of(self.session),

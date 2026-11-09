@@ -2113,7 +2113,11 @@ class Agent:
         ``channel`` itself (Slack and Teams threads) are onboarded per thread.
 
         A user with no row yet is read from the flags their session carried
-        before the table existed, so nobody onboarded then is asked again.
+        before the table existed, so nobody onboarded then is asked again. That
+        first read also writes a completed row for a user who will never be
+        asked (onboarded before the table, or with history from before
+        onboarding), so their later turns hit the completed cache and read
+        nothing.
 
         Voice is never onboarded: nobody onboards mid-phone-call, and with a
         session per call every call's first turn would look like a new user.
@@ -2133,12 +2137,38 @@ class Agent:
                 return _NO_ONBOARDING
             return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
         if session.is_onboarded():
+            await self._close_known_onboarding(user_id, channel, "legacy")
             return _NO_ONBOARDING
         if session.onboarding_prompt_already_sent():
             return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
         # New: nothing stored for this user on the channel, in any session.
         new = session.is_fresh() and not await self._sessions.has_stored_sessions(user_id, channel)
+        # A reservation means another turn in this process is asking right now:
+        # closing the gate would make its `claim_prompt` lose, so the question
+        # would show but its answer go unread. Another process asking leaves a
+        # window of milliseconds (its reply saved, its claim not yet written),
+        # and only for a brand-new user; that is accepted.
+        if not new and (user_id, channel) not in self._onboarding_reserved:
+            await self._close_known_onboarding(user_id, channel, "existing")
         return _Onboarding(prompt=new, ingest=False)
+
+    async def _close_known_onboarding(self, user_id: str, channel: str, reason: str) -> None:
+        """Write a completed row for a user who will never be asked, so later
+        turns skip the read. Only an optimisation: a failed write is logged and
+        the turn goes on."""
+        try:
+            closed = await self._sessions.onboarding.complete_known(user_id, channel, now=time.time(), reason=reason)
+        except Exception:
+            logger.warning(
+                "onboarding.close_known_failed user=%s channel=%s reason=%s",
+                user_id,
+                channel,
+                reason,
+                exc_info=True,
+            )
+            return
+        if closed:
+            logger.info("onboarding.closed_known user=%s channel=%s reason=%s", user_id, channel, reason)
 
     async def _reserve_onboarding_prompt(self, onboarding: _Onboarding, user_id: str, channel: str) -> bool:
         """Hold the right to ask, before the question is appended.

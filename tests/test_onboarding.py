@@ -21,6 +21,7 @@ from pincer.core.session import (
     conversation_key,
 )
 from pincer.db.engine import get_database_url
+from pincer.db.session import session_scope
 from pincer.exceptions import BudgetExceededError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
 from pincer.memory.store import MemoryStore
@@ -90,6 +91,16 @@ async def _reply(
 async def _record(tmp_path: Path, user_id: str, channel: str) -> OnboardingRecord | None:
     """The stored onboarding row, read past every cache (the fixture's db is at head)."""
     return await OnboardingService(get_database_url(tmp_path / "test.db")).get(user_id, channel)
+
+
+async def _closed_by(tmp_path: Path, user_id: str, channel: str) -> str | None:
+    """Why the stored row was closed; asserts it exists and is completed."""
+    record = await _record(tmp_path, user_id, channel)
+    assert record is not None and record.completed_at is not None
+    async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+        row = await OnboardingRepository(session).get((user_id, channel))
+    assert row is not None
+    return row.closed_by
 
 
 async def _store_history(
@@ -583,7 +594,8 @@ async def test_existing_user_new_conversation_is_separate_and_not_prompted(
     assert [m.content for m in thread.messages if m.role == MessageRole.USER] == ["Hi!"]
     main = await session_manager.get_or_create("user-t", "web")
     assert [m.content for m in main.messages if m.role == MessageRole.USER] == ["earlier message"]
-    assert await _record(tmp_path, "user-t", "web") is None
+    assert await _closed_by(tmp_path, "user-t", "web") == "existing"
+    assert mock_llm.complete.call_count == 1  # the turn only; nothing ingested
 
 
 @_PATHS
@@ -598,7 +610,7 @@ async def test_history_only_in_conversations_is_not_new(
     reply = await _reply(agent, path, "user-c", "web", "Hi!", session_key=conversation_key("user-c", "web", "b"))
 
     assert reply == "Hello! I'm Pincer."
-    assert await _record(tmp_path, "user-c", "web") is None
+    assert await _closed_by(tmp_path, "user-c", "web") == "existing"
 
 
 @_PATHS
@@ -642,7 +654,7 @@ async def test_legacy_onboarded_session_is_not_asked(
     assert reply == "Hello! I'm Pincer."
     assert mock_llm.complete.call_count == 1
     assert ONBOARDING_FOLLOWUP_INSTRUCTION not in mock_llm.complete.call_args.kwargs["system"]
-    assert await _record(tmp_path, "user-o", "web") is None
+    assert await _closed_by(tmp_path, "user-o", "web") == "legacy"
 
 
 @_PATHS
@@ -708,6 +720,71 @@ async def test_an_onboarded_user_s_turn_reads_no_onboarding_row(
     await _reply(agent, path, "user-k", "web", "hello", session_key=conversation_key("user-k", "web", "z"))
 
     assert reads == []
+
+
+@pytest.mark.parametrize(
+    "history",
+    [{ONBOARDING_PROMPT_SENT_KEY: "true", ONBOARDING_COMPLETE_KEY: "true"}, {}],
+    ids=["legacy", "existing"],
+)
+@_PATHS
+async def test_a_known_user_s_second_turn_reads_no_onboarding_row(
+    path, history, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """The first turn of a user with no row writes a completed one; the next
+    hits the cache."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(session_manager, "user-k", "web", **history)
+    await _reply(agent, path, "user-k", "web", "hello")
+    stored = session_manager.onboarding.get
+    reads = []
+
+    async def get(user_id, channel):
+        reads.append((user_id, channel))
+        return await stored(user_id, channel)
+
+    session_manager.onboarding.get = get
+
+    reply = await _reply(agent, path, "user-k", "web", "hello again")
+
+    session_manager.onboarding.get = stored
+    assert reply == "Hello! I'm Pincer."
+    assert reads == []
+
+
+@_PATHS
+async def test_an_existing_user_is_not_closed_while_a_turn_is_asking(
+    path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """Closing the gate while another turn asks would make its claim lose and
+    leave its question unread."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(session_manager, "user-r", "web")
+    agent._onboarding_reserved = {("user-r", "web")}  # the other turn, between its question and its save
+
+    reply = await _reply(agent, path, "user-r", "web", "Hi!", session_key=conversation_key("user-r", "web", "b"))
+
+    assert reply == "Hello! I'm Pincer."
+    assert await _record(tmp_path, "user-r", "web") is None
+
+
+@_PATHS
+async def test_a_failed_close_of_a_known_user_does_not_fail_the_turn(
+    path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(session_manager, "user-f", "web")
+    session_manager.onboarding.complete_known = AsyncMock(side_effect=RuntimeError("db down"))
+
+    reply = await _reply(agent, path, "user-f", "web", "hello again")
+
+    assert reply == "Hello! I'm Pincer."
+    assert ONBOARDING_QUESTION_EN not in reply
+    session_manager.onboarding.complete_known.assert_awaited_once()
+    assert await _record(tmp_path, "user-f", "web") is None
 
 
 @pytest.mark.parametrize("session_key", [None, "voice:CA123"], ids=["no_key", "call_key"])
@@ -811,7 +888,7 @@ async def test_preexisting_session_never_prompts(
     result = await agent.handle_message("user-old", "test", "hello again")
 
     assert ONBOARDING_QUESTION_EN not in result.text
-    assert await _record(tmp_path, "user-old", "test") is None
+    assert await _closed_by(tmp_path, "user-old", "test") == "existing"
 
 
 async def test_an_extraction_error_leaves_the_gate_untouched(
