@@ -112,6 +112,7 @@ Replace each skill with a FastMCP server:
 # Before (skills/my_skill/main.py)
 from pincer.tools import tool
 
+
 @tool(name="my_tool", description="Does something")
 async def my_tool(param: str) -> str:
     return f"Result: {param}"
@@ -123,10 +124,12 @@ from fastmcp import FastMCP
 
 mcp = FastMCP(name="my_skill")
 
+
 @mcp.tool
 async def my_tool(param: str) -> str:
     """Does something."""
     return f"Result: {param}"
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

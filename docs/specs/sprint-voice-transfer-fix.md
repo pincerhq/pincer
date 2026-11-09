@@ -71,9 +71,15 @@ Twilio sends us nothing on its own when an inbound call ends unless a status cal
 
    ```python
    client.calls(call_sid).update(
-       twiml=build_dial_twiml(target, timeout_s=..., action_url=..., announce=..., language=...,
-                              time_limit_s=self._settings.voice_transfer_max_duration_s),
-       status_callback=f"{base}/api/apps/twilio/status",   # only when base is http(s)
+       twiml=build_dial_twiml(
+           target,
+           timeout_s=...,
+           action_url=...,
+           announce=...,
+           language=...,
+           time_limit_s=self._settings.voice_transfer_max_duration_s,
+       ),
+       status_callback=f"{base}/api/apps/twilio/status",  # only when base is http(s)
        status_callback_method="POST",
    )
    ```
@@ -87,7 +93,9 @@ New setting in `src/pincer/config/channels.py`:
 
 ```python
 voice_transfer_max_duration_s: int = Field(
-    default=3600, ge=60, le=14400,
+    default=3600,
+    ge=60,
+    le=14400,
     description="Ceiling for a call bridged to a human (<Dial timeLimit>); also the stuck-call allowance for transferred calls",
 )
 ```

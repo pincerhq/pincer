@@ -277,6 +277,7 @@ Located in `src/pincer/tools/builtin/`. Each tool is a module with async handler
 # In a skill or builtin module
 from pincer.tools import tool
 
+
 @tool(
     name="my_tool",
     description="What the LLM sees",

@@ -96,6 +96,7 @@ export const weatherTool: Tool = {
 from pincer.tools import tool
 import httpx
 
+
 @tool(
     name="get_weather",
     description="Get current weather for a city",
