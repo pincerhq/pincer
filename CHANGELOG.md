@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Claude caches tools and system prompt for an hour, the conversation for five minutes (#357)
+
+- Anthropic requests with tools now mark the last tool and the end of the
+  system prompt with a 1-hour cache breakpoint, and turn on automatic caching
+  (5 minutes) for the conversation, so every tool-loop request and every next
+  turn reads the earlier prompt from the cache. Before, only the tools were
+  cached, for 5 minutes. Requests without tools (summaries, extractions) send
+  no breakpoint. `prompt_cache_tools = false` turns all three off.
+- 1-hour writes are priced at the model's `cache_write_1h` rate.
+- Each chat and web chat turn logs one INFO line with its requests' uncached
+  input, cache reads, 5-minute and 1-hour cache writes, output and cost.
+
 #### The system prompt stays the same for a whole conversation (#357)
 
 - Recalled memories and the current date and time are no longer part of the

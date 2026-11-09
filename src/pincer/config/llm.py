@@ -142,8 +142,8 @@ class LLMSettings(BaseModel):
     )
     prompt_cache_tools: bool = Field(
         default=True,
-        description="Anthropic prompt caching on the (static) tool schemas — the largest prompt prefix. "
-        "Major TTFT/cost win on multi-turn conversations, especially voice (Sprint 5 T5.4).",
+        description="Anthropic prompt caching on requests with tools: the tools and the system prompt for "
+        "1 hour, the conversation automatically for 5 minutes (issue #357). False sends no cache breakpoint.",
     )
     max_tokens: int = Field(default=8192, ge=1, le=128000)
     temperature: float = Field(default=0.5, ge=0.0, le=2.0)

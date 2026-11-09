@@ -22,6 +22,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
+from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
 from pincer.core.compaction import LastRequest
 from pincer.core.log_once import LogOnce
@@ -103,6 +104,10 @@ _LOAD_SKILL_TOOL = "load_skill"
 _CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
+# One line per chat turn: its requests' tokens by type, so caching can be watched per turn (issue #357)
+_TURN_LOG = (
+    "Chat turn: session=%s requests=%d input=%d cache_read=%d cache_write_5m=%d cache_write_1h=%d output=%d cost=$%.6f"
+)
 _CALL_PLACED_THEN_FAILED_TEXT = (
     "I placed the call, but then hit an error and could not finish my reply. "
     "The call's result will follow when it ends."
@@ -316,6 +321,20 @@ class _Onboarding:
 
 
 _NO_ONBOARDING = _Onboarding(prompt=False, ingest=False)
+
+
+def _log_turn(session_id: str, requests: int, usage: TokenUsage, cost: float) -> None:
+    logger.info(
+        _TURN_LOG,
+        session_id,
+        requests,
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
+        usage.output_tokens,
+        cost,
+    )
 
 
 def _reading_onboarding(session: Session, *, last_chance: bool = False) -> _Onboarding:
@@ -897,6 +916,8 @@ class Agent:
         system_prompt = await build_prompt(_schema_names(tool_schemas))
 
         total_cost = 0.0
+        turn_usage = TokenUsage()
+        turn_requests = 0
         tool_calls_count = 0
         call_sids: list[str] = []
         final_text = ""
@@ -961,6 +982,8 @@ class Agent:
                 session_id=session.session_id,
                 is_free=is_free,
             )
+            turn_usage += response.usage
+            turn_requests += 1
 
             try:
                 _refuse_truncated_output(response, self._settings.max_tokens)
@@ -1095,6 +1118,7 @@ class Agent:
             except Exception:
                 logger.debug("Failed to store exchange memory", exc_info=True)
 
+        _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
         return AgentResponse(
             text=final_text,
             cost_usd=total_cost,
@@ -1356,6 +1380,8 @@ class Agent:
         response: LLMResponse | None = None
         call_sids: list[str] = []
         total_cost = 0.0
+        turn_usage = TokenUsage()
+        turn_requests = 0
         refused = False  # the budget refused a request: the turn ends with the budget reply
 
         full_text = ""
@@ -1388,6 +1414,8 @@ class Agent:
                     raise
 
                 total_cost += await self._record_cost(response, session.session_id)
+                turn_usage += response.usage
+                turn_requests += 1
                 # A blank cut-off here is fine: the final stream below is the reply, and is checked
                 _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
 
@@ -1498,6 +1526,8 @@ class Agent:
                     if streamed is not None:
                         self._note_request(session, streamed, system_prompt, None)
                         total_cost += await self._record_cost(streamed, session.session_id)
+                        turn_usage += streamed.usage
+                        turn_requests += 1
                         _refuse_truncated_output(streamed, self._settings.max_tokens)
                     if full_text.strip():
                         if streamed is None:
@@ -1533,6 +1563,7 @@ class Agent:
         if onboarding.ingest:
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
+        _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
         yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
 
     async def end_voice_session(self, session_key: str) -> None:

@@ -551,7 +551,7 @@ async def check_cache_reads(t: VoiceTarget) -> Outcome:
         "PASS",
         f"cache_read_tokens turn 1: {first.cache_read_tokens}, {answer.cache_read_tokens}; "
         f"turn 2: {kept.cache_read_tokens} unstripped, {after.cache_read_tokens} after the strip "
-        f"(tools prefix ~{CACHE_PREFIX_TOKENS} tokens)",
+        f"(tools prefix ~{CACHE_PREFIX_TOKENS} tokens; reads also cover the conversation)",
     )
 
 

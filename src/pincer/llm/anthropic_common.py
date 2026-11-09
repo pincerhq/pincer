@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 # Content block types that carry a response's thinking
 _THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
+# Prompt cache breakpoints (owner ruling Q17): tools and system live for an hour, so messages
+# minutes apart reuse them; the conversation uses top-level automatic caching (5 minutes)
+_ONE_HOUR: dict[str, str] = {"type": "ephemeral", "ttl": "1h"}
+_AUTOMATIC: dict[str, str] = {"type": "ephemeral"}
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -79,18 +83,25 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         self._reasoning_effort = settings.reasoning_effort
         self._thinking = settings.thinking
 
-    def _maybe_cache_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Prompt caching (Sprint 5, T5.4): the tool schemas are the largest
-        and fully static prefix of every request — a cache_control breakpoint
-        on the last tool caches the whole tools block across turns, cutting
-        time-to-first-token dramatically on multi-turn conversations. The
-        varying parts (system with per-turn phase/memories, messages) come
-        after the breakpoint and don't invalidate it."""
-        if not getattr(self._settings, "prompt_cache_tools", True):
-            return tools
-        cached = list(tools)
-        cached[-1] = {**cached[-1], "cache_control": {"type": "ephemeral"}}
-        return cached
+    def _cached(self, tools: list[dict[str, Any]] | None, system: str | None) -> dict[str, Any]:
+        """The ``tools``, ``system`` and ``cache_control`` kwargs, with the cache breakpoints.
+
+        Only a request with tools is cached: it is an agent loop (chat, voice, headless) whose
+        prefix is sent again on every request. One-shot calls (summaries, extractions) send no
+        tools, and caching their prompt would only pay the write premium for nothing read back.
+        Three breakpoints, in TTL order: the last tool and the end of the system prompt for an
+        hour, then the conversation through top-level automatic caching (5 minutes). Messages
+        are never marked, so stored history is sent unchanged.
+        """
+        kwargs: dict[str, Any] = {}
+        cache = bool(tools) and getattr(self._settings, "prompt_cache_tools", True)
+        if tools:
+            kwargs["tools"] = [*tools[:-1], {**tools[-1], "cache_control": dict(_ONE_HOUR)}] if cache else tools
+        if system:
+            kwargs["system"] = [{"type": "text", "text": system, "cache_control": dict(_ONE_HOUR)}] if cache else system
+        if cache:
+            kwargs["cache_control"] = dict(_AUTOMATIC)
+        return kwargs
 
     def _build_kwargs(
         self,
@@ -125,10 +136,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             logger.debug("Dropping temperature: %s does not accept it with thinking on", model)
         else:
             kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
-        if system:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs.update(self._cached(tools, system))
         kwargs.update(reasoning.fragment)
         return kwargs
 

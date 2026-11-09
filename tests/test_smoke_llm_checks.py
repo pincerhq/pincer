@@ -344,11 +344,13 @@ def test_cache_reads_reported_for_two_turns_before_and_after_the_strip(smoke, ca
     out = capsys.readouterr().out
     assert code == 0
     assert "PASS  cache-reads: cache_read_tokens turn 1: 0, 1401; turn 2: 1402 unstripped, 1403 after the strip" in out
+    assert "tokens; reads also cover the conversation)" in out  # automatic caching reads past the tools
     requests = build.requests()
     assert len(requests) == 4
     for body in requests:
         assert len(body["tools"]) == 2
-        assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}  # production's breakpoint
+        assert body["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}  # production's breakpoints
+        assert body["cache_control"] == {"type": "ephemeral"}
 
     def thinking_count(body: dict[str, Any]) -> int:
         return sum(

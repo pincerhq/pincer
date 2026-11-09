@@ -66,6 +66,16 @@ class TokenUsage:
         """The whole prompt: uncached input, both cache writes and cache reads."""
         return self.input_tokens + self.cache_write_5m_tokens + self.cache_write_1h_tokens + self.cache_read_tokens
 
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        """Both calls' tokens, type by type (e.g. a turn's requests)."""
+        return TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            cache_write_5m_tokens=self.cache_write_5m_tokens + other.cache_write_5m_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens + other.cache_write_1h_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+        )
+
 
 @dataclass(frozen=True)
 class LongContext:
