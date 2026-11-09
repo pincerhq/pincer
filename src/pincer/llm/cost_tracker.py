@@ -18,7 +18,7 @@ from pincer.services.costs import CostService, CostSummary
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pincer.config.pricing import PriceTable
+    from pincer.config.pricing import PriceTable, TokenUsage
 
 __all__ = ["CostSummary", "CostTracker", "get_cost_tracker"]
 
@@ -52,13 +52,12 @@ class CostTracker:
         self,
         provider: str,
         model: str,
-        input_tokens: int,
-        output_tokens: int,
+        usage: TokenUsage,
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
         """Record a cost entry and return the cost. Raises BudgetExceededError if over limit."""
-        return await self.service.record(provider, model, input_tokens, output_tokens, session_id, is_free)
+        return await self.service.record(provider, model, usage, session_id, is_free)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
         await self.service.add_image_cost(cost_usd, provider, model)

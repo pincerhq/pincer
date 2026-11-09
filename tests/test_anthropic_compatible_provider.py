@@ -9,6 +9,7 @@ import anthropic_sse as sse
 import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
+from pincer.config.pricing import TokenUsage
 from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ThinkingBlock, ToolCall
 
 MODULE = "pincer.llm.anthropic_common"
@@ -965,3 +966,44 @@ async def test_merging_assistant_messages_never_moves_a_later_thinking_ahead_of_
         "role": "assistant",
         "content": [{"type": "text", "text": "One moment."}, *_THINKING_API, {"type": "text", "text": "Done."}],
     }
+
+
+# ── Usage: every token type (issue #357) ──────────────────────────
+
+_CACHED_USAGE = {
+    "input_tokens": 36,
+    "cache_creation_input_tokens": 27_659,
+    "cache_creation": {"ephemeral_5m_input_tokens": 27_559, "ephemeral_1h_input_tokens": 100},
+    "cache_read_input_tokens": 281_470,
+}
+
+
+async def _usage_of(settings, method: str, usage: dict) -> TokenUsage:
+    """The usage one scripted response carrying `usage` parses to, via `method`."""
+    async with sse.ScriptedAnthropic(settings, [([sse.text("ok")], "end_turn", usage)]) as llm:
+        if method == "complete":
+            response = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+        else:
+            events = [e async for e in llm.provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")])]
+            response = events[-1].response
+    return response.usage
+
+
+@pytest.mark.parametrize("method", ["complete", "stream_turn"])
+async def test_both_paths_split_cache_writes_by_ttl(anthropic_settings, method):
+    expected = TokenUsage(
+        input_tokens=36,
+        cache_write_5m_tokens=27_559,
+        cache_write_1h_tokens=100,
+        cache_read_tokens=281_470,
+        output_tokens=5,  # the scripted stream's message_delta
+    )
+    assert await _usage_of(anthropic_settings, method, _CACHED_USAGE) == expected
+
+
+async def test_writes_without_a_ttl_breakdown_are_five_minute_writes(anthropic_settings):
+    """The default TTL: an endpoint that reports only the total wrote 5-minute entries."""
+    usage = {"input_tokens": 36, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 0}
+    assert await _usage_of(anthropic_settings, "complete", usage) == TokenUsage(
+        input_tokens=36, cache_write_5m_tokens=500, output_tokens=5
+    )

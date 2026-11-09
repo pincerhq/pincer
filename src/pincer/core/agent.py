@@ -919,8 +919,7 @@ class Agent:
                 cost = await self._costs.record(
                     provider=provider,
                     model=response.request_model or response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
+                    usage=response.usage,
                     session_id=session.session_id,
                     is_free=is_free,
                 )
@@ -1134,8 +1133,7 @@ class Agent:
                 await self._costs.record(
                     provider=provider,
                     model=response.request_model or response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
+                    usage=response.usage,
                     session_id=None,
                     is_free=is_free,
                 )
@@ -1712,7 +1710,9 @@ class Agent:
                 if timings is not None:
                     # Cache visibility: did the tools-prefix prompt cache hit?
                     timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
-                    timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
+                    timings.setdefault(
+                        "cache_write_tokens", float(response.cache_write_5m_tokens + response.cache_write_1h_tokens)
+                    )
                     timings.setdefault("input_tokens", float(response.input_tokens))
                     # Which model actually served the turn (A/B attribution in the
                     # latency log — the runtime override can change mid-session).
@@ -1725,8 +1725,7 @@ class Agent:
                     await self._costs.record(
                         provider=provider,
                         model=response.request_model or response.model,
-                        input_tokens=response.input_tokens,
-                        output_tokens=response.output_tokens,
+                        usage=response.usage,
                         session_id=session.session_id,
                         is_free=is_free,
                     )

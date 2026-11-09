@@ -23,6 +23,7 @@ from pincer.llm.base import (
     LLMResponse,
     MessageRole,
     StreamTurnEvent,
+    TokenCounts,
     ToolCall,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
@@ -143,6 +144,31 @@ def _normalize_finish_reason(finish_reason: str | None) -> str:
     return finish_reason or ""
 
 
+def _token_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _usage_counts(usage: Any) -> TokenCounts:
+    """The token counts of an OpenAI `usage` (None when the API sent none).
+
+    `prompt_tokens` is the whole prompt: the cached part (`cached_tokens`) and, where the
+    API reports it (Azure, gpt-6), the part written to the cache (`cache_write_tokens`,
+    stored as 5-minute writes) come out of it, leaving uncached input.
+    """
+    prompt = _token_count(getattr(usage, "prompt_tokens", 0))
+    details = getattr(usage, "prompt_tokens_details", None)
+    read = _token_count(getattr(details, "cached_tokens", 0))
+    # Not in the SDK's model: read from the response's extra fields
+    written = _token_count(getattr(details, "cache_write_tokens", 0))
+    return TokenCounts(
+        input_tokens=max(0, prompt - read - written),
+        cache_write_5m_tokens=written,
+        cache_write_1h_tokens=0,
+        cache_read_tokens=read,
+        output_tokens=_token_count(getattr(usage, "completion_tokens", 0)),
+    )
+
+
 def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     """Parse OpenAI ChatCompletion into unified LLMResponse."""
     choice = response.choices[0]
@@ -163,9 +189,8 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
         content=message.content or "",
         tool_calls=tool_calls,
         model=response.model,
-        input_tokens=response.usage.prompt_tokens if response.usage else 0,
-        output_tokens=response.usage.completion_tokens if response.usage else 0,
         stop_reason=_normalize_finish_reason(choice.finish_reason),
+        **_usage_counts(response.usage),
     )
 
 
@@ -373,9 +398,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 model=model_name,
                 provider=self._provider_name,
                 request_model=kwargs["model"],
-                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
                 stop_reason=_normalize_finish_reason(finish_reason),
+                **_usage_counts(usage),
             )
         )
 

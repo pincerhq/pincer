@@ -2,6 +2,7 @@
 
 import pytest
 
+from pincer.config.pricing import TokenUsage
 from pincer.llm.base import LLMMessage, MessageRole, ToolCall
 from pincer.llm.cost_tracker import CostTracker
 
@@ -28,8 +29,7 @@ async def test_cost_tracker_record(cost_tracker: CostTracker) -> None:
     cost = await cost_tracker.record(
         provider="test",
         model="gpt-4o-mini",
-        input_tokens=1000,
-        output_tokens=500,
+        usage=TokenUsage(input_tokens=1000, output_tokens=500),
     )
     assert cost > 0
 
@@ -42,8 +42,7 @@ async def test_cost_tracker_record_free_provider(cost_tracker: CostTracker) -> N
     cost = await cost_tracker.record(
         provider="ollama",
         model="llama3.2",
-        input_tokens=1000,
-        output_tokens=500,
+        usage=TokenUsage(input_tokens=1000, output_tokens=500),
         is_free=True,
     )
     assert cost == 0.0
@@ -51,8 +50,8 @@ async def test_cost_tracker_record_free_provider(cost_tracker: CostTracker) -> N
 
 @pytest.mark.asyncio
 async def test_cost_tracker_summary(cost_tracker: CostTracker) -> None:
-    await cost_tracker.record("test", "gpt-4o", 100, 50)
-    await cost_tracker.record("test", "gpt-4o", 200, 100)
+    await cost_tracker.record("test", "gpt-4o", TokenUsage(input_tokens=100, output_tokens=50))
+    await cost_tracker.record("test", "gpt-4o", TokenUsage(input_tokens=200, output_tokens=100))
 
     summary = await cost_tracker.get_summary()
     assert summary.total_calls == 2
@@ -77,7 +76,7 @@ async def test_cost_tracker_image_and_budget(cost_tracker: CostTracker) -> None:
 async def test_cost_tracker_reporting_queries(cost_tracker: CostTracker) -> None:
     from datetime import UTC, datetime
 
-    await cost_tracker.record("test", "gpt-4o", 100, 50)
+    await cost_tracker.record("test", "gpt-4o", TokenUsage(input_tokens=100, output_tokens=50))
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     daily = await cost_tracker.get_daily_costs(today)

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import openai as _openai
 import pytest
 
+from pincer.config.pricing import TokenUsage
 from pincer.llm.base import LLMMessage, MessageRole
 
 MODULE = "pincer.llm.openai_common"
@@ -747,3 +748,59 @@ class TestReasoningSettings:
         assert body["model"] == "deploy-benign-345"
         assert "reasoning_effort" not in body
         assert not [r for r in caplog.records if "Not sending" in r.getMessage()]
+
+
+# ── Usage: every token type (issue #357) ──────────────────────────
+
+
+async def _usage_of(method: str, usage: dict) -> TokenUsage:
+    """The usage a real response carrying `usage` (OpenAI's JSON) parses to."""
+    import json
+
+    import httpx
+    from openai import AsyncOpenAI
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("stream"):
+            last = {**_CHUNK, "choices": [], "usage": usage}
+            sse = f"data: {json.dumps(_CHUNK)}\n\ndata: {json.dumps(last)}\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
+        return httpx.Response(200, json={**_COMPLETION, "usage": usage})
+
+    provider = OpenAICompatibleProvider(_reasoning_settings("gpt-5.4-mini"), "openai")
+    await provider._client.close()
+    provider._client = AsyncOpenAI(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    try:
+        if method == "complete":
+            response = await provider.complete(_HI)
+        else:
+            response = [e async for e in provider.stream_turn(_HI)][-1].response
+    finally:
+        await provider.close()
+    return response.usage
+
+
+@pytest.mark.parametrize("method", ["complete", "stream_turn"])
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        # cached input is read from the cache, not uncached input
+        ({"cached_tokens": 800}, TokenUsage(input_tokens=200, cache_read_tokens=800, output_tokens=50)),
+        # Azure reports writes (gpt-6) beside the cached count; they are stored as 5-minute writes
+        (
+            {"cached_tokens": 600, "cache_write_tokens": 300},
+            TokenUsage(input_tokens=100, cache_write_5m_tokens=300, cache_read_tokens=600, output_tokens=50),
+        ),
+        # no details at all: the whole prompt is uncached
+        (None, TokenUsage(input_tokens=1_000, output_tokens=50)),
+    ],
+)
+async def test_the_prompt_is_split_into_uncached_input_and_cache_tokens(method, details, expected):
+    usage = {"prompt_tokens": 1_000, "completion_tokens": 50, "total_tokens": 1_050}
+    if details is not None:
+        usage["prompt_tokens_details"] = details
+    assert await _usage_of(method, usage) == expected

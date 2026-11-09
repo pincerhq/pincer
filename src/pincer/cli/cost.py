@@ -17,6 +17,10 @@ async def cost(
     await _show_cost(days=days, by_model=by_model, by_tool=by_tool, export=export)
 
 
+def _hit_rate(rate: float | None) -> str:
+    return "—" if rate is None else f"{rate:.1%}"
+
+
 async def _show_cost(days: int = 0, by_model: bool = False, by_tool: bool = False, export: str = "") -> None:
     from datetime import UTC, datetime, timedelta
 
@@ -24,6 +28,7 @@ async def _show_cost(days: int = 0, by_model: bool = False, by_tool: bool = Fals
 
     from pincer.config import get_settings_relaxed
     from pincer.llm.cost_tracker import CostTracker
+    from pincer.services.costs import cache_hit_rate
 
     settings = get_settings_relaxed()
     tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
@@ -36,6 +41,11 @@ async def _show_cost(days: int = 0, by_model: bool = False, by_tool: bool = Fals
     console.print(f"  Today:   ${today:.4f} / ${settings.daily_budget_usd:.2f}")
     console.print(f"  Total:   ${summary.total_usd:.4f} ({summary.total_calls} calls)")
     console.print(f"  Tokens:  {summary.total_input_tokens:,} in / {summary.total_output_tokens:,} out")
+    written = summary.total_cache_write_5m_tokens + summary.total_cache_write_1h_tokens
+    console.print(
+        f"  Cache:   {summary.total_cache_read_tokens:,} read / {written:,} written "
+        f"({_hit_rate(summary.cache_hit_rate)} hit rate)"
+    )
 
     if days > 0:
         end = datetime.now(UTC)
@@ -58,12 +68,24 @@ async def _show_cost(days: int = 0, by_model: bool = False, by_tool: bool = Fals
         if models:
             console.print("\n[bold]By Model:[/bold]")
             table = Table()
-            table.add_column("Model")
+            table.add_column("Model", no_wrap=True)
             table.add_column("Cost", justify="right")
             table.add_column("Requests", justify="right")
             table.add_column("Tokens", justify="right")
+            table.add_column("Cache read", justify="right")
+            table.add_column("Cache write", justify="right")
+            table.add_column("Hit rate", justify="right")
             for m in models:
-                table.add_row(m["model"], f"${m['total']:.4f}", str(m["requests"]), f"{m['tokens']:,}")
+                written = m["cache_write_5m_tokens"] + m["cache_write_1h_tokens"]
+                table.add_row(
+                    m["model"],
+                    f"${m['total']:.4f}",
+                    str(m["requests"]),
+                    f"{m['tokens']:,}",
+                    f"{m['cache_read_tokens']:,}",
+                    f"{written:,}",
+                    _hit_rate(cache_hit_rate(m["input_tokens"], written, m["cache_read_tokens"])),
+                )
             console.print(table)
 
     if export:

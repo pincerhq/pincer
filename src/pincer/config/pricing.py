@@ -51,6 +51,23 @@ class Rates:
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    """The tokens of one LLM call, by how each is billed. `input_tokens` is uncached input
+    only; the field names are the cost log's columns."""
+
+    input_tokens: int = 0
+    cache_write_5m_tokens: int = 0
+    cache_write_1h_tokens: int = 0
+    cache_read_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def prompt_tokens(self) -> int:
+        """The whole prompt: uncached input, both cache writes and cache reads."""
+        return self.input_tokens + self.cache_write_5m_tokens + self.cache_write_1h_tokens + self.cache_read_tokens
+
+
+@dataclass(frozen=True)
 class LongContext:
     """The rates that replace an entry's own when the whole prompt is above `above` tokens."""
 
@@ -90,11 +107,17 @@ class PriceTable:
     def __contains__(self, model: object) -> bool:
         return model in self.entries
 
-    def cost(self, provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
-        """USD for one call served by `provider`. The prompt is `input_tokens` until the cache
-        token types are priced (slice 3), which then counts writes and reads in it as well."""
-        rates = self._resolve(provider, model, input_tokens)
-        return (input_tokens * rates.input + output_tokens * rates.output) / _PER_TOKEN
+    def cost(self, provider: str, model: str, usage: TokenUsage) -> float:
+        """USD for one call served by `provider`: every token type at its own rate, the
+        rates chosen by the whole prompt (uncached input, cache writes and reads)."""
+        rates = self._resolve(provider, model, usage.prompt_tokens)
+        return (
+            usage.input_tokens * rates.input
+            + usage.cache_write_5m_tokens * rates.cache_write
+            + usage.cache_write_1h_tokens * rates.cache_write_1h
+            + usage.cache_read_tokens * rates.cache_read
+            + usage.output_tokens * rates.output
+        ) / _PER_TOKEN
 
     def _resolve(self, provider: str, model: str, prompt_tokens: int) -> Rates:
         """The rates one call is priced at: the entry's long tier when the prompt is above

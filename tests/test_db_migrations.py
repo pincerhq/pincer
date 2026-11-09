@@ -52,7 +52,10 @@ EXPECTED_TABLES = {
 }
 
 #: Columns migrations after 0018 add on purpose to the tables 0017/0018 rebuild.
-_ADDED_AFTER_0018 = {"call_transcripts": {"delivery_reason"}}  # 0027
+_ADDED_AFTER_0018 = {
+    "call_transcripts": {"delivery_reason"},  # 0027
+    "cost_logs": {"cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"},  # 0029
+}
 
 
 def _tables(db_path: Path) -> set[str]:
@@ -2170,5 +2173,47 @@ def test_identity_status_backfills_the_source(migration_url, tmp_path):
         command.downgrade(cfg, "0027")
         columns = {column["name"] for column in sa.inspect(engine_).get_columns("pincer_identity_profiles")}
         assert not {"active", "source"} & columns
+    finally:
+        engine_.dispose()
+
+
+# ── 0029: cost log cache token columns ─────────────────────────────────
+
+_CACHE_COLUMNS = {"cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"}
+
+
+def test_0029_adds_the_cache_token_columns_and_leaves_old_rows_at_zero(migration_url, tmp_path):
+    """#357: `input_tokens` is uncached input from 0029 on; rows written before it read 0
+    in each cache column (not recorded), and the downgrade drops the three again."""
+    from pincer.models.costs import CostLog
+
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0028")
+    engine_ = sa.create_engine(migration_url)
+    columns = ("timestamp", "provider", "model", "input_tokens", "output_tokens", "cost_usd")
+    old = (1.0, "anthropic", "claude-a", 10, 5, 0.5)
+    try:
+        with engine_.begin() as conn:
+            conn.execute(CostLog.__table__.insert().values(dict(zip(columns, old, strict=True))))
+
+        command.upgrade(cfg, "0029")
+        inspector = sa.inspect(engine_)
+        added = {c["name"]: c for c in inspector.get_columns("pincer_cost_logs") if c["name"] in _CACHE_COLUMNS}
+        assert {name: column["nullable"] for name, column in added.items()} == dict.fromkeys(_CACHE_COLUMNS, False)
+        with engine_.connect() as conn:
+            row = conn.execute(
+                sa.text(
+                    "SELECT timestamp, provider, model, input_tokens, output_tokens, cost_usd, "
+                    "cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens FROM pincer_cost_logs"
+                )
+            ).one()
+        assert tuple(row) == (*old, 0, 0, 0)
+
+        command.downgrade(cfg, "0028")
+        assert not _CACHE_COLUMNS & {c["name"] for c in sa.inspect(engine_).get_columns("pincer_cost_logs")}
+        with engine_.connect() as conn:
+            assert conn.execute(sa.text("SELECT input_tokens, cost_usd FROM pincer_cost_logs")).one() == (10, 0.5)
+        command.upgrade(cfg, "head")
+        assert {c["name"] for c in sa.inspect(engine_).get_columns("pincer_cost_logs")} >= _CACHE_COLUMNS
     finally:
         engine_.dispose()

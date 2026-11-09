@@ -11,7 +11,9 @@ import base64
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
+
+from pincer.config.pricing import TokenUsage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -116,6 +118,16 @@ class ToolResult:
     is_error: bool = False
 
 
+class TokenCounts(TypedDict):
+    """A provider's usage as `LLMResponse` keyword arguments (each leaf parses its own)."""
+
+    input_tokens: int  # uncached
+    cache_write_5m_tokens: int
+    cache_write_1h_tokens: int
+    cache_read_tokens: int
+    output_tokens: int
+
+
 @dataclass(slots=True)
 class LLMResponse:
     """Unified response from any LLM provider."""
@@ -127,12 +139,13 @@ class LLMResponse:
     # The model name Pincer sent, which prices the call; `model` is what the API reports
     # back (a dated snapshot, or the model behind an Azure deployment name)
     request_model: str = ""
-    input_tokens: int = 0
+    input_tokens: int = 0  # uncached input only; the cache counts below are the rest of the prompt
     output_tokens: int = 0
     stop_reason: str = ""
-    # Prompt-cache usage (Sprint 5, T5.4) — 0 when the provider doesn't report it
+    # Prompt-cache usage: 0 when the provider doesn't report it
     cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    cache_write_5m_tokens: int = 0
+    cache_write_1h_tokens: int = 0
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
     # Every content block in the order the API sent them; filled only when there is thinking
     content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
@@ -140,6 +153,17 @@ class LLMResponse:
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
+
+    @property
+    def usage(self) -> TokenUsage:
+        """Every token type of this call, as it is priced and recorded."""
+        return TokenUsage(
+            input_tokens=self.input_tokens,
+            cache_write_5m_tokens=self.cache_write_5m_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens,
+            cache_read_tokens=self.cache_read_tokens,
+            output_tokens=self.output_tokens,
+        )
 
     @property
     def truncated(self) -> bool:

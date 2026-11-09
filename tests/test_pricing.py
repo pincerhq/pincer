@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from pincer.config.pricing import PriceTable, PricingError, Rates, UnpricedModelError, load_price_table
+from pincer.config.pricing import (
+    PriceTable,
+    PricingError,
+    Rates,
+    TokenUsage,
+    UnpricedModelError,
+    load_price_table,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,7 +33,9 @@ def test_the_shipped_section_prices_claude_opus_4_6_and_haiku_5_5(shipped: Price
     assert haiku is not None
     assert (opus.input, opus.output) == (5.0, 25.0)
     assert (haiku.input, haiku.output) == (0.10, 0.50)
-    assert shipped.cost("anthropic", "claude-opus-4-6", 1_000_000, 1_000_000) == pytest.approx(30.0)
+    assert shipped.cost(
+        "anthropic", "claude-opus-4-6", TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000)
+    ) == pytest.approx(30.0)
 
 
 def test_tests_read_their_own_pricing_never_the_repository_config() -> None:
@@ -152,7 +161,7 @@ def test_resolution_is_by_exact_name_only(shipped: PriceTable) -> None:
         assert shipped.rates(spelling) is None, spelling
         assert spelling not in shipped
     with pytest.raises(UnpricedModelError) as raised:
-        shipped.cost("anthropic", "claude-opus-4-5-latest", 10, 10)
+        shipped.cost("anthropic", "claude-opus-4-5-latest", TokenUsage(input_tokens=10, output_tokens=10))
     assert raised.value.model == "claude-opus-4-5-latest"
 
 
@@ -274,7 +283,9 @@ def test_a_pricing_key_that_is_not_a_table_is_refused(tmp_path: Path) -> None:
 def test_haiku_5_5_switches_to_its_long_rates_only_above_100k(
     shipped: PriceTable, prompt_tokens: int, expected: float
 ) -> None:
-    assert shipped.cost("anthropic", "claude-haiku-5-5", prompt_tokens, 1_000) == pytest.approx(expected, abs=1e-12)
+    assert shipped.cost(
+        "anthropic", "claude-haiku-5-5", TokenUsage(input_tokens=prompt_tokens, output_tokens=1_000)
+    ) == pytest.approx(expected, abs=1e-12)
 
 
 @pytest.mark.parametrize(
@@ -284,7 +295,9 @@ def test_haiku_5_5_switches_to_its_long_rates_only_above_100k(
 def test_gpt_6_1_terra_switches_to_its_long_rates_only_above_272k(
     shipped: PriceTable, prompt_tokens: int, expected: float
 ) -> None:
-    assert shipped.cost("azure", "gpt-6.1-terra", prompt_tokens, 1_000) == pytest.approx(expected, abs=1e-12)
+    assert shipped.cost(
+        "azure", "gpt-6.1-terra", TokenUsage(input_tokens=prompt_tokens, output_tokens=1_000)
+    ) == pytest.approx(expected, abs=1e-12)
 
 
 def _with_providers(tmp_path: Path, providers: str) -> PriceTable:
@@ -305,10 +318,12 @@ def test_a_provider_multiplier_scales_whichever_tier_applies(
     tmp_path: Path, multiplier: float, prompt_tokens: int, expected: float
 ) -> None:
     table = _with_providers(tmp_path, f'[pricing.provider."foundry"]\nmultiplier = {multiplier}\n')
-    assert table.cost("foundry", "claude-haiku-5-5", prompt_tokens, 1_000) == pytest.approx(expected, abs=1e-12)
-    assert table.cost("anthropic", "claude-haiku-5-5", prompt_tokens, 1_000) == pytest.approx(
-        expected / multiplier, abs=1e-12
-    )
+    assert table.cost(
+        "foundry", "claude-haiku-5-5", TokenUsage(input_tokens=prompt_tokens, output_tokens=1_000)
+    ) == pytest.approx(expected, abs=1e-12)
+    assert table.cost(
+        "anthropic", "claude-haiku-5-5", TokenUsage(input_tokens=prompt_tokens, output_tokens=1_000)
+    ) == pytest.approx(expected / multiplier, abs=1e-12)
 
 
 def test_a_local_provider_table_replaces_only_that_provider(tmp_path: Path) -> None:
@@ -404,3 +419,41 @@ def test_an_invalid_long_context_is_refused_naming_the_field(tmp_path: Path, lon
     with pytest.raises(PricingError) as raised:
         load_price_table(tmp_path)
     assert raised.value.errors == [error]
+
+
+def test_a_one_hour_cache_write_is_priced_at_its_own_rate(shipped: PriceTable) -> None:
+    """Sonnet 5.5 writes at 2.50 (5-minute) and 4 (1-hour) per MTok."""
+    one_hour = TokenUsage(cache_write_1h_tokens=1_000)
+    five_minute = TokenUsage(cache_write_5m_tokens=1_000)
+    assert shipped.cost("anthropic", "claude-sonnet-5-5", one_hour) == pytest.approx(0.004, abs=1e-12)
+    assert shipped.cost("anthropic", "claude-sonnet-5-5", five_minute) == pytest.approx(0.0025, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        # 1,000 uncached + 99,000 read = exactly 100,000: base 0.10 / 0.01 / 0.50
+        (TokenUsage(input_tokens=1_000, cache_read_tokens=99_000, output_tokens=1_000), 0.00159),
+        # 1,000 uncached + 100,000 read = 101,000: long 0.50 / 0.05 / 2.50, though uncached is tiny
+        (TokenUsage(input_tokens=1_000, cache_read_tokens=100_000, output_tokens=1_000), 0.008),
+        # writes count too: 1,000 + 50,000 5m + 50,000 1h = 101,000 → 0.50 / 0.625 / 1 / 2.50
+        (
+            TokenUsage(
+                input_tokens=1_000, cache_write_5m_tokens=50_000, cache_write_1h_tokens=50_000, output_tokens=1_000
+            ),
+            0.08425,
+        ),
+    ],
+)
+def test_the_long_context_threshold_counts_the_whole_prompt(
+    shipped: PriceTable, usage: TokenUsage, expected: float
+) -> None:
+    assert shipped.cost("anthropic", "claude-haiku-5-5", usage) == pytest.approx(expected, abs=1e-12)
+
+
+def test_a_provider_multiplier_scales_the_cache_rates_too(tmp_path: Path) -> None:
+    """The benchmark oracle ($0.1093765) on a Data Zone deployment."""
+    table = _with_providers(tmp_path, '[pricing.provider."foundry"]\nmultiplier = 1.1\n')
+    oracle = TokenUsage(input_tokens=36, cache_write_5m_tokens=27_559, cache_read_tokens=281_470, output_tokens=1_226)
+    assert table.cost("foundry", "claude-sonnet-5-5", oracle) == pytest.approx(0.12031415, abs=1e-12)
+    assert table.cost("anthropic", "claude-sonnet-5-5", oracle) == pytest.approx(0.1093765, abs=1e-12)

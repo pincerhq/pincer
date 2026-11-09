@@ -24,7 +24,7 @@ from pincer.repositories.costs import CostLogRepository, ImageCostLogRepository
 
 if TYPE_CHECKING:
     from pincer.config import Settings
-    from pincer.config.pricing import PriceTable
+    from pincer.config.pricing import PriceTable, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,25 @@ _DAY_S = 86400
 class CostSummary:
     total_usd: float
     total_calls: int
-    total_input_tokens: int
+    total_input_tokens: int  # uncached input
     total_output_tokens: int
+    total_cache_read_tokens: int = 0
+    total_cache_write_5m_tokens: int = 0
+    total_cache_write_1h_tokens: int = 0
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        return cache_hit_rate(
+            self.total_input_tokens,
+            self.total_cache_write_5m_tokens + self.total_cache_write_1h_tokens,
+            self.total_cache_read_tokens,
+        )
+
+
+def cache_hit_rate(uncached: int, written: int, read: int) -> float | None:
+    """The share of all input read from the cache; None when there was no input."""
+    total = uncached + written + read
+    return read / total if total else None
 
 
 def _utc_today_start() -> float:
@@ -70,8 +87,7 @@ class CostService:
         self,
         provider: str,
         model: str,
-        input_tokens: int,
-        output_tokens: int,
+        usage: TokenUsage,
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
@@ -83,7 +99,7 @@ class CostService:
         `is_free` (e.g. a keyless local endpoint) forces zero cost.
         """
         try:
-            cost = 0.0 if is_free else self._price(provider, model, input_tokens, output_tokens)
+            cost = 0.0 if is_free else self._price(provider, model, usage)
         except UnpricedModelError:
             # The startup check prices every model Pincer will call, so this is a model it
             # was never told about: loud, and never stored at an invented $0 (issue #357).
@@ -106,8 +122,11 @@ class CostService:
                     timestamp=time.time(),
                     provider=provider,
                     model=model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
+                    input_tokens=usage.input_tokens,
+                    cache_write_5m_tokens=usage.cache_write_5m_tokens,
+                    cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    output_tokens=usage.output_tokens,
                     cost_usd=cost,
                     session_id=session_id,
                 ),
@@ -121,19 +140,24 @@ class CostService:
         try:
             from pincer.observability.call_costs import attribute_llm_cost
 
-            attribute_llm_cost(input_tokens, output_tokens, cost)
+            attribute_llm_cost(usage.input_tokens, usage.output_tokens, cost)
         except Exception:  # pragma: no cover — accounting must never break a turn
             logger.debug("Per-call LLM cost attribution failed", exc_info=True)
 
         logger.debug(
-            "Cost: $%.6f (%din/%dout) model=%s session=%s", cost, input_tokens, output_tokens, model, session_id
+            "Cost: $%.6f (%din/%dout) model=%s session=%s",
+            cost,
+            usage.input_tokens,
+            usage.output_tokens,
+            model,
+            session_id,
         )
         return cost
 
-    def _price(self, provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
+    def _price(self, provider: str, model: str, usage: TokenUsage) -> float:
         if self._prices is None:
             raise RuntimeError("CostService has no price table: pass prices= to record LLM calls")
-        return self._prices.cost(provider, model, input_tokens, output_tokens)
+        return self._prices.cost(provider, model, usage)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
         async with session_scope(self._url) as session:
@@ -157,9 +181,17 @@ class CostService:
     async def get_summary(self, since_timestamp: float | None = None) -> CostSummary:
         async with session_scope(self._url) as session:
             # A falsy `since_timestamp` (None or 0) means all time, as before.
-            spend, calls, tokens_in, tokens_out = await CostLogRepository(session).totals(since_timestamp or None)
+            spend, calls, tokens_in, tokens_out, read, write_5m, write_1h = await CostLogRepository(session).totals(
+                since_timestamp or None
+            )
         return CostSummary(
-            total_usd=spend, total_calls=calls, total_input_tokens=tokens_in, total_output_tokens=tokens_out
+            total_usd=spend,
+            total_calls=calls,
+            total_input_tokens=tokens_in,
+            total_output_tokens=tokens_out,
+            total_cache_read_tokens=read,
+            total_cache_write_5m_tokens=write_5m,
+            total_cache_write_1h_tokens=write_1h,
         )
 
     async def get_daily_costs(self, date_str: str) -> dict[str, Any]:
@@ -172,8 +204,11 @@ class CostService:
         return {
             "total": round(total, 6),
             "request_count": count,
-            "by_model": {model: round(spend, 6) for model, spend, _, _ in by_model},
+            "by_model": {row.model: round(row.spend, 6) for row in by_model},
             "by_tool": {},
+            "cache_read_tokens": sum(row.cache_read_tokens for row in by_model),
+            "cache_write_5m_tokens": sum(row.cache_write_5m_tokens for row in by_model),
+            "cache_write_1h_tokens": sum(row.cache_write_1h_tokens for row in by_model),
         }
 
     async def get_daily_history(self, start: str, end: str) -> list[dict[str, Any]]:
@@ -187,8 +222,17 @@ class CostService:
         async with session_scope(self._url) as session:
             rows = await CostLogRepository(session).by_model(_day_start(start), _day_start(end) + _DAY_S)
         return [
-            {"model": model, "total": round(spend, 6), "requests": calls, "tokens": tokens}
-            for model, spend, calls, tokens in rows
+            {
+                "model": row.model,
+                "total": round(row.spend, 6),
+                "requests": row.calls,
+                "tokens": row.input_tokens + row.output_tokens,  # uncached input + output, as before
+                "input_tokens": row.input_tokens,
+                "cache_read_tokens": row.cache_read_tokens,
+                "cache_write_5m_tokens": row.cache_write_5m_tokens,
+                "cache_write_1h_tokens": row.cache_write_1h_tokens,
+            }
+            for row in rows
         ]
 
     async def get_costs_by_tool(self, start: str, end: str) -> list[dict[str, Any]]:

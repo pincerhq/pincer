@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from pincer.cli import app
 from pincer.config import Settings
+from pincer.config.pricing import TokenUsage
 
 runner = CliRunner()
 
@@ -173,7 +174,9 @@ async def test_the_api_agent_prices_calls_from_the_pricing_config(
     monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock())
     agent = await _deps.build_agent_from_settings()
     try:
-        assert await agent._costs.record("anthropic", "claude-a", 1_000_000, 1_000_000) == pytest.approx(6.0)
+        assert await agent._costs.record(
+            "anthropic", "claude-a", TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000)
+        ) == pytest.approx(6.0)
     finally:
         await agent._sessions.close()
         await agent._costs.close()

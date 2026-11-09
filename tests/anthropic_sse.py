@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from pincer.config import Settings
 
 # One scripted response: streamed blocks + stop reason (+ usage), or an HTTP error status
-Scripted = tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, dict[str, int]] | int
+Scripted = tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, dict[str, Any]] | int
 
 
 def thinking(text: str, signature: str) -> dict[str, Any]:
@@ -60,7 +60,7 @@ def _block_events(index: int, block: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def sse_body(
-    blocks: list[dict[str, Any]], stop_reason: str, model: str = "claude-x", usage: dict[str, int] | None = None
+    blocks: list[dict[str, Any]], stop_reason: str, model: str = "claude-x", usage: dict[str, Any] | None = None
 ) -> bytes:
     """One streamed Messages response holding `blocks`, in order; `usage` adds to the start usage
     (e.g. ``cache_read_input_tokens``)."""

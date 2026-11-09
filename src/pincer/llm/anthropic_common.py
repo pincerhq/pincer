@@ -17,6 +17,7 @@ from anthropic.types import (
     Message,
     TextBlock,
     ToolUseBlock,
+    Usage,
 )
 from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
 from anthropic.types import ThinkingBlock as SDKThinkingBlock
@@ -29,6 +30,7 @@ from pincer.llm.base import (
     MessageRole,
     StreamTurnEvent,
     ThinkingBlock,
+    TokenCounts,
     ToolCall,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
@@ -448,16 +450,27 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             content="\n".join(text_parts),
             tool_calls=tool_calls,
             model=response.model,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
             stop_reason=response.stop_reason or "",
-            # Cache visibility (Sprint 5): whether the tools-prefix cache hit
-            cache_read_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
-            cache_write_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
+            **_usage_counts(response.usage),
             thinking_blocks=thinking_blocks,
             # The order matters only to the thinking the next request returns
             content_blocks=ordered if thinking_blocks else [],
         )
+
+
+def _usage_counts(usage: Usage) -> TokenCounts:
+    """The token counts of an Anthropic `usage`: `input_tokens` is already
+    uncached input. Cache writes are split by TTL; an endpoint that reports only their
+    total (no `cache_creation`) wrote at the default TTL, 5 minutes."""
+    written = usage.cache_creation_input_tokens or 0
+    by_ttl = usage.cache_creation
+    return TokenCounts(
+        input_tokens=usage.input_tokens,
+        cache_write_5m_tokens=by_ttl.ephemeral_5m_input_tokens if by_ttl is not None else written,
+        cache_write_1h_tokens=by_ttl.ephemeral_1h_input_tokens if by_ttl is not None else 0,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        output_tokens=usage.output_tokens,
+    )
 
 
 def _is_thinking(block: Any) -> bool:

@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from pincer.cli import app
+from pincer.config.pricing import TokenUsage
 
 runner = CliRunner()
 
@@ -145,7 +146,7 @@ def _seed_cost(db_path: object, daily_budget: float, entries: list[tuple[str, st
         tracker = CostTracker(db_path, daily_budget)  # type: ignore[arg-type]
         await tracker.initialize()
         for provider, model, in_tok, out_tok in entries:
-            await tracker.record(provider, model, in_tok, out_tok, is_free=True)
+            await tracker.record(provider, model, TokenUsage(input_tokens=in_tok, output_tokens=out_tok), is_free=True)
         await tracker.close()
 
     asyncio.run(_seed())
@@ -191,3 +192,72 @@ def test_cost_export(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type
     assert result.exit_code == 0
     assert "Exported to" in result.output
     assert export_path.exists()
+
+
+def _seed_priced(db_path: object, calls: list[tuple[str, str, TokenUsage]]) -> None:
+    """Record `calls` (provider, model, usage) priced by the repository's shipped pincer.toml."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    with tempfile.TemporaryDirectory() as config_dir:
+        shutil.copy(Path(__file__).resolve().parents[1] / "pincer.toml", Path(config_dir) / "pincer.toml")
+        prices = load_price_table(Path(config_dir))
+
+    async def _seed() -> None:
+        tracker = CostTracker(db_path, 100.0, prices)  # type: ignore[arg-type]
+        await tracker.initialize()
+        for provider, model, usage in calls:
+            await tracker.record(provider, model, usage)
+        await tracker.close()
+
+    asyncio.run(_seed())
+
+
+_ORACLE = TokenUsage(input_tokens=36, cache_write_5m_tokens=27_559, cache_read_tokens=281_470, output_tokens=1_226)
+_MINI = TokenUsage(input_tokens=200, cache_read_tokens=800, output_tokens=100)
+
+
+def test_cost_shows_cache_tokens_and_the_hit_rate(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Hit rate = cache reads ÷ all input (uncached + writes + reads): 282,270 ÷ 310,065."""
+    settings = _settings_for(tmp_path)
+    _seed_priced(
+        settings.db_path,
+        [("anthropic", "claude-sonnet-5-5", _ORACLE), ("openai", "gpt-5.4-mini", _MINI)],
+    )
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+
+    result = runner.invoke(app, ["cost"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "  Total:   $0.1100 (2 calls)" in lines
+    assert "  Tokens:  236 in / 1,326 out" in lines
+    assert "  Cache:   282,270 read / 27,559 written (91.0% hit rate)" in lines
+
+
+def test_cost_by_model_shows_each_model_s_cache_tokens_and_hit_rate(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_for(tmp_path)
+    _seed_priced(
+        settings.db_path,
+        [("anthropic", "claude-sonnet-5-5", _ORACLE), ("openai", "gpt-5.4-mini", _MINI)],
+    )
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+    monkeypatch.setenv("COLUMNS", "200")
+
+    result = runner.invoke(app, ["cost", "--by-model"])
+
+    assert result.exit_code == 0, result.output
+    rows = [
+        [cell.strip() for cell in line.split("│")[1:-1]]
+        for line in result.output.splitlines()
+        if "claude-sonnet-5-5" in line or "gpt-5.4-mini" in line
+    ]
+    assert rows == [
+        # model, cost, requests, tokens (uncached in + out), cache read, cache write, hit rate
+        ["claude-sonnet-5-5", "$0.1094", "1", "1,262", "281,470", "27,559", "91.1%"],
+        ["gpt-5.4-mini", "$0.0007", "1", "300", "800", "0", "80.0%"],
+    ]
