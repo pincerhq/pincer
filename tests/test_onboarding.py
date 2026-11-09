@@ -380,37 +380,66 @@ async def test_a_turn_without_memory_is_not_read_for_an_answer(
     assert await memory_store.list_memories(user_id="user-s", category="profile") == []
 
 
-@_PATHS
-async def test_a_disconnect_before_the_reply_is_saved_leaves_no_claim(
-    path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+async def test_a_failed_save_of_the_reply_leaves_no_claim(
+    tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
     """The question counts as asked only once the reply carrying it is saved."""
-    _streams(mock_llm, "Hello! I'm Pincer.")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     key = conversation_key("user-d", "web", "a")
+    save = session_manager.add_message
 
-    if path == "blocking":
-        save = session_manager.add_message
+    async def add_message(session, message):
+        if message.role == MessageRole.ASSISTANT:
+            raise ConnectionResetError("client went away")
+        await save(session, message)
 
-        async def add_message(session, message):
-            if message.role == MessageRole.ASSISTANT:
-                raise ConnectionResetError("client went away")
-            await save(session, message)
-
-        session_manager.add_message = add_message
-        with pytest.raises(ConnectionResetError):
-            await agent.handle_message("user-d", "web", "Hi!", session_key=key)
-        session_manager.add_message = save
-    else:
-        stream = agent.handle_message_stream("user-d", "web", "Hi!", session_key=key)
-        async for chunk in stream:
-            if ONBOARDING_QUESTION_EN in chunk.content:
-                break
-        else:
-            pytest.fail("the question was never streamed")
-        await stream.aclose()
+    session_manager.add_message = add_message
+    with pytest.raises(ConnectionResetError):
+        await agent.handle_message("user-d", "web", "Hi!", session_key=key)
+    session_manager.add_message = save
 
     assert await _record(tmp_path, "user-d", "web") is None
+    assert agent._onboarding_reserved == set()
+
+
+async def test_a_disconnect_after_the_question_is_streamed_still_records_it(
+    tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """The reply and the claim are saved before the question is streamed: a
+    client that drops on it leaves the user asked, and their next message is
+    read for the answer."""
+    llm = _scripted_llm(
+        "Hello!",
+        "Nice to meet you, Bob.",
+        '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "en"}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    key = conversation_key("user-d", "web", "a")
+
+    stream = agent.handle_message_stream("user-d", "web", "Hi!", session_key=key)
+    async for chunk in stream:
+        if ONBOARDING_QUESTION_EN in chunk.content:
+            break
+    else:
+        pytest.fail("the question was never streamed")
+    await stream.aclose()
+
+    record = await _record(tmp_path, "user-d", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.completed_at) == (key, None)
+    session = await session_manager.get_or_create("user-d", "web", session_key=key)
+    assert session.messages[-1].role == MessageRole.ASSISTANT
+    assert session.messages[-1].content.endswith(ONBOARDING_QUESTION_EN)
+    assert agent._onboarding_reserved == set()
+
+    await _reply(agent, "stream", "user-d", "web", "I'm Bob, accountant", session_key=key)
+
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[1].kwargs["system"]
+    record = await _record(tmp_path, "user-d", "web")
+    assert record is not None
+    assert record.completed_at is not None
+    profiles = await memory_store.list_memories(user_id="user-d", category="profile")
+    assert [("Bob" in p.content) for p in profiles] == [True]
 
 
 # What an extraction prompt elicits from a model for a task message. These are

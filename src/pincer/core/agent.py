@@ -1464,6 +1464,7 @@ class Agent:
 
         # ── Onboarding: append warm question on a fresh session ────────────
         asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
+        tail = ""
         try:
             if asking:
                 # Extend what the client already received: only the newlines still missing for a
@@ -1471,7 +1472,6 @@ class Agent:
                 trailing = len(full_text) - len(full_text.rstrip("\n"))
                 tail = "\n" * max(0, 2 - trailing) + ONBOARDING_QUESTION_EN
                 full_text += tail
-                yield StreamChunk(StreamEventType.TEXT, tail)
 
             if full_text:
                 final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
@@ -1481,6 +1481,10 @@ class Agent:
         finally:
             if asking:
                 self._onboarding_reserved.discard((user_id, channel))
+        # Saved and recorded before the client sees it: a disconnect at this yield still
+        # leaves the question asked, so the next message is read for the answer
+        if tail:
+            yield StreamChunk(StreamEventType.TEXT, tail)
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
@@ -2162,7 +2166,9 @@ class Agent:
 
     async def _record_onboarding_prompt(self, session: Session, user_id: str, channel: str) -> None:
         """Record the question as asked, once the reply carrying it is saved:
-        a turn cut off before then leaves no claim behind."""
+        a turn cut off before then (a failed save, or a stream dropped during the
+        main reply) leaves no claim behind. The stream path records before it
+        sends the question, so a disconnect while streaming it still counts as asked."""
         if await self._sessions.onboarding.claim_prompt(user_id, channel, session.session_id, now=time.time()):
             logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
         else:
