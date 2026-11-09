@@ -189,7 +189,7 @@ Today's spending breakdown.
   "date": "2026-02-26",
   "total_usd": 1.58,
   "by_model": {
-    "claude-sonnet-4-20250514": 1.20,
+    "claude-sonnet-5-5": 1.20,
     "claude-haiku-4-5-20251001": 0.38
   },
   "by_tool": {

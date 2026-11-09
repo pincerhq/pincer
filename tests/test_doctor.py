@@ -33,7 +33,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
-    assert len(report.checks) == 69
+    # + 1 LLM pricing (issue #357)
+    assert len(report.checks) == 70
 
     assert 0 <= report.score <= 100
 

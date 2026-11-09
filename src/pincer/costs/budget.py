@@ -2,7 +2,7 @@
 Pincer Budget Enforcement — Hard limits with notifications and auto-downgrade.
 
 Orchestration layer on top of CostTracker: tracks in-memory daily spend,
-auto-downgrades to cheaper models near limits, sends user notifications.
+flags a user near the limit (is_downgraded), sends user notifications.
 """
 
 from __future__ import annotations
@@ -15,13 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-MODEL_COST_TIERS = [
-    {"model": "claude-sonnet-4-5-20250929", "cost_per_1k": 0.009, "tier": "premium"},
-    {"model": "claude-haiku-4-5-20251001", "cost_per_1k": 0.002, "tier": "standard"},
-    {"model": "gpt-4o", "cost_per_1k": 0.0075, "tier": "premium"},
-    {"model": "gpt-4o-mini", "cost_per_1k": 0.00045, "tier": "budget"},
-]
 
 
 @dataclass
@@ -160,31 +153,6 @@ class BudgetEnforcer:
                 warning_sent=self._warning_sent.get(user_id, False),
                 budget_exhausted=pct >= 1.0,
             )
-
-    async def get_model_for_budget(self, user_id: str, preferred_model: str) -> str:
-        """Return a cheaper model if user is near their budget limit."""
-        async with self._lock:
-            self._reset_if_new_day()
-            if not self._downgraded.get(user_id):
-                return preferred_model
-
-            current_tier = next(
-                (m for m in MODEL_COST_TIERS if m["model"] == preferred_model),
-                None,
-            )
-            if not current_tier:
-                return preferred_model
-
-            provider = "anthropic" if "claude" in preferred_model else "openai"
-            alternatives = [
-                m
-                for m in MODEL_COST_TIERS
-                if ("claude" in m["model"]) == (provider == "anthropic")
-                and m["cost_per_1k"] < current_tier["cost_per_1k"]
-            ]
-            if alternatives:
-                return min(alternatives, key=lambda m: m["cost_per_1k"])["model"]
-            return preferred_model
 
     async def increase_budget(self, user_id: str, new_limit: float) -> str:
         """User-facing budget adjustment."""

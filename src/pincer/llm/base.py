@@ -124,6 +124,9 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
     provider: str = ""  # name of the provider that actually served this response
+    # The model name Pincer sent, which prices the call; `model` is what the API reports
+    # back (a dated snapshot, or the model behind an Azure deployment name)
+    request_model: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     stop_reason: str = ""

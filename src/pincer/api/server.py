@@ -82,8 +82,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if not getattr(app.state, "agent", None):
         # When started via `pincer run` the CLI pre-injects the fully-built
-        # agent (with MCP, memory backend, etc.) before uvicorn starts.
-        # Only build a standalone agent when running the API server directly.
+        # agent (with MCP, memory backend, etc.) before uvicorn starts, after
+        # its own price check. Only build a standalone agent when running the
+        # API server directly, and refuse to start, like `pincer run`, when a
+        # model it will call has no price (issue #357).
+        from pincer.llm.pricing_check import pricing_problems
+
+        problems = pricing_problems(get_settings_relaxed())
+        if problems is not None:
+            raise RuntimeError(problems)
         try:
             app.state.agent = await build_agent_from_settings()
         except Exception as e:

@@ -7,6 +7,15 @@ from typer.testing import CliRunner
 
 from pincer.cli import app
 
+
+@pytest.fixture(autouse=True)
+def _no_price_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests run `run` / `chat` on MagicMock settings, which name no real model to price;
+    the price check has its own tests (test_pricing_entry_points)."""
+    monkeypatch.setattr("pincer.cli.run.refuse_unpriced_models", lambda settings: None)
+    monkeypatch.setattr("pincer.cli.chat.refuse_unpriced_models", lambda settings: None)
+
+
 runner = CliRunner()
 
 

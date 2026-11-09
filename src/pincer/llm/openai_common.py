@@ -288,6 +288,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         result = parse_openai_response(response)
         result.provider = self._provider_name
+        result.request_model = kwargs["model"]
         return result
 
     async def stream_turn(
@@ -371,6 +372,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 tool_calls=tool_calls,
                 model=model_name,
                 provider=self._provider_name,
+                request_model=kwargs["model"],
                 input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
                 stop_reason=_normalize_finish_reason(finish_reason),

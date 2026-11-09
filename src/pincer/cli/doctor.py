@@ -36,6 +36,7 @@ def doctor(
             raise typer.Exit(1)
         return
 
+    from rich.markup import escape
     from rich.table import Table
 
     status_icons = {
@@ -62,11 +63,12 @@ def doctor(
         if check.category != current_category:
             current_category = check.category
             table.add_row("", f"[bold underline]{current_category.upper()}[/bold underline]", "", "")
+        # Plain text, not markup: a hint like `[pricing."<model>"]` would be swallowed as a style tag
         table.add_row(
             status_icons.get(check.status, ""),
-            check.name,
-            check.message,
-            check.fix_hint,
+            escape(check.name),
+            escape(check.message),
+            escape(check.fix_hint),
         )
 
     console.print(table)

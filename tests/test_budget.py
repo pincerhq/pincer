@@ -41,28 +41,6 @@ async def test_auto_downgrade():
 
 
 @pytest.mark.asyncio
-async def test_model_downgrade():
-    enforcer = BudgetEnforcer(
-        daily_limit_usd=10.0,
-        auto_downgrade_threshold_pct=0.70,
-    )
-    await enforcer.record_cost("u1", 8.0)
-    model = await enforcer.get_model_for_budget("u1", "claude-sonnet-4-5-20250929")
-    assert model == "claude-haiku-4-5-20251001"
-
-
-@pytest.mark.asyncio
-async def test_no_downgrade_under_threshold():
-    enforcer = BudgetEnforcer(
-        daily_limit_usd=10.0,
-        auto_downgrade_threshold_pct=0.70,
-    )
-    await enforcer.record_cost("u1", 3.0)
-    model = await enforcer.get_model_for_budget("u1", "claude-sonnet-4-5-20250929")
-    assert model == "claude-sonnet-4-5-20250929"
-
-
-@pytest.mark.asyncio
 async def test_warning_notification():
     notifications = []
 

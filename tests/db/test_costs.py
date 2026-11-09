@@ -7,14 +7,18 @@ from datetime import UTC, datetime
 
 import pytest
 
+from pincer.config.pricing import PriceTable, Rates
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.exceptions import BudgetExceededError
 from pincer.models.costs import CostLog, ImageCostLog
 from pincer.repositories.costs import CostLogRepository
-from pincer.services.costs import CostService, calculate_cost
+from pincer.services.costs import CostService
 
 _TABLES = [CostLog.__table__, ImageCostLog.__table__]
+
+# Test rates, USD per million tokens: never the shipped pincer.toml.
+_PRICES = PriceTable({"gpt-4o": Rates(input=2.0, cache_write=2.0, cache_write_1h=2.0, cache_read=0.5, output=8.0)})
 
 # 2025-12-31T23:59:59Z and 2026-01-01T00:00:00Z: one second, two UTC days.
 _LAST_SECOND_OF_2025 = 1_767_225_599.0
@@ -48,23 +52,23 @@ async def _log(url: str, *, at: float, model: str = "gpt-4o", cost: float = 1.0,
         )
 
 
-async def test_record_prices_the_call_and_stores_it(url):
-    service = CostService(url)
+async def test_record_prices_the_call_from_the_price_table_and_stores_it(url):
+    service = CostService(url, prices=_PRICES)
     cost = await service.record("openai", "gpt-4o", 1000, 500, session_id="s1")
-    assert cost == pytest.approx(calculate_cost("gpt-4o", 1000, 500))
+    assert cost == pytest.approx((1000 * 2.0 + 500 * 8.0) / 1_000_000)
     summary = await service.get_summary()
     assert (summary.total_calls, summary.total_input_tokens, summary.total_output_tokens) == (1, 1000, 500)
     assert summary.total_usd == pytest.approx(cost)
 
 
 async def test_a_free_provider_costs_nothing(url):
-    assert await CostService(url).record("local", "gpt-4o", 1000, 500, is_free=True) == 0.0
+    assert await CostService(url, prices=_PRICES).record("local", "gpt-4o", 1000, 500, is_free=True) == 0.0
 
 
 async def test_going_over_budget_raises_and_records_nothing(url):
-    service = CostService(url, daily_budget=0.001)
+    service = CostService(url, daily_budget=0.001, prices=_PRICES)
     with pytest.raises(BudgetExceededError):
-        await service.record("openai", "gpt-4o", 1_000_000, 0)  # $2.50
+        await service.record("openai", "gpt-4o", 1_000_000, 0)  # $2.00
     assert (await service.get_summary()).total_calls == 0
 
 
@@ -129,3 +133,17 @@ async def test_budget_status(url):
 def test_the_day_boundaries_used_above_are_what_they_claim():
     assert datetime.fromtimestamp(_LAST_SECOND_OF_2025, UTC).isoformat() == "2025-12-31T23:59:59+00:00"
     assert datetime.fromtimestamp(_FIRST_SECOND_OF_2026, UTC).isoformat() == "2026-01-01T00:00:00+00:00"
+
+
+async def test_an_unpriced_model_raises_logs_and_stores_nothing(url, caplog):
+    import logging
+
+    from pincer.config.pricing import UnpricedModelError
+
+    service = CostService(url, prices=_PRICES)
+    with caplog.at_level(logging.ERROR, logger="pincer.services.costs"), pytest.raises(UnpricedModelError):
+        await service.record("openai", "gpt-4o-2024-08-06", 1000, 500)
+    assert [(r.levelname, r.getMessage()) for r in caplog.records if r.name == "pincer.services.costs"] == [
+        ("ERROR", "No [pricing] entry for model 'gpt-4o-2024-08-06' (provider openai): the call is not recorded")
+    ]
+    assert (await service.get_summary()).total_calls == 0

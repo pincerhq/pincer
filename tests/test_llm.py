@@ -3,7 +3,7 @@
 import pytest
 
 from pincer.llm.base import LLMMessage, MessageRole, ToolCall
-from pincer.llm.cost_tracker import CostTracker, calculate_cost
+from pincer.llm.cost_tracker import CostTracker
 
 
 def test_message_serialization() -> None:
@@ -21,18 +21,6 @@ def test_message_serialization() -> None:
     assert restored.role == MessageRole.ASSISTANT
     assert restored.content == "Hello"
     assert restored.tool_calls[0].name == "greet"
-
-
-def test_calculate_cost_known_model() -> None:
-    cost = calculate_cost("gpt-4o-mini", input_tokens=1000, output_tokens=500)
-    expected = (1000 * 0.15 + 500 * 0.60) / 1_000_000
-    assert abs(cost - expected) < 1e-10
-
-
-def test_calculate_cost_unknown_model() -> None:
-    cost = calculate_cost("unknown-model", input_tokens=1000, output_tokens=500)
-    expected = (1000 * 3.0 + 500 * 15.0) / 1_000_000
-    assert abs(cost - expected) < 1e-10
 
 
 @pytest.mark.asyncio

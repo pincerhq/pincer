@@ -60,7 +60,7 @@ You should see:
 
 ```
 🦜 Pincer v0.7.0
-✅ LLM: Claude claude-sonnet-4-20250514 (Anthropic)
+✅ LLM: Claude claude-sonnet-5-5 (Anthropic)
 ✅ Channel: Telegram (@your_bot_name)
 ✅ Memory: SQLite (data/pincer.db)
 ✅ Tools: 12 loaded (3 require approval)

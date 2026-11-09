@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_support import free_port, pincer_command, scratch_env, signal_channel_env, wait_for_output
+from daemon_support import (
+    free_port,
+    pincer_command,
+    scratch_env,
+    signal_channel_env,
+    wait_for_output,
+    write_test_pricing,
+)
 
 from pincer import daemon
 
@@ -34,6 +41,7 @@ def _signal_after_banner(
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
+    write_test_pricing(cwd)
     if pincer_toml:
         (cwd / "pincer.toml").write_text(pincer_toml)
     env = scratch_env(home, data, PYTHONUNBUFFERED="1", **extra_env)
@@ -147,6 +155,7 @@ def test_a_signal_during_startup_shuts_down_what_has_started(
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
+    write_test_pricing(cwd)
     env = scratch_env(
         home,
         data,

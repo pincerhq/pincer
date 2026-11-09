@@ -13,32 +13,29 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db import ensure_schema_current
 from pincer.db.engine import get_database_url
-from pincer.services.costs import (
-    DEFAULT_PRICING,
-    PRICING,
-    CostService,
-    CostSummary,
-    calculate_cost,
-)
+from pincer.services.costs import CostService, CostSummary
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ["DEFAULT_PRICING", "PRICING", "CostSummary", "CostTracker", "calculate_cost", "get_cost_tracker"]
+    from pincer.config.pricing import PriceTable
+
+__all__ = ["CostSummary", "CostTracker", "get_cost_tracker"]
 
 
 class CostTracker:
     """Cost tracker with budget enforcement, backed by `CostService`."""
 
-    def __init__(self, db_path: Path, daily_budget: float = 0.0) -> None:
+    def __init__(self, db_path: Path, daily_budget: float = 0.0, prices: PriceTable | None = None) -> None:
         self._db_path = db_path
         self._daily_budget = daily_budget
+        self._prices = prices
         self._service: CostService | None = None
 
     async def initialize(self) -> None:
         """Bring the database to head (see pincer.db.migrations) and attach the service."""
         await asyncio.to_thread(ensure_schema_current, self._db_path)
-        self._service = CostService(get_database_url(self._db_path), self._daily_budget)
+        self._service = CostService(get_database_url(self._db_path), self._daily_budget, self._prices)
 
     async def close(self) -> None:
         """Drop the service. The engine is shared, so the process disposes it

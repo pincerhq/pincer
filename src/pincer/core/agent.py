@@ -918,7 +918,7 @@ class Agent:
                 is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
                 cost = await self._costs.record(
                     provider=provider,
-                    model=response.model,
+                    model=response.request_model or response.model,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
                     session_id=session.session_id,
@@ -1133,7 +1133,7 @@ class Agent:
                 is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
                 await self._costs.record(
                     provider=provider,
-                    model=response.model,
+                    model=response.request_model or response.model,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
                     session_id=None,
@@ -1724,7 +1724,7 @@ class Agent:
                     is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
                     await self._costs.record(
                         provider=provider,
-                        model=response.model,
+                        model=response.request_model or response.model,
                         input_tokens=response.input_tokens,
                         output_tokens=response.output_tokens,
                         session_id=session.session_id,

@@ -58,6 +58,8 @@ async def test_chat_loop_processes_clear_cost_and_message(monkeypatch: pytest.Mo
     mock_agent.handle_message = AsyncMock(return_value=mock_response)
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
+    # A MagicMock names no real model to price; the price check has its own tests (test_pricing_entry_points)
+    monkeypatch.setattr("pincer.cli.chat.refuse_unpriced_models", lambda settings: None)
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=mock_session))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=mock_cost))
     monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))

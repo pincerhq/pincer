@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends
 
+from pincer.config.pricing import UnpricedModelError
 from pincer.db.engine import ensure_schema_current, get_database_url
 from pincer.db.session import session_scope
 from pincer.exceptions import BudgetExceededError
@@ -23,35 +24,11 @@ from pincer.repositories.costs import CostLogRepository, ImageCostLogRepository
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+    from pincer.config.pricing import PriceTable
 
 logger = logging.getLogger(__name__)
 
-# ── Pricing per 1M tokens (input, output) in USD ────────
-PRICING: dict[str, tuple[float, float]] = {
-    # Anthropic
-    "claude-opus-4-6": (15.0, 75.0),
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "claude-sonnet-4-5-20250929": (3.0, 15.0),
-    "claude-sonnet-4-20250514": (3.0, 15.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
-    # OpenAI
-    "gpt-4o": (2.50, 10.0),
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4-turbo": (10.0, 30.0),
-    "o1": (15.0, 60.0),
-    "o1-mini": (1.10, 4.40),
-    "o3-mini": (1.10, 4.40),
-}
-
-DEFAULT_PRICING = (3.0, 15.0)
-
 _DAY_S = 86400
-
-
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Calculate cost in USD for a single API call."""
-    input_rate, output_rate = PRICING.get(model, DEFAULT_PRICING)
-    return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
 
 
 @dataclass
@@ -71,13 +48,15 @@ def _day_start(date_str: str) -> float:
 
 
 class CostService:
-    def __init__(self, url: str | None = None, daily_budget: float = 0.0) -> None:
+    def __init__(self, url: str | None = None, daily_budget: float = 0.0, prices: PriceTable | None = None) -> None:
         self._url = url
         self.daily_budget = daily_budget
+        self._prices = prices
 
     @classmethod
     async def from_settings(cls, settings: Settings | None = None) -> CostService:
-        """The configured database (brought to head) and daily budget."""
+        """The configured database (brought to head) and daily budget, for reading:
+        it has no price table, so it cannot record an LLM call."""
         if settings is None:
             from pincer.config import get_settings
 
@@ -99,10 +78,17 @@ class CostService:
         """Record an LLM call and return its cost.
 
         Raises `BudgetExceededError`, recording nothing, when the call would
-        take today's spend over the daily budget. `is_free` (e.g. a keyless
-        local endpoint) forces zero cost.
+        take today's spend over the daily budget, and `UnpricedModelError`
+        (logged, recording nothing) when `model` has no `[pricing]` entry.
+        `is_free` (e.g. a keyless local endpoint) forces zero cost.
         """
-        cost = 0.0 if is_free else calculate_cost(model, input_tokens, output_tokens)
+        try:
+            cost = 0.0 if is_free else self._price(model, input_tokens, output_tokens)
+        except UnpricedModelError:
+            # The startup check prices every model Pincer will call, so this is a model it
+            # was never told about: loud, and never stored at an invented $0 (issue #357).
+            logger.error("No [pricing] entry for model %r (provider %s): the call is not recorded", model, provider)
+            raise
         # The check reads in its own transaction, deliberately, rather than
         # sharing one with the insert below: a SQLite transaction that reads
         # first and writes after fails outright with SQLITE_BUSY_SNAPSHOT if
@@ -143,6 +129,11 @@ class CostService:
             "Cost: $%.6f (%din/%dout) model=%s session=%s", cost, input_tokens, output_tokens, model, session_id
         )
         return cost
+
+    def _price(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        if self._prices is None:
+            raise RuntimeError("CostService has no price table: pass prices= to record LLM calls")
+        return self._prices.cost(model, input_tokens, output_tokens)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
         async with session_scope(self._url) as session:

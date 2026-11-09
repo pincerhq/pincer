@@ -59,6 +59,17 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", ())
 
 
+#: Test prices: what every test prices LLM calls with, instead of the repository's pincer.toml.
+TEST_PRICING_DIR = Path(__file__).parent / "fixtures" / "pricing"
+
+
+@pytest.fixture(autouse=True)
+def _test_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests price from tests/fixtures/pricing, never from the repository's pincer.toml
+    or a developer's pincer.local.toml. A test about loading passes its own directory."""
+    monkeypatch.setattr("pincer.config.pricing._config_dir", lambda: TEST_PRICING_DIR)
+
+
 @pytest.fixture(autouse=True)
 def _reset_skill_service() -> Iterator[None]:
     """The SkillService is a per-process singleton built from the first settings
@@ -306,7 +317,9 @@ async def session_manager(tmp_path: Path) -> SessionManager:
 
 @pytest_asyncio.fixture
 async def cost_tracker(tmp_path: Path) -> CostTracker:
-    ct = CostTracker(tmp_path / "test.db", daily_budget=100.0)
+    from pincer.config.pricing import load_price_table
+
+    ct = CostTracker(tmp_path / "test.db", daily_budget=100.0, prices=load_price_table())
     await ct.initialize()
     yield ct  # type: ignore[misc]
     await ct.close()

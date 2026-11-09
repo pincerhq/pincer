@@ -507,7 +507,7 @@ PINCER_OPENAI_COMPATIBLE_MODEL=grok-3
 PINCER_ANTHROPIC_COMPATIBLE_PROVIDER=my-claude
 PINCER_ANTHROPIC_COMPATIBLE_BASE_URL=https://your-proxy/v1
 PINCER_ANTHROPIC_COMPATIBLE_API_KEY=...
-PINCER_ANTHROPIC_COMPATIBLE_MODEL=claude-3-7-sonnet
+PINCER_ANTHROPIC_COMPATIBLE_MODEL=claude-sonnet-5-5
 ```
 
 One OpenAI-wire + one Anthropic-wire compatible endpoint can run side by side (one `*_COMPATIBLE_*` set each), so the maximum distinct pool is `anthropic` + `openai` + one OpenAI-compatible + one Anthropic-compatible.

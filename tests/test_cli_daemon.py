@@ -35,6 +35,7 @@ from daemon_support import (
     stop_within,
     within,
     write_log,
+    write_test_pricing,
 )
 from typer.testing import CliRunner, Result
 
@@ -112,6 +113,8 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     settings.daily_budget_usd = 5.0
     monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+    # A MagicMock names no real model to price; the price check has its own tests (test_pricing_entry_points)
+    monkeypatch.setattr("pincer.cli.run.refuse_unpriced_models", lambda settings: None)
     _child_mode(monkeypatch, "ready", path)
     # Everything a test starts (`run -d`'s daemon, `pincer logs`, `pincer run`) inherits this environment.
     monkeypatch.setenv("PYTHONPATH", child_env()["PYTHONPATH"])
@@ -1545,6 +1548,7 @@ def test_ctrl_c_while_run_detach_waits_stops_waiting_at_once_and_leaves_the_daem
 ) -> None:
     cwd = tmp_path / "detach-cwd"
     cwd.mkdir()
+    write_test_pricing(cwd)  # a real `run -d`: it prices its models before it forks
     fake = json.dumps(daemon_fake_child.argv("gated", data_dir))  # never ready on its own
     process = subprocess.Popen(
         [*pincer_command()[:3], "-P", "-c", PATCHED_CHILD_RUN_DETACH, fake],

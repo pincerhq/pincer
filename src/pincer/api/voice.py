@@ -1562,10 +1562,10 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
     model = body.voice_turn_model.strip()
     if not TURN_MODEL_RE.match(model):
         raise HTTPException(status_code=422, detail=f"Invalid turn model format: {model!r}")
-    from pincer.llm.router import plan_voice_turn
+    from pincer.llm.pricing_check import voice_turn_unusable
 
-    plan = await asyncio.to_thread(plan_voice_turn, get_settings_relaxed(), model)
-    reason = plan.unusable
+    # Unbuildable or unpriced (#357): a runtime switch never bypasses the startup check.
+    reason = await asyncio.to_thread(voice_turn_unusable, get_settings_relaxed(), model)
     if reason is not None:
         raise HTTPException(status_code=422, detail=f"Turn model {model!r} can't be used here: {reason}")
 

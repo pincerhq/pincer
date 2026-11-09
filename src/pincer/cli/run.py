@@ -20,7 +20,14 @@ from pincer.cli._attachments import (
     _format_pdf_attachment,
     _safe_upload_path,
 )
-from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
+from pincer.cli._shared import (
+    _create_memory_backend,
+    _port_in_use,
+    _print_voice_webhook_urls,
+    _setup_logging,
+    console,
+    refuse_unpriced_models,
+)
 from pincer.cli.daemon import (
     WAIT_TIMEOUT,
     attach_daemon,
@@ -92,6 +99,8 @@ async def run(
                 soft_wrap=True,
             )
             raise typer.Exit(1)
+        # In the foreground, before anything forks, so the refusal reaches the terminal
+        refuse_unpriced_models(settings)
         start_daemon(settings, wait_timeout)
         return
 
@@ -109,6 +118,9 @@ async def run(
         if running is not None:
             attach_daemon(settings, running)
             return
+
+    # Following a running daemon calls no model, so only a start is refused (issue #357)
+    refuse_unpriced_models(settings)
 
     _setup_logging(settings.log_level.value)
 
@@ -203,6 +215,7 @@ def _refuse_legacy_identity_map() -> None:
 
 
 async def _build_core(settings: Settings) -> CoreComponents:
+    from pincer.config.pricing import load_price_table
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.db.engine import init_database
@@ -221,7 +234,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
     await session_mgr.initialize()
 
-    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
+    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()
 
     # Sprint 5: Security components
@@ -1520,14 +1533,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
                     )
         try:
             from pincer.channels.phone_calls import VoiceChannel
-            from pincer.llm.router import plan_voice_turn
+            from pincer.llm.pricing_check import voice_turn_unusable
             from pincer.voice.engine import get_voice_engine
 
             # Dashboard-set runtime overrides (voice turn model) survive restarts
             from pincer.voice.runtime_config import apply_overrides
             from pincer.voice.twiml_server import init_voice_routes
 
-            apply_overrides(settings, unusable_reason=lambda m: plan_voice_turn(settings, m).unusable)
+            apply_overrides(settings, unusable_reason=lambda m: voice_turn_unusable(settings, m))
 
             # Telephony telemetry: start the bounded exporter before the first
             # call can arrive. Failing to start it must never stop voice from

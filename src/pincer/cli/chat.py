@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pincer.cli._shared import _create_memory_backend, _setup_logging, console
+from pincer.cli._shared import _create_memory_backend, _setup_logging, console, refuse_unpriced_models
 
 if TYPE_CHECKING:
     from pincer.memory.base import BaseMemoryBackend
@@ -27,6 +27,7 @@ async def _chat_loop() -> None:
     except Exception as e:
         console.print(f"[red]Configuration error:[/red] {e}")
         return
+    refuse_unpriced_models(settings)
 
     _setup_logging("WARNING")
 
@@ -39,6 +40,7 @@ async def _chat_loop() -> None:
     )
 
     # Reuse the same agent setup as `run` but minimal
+    from pincer.config.pricing import load_price_table
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
@@ -48,7 +50,7 @@ async def _chat_loop() -> None:
 
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
     await session_mgr.initialize()
-    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
+    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()
 
     from pincer.config.llm import call_effort, call_thinking

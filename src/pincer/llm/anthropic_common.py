@@ -155,6 +155,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
         result = self._parse_response(response)
         result.provider = self._provider_name
+        result.request_model = kwargs["model"]
         return result
 
     async def stream_turn(
@@ -188,6 +189,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
         result = self._parse_response(final)
         result.provider = self._provider_name
+        result.request_model = kwargs["model"]
         yield StreamTurnEvent(response=result)
 
     async def close(self) -> None:

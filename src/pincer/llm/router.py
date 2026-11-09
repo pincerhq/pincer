@@ -59,7 +59,7 @@ def _build_leaf(settings: Settings, name: str) -> BaseLLMProvider:
     )
 
 
-def _known_provider_names(settings: Settings) -> set[str]:
+def known_provider_names(settings: Settings) -> set[str]:
     names = {*WELL_KNOWN_PROVIDERS, settings.openai_compatible_provider, settings.anthropic_compatible_provider}
     names.discard("")
     return names
@@ -81,7 +81,7 @@ def summary_target(settings: Settings) -> tuple[str, str]:
     provider = settings.summary_provider or ""
     model = settings.summary_model
     prefix, sep, rest = model.partition(":")
-    if sep and prefix.strip() in _known_provider_names(settings):
+    if sep and prefix.strip() in known_provider_names(settings):
         provider, model = prefix.strip(), rest.strip()
     return provider or settings.default_provider, model
 
@@ -117,6 +117,31 @@ def provider_default_model(settings: Settings, name: str) -> str:
     if name and name == settings.anthropic_compatible_provider:
         return settings.anthropic_compatible_model or settings.default_model
     return settings.default_model
+
+
+def is_free_provider(settings: Settings, name: str) -> bool:
+    """A provider is free when it is a compatible endpoint with no API key (e.g. a local Ollama)."""
+    if name in WELL_KNOWN_PROVIDERS:
+        return False
+    if name and name == settings.openai_compatible_provider:
+        return settings.openai_compatible_api_key.get_secret_value() == ""
+    if name and name == settings.anthropic_compatible_provider:
+        return settings.anthropic_compatible_api_key.get_secret_value() == ""
+    return False
+
+
+def has_credentials(settings: Settings, name: str) -> bool:
+    """True when `name` can be built from the configured credentials: a key for a
+    well-known provider, a base URL for a compatible endpoint (its key is optional)."""
+    if name == "anthropic":
+        return settings.anthropic_api_key.get_secret_value() != ""
+    if name == "openai":
+        return settings.openai_api_key.get_secret_value() != ""
+    if name and name == settings.openai_compatible_provider:
+        return settings.openai_compatible_base_url != ""
+    if name and name == settings.anthropic_compatible_provider:
+        return settings.anthropic_compatible_base_url != ""
+    return False
 
 
 def wire_safe_model(settings: Settings, name: str, model: str) -> str:
@@ -334,14 +359,7 @@ class LLMRouter(BaseLLMProvider):
 
     def is_free(self, provider: str) -> bool:
         """A provider is free when it has no API key (e.g. a local Ollama endpoint)."""
-        s = self._settings
-        if provider in WELL_KNOWN_PROVIDERS:
-            return False
-        if provider and provider == s.openai_compatible_provider:
-            return s.openai_compatible_api_key.get_secret_value() == ""
-        if provider and provider == s.anthropic_compatible_provider:
-            return s.anthropic_compatible_api_key.get_secret_value() == ""
-        return False
+        return is_free_provider(self._settings, provider)
 
     # ── BaseLLMProvider ──────────────────────────────────
 

@@ -34,6 +34,9 @@ AS_TYPED_IN_A_TERMINAL = (
     "signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); "
     "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])"
 )
+# The test prices (USD per million tokens) a real `pincer run` gets in its scratch cwd: it refuses to
+# start without a price for its models (issue #357), and must never read the repository's pincer.toml.
+TEST_PRICING = Path(__file__).parent / "fixtures" / "pricing" / "pincer.toml"
 # Rich markup, a CRLF line, a byte that isn't UTF-8 and no final newline: whatever a decode or a console would change.
 RAW_LOG = b"plain line\n[bold]markup[/bold] kept\r\nbad byte \xff here\nno newline at the end"
 
@@ -52,6 +55,11 @@ def with_tree_on_path(env: dict[str, str]) -> dict[str, str]:
 def child_env() -> dict[str, str]:
     """This process's environment, for a child that must import the tree under test."""
     return with_tree_on_path(dict(os.environ))
+
+
+def write_test_pricing(cwd: Path) -> None:
+    """Give a real Pincer started in `cwd` the test prices, as its pincer.local.toml."""
+    (cwd / "pincer.local.toml").write_bytes(TEST_PRICING.read_bytes())
 
 
 def scratch_env(home: Path, data: Path, **extra: str) -> dict[str, str]:

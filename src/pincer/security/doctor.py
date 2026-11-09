@@ -208,6 +208,7 @@ class SecurityDoctor:
         report.checks.append(self._check_llm_reasoning_voice(settings))
         report.checks.append(self._check_llm_reasoning_summary(settings))
         report.checks.append(self._check_voice_thinking_token_limit(settings))
+        report.checks.append(self._check_llm_pricing(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2166,6 +2167,42 @@ class SecurityDoctor:
         )
 
     # ── LLM effort and thinking (issue #345) ──────────────
+
+    def _check_llm_pricing(self, cfg: Settings | None = None) -> CheckResult:
+        """Every model Pincer will call has a valid `[pricing]` entry (issue #357); the same
+        check `pincer run` refuses to start on."""
+        from pincer.config.pricing import paste_block
+        from pincer.llm.pricing_check import check_pricing
+
+        report = check_pricing(self._cfg(cfg), self.config_dir)
+        if report.errors:
+            return CheckResult(
+                "llm_pricing",
+                CheckStatus.CRITICAL,
+                f"Invalid [pricing] entries: {'; '.join(report.errors)}; Pincer will not start",
+                fix_hint="Fix the [pricing] section of pincer.toml / pincer.local.toml",
+                category="llm",
+            )
+        if report.missing:
+            listed = ", ".join(
+                f"{model} ({', '.join(f'{u.role} on {u.provider}' for u in uses)})"
+                for model, uses in report.missing.items()
+            )
+            count = f"{len(report.missing)} model{'s' if len(report.missing) > 1 else ''}"
+            return CheckResult(
+                "llm_pricing",
+                CheckStatus.CRITICAL,
+                f"No price for {count} Pincer will call: {listed}; Pincer will not start",
+                fix_hint="Add to pincer.local.toml and fill in the rates (USD per million tokens):\n"
+                + paste_block(report.missing),
+                category="llm",
+            )
+        message = (
+            f"Every model Pincer will call has a price: {', '.join(report.models)}"
+            if report.models
+            else "No model Pincer will call is billed (keyless endpoints only)"
+        )
+        return CheckResult("llm_pricing", CheckStatus.PASS, message, category="llm")
 
     def _check_llm_reasoning_default(self, cfg: Settings | None = None) -> CheckResult:
         """What the default provider's requests carry for PINCER_REASONING_EFFORT / PINCER_THINKING."""

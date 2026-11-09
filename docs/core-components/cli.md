@@ -108,7 +108,7 @@ $ pincer init
 
 ? LLM Provider: Anthropic
 ? API Key: sk-ant-***
-✓ Connection successful (claude-3-5-sonnet-20241022)
+✓ Connection successful (claude-sonnet-5-5)
 
 ? Enable Telegram? Yes
 ? Bot Token: 123456:ABC***
@@ -152,7 +152,7 @@ pincer run tasks
 **Output:**
 ```
 🦜 Pincer Agent v0.5.0
-  Provider:  anthropic (claude-3-5-sonnet-20241022)
+  Provider:  anthropic (claude-sonnet-5-5)
   Channels:  telegram ✓  whatsapp ✗  discord ✓
   Budget:    $0.00 / $5.00
   API:       http://127.0.0.1:8080
@@ -215,7 +215,7 @@ pincer config
 🦜 Pincer Configuration
 
   Provider:     anthropic
-  Model:        claude-3-5-sonnet-20241022
+  Model:        claude-sonnet-5-5
   Anthropic:    ✓ set
   OpenAI:       ✗ not set
   Telegram:     ✓ set
@@ -266,8 +266,8 @@ pincer cost --days 30 --export costs_feb.json
   Budget:    $0.42 / $5.00 (8.5%)
 
   By Model:
-    claude-3-5-sonnet   $0.3800  (42 requests)
-    claude-3-5-haiku    $0.0431  (5 requests)
+    claude-sonnet-5-5   $0.3800  (42 requests)
+    claude-haiku-5-5    $0.0431  (5 requests)
 ```
 
 ---

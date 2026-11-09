@@ -9,12 +9,13 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+from pincer.config.pricing import load_price_table
 from pincer.llm.cost_tracker import CostTracker
 
 
 @pytest.fixture
 async def tracker(tmp_path: Path):
-    ct = CostTracker(tmp_path / "test.db", daily_budget=10.0)
+    ct = CostTracker(tmp_path / "test.db", daily_budget=10.0, prices=load_price_table())
     await ct.initialize()
     yield ct
     await ct.close()

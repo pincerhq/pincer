@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 async def build_agent_from_settings() -> Agent:
     from pincer.config import get_settings_relaxed
+    from pincer.config.pricing import load_price_table
     from pincer.llm.router import LLMRouter
 
     settings = get_settings_relaxed()
@@ -36,7 +37,7 @@ async def build_agent_from_settings() -> Agent:
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
     await session_mgr.initialize()
 
-    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
+    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()
 
     llm = LLMRouter().get_llm()
