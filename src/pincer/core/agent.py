@@ -85,6 +85,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _HEADLESS_LLM_ERROR_TEXT = "Sorry, I couldn't complete this scheduled action due to an LLM error."
+_BUDGET_REACHED_TEXT = (
+    "Warning: Daily budget limit reached. Limit: ${limit:.2f}. I'll be back tomorrow, or you can increase the limit."
+)
+_HEADLESS_BUDGET_REACHED_TEXT = (
+    "Warning: Daily budget limit reached. Limit: ${limit:.2f}. Could not complete this scheduled action."
+)
 # A call turn whose model repeats this many tool calls it already made ends
 # with TOOL_NO_PROGRESS instead of another round (issue #300).
 _MAX_DUPLICATE_TOOL_CALLS = 2
@@ -867,6 +873,12 @@ class Agent:
 
         # ── ReAct Loop ───────────────────────────────────
         for _iteration in range(self._settings.max_tool_iterations):
+            # Checked before every call, tool rounds included: the call that
+            # crossed the limit was recorded, the next one is never made.
+            if await self._costs.budget_reached():
+                final_text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+                break
+
             # Proactive sanitization: fix orphaned pairs before they reach the API
             await self._repair_tool_pairs(session)
 
@@ -880,13 +892,6 @@ class Agent:
                 # The image stays on every request of the turn: dropping it
                 # would change the history under the turn's thinking blocks.
                 # end_turn drops it (images are never persisted).
-            except BudgetExceededError:
-                final_text = (
-                    "Warning: Daily budget limit reached. "
-                    f"Limit: ${self._settings.daily_budget_usd:.2f}. "
-                    "I'll be back tomorrow, or you can increase the limit."
-                )
-                break
             except LLMError as e:
                 recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
                 if recovery is _PairRecovery.RETRY:
@@ -910,23 +915,17 @@ class Agent:
                 final_text = _CALL_PLACED_THEN_FAILED_TEXT
                 break
 
-            # Track cost
-            try:
-                # Attribute cost to the provider that actually served (may be a
-                # failover), not the configured primary.
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                cost = await self._costs.record(
-                    provider=provider,
-                    model=response.request_model or response.model,
-                    usage=response.usage,
-                    session_id=session.session_id,
-                    is_free=is_free,
-                )
-                total_cost += cost
-            except BudgetExceededError as e:
-                final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
-                break
+            # Track cost. Attribute it to the provider that actually served (may
+            # be a failover), not the configured primary.
+            provider = response.provider or self._settings.default_provider
+            is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+            total_cost += await self._costs.record(
+                provider=provider,
+                model=response.request_model or response.model,
+                usage=response.usage,
+                session_id=session.session_id,
+                is_free=is_free,
+            )
 
             try:
                 _refuse_truncated_output(response, self._settings.max_tokens)
@@ -1110,6 +1109,8 @@ class Agent:
         iterations = max_iterations or self._settings.max_tool_iterations
 
         for _iteration in range(iterations):
+            if await self._costs.budget_reached():
+                return _HEADLESS_BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
             try:
                 response: LLMResponse = await self._llm.complete(
                     messages=messages,
@@ -1117,28 +1118,19 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
-            except BudgetExceededError:
-                return (
-                    "Warning: Daily budget limit reached. "
-                    f"Limit: ${self._settings.daily_budget_usd:.2f}. "
-                    "Could not complete this scheduled action."
-                )
             except LLMError:
                 logger.exception("run_headless: LLM call failed")
                 return _HEADLESS_LLM_ERROR_TEXT
 
-            try:
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                await self._costs.record(
-                    provider=provider,
-                    model=response.request_model or response.model,
-                    usage=response.usage,
-                    session_id=None,
-                    is_free=is_free,
-                )
-            except BudgetExceededError as e:
-                return f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
+            provider = response.provider or self._settings.default_provider
+            is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+            await self._costs.record(
+                provider=provider,
+                model=response.request_model or response.model,
+                usage=response.usage,
+                session_id=None,
+                is_free=is_free,
+            )
 
             try:
                 _refuse_truncated_output(response, self._settings.max_tokens)

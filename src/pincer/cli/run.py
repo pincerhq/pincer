@@ -247,7 +247,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
         messages_per_minute=settings.rate_messages_per_min,
         tool_calls_per_minute=settings.rate_tools_per_min,
         max_concurrent_llm=settings.max_concurrent_llm,
-        max_daily_spend_usd=settings.daily_budget_usd,
     )
 
     # Initialize memory system

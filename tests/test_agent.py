@@ -1127,13 +1127,33 @@ async def test_a_non_llm_error_after_a_dial_is_logged_with_its_traceback(
 
 
 @pytest.mark.asyncio
-async def test_a_budget_stop_after_a_dial_keeps_its_own_reply(settings, mock_llm, session_manager, cost_tracker):
-    mock_llm.complete.side_effect = [_two_dials_then_text()[0], BudgetExceededError(5.0, 5.0)]
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+async def test_a_budget_stop_after_a_dial_keeps_its_own_reply(settings, mock_llm, session_manager, tmp_path):
+    """The dialling request crosses the budget ($7/MTok x 1,000 = the whole $0.007): the turn
+    stops before its next request with the budget reply, never the placed-call text."""
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
 
-    result = await agent.handle_message("user1", "test", "call them", memory=False)
+    dial = _two_dials_then_text()[0]
+    dial.request_model, dial.input_tokens, dial.output_tokens = "test-fixture-model", 1_000, 0
+    mock_llm.complete.side_effect = [dial, _two_dials_then_text()[1]]
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=0.007, prices=load_price_table())
+    await tracker.initialize()
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 0.007}),
+        mock_llm,
+        session_manager,
+        tracker,
+        _dialing_registry(_DIAL_RESULTS),
+    )
 
+    try:
+        result = await agent.handle_message("user1", "test", "call them", memory=False)
+    finally:
+        await tracker.close()
+
+    assert mock_llm.complete.await_count == 1
     assert result.text.startswith("Warning: Daily budget limit reached.")
+    assert result.call_sids == ["CA9"]
 
 
 @pytest.mark.asyncio
@@ -1461,19 +1481,6 @@ async def test_run_headless_allowed_tools_keeps_matching_tool(
 
 
 @pytest.mark.asyncio
-async def test_run_headless_budget_exceeded_during_llm_call(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
-    mock_llm.complete.side_effect = BudgetExceededError(spent=100.0, limit=100.0)
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    result = await agent.run_headless("hi", user_id="usr1", channel="scheduled")
-
-    assert "budget limit reached" in result.lower()
-    assert "$100.00" in result
-
-
-@pytest.mark.asyncio
 async def test_run_headless_llm_error(settings, mock_llm, session_manager, cost_tracker, tool_registry):
     mock_llm.complete.side_effect = LLMError("connection reset")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
@@ -1481,20 +1488,6 @@ async def test_run_headless_llm_error(settings, mock_llm, session_manager, cost_
     result = await agent.run_headless("hi", user_id="usr1", channel="scheduled")
 
     assert "llm error" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_run_headless_budget_exceeded_during_cost_record(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-
-    with patch.object(cost_tracker, "record", side_effect=BudgetExceededError(spent=60.0, limit=100.0)):
-        result = await agent.run_headless("hi", user_id="usr1", channel="scheduled")
-
-    assert "budget limit reached" in result.lower()
-    assert "$60.00" in result
-    assert "$100.00" in result
 
 
 @pytest.mark.asyncio

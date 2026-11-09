@@ -24,7 +24,7 @@ __all__ = ["CostSummary", "CostTracker", "get_cost_tracker"]
 
 
 class CostTracker:
-    """Cost tracker with budget enforcement, backed by `CostService`."""
+    """Cost tracker and the daily budget check, backed by `CostService`."""
 
     def __init__(self, db_path: Path, daily_budget: float = 0.0, prices: PriceTable | None = None) -> None:
         self._db_path = db_path
@@ -56,7 +56,7 @@ class CostTracker:
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
-        """Record a cost entry and return the cost. Raises BudgetExceededError if over limit."""
+        """Record a cost entry and return the cost. Always stores, over budget too (see `budget_reached`)."""
         return await self.service.record(provider, model, usage, session_id, is_free)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
@@ -67,6 +67,9 @@ class CostTracker:
 
     async def get_today_spend(self) -> float:
         return await self.service.get_today_spend()
+
+    async def budget_reached(self) -> bool:
+        return await self.service.budget_reached()
 
     async def get_summary(self, since_timestamp: float | None = None) -> CostSummary:
         return await self.service.get_summary(since_timestamp)

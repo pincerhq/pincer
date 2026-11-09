@@ -224,7 +224,6 @@ module = [
     "pincer.tools.builtin.email_tool",
     "pincer.tools.builtin.image_gen",
     "pincer.core.agent",
-    "pincer.costs.budget",
     "pincer.api.skills",
     "pincer.cli",
     "pincer.cli.*",

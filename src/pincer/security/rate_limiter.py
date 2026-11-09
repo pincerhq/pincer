@@ -2,7 +2,8 @@
 Pincer Rate Limiter — Token-bucket per-user + global rate limiting.
 
 - Per-user: messages/min, tool calls/min (token bucket)
-- Global: concurrent LLM calls (semaphore), daily API spend (budget check)
+- Global: concurrent LLM calls (semaphore)
+- Spend and the daily budget live in the cost service (pincer.services.costs)
 - All async-safe, zero external dependencies
 """
 
@@ -56,17 +57,12 @@ class RateLimiter:
         messages_per_minute: int = 30,
         tool_calls_per_minute: int = 20,
         max_concurrent_llm: int = 5,
-        max_daily_spend_usd: float = 5.0,
     ) -> None:
         self._messages_per_minute = messages_per_minute
         self._tool_calls_per_minute = tool_calls_per_minute
-        self._max_daily_spend_usd = max_daily_spend_usd
         self._user_message_buckets: dict[str, TokenBucket] = {}
         self._user_tool_buckets: dict[str, TokenBucket] = {}
         self._llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
-        self._daily_spend: float = 0.0
-        self._daily_spend_lock = asyncio.Lock()
-        self._spend_reset_date: str = ""
 
     def _get_message_bucket(self, user_id: str) -> TokenBucket:
         if user_id not in self._user_message_buckets:
@@ -106,62 +102,18 @@ class RateLimiter:
                 wait_seconds=wait,
             )
 
-    async def check_daily_spend(self, cost: float = 0.0) -> None:
-        """Raise RateLimitExceeded if daily spend would exceed limit."""
-        async with self._daily_spend_lock:
-            today = time.strftime("%Y-%m-%d")
-            if today != self._spend_reset_date:
-                self._daily_spend = 0.0
-                self._spend_reset_date = today
-            projected = self._daily_spend + cost
-            limit = self._max_daily_spend_usd
-            if projected > limit:
-                raise RateLimitExceeded(
-                    f"Daily spending limit reached "
-                    f"(${self._daily_spend:.2f}/${limit:.2f}). "
-                    f"Processing paused until tomorrow.",
-                )
-
-    async def record_spend(self, cost: float) -> float:
-        """Record spending. Returns new daily total."""
-        async with self._daily_spend_lock:
-            today = time.strftime("%Y-%m-%d")
-            if today != self._spend_reset_date:
-                self._daily_spend = 0.0
-                self._spend_reset_date = today
-            self._daily_spend += cost
-            return self._daily_spend
-
-    async def get_daily_spend(self) -> float:
-        async with self._daily_spend_lock:
-            today = time.strftime("%Y-%m-%d")
-            if today != self._spend_reset_date:
-                return 0.0
-            return self._daily_spend
-
-    async def update_daily_limit(self, new_limit: float) -> None:
-        if new_limit < 0 or new_limit > 100:
-            raise ValueError("Budget must be between $0 and $100")
-        self._max_daily_spend_usd = new_limit
-
     def llm_semaphore(self) -> asyncio.Semaphore:
         return self._llm_semaphore
 
     async def get_status(self, user_id: str) -> dict[str, Any]:
         msg_bucket = self._get_message_bucket(user_id)
         tool_bucket = self._get_tool_bucket(user_id)
-        daily_spend = await self.get_daily_spend()
         return {
             "messages_remaining": int(msg_bucket.tokens),
             "messages_limit": self._messages_per_minute,
             "tool_calls_remaining": int(tool_bucket.tokens),
             "tool_calls_limit": self._tool_calls_per_minute,
             "concurrent_llm_available": self._llm_semaphore._value,
-            "daily_spend_usd": round(daily_spend, 4),
-            "daily_limit_usd": self._max_daily_spend_usd,
-            "daily_spend_pct": round((daily_spend / self._max_daily_spend_usd) * 100, 1)
-            if self._max_daily_spend_usd > 0
-            else 0,
         }
 
     def cleanup_user(self, user_id: str) -> None:

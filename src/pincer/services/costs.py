@@ -18,7 +18,6 @@ from fastapi import Depends
 from pincer.config.pricing import UnpricedModelError
 from pincer.db.engine import ensure_schema_current, get_database_url
 from pincer.db.session import session_scope
-from pincer.exceptions import BudgetExceededError
 from pincer.models.costs import CostLog, ImageCostLog
 from pincer.repositories.costs import CostLogRepository, ImageCostLogRepository
 
@@ -93,10 +92,11 @@ class CostService:
     ) -> float:
         """Record an LLM call and return its cost.
 
-        Raises `BudgetExceededError`, recording nothing, when the call would
-        take today's spend over the daily budget, and `UnpricedModelError`
-        (logged, recording nothing) when `model` has no `[pricing]` entry.
-        `is_free` (e.g. a keyless local endpoint) forces zero cost.
+        Every completed call is stored, even one that takes today's spend over
+        the daily budget: the budget is checked before a call (`budget_reached`),
+        never here. Raises `UnpricedModelError` (logged, recording nothing) when
+        `model` has no `[pricing]` entry. `is_free` (e.g. a keyless local
+        endpoint) forces zero cost.
         """
         try:
             cost = 0.0 if is_free else self._price(provider, model, usage)
@@ -105,17 +105,6 @@ class CostService:
             # was never told about: loud, and never stored at an invented $0 (issue #357).
             logger.error("No [pricing] entry for model %r (provider %s): the call is not recorded", model, provider)
             raise
-        # The check reads in its own transaction, deliberately, rather than
-        # sharing one with the insert below: a SQLite transaction that reads
-        # first and writes after fails outright with SQLITE_BUSY_SNAPSHOT if
-        # another process committed in between, and `busy_timeout` does not
-        # retry that one. The budget is advisory to a hair's breadth either
-        # way; failing an LLM turn over it is not.
-        if cost > 0 and self.daily_budget > 0:
-            today_spent = await self.get_today_spend()
-            if today_spent + cost > self.daily_budget:
-                raise BudgetExceededError(spent=today_spent + cost, limit=self.daily_budget)
-
         async with session_scope(self._url) as session:
             await CostLogRepository(session).add(
                 CostLog(
@@ -167,6 +156,14 @@ class CostService:
             )
 
     # ── reads ────────────────────────────────────────────────────────
+
+    async def budget_reached(self) -> bool:
+        """True when a daily budget is set and today's recorded spend is at or over it.
+
+        Checked before each LLM call: a call is refused once this is True, and
+        every call that was made is recorded, even the one that crossed the limit.
+        """
+        return self.daily_budget > 0 and await self.get_today_spend() >= self.daily_budget
 
     async def get_image_count_today(self) -> int:
         """Image generations today (UTC)."""

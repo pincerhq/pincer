@@ -12,7 +12,6 @@ import pytest
 from pincer.config.pricing import PriceTable, Rates, TokenUsage, load_price_table
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
-from pincer.exceptions import BudgetExceededError
 from pincer.models.costs import CostLog, ImageCostLog
 from pincer.repositories.costs import CostLogRepository
 from pincer.services.costs import CostService
@@ -85,11 +84,30 @@ async def test_a_free_provider_costs_nothing(url):
     )
 
 
-async def test_going_over_budget_raises_and_records_nothing(url):
+async def test_a_call_over_budget_is_recorded_at_its_full_cost(url):
     service = CostService(url, daily_budget=0.001, prices=_PRICES)
-    with pytest.raises(BudgetExceededError):
-        await service.record("openai", "gpt-4o", TokenUsage(input_tokens=1_000_000, output_tokens=0))  # $2.00
-    assert (await service.get_summary()).total_calls == 0
+    cost = await service.record("openai", "gpt-4o", TokenUsage(input_tokens=1_000_000, output_tokens=0))  # $2.00
+    assert cost == pytest.approx(2.0)
+    summary = await service.get_summary()
+    assert (summary.total_calls, summary.total_usd) == (1, pytest.approx(2.0))
+
+
+@pytest.mark.parametrize(
+    ("budget", "spent", "reached"),
+    [(1.0, 0.99, False), (1.0, 1.0, True), (1.0, 1.01, True), (0.0, 1_000.0, False)],
+)
+async def test_the_budget_is_reached_at_the_limit_and_never_when_it_is_zero(url, budget, spent, reached):
+    await _log(url, at=time.time(), cost=spent)
+    assert await CostService(url, daily_budget=budget).budget_reached() is reached
+
+
+async def test_spend_from_yesterday_and_images_today_count_as_they_do_for_today_spend(url):
+    """The check reads today's spend: yesterday's calls do not count; images do."""
+    service = CostService(url, daily_budget=1.0)
+    await _log(url, at=time.time() - 2 * 86400, cost=5.0)
+    assert await service.budget_reached() is False
+    await service.add_image_cost(1.0, "fal")
+    assert await service.budget_reached() is True
 
 
 async def test_today_spend_counts_llm_and_images_but_not_yesterday(url):
