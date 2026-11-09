@@ -13,7 +13,7 @@ from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.session import SessionManager
-from pincer.exceptions import BudgetExceededError, LLMError
+from pincer.exceptions import LLMError
 from pincer.llm.base import (
     BaseLLMProvider,
     LLMMessage,
@@ -328,15 +328,28 @@ async def test_chat_turn_strips_thinking_when_it_fails(settings, mock_llm, sessi
     assert _sent_thinking(session.messages) == []
 
 
-async def test_streaming_chat_strips_thinking_on_a_budget_stop(
-    settings, mock_llm, session_manager, cost_tracker, tools
-):
-    mock_llm.complete.side_effect = [_thinking_tool_response(), BudgetExceededError(100.0, 100.0), _DONE]
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
+async def test_streaming_chat_strips_thinking_on_a_budget_stop(settings, mock_llm, session_manager, tools, tmp_path):
+    """The thinking request crosses the budget ($7/MTok x 1,000 = the whole $0.007); the next one is refused."""
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
 
-    chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
+    crossing = _thinking_tool_response()
+    crossing.request_model, crossing.input_tokens, crossing.output_tokens = "test-fixture-model", 1_000, 0
+    mock_llm.complete.side_effect = [crossing, _DONE]
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=0.007, prices=load_price_table())
+    await tracker.initialize()
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 0.007}), mock_llm, session_manager, tracker, tools.registry
+    )
 
-    assert chunks[-1].content == "Daily budget limit reached."  # precondition: the budget stop's early return
+    try:
+        chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
+    finally:
+        await tracker.close()
+
+    # precondition: the budget stop
+    assert chunks[-1].content.startswith("Warning: Daily budget limit reached.")
+    assert mock_llm.complete.await_count == 1
     session = await session_manager.get_or_create("user1", "web")
     assert any(m.tool_calls for m in session.messages)
     assert _sent_thinking(session.messages) == []

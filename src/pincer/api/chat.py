@@ -37,7 +37,7 @@ from pincer.api.approvals import (
 from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
 from pincer.core.session import channel_session_key, conversation_key
-from pincer.exceptions import BudgetExceededError, LLMError
+from pincer.exceptions import LLMError
 from pincer.services.voice import CallsServiceDep
 
 if TYPE_CHECKING:
@@ -161,8 +161,6 @@ async def post_message(
             session_key=_conversation_session_key(user_id, body.conversation_id),
             memory=body.memory,
         )
-    except BudgetExceededError as e:
-        raise HTTPException(402, str(e)) from e
     except LLMError as e:
         raise HTTPException(502, str(e)) from e
     return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model, "call_sids": resp.call_sids}
@@ -208,9 +206,7 @@ async def post_stream(
                                 done["call_sid"] = chunk.call_sid
                             await queue.put(("tool", done))
                         elif chunk.type == StreamEventType.DONE:
-                            await queue.put(("done", {"text": chunk.content}))
-            except BudgetExceededError as e:
-                await queue.put(("error", {"message": f"Warning: Daily budget — {e}"}))
+                            await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))
             except LLMError as e:
                 await queue.put(("error", {"message": f"LLM error: {e}"}))
             except Exception as e:  # noqa: BLE001

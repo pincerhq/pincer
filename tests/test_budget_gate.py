@@ -6,16 +6,19 @@ call of 1,000 input tokens costs $0.007.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import uuid
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from pincer.config.pricing import TokenUsage, load_price_table
 from pincer.core.agent import Agent
 from pincer.db.engine import get_database_url
 from pincer.db.session import session_scope
-from pincer.llm.base import BaseLLMProvider, LLMResponse, ToolCall
+from pincer.llm.base import BaseLLMProvider, LLMResponse, StreamTurnEvent, ToolCall
 from pincer.llm.cost_tracker import CostTracker
 from pincer.repositories.costs import CostLogRepository
 from pincer.services.costs import CostService
@@ -46,9 +49,21 @@ def _greet(n: int) -> list[ToolCall]:
 
 
 def _scripted_llm(*responses: LLMResponse) -> AsyncMock:
+    """`complete` and `stream_turn` take the next scripted response; `stream_turn.calls` counts streams."""
     queue = list(responses)
     llm = AsyncMock(spec=BaseLLMProvider)
     llm.complete.side_effect = lambda *a, **k: queue.pop(0)
+    streams: list[dict[str, Any]] = []
+
+    async def stream_turn(*args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
+        streams.append(kwargs)
+        response = queue.pop(0)
+        if response.content:
+            yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
+
+    llm.stream_turn = stream_turn
+    llm.streams = streams
     return llm
 
 
@@ -192,3 +207,131 @@ async def test_a_headless_tool_loop_that_crosses_the_budget_stops_before_its_nex
     assert llm.complete.await_count == 2
     assert result == _headless_budget_text(0.01)
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST), pytest.approx(_CALL_COST)]
+
+
+# ── web chat (the streaming path) ───────────────────────────────────
+
+
+async def _web_chat(agent: Agent, text: str = "hi") -> list[tuple[str, dict[str, Any]]]:
+    """One turn through the real `/api/chat/stream` endpoint: its SSE events, in order."""
+    from pincer.api.chat import chat_user
+    from pincer.api.server import create_app
+
+    app = create_app()
+    app.state.agent = agent
+    app.dependency_overrides[chat_user] = lambda: "user"
+    body = {"text": text, "conversation_id": str(uuid.uuid4()), "memory": False}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/chat/stream", json=body)
+    assert response.status_code == 200
+    events = []
+    for frame in response.text.split("\n\n"):
+        if frame.strip():
+            event, data = frame.split("\n", 1)
+            events.append((event.removeprefix("event: "), json.loads(data.removeprefix("data: "))))
+    return events
+
+
+async def test_a_web_chat_turn_with_spend_at_the_budget_makes_no_llm_call(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    settings, tracker = await budgeted(_CALL_COST)
+    await _seed(tmp_path, _CALL)
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    events = await _web_chat(agent)
+
+    assert events == [
+        ("chunk", {"delta": _budget_text(_CALL_COST)}),
+        ("done", {"text": _budget_text(_CALL_COST), "cost_usd": 0.0}),
+    ]
+    assert (llm.complete.await_count, len(llm.streams)) == (0, 0)
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)]
+
+
+async def _streamed_turn(agent: Agent, text: str = "hi") -> list[Any]:
+    return [chunk async for chunk in agent.handle_message_stream("user", "web", text, memory=False)]
+
+
+async def test_a_plain_streamed_turn_records_both_its_requests(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """The tool loop's toolless answer is discarded and the reply streamed by a second request: both are spent."""
+    settings, tracker = await budgeted(100.0)
+    llm = _scripted_llm(_response(), _response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    chunks = await _streamed_turn(agent)
+
+    assert (llm.complete.await_count, len(llm.streams)) == (1, 1)
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST), pytest.approx(_CALL_COST)]
+    assert chunks[-1].content == "Done."
+    assert chunks[-1].cost_usd == pytest.approx(0.014)
+
+
+async def test_a_streamed_turn_with_one_tool_round_records_three_requests(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """Tool call, the toolless answer the stream replaces, then the streamed reply."""
+    settings, tracker = await budgeted(100.0)
+    llm = _scripted_llm(_response(_greet(1)), _response(), _response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    chunks = await _streamed_turn(agent)
+
+    assert (llm.complete.await_count, len(llm.streams)) == (2, 1)
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 3
+    assert chunks[-1].cost_usd == pytest.approx(0.021)
+
+
+async def test_a_streamed_tool_loop_that_crosses_the_budget_stops_before_its_next_request(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    settings, tracker = await budgeted(0.01)
+    llm = _scripted_llm(_response(_greet(1)), _response(_greet(2)), _response(), _response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    chunks = await _streamed_turn(agent, "greet Ann twice")
+
+    assert (llm.complete.await_count, len(llm.streams)) == (2, 0)
+    assert [c.content for c in chunks if c.type.value == "text"] == [_budget_text(0.01)]
+    assert (chunks[-1].content, chunks[-1].cost_usd) == (_budget_text(0.01), pytest.approx(0.014))
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
+    session = await session_manager.get_or_create("user", "web")
+    calls = [tc.id for m in session.messages for tc in m.tool_calls]
+    results = [m.tool_call_id for m in session.messages if m.tool_call_id]
+    assert calls == results == ["tc1", "tc2"]
+    assert session.messages[-1].content == _budget_text(0.01)
+
+
+async def test_the_final_stream_is_not_requested_once_the_tool_loop_reached_the_budget(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """$0.007 seeded + the toolless $0.007 answer = $0.014, the budget: the streamed reply is a request too."""
+    settings, tracker = await budgeted(0.014)
+    await _seed(tmp_path, _CALL)
+    llm = _scripted_llm(_response(), _response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    chunks = await _streamed_turn(agent)
+
+    assert (llm.complete.await_count, len(llm.streams)) == (1, 0)
+    assert (chunks[-1].content, chunks[-1].cost_usd) == (_budget_text(0.014), pytest.approx(_CALL_COST))
+    assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
+
+
+async def test_the_web_chat_done_event_carries_the_cost_of_the_turn_s_recorded_requests(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    settings, tracker = await budgeted(0.0)
+    llm = _scripted_llm(_response(_greet(1)), _response(), _response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    events = await _web_chat(agent)
+
+    assert [name for name, _ in events] == ["tool", "tool", "chunk", "done"]
+    stored = await _stored_costs(tmp_path)
+    assert len(stored) == 3
+    assert events[-1] == ("done", {"text": "Done.", "cost_usd": pytest.approx(sum(stored), abs=1e-12)})
+    assert events[-1][1]["cost_usd"] == pytest.approx(0.021)

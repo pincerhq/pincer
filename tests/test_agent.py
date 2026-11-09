@@ -26,7 +26,7 @@ from pincer.core.agent import (
     _sanitize_tool_pairs,
 )
 from pincer.core.session import SessionManager
-from pincer.exceptions import BudgetExceededError, LLMError, LLMOutputTruncatedError
+from pincer.exceptions import LLMError, LLMOutputTruncatedError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall, ToolResult
 from pincer.memory.mcp import MCPMemoryBackend
 from pincer.memory.summarizer import Summarizer
@@ -825,16 +825,35 @@ async def test_a_streamed_turn_cut_off_inside_a_tool_call_before_any_dial_still_
 
 @pytest.mark.asyncio
 async def test_a_streamed_turn_over_budget_after_a_dial_keeps_the_budget_reply(
-    settings, mock_llm, session_manager, cost_tracker
+    settings, mock_llm, session_manager, tmp_path
 ):
-    """A budget stop is not an LLM failure: it keeps its own reply, never the placed-call text."""
-    mock_llm.complete.side_effect = [_two_dials_then_text()[0], BudgetExceededError(5.0, 5.0)]
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+    """A budget stop is not an LLM failure: it keeps its own reply, never the placed-call text.
+    The dialling request crosses the budget ($7/MTok x 1,000 = the whole $0.007)."""
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
 
-    chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+    dial = _two_dials_then_text()[0]
+    dial.request_model, dial.input_tokens, dial.output_tokens = "test-fixture-model", 1_000, 0
+    mock_llm.complete.side_effect = [dial, _two_dials_then_text()[1]]
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=0.007, prices=load_price_table())
+    await tracker.initialize()
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 0.007}),
+        mock_llm,
+        session_manager,
+        tracker,
+        _dialing_registry(_DIAL_RESULTS),
+    )
 
+    try:
+        chunks = [c async for c in agent.handle_message_stream("user1", "test", "call them", memory=False)]
+    finally:
+        await tracker.close()
+
+    assert mock_llm.complete.await_count == 1
     assert chunks[-1].type == StreamEventType.DONE
-    assert chunks[-1].content == "Daily budget limit reached."
+    assert chunks[-1].content.startswith("Warning: Daily budget limit reached.")
+    assert [c.call_sid for c in chunks if c.call_sid] == ["CA9"]
 
 
 def _stream_of(*events: StreamTurnEvent):

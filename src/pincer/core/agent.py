@@ -301,6 +301,7 @@ class StreamChunk:
     type: StreamEventType
     content: str
     call_sid: str = ""
+    cost_usd: float = 0.0  # on DONE: the sum of the turn's recorded LLM costs
 
 
 @dataclass(frozen=True, slots=True)
@@ -1230,6 +1231,18 @@ class Agent:
             async for chunk in stream:
                 yield chunk
 
+    async def _record_cost(self, response: LLMResponse, session_id: str | None) -> float:
+        """Record one completed request against the provider that served it (may be
+        a failover, not the configured primary) and return its cost."""
+        provider = response.provider or self._settings.default_provider
+        return await self._costs.record(
+            provider=provider,
+            model=response.request_model or response.model,
+            usage=response.usage,
+            session_id=session_id,
+            is_free=self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False,
+        )
+
     async def _handle_message_stream(
         self,
         user_id: str,
@@ -1304,11 +1317,18 @@ class Agent:
         sanitize_attempts = 0
         response: LLMResponse | None = None
         call_sids: list[str] = []
+        total_cost = 0.0
+        refused = False  # the budget refused a request: the turn ends with the budget reply
 
         full_text = ""
         try:
             # Tool-call iterations (non-streaming)
             for _iteration in range(self._settings.max_tool_iterations):
+                # Checked before every request, as on the non-stream path
+                if await self._costs.budget_reached():
+                    refused = True
+                    break
+
                 # Proactive sanitization: fix orphaned pairs before they reach the API
                 await self._repair_tool_pairs(session)
 
@@ -1318,19 +1338,17 @@ class Agent:
                         tools=tool_schemas,
                         system=system_prompt,
                     )
-                except BudgetExceededError:
-                    yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
-                    return
                 except LLMError as e:
                     recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
                     if recovery is _PairRecovery.RETRY:
                         sanitize_attempts += 1
                         continue
                     if recovery is _PairRecovery.CLEARED:
-                        yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
+                        yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
                         return
                     raise
 
+                total_cost += await self._record_cost(response, session.session_id)
                 # A blank cut-off here is fine: the final stream below is the reply, and is checked
                 _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
 
@@ -1391,7 +1409,7 @@ class Agent:
                     consecutive_errors = 0
             else:
                 fallback_content = response.content if response and response.content else "Max iterations reached."
-                yield StreamChunk(StreamEventType.DONE, fallback_content)
+                yield StreamChunk(StreamEventType.DONE, fallback_content, cost_usd=total_cost)
                 return
 
             if circuit_broken:
@@ -1403,7 +1421,7 @@ class Agent:
                 if fallback:
                     final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
                     await self._sessions.add_message(session, final_msg)
-                yield StreamChunk(StreamEventType.DONE, fallback)
+                yield StreamChunk(StreamEventType.DONE, fallback, cost_usd=total_cost)
                 return
 
             # Stream the final response. It sends no tools, unlike the turn's earlier
@@ -1411,40 +1429,47 @@ class Agent:
             # thinking is dropped before it (Q2c).
             strip_thinking(session.messages)
             streamed: LLMResponse | None = None
-            try:
-                async for event in self._llm.stream_turn(
-                    messages=session.messages,
-                    system=system_prompt,
-                ):
-                    if event.response is not None:
-                        streamed = event.response
-                    elif event.text:
-                        full_text += event.text
-                        yield StreamChunk(StreamEventType.TEXT, event.text)
-            except Exception:
-                logger.exception("Final stream failed after %d chars", len(full_text))
-                if full_text.strip():
-                    logger.warning("Keeping the %d streamed chars as the reply", len(full_text))
-                else:
-                    # The tool loop let a blank cut-off through because this stream was the reply;
-                    # it must not become the reply now that the stream failed.
-                    fallback = _tool_loop_fallback(response, self._settings.max_tokens, "failed")
-                    full_text += fallback
-                    yield StreamChunk(StreamEventType.TEXT, fallback)
+            if refused or await self._costs.budget_reached():  # the streamed reply is a request too
+                full_text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+                yield StreamChunk(StreamEventType.TEXT, full_text)
             else:
-                # The reply is the stream, so its stop reason decides: a budget spent on thinking
-                # leaves no text, which must not be sent as an empty reply
-                if streamed is not None:
-                    _refuse_truncated_output(streamed, self._settings.max_tokens)
-                if full_text.strip():
-                    if streamed is None:
-                        # The user already saw these chunks, so they are the reply
-                        logger.warning("stream_turn ended without a final response; replying with the streamed text")
+                try:
+                    async for event in self._llm.stream_turn(
+                        messages=session.messages,
+                        system=system_prompt,
+                    ):
+                        if event.response is not None:
+                            streamed = event.response
+                        elif event.text:
+                            full_text += event.text
+                            yield StreamChunk(StreamEventType.TEXT, event.text)
+                except Exception:
+                    logger.exception("Final stream failed after %d chars", len(full_text))
+                    if full_text.strip():
+                        logger.warning("Keeping the %d streamed chars as the reply", len(full_text))
+                    else:
+                        # The tool loop let a blank cut-off through because this stream was the reply;
+                        # it must not become the reply now that the stream failed.
+                        fallback = _tool_loop_fallback(response, self._settings.max_tokens, "failed")
+                        full_text += fallback
+                        yield StreamChunk(StreamEventType.TEXT, fallback)
                 else:
-                    why = "completed with no text" if streamed is not None else "closed without a final response"
-                    fallback = _tool_loop_fallback(response, self._settings.max_tokens, why)
-                    full_text += fallback
-                    yield StreamChunk(StreamEventType.TEXT, fallback)
+                    # The reply is the stream, so its stop reason decides: a budget spent on thinking
+                    # leaves no text, which must not be sent as an empty reply
+                    if streamed is not None:
+                        total_cost += await self._record_cost(streamed, session.session_id)
+                        _refuse_truncated_output(streamed, self._settings.max_tokens)
+                    if full_text.strip():
+                        if streamed is None:
+                            # The user already saw these chunks, so they are the reply
+                            logger.warning(
+                                "stream_turn ended without a final response; replying with the streamed text"
+                            )
+                    else:
+                        why = "completed with no text" if streamed is not None else "closed without a final response"
+                        fallback = _tool_loop_fallback(response, self._settings.max_tokens, why)
+                        full_text += fallback
+                        yield StreamChunk(StreamEventType.TEXT, fallback)
         except Exception:
             if not call_sids:
                 raise
@@ -1468,7 +1493,7 @@ class Agent:
         if onboarding.ingest:
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
-        yield StreamChunk(StreamEventType.DONE, full_text)
+        yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
 
     async def end_voice_session(self, session_key: str) -> None:
         """Drop a finished call's session from the cache (see ``stream_voice_turn``)."""
