@@ -91,9 +91,9 @@ root. The directory is deleted on `MCPSandbox.stop()`.
 process group. On shutdown:
 
 ```python
-os.killpg(pgid, signal.SIGTERM)   # polite shutdown
+os.killpg(pgid, signal.SIGTERM)  # polite shutdown
 # wait up to _SIGTERM_WAIT_SECONDS (5s)
-os.killpg(pgid, signal.SIGKILL)   # force kill if still running
+os.killpg(pgid, signal.SIGKILL)  # force kill if still running
 ```
 
 Child processes spawned by the MCP server are also killed — there are no zombie
@@ -210,6 +210,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 mcp = FastMCP(name="my_server")
 
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -222,8 +223,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.transport == "http":
-        app = mcp.http_app()                          # FastMCP → Starlette ASGI app
-        cors_app = CORSMiddleware(                    # wrap with CORS for browser clients
+        app = mcp.http_app()  # FastMCP → Starlette ASGI app
+        cors_app = CORSMiddleware(  # wrap with CORS for browser clients
             app=app,
             allow_origins=["*"],
             allow_methods=["*"],
@@ -231,7 +232,7 @@ def main() -> None:
         )
         uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
-        mcp.run(transport="stdio")                   # MCP SDK stdio loop
+        mcp.run(transport="stdio")  # MCP SDK stdio loop
 ```
 
 `mcp.http_app()` returns a Starlette application that exposes the MCP endpoint
