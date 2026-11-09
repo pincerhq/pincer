@@ -29,11 +29,12 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         self, user_id: str, channel: str, completed_at: float, *, reason: Literal["answer", "expired"]
     ) -> bool:
         """Close the gate, recording why in `closed_by` ("answer" or "expired").
-        Only an answer may take over an empty-reply closure; any other closed
-        row is kept."""
+        An answer may take over an empty or expired closure: both follow a read
+        that found no answer, and a concurrent message may still hold one.
+        Nothing takes over an answer, and any other closed row is kept."""
         eligible = _TABLE.c.completed_at.is_(None)
         if reason == "answer":
-            eligible = eligible | (_TABLE.c.closed_by == "empty")
+            eligible = eligible | col(Onboarding.closed_by).in_(("empty", "expired"))
         result = await self.session.exec(
             upsert(
                 dialect_of(self.session),
@@ -51,7 +52,11 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
 
     async def count_empty_reply(self, user_id: str, channel: str, *, max_empty: int, now: float) -> bool:
         """Count a reply that held no answer; the `max_empty`-th one closes the
-        gate. True when the gate is closed afterwards."""
+        gate. True when the gate is closed afterwards.
+
+        A row created here (a user asked before the table existed) takes `now`
+        as its `asked_at`, so its answer window runs from the first reply seen.
+        """
         await self.session.exec(
             upsert(
                 dialect_of(self.session),
@@ -60,6 +65,7 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
                     "user_id": user_id,
                     "channel": channel,
                     "attempts": 1,
+                    "asked_at": now,
                     "completed_at": now if max_empty <= 1 else None,
                     "closed_by": "empty" if max_empty <= 1 else None,
                 },
