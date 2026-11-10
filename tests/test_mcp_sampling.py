@@ -288,6 +288,71 @@ async def test_without_an_anthropic_key_sampling_has_no_backend(tmp_path, anthro
     ]
 
 
+_UNCHECKED = "[Sampling: could not check the daily budget, request not sent]"
+_SETUP_FAILED = "MCP sampling: the daily budget can't be checked; every sampling request will be refused"
+
+
+async def _sample_twice(shell) -> list[str]:  # type: ignore[no-untyped-def]
+    """Two requests to one backend, built once as `run()` builds it."""
+    handler = SamplingHandler(llm_backend=await shell._build_llm_backend(), enabled=True)
+    return [await handler.handle([{"role": "user", "content": "hi"}]) for _ in range(2)]
+
+
+def _errors(caplog) -> list[str]:  # type: ignore[no-untyped-def]
+    return [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+
+
+async def test_when_the_cost_log_cannot_be_opened_every_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, caplog
+):  # type: ignore[no-untyped-def]
+    """Startup survives, the setup is not retried per request (one ERROR), nothing is sent."""
+    (tmp_path / "not-a-dir").write_text("", encoding="utf-8")
+    use_settings(_settings(tmp_path / "not-a-dir" / "data"))
+
+    replies = await _sample_twice(_shell())
+
+    assert replies == [_UNCHECKED, _UNCHECKED]
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == [_SETUP_FAILED]
+
+
+async def test_with_an_invalid_price_table_every_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, caplog, monkeypatch
+):  # type: ignore[no-untyped-def]
+    """A PricingError no longer escapes `_build_llm_backend`, which would stop the whole server."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "pincer.toml").write_text('[pricing."test-fixture-model"]\ninput = 1.0\n', encoding="utf-8")
+    monkeypatch.setattr("pincer.config.pricing._config_dir", lambda: config)
+    use_settings(_settings(tmp_path))
+
+    replies = await _sample_twice(_shell())
+
+    assert replies == [_UNCHECKED, _UNCHECKED]
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == [_SETUP_FAILED]
+
+
+async def test_when_the_budget_cannot_be_read_a_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, monkeypatch
+):  # type: ignore[no-untyped-def]
+    """The cost database fails after a good startup: refused cleanly, nothing sent."""
+    from sqlalchemy.exc import OperationalError
+
+    async def unreadable(self):  # type: ignore[no-untyped-def]
+        raise OperationalError("SELECT", {}, Exception("database is locked"))
+
+    use_settings(_settings(tmp_path, budget=1.0))
+    shell = _shell()
+    backend = await shell._build_llm_backend()
+    monkeypatch.setattr("pincer.services.costs.CostService.budget_reached", unreadable)
+
+    reply = await SamplingHandler(llm_backend=backend, enabled=True).handle([{"role": "user", "content": "hi"}])
+
+    assert reply == _UNCHECKED
+    assert anthropic_api.requests == []
+
+
 def test_sampling_defaults_to_a_shipped_model() -> None:
     """The retired claude-sonnet-4 default had no price, so its spend could never be recorded."""
     from pincer.config.pricing import load_price_table

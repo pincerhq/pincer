@@ -25,7 +25,12 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pincer.mcp.sampling import DEFAULT_SAMPLING_MODEL, SAMPLING_PROVIDER, StandaloneLLMBackend
+from pincer.mcp.sampling import (
+    DEFAULT_SAMPLING_MODEL,
+    SAMPLING_PROVIDER,
+    MeteringUnavailableBackend,
+    StandaloneLLMBackend,
+)
 
 if TYPE_CHECKING:
     from pincer.mcp.config import MCPConfig
@@ -189,8 +194,17 @@ class StandaloneMCPShell:
             logger.error("MCP sampling is enabled but has no Anthropic API key (PINCER_ANTHROPIC_API_KEY)")
             return None
         # The same daily budget and cost log as the agent (issue #357)
-        costs = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
-        await costs.initialize()
+        try:
+            costs = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
+            await costs.initialize()
+        except Exception:
+            # Not retried per request: the server keeps its tools, and sampling fails closed
+            logger.error(
+                "MCP sampling: the daily budget can't be checked; every sampling request will be refused",
+                exc_info=True,
+            )
+            await provider.close()
+            return MeteringUnavailableBackend()
         return StandaloneLLMBackend(
             MeteredLLM(provider, costs, SAMPLING_PROVIDER),
             default_model=getattr(sampling_cfg, "model", DEFAULT_SAMPLING_MODEL),

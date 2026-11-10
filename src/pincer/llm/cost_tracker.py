@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db import ensure_schema_current
 from pincer.db.engine import get_database_url
-from pincer.exceptions import DailyBudgetReachedError
+from pincer.exceptions import BudgetCheckFailedError, DailyBudgetReachedError
 from pincer.llm.base import BaseLLMProvider
 from pincer.services.costs import CostService, CostSummary
 
@@ -128,7 +128,8 @@ class MeteredLLM(BaseLLMProvider):
     recorded after, for callers outside the agent's turn loops (a finished call's report).
 
     A request refused by the budget raises `DailyBudgetReachedError` before anything is
-    sent; callers already treat a failed request as "no answer" and take their fallback.
+    sent, and one whose budget can't be read raises `BudgetCheckFailedError`; callers
+    already treat a failed request as "no answer" and take their fallback.
     `stream_turn` is the base fallback over `complete`, so it is metered the same way.
     """
 
@@ -149,7 +150,11 @@ class MeteredLLM(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        if await self._costs.budget_reached():
+        try:
+            reached = await self._costs.budget_reached()
+        except Exception as e:
+            raise BudgetCheckFailedError("the daily budget could not be read: the request was not sent") from e
+        if reached:
             raise DailyBudgetReachedError("daily budget reached: the request was not sent")
         response = await self._llm.complete(
             messages,

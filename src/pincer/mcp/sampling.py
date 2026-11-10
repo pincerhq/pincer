@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
-from pincer.exceptions import DailyBudgetReachedError
+from pincer.exceptions import BudgetCheckFailedError, DailyBudgetReachedError
 from pincer.llm.base import LLMMessage, MessageRole
 
 if TYPE_CHECKING:
@@ -37,6 +37,8 @@ logger = logging.getLogger("pincer.mcp.sampling")
 
 DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
 SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
+# When the spend can't be checked (or recorded): sampling fails closed, like an outbound dial
+SAMPLING_BUDGET_UNCHECKED = "[Sampling: could not check the daily budget, request not sent]"
 
 
 # ── LLM backend abstraction ────────────────────────────────────────────────────
@@ -127,6 +129,19 @@ class StandaloneLLMBackend(LLMBackend):
             pinned=True,
         )
         return response.content
+
+
+class MeteringUnavailableBackend(LLMBackend):
+    """Stands in when sampling's metering could not be set up at startup (logged then, once):
+    every request is refused before anything is sent, since its spend could not be checked."""
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        max_tokens: int = 1024,
+    ) -> str:
+        raise BudgetCheckFailedError("the daily budget can't be checked: the sampling request was not sent")
 
 
 def _to_llm_messages(messages: list[dict[str, Any]]) -> list[LLMMessage]:
@@ -258,6 +273,9 @@ class SamplingHandler:
         except DailyBudgetReachedError:
             logger.info("Sampling request refused: the daily budget is reached")
             return "[Sampling: daily budget reached]"
+        except BudgetCheckFailedError:
+            logger.warning("Sampling request refused: the daily budget can't be checked", exc_info=True)
+            return SAMPLING_BUDGET_UNCHECKED
         except Exception as e:
             logger.exception("Sampling request failed: %s", e)
             return f"[Sampling error: {type(e).__name__}: {e}]"
