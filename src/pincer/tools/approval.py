@@ -29,6 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from pincer.utils.csv_list import split_csv
+
 ApprovalMode = Literal["all", "critical", "none"]
 
 APPROVAL_MODES: frozenset[str] = frozenset({"all", "critical", "none"})
@@ -148,9 +150,9 @@ def parse_tool_names(value: object) -> frozenset[str]:
     if value is None:
         return frozenset()
     if isinstance(value, str):
-        return frozenset(part.strip() for part in value.split(",") if part.strip())
+        return frozenset(split_csv(value))
     if isinstance(value, (list, tuple, set, frozenset)):
-        return frozenset(str(name).strip() for name in value if str(name).strip())
+        return frozenset(s for name in value if (s := str(name).strip()))
     return frozenset()
 
 

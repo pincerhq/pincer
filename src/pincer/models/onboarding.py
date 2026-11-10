@@ -1,10 +1,17 @@
 """First-conversation onboarding, one row per user and channel."""
 
+from typing import Literal
+
 import sqlalchemy as sa
 from sqlalchemy import Column, Integer, Text
 from sqlmodel import Field, SQLModel
 
 from pincer.db.types import Real
+
+# Why a row's gate was closed: an answer, the answer window expiring, too many
+# replies with no answer, or a user never asked (onboarded before the table
+# existed, or with history from before onboarding).
+ClosedBy = Literal["answer", "expired", "empty", "legacy", "existing"]
 
 
 class Onboarding(SQLModel, table=True):
@@ -12,7 +19,8 @@ class Onboarding(SQLModel, table=True):
 
     `asked_session_id` is the session whose reply carried the question. The
     user's next message in any session is checked for an answer; `attempts`
-    counts the ones that held none. Times are epoch seconds, as in
+    counts the ones that held none, and after the answer window also the
+    reads whose extraction call failed. Times are epoch seconds, as in
     `pincer_sessions`.
     """
 
@@ -23,5 +31,5 @@ class Onboarding(SQLModel, table=True):
     asked_session_id: str | None = Field(default=None, sa_column=Column(Text()))
     asked_at: float | None = Field(default=None, sa_column=Column(Real()))
     completed_at: float | None = Field(default=None, sa_column=Column(Real()))
-    closed_by: str | None = Field(default=None, sa_column=Column(Text()))
+    closed_by: ClosedBy | None = Field(default=None, sa_column=Column(Text()))
     attempts: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=sa.text("0")))

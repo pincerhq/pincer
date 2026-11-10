@@ -19,6 +19,7 @@ from email.message import EmailMessage
 from typing import Any
 
 from pincer.config import get_settings
+from pincer.utils.csv_list import split_csv
 
 logger = logging.getLogger(__name__)
 
@@ -403,13 +404,16 @@ async def email_mark(uids: str, action: str, folder: str = "INBOX") -> str:
     if action not in _MARK_ACTIONS:
         return f"Invalid action '{action}'. Choose from: {', '.join(_MARK_ACTIONS)}"
 
+    uid_list = split_csv(uids)
+    if not uid_list:
+        return "No UIDs given."
+
     client = None
     try:
         client = await _get_imap_client()
         await client.select(_quote_mailbox(folder))
 
         cmd, flags = _MARK_ACTIONS[action]
-        uid_list = [u.strip() for u in uids.split(",")]
 
         marked = 0
         for uid_val in uid_list:
@@ -433,12 +437,15 @@ async def email_mark(uids: str, action: str, folder: str = "INBOX") -> str:
 
 async def email_move(uids: str, destination: str, folder: str = "INBOX") -> str:
     """Move one or more emails (comma-separated UIDs) to a destination folder."""
+    uid_list = split_csv(uids)
+    if not uid_list:
+        return "No UIDs given."
+
     client = None
     try:
         client = await _get_imap_client()
         await client.select(_quote_mailbox(folder))
 
-        uid_list = [u.strip() for u in uids.split(",")]
         moved = 0
         for uid_val in uid_list:
             status, _ = await client.uid("copy", uid_val, _quote_mailbox(destination))
@@ -465,6 +472,10 @@ async def email_move(uids: str, destination: str, folder: str = "INBOX") -> str:
 
 async def email_trash(uids: str, folder: str = "INBOX") -> str:
     """Move one or more emails (comma-separated UIDs) to the Trash folder."""
+    uid_list = split_csv(uids)
+    if not uid_list:
+        return "No UIDs given."
+
     client = None
     try:
         client = await _get_imap_client()
@@ -475,7 +486,6 @@ async def email_trash(uids: str, folder: str = "INBOX") -> str:
 
         await client.select(_quote_mailbox(folder))
 
-        uid_list = [u.strip() for u in uids.split(",")]
         trashed = 0
         for uid_val in uid_list:
             status, _ = await client.uid("copy", uid_val, _quote_mailbox(trash_folder))

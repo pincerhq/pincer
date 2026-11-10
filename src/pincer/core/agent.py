@@ -19,7 +19,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
@@ -304,9 +304,15 @@ class _Onboarding:
     prompt: bool  # append the question to this turn's reply
     ingest: bool  # read this message for an answer to the question
     followup: bool = False  # this session showed the question: say so to the model
+    last_chance: bool = False  # with ingest, past the answer window: close the gate unless this is an answer
 
 
 _NO_ONBOARDING = _Onboarding(prompt=False, ingest=False)
+
+
+def _reading_onboarding(session: Session, *, last_chance: bool = False) -> _Onboarding:
+    """A turn that reads its message for an answer to the question already asked."""
+    return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session), last_chance=last_chance)
 
 
 def _no_router_build(name: str, model_hint: str) -> str:
@@ -630,6 +636,7 @@ class Agent:
         # DEBUG repeats, INFO on recovery), not once per message.
         self._mcp_list_outage = LogOnce(logger, recovery="Fetching the MCP server list for prompt recovered")
         self._memory_outage = LogOnce(logger, recovery="Fetching memories for prompt recovered")
+        self._close_known_outage = LogOnce(logger, recovery="Closing onboarding for known users recovered")
         # Voice calls whose resolved provider/model was already logged (once per call)
         self._voice_model_logged: set[str] = set()
 
@@ -1039,7 +1046,7 @@ class Agent:
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
-            await self._ingest_onboarding_reply(text, user_id, channel)
+            await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
         # Store the final exchange as a memory for future retrieval
         if self._memory and memory and final_text:
@@ -1488,7 +1495,7 @@ class Agent:
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
-            await self._ingest_onboarding_reply(text, user_id, channel)
+            await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
         yield StreamChunk(StreamEventType.DONE, full_text)
 
@@ -2117,7 +2124,17 @@ class Agent:
         ``channel`` itself (Slack and Teams threads) are onboarded per thread.
 
         A user with no row yet is read from the flags their session carried
-        before the table existed, so nobody onboarded then is asked again.
+        before the table existed, so nobody onboarded then is asked again. That
+        first read also writes a completed row for a user who will never be
+        asked (onboarded before the table, or with history older than any turn,
+        see `_should_close_existing`), so their later turns hit the completed
+        cache and read nothing.
+
+        Once `_ONBOARDING_ANSWER_WINDOW_S` has passed since the question, the
+        next message is still read: an answer completes onboarding, and
+        anything else closes the gate as expired (``last_chance``). A late
+        answer is never dropped unread. Failed late reads are bounded too:
+        see `_ingest_onboarding_reply`.
 
         Voice is never onboarded: nobody onboards mid-phone-call, and with a
         session per call every call's first turn would look like a new user.
@@ -2132,17 +2149,54 @@ class Agent:
             if record.completed_at is not None:
                 return _NO_ONBOARDING
             if record.asked_at is not None and time.time() - record.asked_at > _ONBOARDING_ANSWER_WINDOW_S:
-                await onboarding.complete(user_id, channel, now=time.time())
-                logger.info("onboarding.expired user=%s channel=%s", user_id, channel)
-                return _NO_ONBOARDING
-            return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
+                return _reading_onboarding(session, last_chance=True)
+            return _reading_onboarding(session)
         if session.is_onboarded():
+            await self._close_known_onboarding(user_id, channel, "legacy")
             return _NO_ONBOARDING
         if session.onboarding_prompt_already_sent():
-            return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
+            return _reading_onboarding(session)
         # New: nothing stored for this user on the channel, in any session.
         new = session.is_fresh() and not await self._sessions.has_stored_sessions(user_id, channel)
+        if not new and await self._should_close_existing(user_id, channel):
+            await self._close_known_onboarding(user_id, channel, "existing")
         return _Onboarding(prompt=new, ingest=False)
+
+    async def _should_close_existing(self, user_id: str, channel: str) -> bool:
+        """True when a user who is not new may be closed as ``existing``: they
+        have a stored session on the channel created more than the answer
+        window (24 h) ago.
+
+        Stored history alone is not enough. A brand-new user's first turn
+        saves its user message, then runs the model for seconds before it
+        asks; another turn for them (another conversation, maybe another
+        process) sees that history meanwhile, and closing the gate then would
+        make the asking turn's `claim_prompt` lose, so its question would show
+        but its answer go unread. No turn lasts the answer window, so history
+        older than that was never written by a turn still asking. A user whose
+        history is all newer keeps one read per turn until it is older.
+        """
+        cutoff = time.time() - _ONBOARDING_ANSWER_WINDOW_S
+        return await self._sessions.has_stored_sessions(user_id, channel, created_before=cutoff)
+
+    async def _close_known_onboarding(self, user_id: str, channel: str, reason: Literal["legacy", "existing"]) -> None:
+        """Write a completed row for a user who will never be asked, so later
+        turns skip the read. Only an optimisation: a failed write is logged
+        (once per outage) and the turn goes on."""
+        try:
+            closed = await self._sessions.onboarding.complete_known(user_id, channel, now=time.time(), reason=reason)
+        except Exception:
+            self._close_known_outage.log(
+                "onboarding.close_known_failed user=%s channel=%s reason=%s",
+                user_id,
+                channel,
+                reason,
+                exc_info=True,
+            )
+            return
+        self._close_known_outage.clear()
+        if closed:
+            logger.info("onboarding.closed_known user=%s channel=%s reason=%s", user_id, channel, reason)
 
     async def _reserve_onboarding_prompt(self, onboarding: _Onboarding, user_id: str, channel: str) -> bool:
         """Hold the right to ask, before the question is appended.
@@ -2180,6 +2234,7 @@ class Agent:
         reply_text: str,
         user_id: str,
         channel: str,
+        onboarding: _Onboarding,
     ) -> None:
         """Ask the model whether the message answers the onboarding question,
         and read name / use_case / language from it.
@@ -2187,8 +2242,16 @@ class Agent:
         An answer with a field in it closes the gate, and the turn that closes
         it writes the profile. A message the model says is no answer (a task),
         or one with no field, is only counted: the gate closes, empty, at
-        `_ONBOARDING_MAX_EMPTY_REPLIES`, and its text is never kept. A failed
-        extraction call is not a reply at all and leaves the gate as it was.
+        `_ONBOARDING_MAX_EMPTY_REPLIES`, and its text is never kept. On the
+        `last_chance` read, after the answer window, such a message closes the
+        gate as expired instead.
+
+        A failed extraction call is not a reply at all. Within the window it
+        leaves the gate as it was. After it, the failure is counted in
+        `attempts` with the empty replies, and the gate closes as expired at
+        `_ONBOARDING_MAX_EMPTY_REPLIES`: a failing extractor costs a user a
+        bounded number of extra calls, and a transient outage still drops no
+        answer while the next message is read again.
         """
         name: str | None = None
         use_case: str | None = None
@@ -2208,6 +2271,18 @@ class Agent:
                 pinned=True,
             )
         except Exception as e:
+            if onboarding.last_chance:
+                closed = await self._sessions.onboarding.record_failed_late_read(
+                    user_id, channel, max_reads=_ONBOARDING_MAX_EMPTY_REPLIES, now=time.time()
+                )
+                logger.warning(
+                    "Onboarding extraction failed after the answer window; closed=%s user=%s channel=%s: %s",
+                    closed,
+                    user_id,
+                    channel,
+                    e,
+                )
+                return
             logger.warning("Onboarding extraction failed; the gate is left as it was: %s", e)
             return
         data = _safe_json_loads(response.content or "")
@@ -2217,14 +2292,11 @@ class Agent:
             language = _clean_profile_value(data.get("language"))
 
         if not any([name, use_case, language]):
-            closed = await self._sessions.onboarding.record_empty_reply(
-                user_id, channel, max_empty=_ONBOARDING_MAX_EMPTY_REPLIES, now=time.time()
-            )
-            logger.info("onboarding.empty_reply user=%s channel=%s closed=%s", user_id, channel, closed)
+            await self._close_onboarding_unanswered(user_id, channel, last_chance=onboarding.last_chance)
             return
 
         if not await self._sessions.onboarding.complete_answer(user_id, channel, now=time.time()):
-            # Another answer or expiry closed the gate first.
+            # Another answer closed the gate first.
             logger.info("onboarding.already_completed user=%s channel=%s", user_id, channel)
             return
         logger.info(
@@ -2244,6 +2316,21 @@ class Agent:
                 )
             except Exception:
                 logger.debug("Failed to write profile memory", exc_info=True)
+
+    async def _close_onboarding_unanswered(self, user_id: str, channel: str, *, last_chance: bool) -> None:
+        """A read found no answer: after the answer window the gate closes as
+        expired, and before it the reply is counted as empty."""
+        onboarding = self._sessions.onboarding
+        if last_chance:
+            if await onboarding.complete(user_id, channel, now=time.time()):
+                logger.info("onboarding.expired user=%s channel=%s", user_id, channel)
+            else:
+                logger.info("onboarding.already_completed user=%s channel=%s", user_id, channel)
+            return
+        closed = await onboarding.record_empty_reply(
+            user_id, channel, max_empty=_ONBOARDING_MAX_EMPTY_REPLIES, now=time.time()
+        )
+        logger.info("onboarding.empty_reply user=%s channel=%s closed=%s", user_id, channel, closed)
 
     async def _execute_tool(
         self,

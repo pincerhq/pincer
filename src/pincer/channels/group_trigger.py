@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
+from pincer.utils.csv_list import split_csv
+
 # Letters of scripts written without spaces between words. Python's Unicode
 # ``\w`` includes them, so a plain ``(?<!\w)`` boundary would never match a
 # trigger embedded in such text.
@@ -45,8 +47,8 @@ _SPACED_WORD_CHAR = rf"[^\W{_NO_SPACE_SCRIPTS}]"
 
 
 def parse_group_triggers(raw: str) -> tuple[str, ...]:
-    """Split a comma-separated trigger setting into trimmed, non-empty entries."""
-    return tuple(entry for part in raw.split(",") if (entry := part.strip()))
+    """``split_csv`` as a tuple, so the result is hashable for the ``lru_cache`` below."""
+    return tuple(split_csv(raw))
 
 
 @lru_cache(maxsize=32)

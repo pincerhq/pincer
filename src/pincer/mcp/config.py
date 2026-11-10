@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pincer.config.toml_loader import read_toml_raw as _read_toml_raw
+from pincer.utils.csv_list import split_csv
 
 if TYPE_CHECKING:
     from pincer.config.main import Settings
@@ -383,7 +384,7 @@ def _load_env_servers(pincer_vars: dict[str, str] | None = None) -> list[MCPServ
 
         # Parse args: comma-separated
         args_str = os.environ.get(f"{prefix}ARGS", "")
-        args = _interpolate_list([a.strip() for a in args_str.split(",") if a.strip()], pincer_vars) if args_str else []
+        args = _interpolate_list(split_csv(args_str), pincer_vars)
 
         # Parse env: PINCER_MCP_SERVER_N_ENV_VARNAME=value
         env: dict[str, str] = {}
@@ -395,7 +396,7 @@ def _load_env_servers(pincer_vars: dict[str, str] | None = None) -> list[MCPServ
 
         # Approval patterns
         approval_str = os.environ.get(f"{prefix}APPROVAL", "*")
-        approval = [a.strip() for a in approval_str.split(",") if a.strip()]
+        approval = split_csv(approval_str)
 
         enabled_str = os.environ.get(f"{prefix}ENABLED", "true").lower()
         sandbox_str = os.environ.get(f"{prefix}SANDBOX", "true").lower()

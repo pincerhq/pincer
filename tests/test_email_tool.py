@@ -403,6 +403,34 @@ class TestEmailMark:
             assert "1/1" in result
             assert "\\Flagged" in store_calls[0][2]
 
+    async def test_mark_skips_empty_uids(self):
+        mock_client = _make_imap_client()
+
+        store_calls = []
+
+        async def mock_uid(command, *args):
+            if command == "store":
+                store_calls.append(args)
+            return ("OK", [b""])
+
+        mock_client.uid = mock_uid
+
+        with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
+            from pincer.tools.builtin.email_tool import email_mark
+
+            result = await email_mark("1,,2,", "read")
+            assert "2/2" in result
+            assert [call[0] for call in store_calls] == ["1", "2"]
+
+    @pytest.mark.parametrize("uids", ["", " , ,"])
+    async def test_mark_no_uids_skips_imap(self, uids):
+        with patch("pincer.tools.builtin.email_tool._get_imap_client") as get_client:
+            from pincer.tools.builtin.email_tool import email_mark
+
+            result = await email_mark(uids, "read")
+            assert result == "No UIDs given."
+            get_client.assert_not_called()
+
     async def test_mark_invalid_action(self):
         from pincer.tools.builtin.email_tool import email_mark
 

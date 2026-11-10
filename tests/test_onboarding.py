@@ -9,7 +9,14 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from pincer.core.agent import _ONBOARDING_EXTRACTION_MAX_TOKENS, Agent, StreamEventType
+from pincer.core.agent import (
+    _ONBOARDING_ANSWER_WINDOW_S,
+    _ONBOARDING_EXTRACTION_MAX_TOKENS,
+    _ONBOARDING_MAX_EMPTY_REPLIES,
+    Agent,
+    StreamEventType,
+    _Onboarding,
+)
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
     ONBOARDING_FOLLOWUP_INSTRUCTION,
@@ -92,6 +99,11 @@ async def _record(tmp_path: Path, user_id: str, channel: str) -> OnboardingRecor
     return await OnboardingService(get_database_url(tmp_path / "test.db")).get(user_id, channel)
 
 
+def _long_ago() -> float:
+    """A session creation time past the answer window: no turn still asking wrote it."""
+    return time.time() - _ONBOARDING_ANSWER_WINDOW_S - 3600
+
+
 async def _store_history(
     session_manager,
     user_id: str,
@@ -99,9 +111,12 @@ async def _store_history(
     *,
     session_key: str | None = None,
     reply: str = "earlier reply",
+    created_at: float | None = None,
     **metadata,
 ):
     session = await session_manager.get_or_create(user_id, channel, session_key=session_key)
+    if created_at is not None:
+        session.created_at = created_at
     session.metadata.update(metadata)
     await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="earlier message"))
     await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=reply))
@@ -309,26 +324,173 @@ async def test_two_empty_replies_close_the_gate(
     assert await memory_store.list_memories(user_id="user-q", category="profile") == []
 
 
+async def _asked_a_day_ago(session_manager, user_id: str) -> None:
+    """A question shown in the user's web session, asked more than a day ago."""
+    await _store_history(session_manager, user_id, "web", reply=f"Hello!\n\n{ONBOARDING_QUESTION_EN}")
+    past_window = time.time() - _ONBOARDING_ANSWER_WINDOW_S - 3600
+    assert await session_manager.onboarding.claim_prompt(user_id, "web", f"web:{user_id}", now=past_window)
+
+
 @_PATHS
 async def test_an_unanswered_question_expires_after_a_day(
     path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
-    """A question left unanswered for more than a day is closed by the next
-    message, which is not read for an answer."""
-    llm = _scripted_llm("Sure.")
+    """More than a day after the question, a message that is no answer closes
+    the gate as expired after one read, with no profile; nothing after it is read."""
+    llm = _scripted_llm("Sure.", _TASK_REPLIES["new_prompt_response"], "Done.")
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
-    await _store_history(session_manager, "user-e", "web")
-    a_day_ago = time.time() - 25 * 60 * 60
-    assert await session_manager.onboarding.claim_prompt("user-e", "web", "web:user-e", now=a_day_ago)
+    await _asked_a_day_ago(session_manager, "user-e")
 
-    await _reply(agent, path, "user-e", "web", "I'm Eve")
+    await _reply(agent, path, "user-e", "web", "Summarize this contract for me")
 
-    assert llm.complete.call_count == 1
-    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args.kwargs["system"]
+    assert llm.complete.call_count == 2
     record = await _record(tmp_path, "user-e", "web")
     assert record is not None
-    assert record.completed_at is not None
+    assert (record.attempts, record.completed_at is not None, record.closed_by) == (0, True, "expired")
     assert await memory_store.list_memories(user_id="user-e", category="profile") == []
+
+    await _reply(agent, path, "user-e", "web", "And the next one")
+
+    assert llm.complete.call_count == 3
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args_list[2].kwargs["system"]
+
+
+@_PATHS
+async def test_an_answer_after_a_day_is_read(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Asked at 23:00, answered at 23:30 the next day: the answer is still
+    taken, with the follow-up instruction, and the profile is written."""
+    llm = _scripted_llm(
+        "Nice to meet you, Ana.",
+        '{"answers_question": true, "name": "Ana", "use_case": "travel planning", "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    await _asked_a_day_ago(session_manager, "user-ana")
+
+    await _reply(agent, path, "user-ana", "web", "I'm Ana, mostly travel planning")
+
+    assert llm.complete.call_count == 2
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[0].kwargs["system"]
+    record = await _record(tmp_path, "user-ana", "web")
+    assert record is not None
+    assert (record.completed_at is not None, record.closed_by) == (True, "answer")
+    profiles = await memory_store.list_memories(user_id="user-ana", category="profile")
+    assert [("Ana" in p.content) for p in profiles] == [True]
+
+
+@_PATHS
+async def test_an_extraction_error_after_a_day_leaves_the_gate_open(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """A transient outage on the late read drops nothing: the gate stays open,
+    and the next message gets the same last chance."""
+    llm = _scripted_llm(
+        "Sure.",
+        RuntimeError("LLM down"),
+        "Nice to meet you, Ana.",
+        '{"answers_question": true, "name": "Ana", "use_case": null, "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    await _asked_a_day_ago(session_manager, "user-ana2")
+
+    await _reply(agent, path, "user-ana2", "web", "I'm Ana")
+
+    record = await _record(tmp_path, "user-ana2", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (1, None)
+
+    await _reply(agent, path, "user-ana2", "web", "I'm Ana, again")
+
+    record = await _record(tmp_path, "user-ana2", "web")
+    assert record is not None and record.closed_by == "answer"
+    assert len(await memory_store.list_memories(user_id="user-ana2", category="profile")) == 1
+
+
+def _extracting_llm(extract) -> AsyncMock:
+    """An LLM whose extraction calls go to ``extract(text)``; other calls reply "Ok."."""
+
+    async def complete(**kwargs):
+        if kwargs.get("max_tokens") == _ONBOARDING_EXTRACTION_MAX_TOKENS:
+            return await extract(kwargs["messages"][0].content)
+        return _llm_text("Ok.")
+
+    llm = AsyncMock()
+    llm.complete.side_effect = complete
+    _streams(llm, "Ok.")
+    return llm
+
+
+@_PATHS
+async def test_a_failing_extractor_after_a_day_stops_being_called(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Extraction that keeps failing after the window is retried a bounded
+    number of times, then the gate closes as expired and nothing more is read."""
+    extractions = []
+
+    async def extract(prompt: str) -> LLMResponse:
+        extractions.append(prompt)
+        raise BudgetExceededError("over budget")
+
+    agent = Agent(
+        settings, _extracting_llm(extract), session_manager, cost_tracker, tool_registry, memory_store=memory_store
+    )
+    await _asked_a_day_ago(session_manager, "user-f")
+
+    for n in range(_ONBOARDING_MAX_EMPTY_REPLIES + 2):
+        await _reply(agent, path, "user-f", "web", f"Task {n}")
+
+    assert len(extractions) == _ONBOARDING_MAX_EMPTY_REPLIES
+    record = await _record(tmp_path, "user-f", "web")
+    assert record is not None
+    assert (record.completed_at is not None, record.closed_by) == (True, "expired")
+    assert await memory_store.list_memories(user_id="user-f", category="profile") == []
+
+
+@_PATHS
+async def test_a_late_answer_takes_over_a_concurrent_late_expiry(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """After the window, a task and an answer are read at once. The task's
+    expiry lands first; the answer still completes onboarding and writes the profile."""
+    both_extracting = asyncio.Barrier(2)
+    expired = asyncio.Event()
+    onboarding = session_manager.onboarding
+    complete = onboarding.complete
+
+    async def expire_then_signal(*args, **kwargs):
+        won = await complete(*args, **kwargs)
+        expired.set()
+        return won
+
+    onboarding.complete = expire_then_signal
+
+    async def extract(prompt: str) -> LLMResponse:
+        await both_extracting.wait()
+        if "I'm Ana" in prompt:
+            await expired.wait()
+            return _llm_text('{"answers_question": true, "name": "Ana", "use_case": null, "language": null}')
+        return _llm_text(_TASK_REPLIES["new_prompt_response"])
+
+    agent = Agent(
+        settings, _extracting_llm(extract), session_manager, cost_tracker, tool_registry, memory_store=memory_store
+    )
+    await _asked_a_day_ago(session_manager, "user-r")
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            _reply(agent, path, "user-r", "web", "Summarize this contract for me"),
+            _reply(agent, path, "user-r", "web", "I'm Ana", session_key=conversation_key("user-r", "web", "b")),
+        ),
+        timeout=10,
+    )
+
+    assert expired.is_set()
+    record = await _record(tmp_path, "user-r", "web")
+    assert record is not None and record.closed_by == "answer"
+    profiles = await memory_store.list_memories(user_id="user-r", category="profile")
+    assert [("Ana" in p.content) for p in profiles] == [True]
 
 
 @_PATHS
@@ -586,7 +748,7 @@ async def test_inflight_answer_after_empty_closure_writes_profile(
     assert not await onboarding.record_empty_reply("user-race", "web", max_empty=2, now=2.0)
     assert await onboarding.record_empty_reply("user-race", "web", max_empty=2, now=3.0)
 
-    await agent._ingest_onboarding_reply("I'm Bob", "user-race", "web")
+    await agent._ingest_onboarding_reply("I'm Bob", "user-race", "web", _Onboarding(prompt=False, ingest=True))
 
     record = await onboarding.get("user-race", "web")
     assert record is not None and record.attempts == 2
@@ -602,7 +764,7 @@ async def test_existing_user_new_conversation_is_separate_and_not_prompted(
     their main one is not asked who they are when they open "New chat"."""
     _streams(mock_llm, "Hello! I'm Pincer.")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-    await _store_history(session_manager, "user-t", "web")
+    await _store_history(session_manager, "user-t", "web", created_at=_long_ago())
     key = conversation_key("user-t", "web", "thread-1")
 
     reply = await _reply(agent, path, "user-t", "web", "Hi!", session_key=key)
@@ -612,7 +774,10 @@ async def test_existing_user_new_conversation_is_separate_and_not_prompted(
     assert [m.content for m in thread.messages if m.role == MessageRole.USER] == ["Hi!"]
     main = await session_manager.get_or_create("user-t", "web")
     assert [m.content for m in main.messages if m.role == MessageRole.USER] == ["earlier message"]
-    assert await _record(tmp_path, "user-t", "web") is None
+    record = await _record(tmp_path, "user-t", "web")
+    assert record is not None and record.completed_at is not None
+    assert record.closed_by == "existing"
+    assert mock_llm.complete.call_count == 1  # the turn only; nothing ingested
 
 
 @_PATHS
@@ -622,12 +787,16 @@ async def test_history_only_in_conversations_is_not_new(
     """No main-chat history, but a stored conversation: not a new user."""
     _streams(mock_llm, "Hello! I'm Pincer.")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-    await _store_history(session_manager, "user-c", "web", session_key=conversation_key("user-c", "web", "a"))
+    await _store_history(
+        session_manager, "user-c", "web", session_key=conversation_key("user-c", "web", "a"), created_at=_long_ago()
+    )
 
     reply = await _reply(agent, path, "user-c", "web", "Hi!", session_key=conversation_key("user-c", "web", "b"))
 
     assert reply == "Hello! I'm Pincer."
-    assert await _record(tmp_path, "user-c", "web") is None
+    record = await _record(tmp_path, "user-c", "web")
+    assert record is not None and record.completed_at is not None
+    assert record.closed_by == "existing"
 
 
 @_PATHS
@@ -671,7 +840,9 @@ async def test_legacy_onboarded_session_is_not_asked(
     assert reply == "Hello! I'm Pincer."
     assert mock_llm.complete.call_count == 1
     assert ONBOARDING_FOLLOWUP_INSTRUCTION not in mock_llm.complete.call_args.kwargs["system"]
-    assert await _record(tmp_path, "user-o", "web") is None
+    record = await _record(tmp_path, "user-o", "web")
+    assert record is not None and record.completed_at is not None
+    assert record.closed_by == "legacy"
 
 
 @_PATHS
@@ -737,6 +908,130 @@ async def test_an_onboarded_user_s_turn_reads_no_onboarding_row(
     await _reply(agent, path, "user-k", "web", "hello", session_key=conversation_key("user-k", "web", "z"))
 
     assert reads == []
+
+
+@pytest.mark.parametrize(
+    "history",
+    [{ONBOARDING_PROMPT_SENT_KEY: "true", ONBOARDING_COMPLETE_KEY: "true"}, {}],
+    ids=["legacy", "existing"],
+)
+@_PATHS
+async def test_a_known_user_s_second_turn_reads_no_onboarding_row(
+    path, history, settings, mock_llm, session_manager, cost_tracker, tool_registry, monkeypatch
+):
+    """The first turn of a user with no row writes a completed one; the next
+    hits the cache."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(session_manager, "user-k", "web", created_at=_long_ago(), **history)
+    await _reply(agent, path, "user-k", "web", "hello")
+    stored = session_manager.onboarding.get
+    reads = []
+
+    async def get(user_id, channel):
+        reads.append((user_id, channel))
+        return await stored(user_id, channel)
+
+    monkeypatch.setattr(session_manager.onboarding, "get", get)
+
+    reply = await _reply(agent, path, "user-k", "web", "hello again")
+
+    assert reply == "Hello! I'm Pincer."
+    assert reads == []
+
+
+def _gated_llm(entered: asyncio.Event, release: asyncio.Event) -> AsyncMock:
+    """An LLM whose first call (blocking or streamed) waits for ``release``,
+    after setting ``entered``; later calls answer at once."""
+    llm = AsyncMock()
+    calls = 0
+
+    async def wait_if_first() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+
+    async def complete(**_: object) -> LLMResponse:
+        await wait_if_first()
+        return _llm_text("Hello! I'm Pincer.")
+
+    async def stream_turn(**_: object) -> AsyncIterator[StreamTurnEvent]:
+        await wait_if_first()
+        yield StreamTurnEvent(text="Hello! I'm Pincer.")
+        yield StreamTurnEvent(response=_llm_text("Hello! I'm Pincer."))
+
+    llm.complete.side_effect = complete
+    llm.stream_turn = stream_turn
+    return llm
+
+
+@_PATHS
+async def test_a_new_user_s_other_turn_does_not_close_the_gate_while_the_first_asks(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry
+):
+    """A brand-new user's first turn saves its message, then runs the model
+    before it asks. Another turn meanwhile sees that history and is not new,
+    but must not close the gate: the first turn's claim would lose and its
+    question go unread."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    agent = Agent(settings, _gated_llm(entered, release), session_manager, cost_tracker, tool_registry)
+    first = asyncio.create_task(
+        _reply(agent, path, "user-n", "web", "Hi!", session_key=conversation_key("user-n", "web", "a"))
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    other = await _reply(agent, path, "user-n", "web", "Hello?", session_key=conversation_key("user-n", "web", "b"))
+
+    assert ONBOARDING_QUESTION_EN not in other
+    assert await _record(tmp_path, "user-n", "web") is None
+    release.set()
+    reply = await asyncio.wait_for(first, timeout=5)
+    assert ONBOARDING_QUESTION_EN in reply
+    record = await _record(tmp_path, "user-n", "web")
+    assert record is not None
+    assert record.asked_at is not None and record.completed_at is None
+
+
+@pytest.mark.parametrize("old", [False, True], ids=["recent_history", "old_history"])
+@_PATHS
+async def test_an_existing_user_is_closed_only_once_their_history_is_older_than_a_day(
+    path, old, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """History newer than the answer window might be an asking turn's own, so
+    the user is left without a row (and still not asked) until it is older."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(session_manager, "user-a", "web", created_at=_long_ago() if old else None)
+
+    reply = await _reply(agent, path, "user-a", "web", "Hi!", session_key=conversation_key("user-a", "web", "b"))
+
+    assert ONBOARDING_QUESTION_EN not in reply
+    record = await _record(tmp_path, "user-a", "web")
+    if old:
+        assert record is not None and record.completed_at is not None
+        assert record.closed_by == "existing"
+    else:
+        assert record is None
+
+
+@_PATHS
+async def test_a_failed_close_of_a_known_user_does_not_fail_the_turn(
+    path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry, monkeypatch
+):
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(session_manager, "user-f", "web", created_at=_long_ago())
+    complete_known = AsyncMock(side_effect=RuntimeError("db down"))
+    monkeypatch.setattr(session_manager.onboarding, "complete_known", complete_known)
+
+    reply = await _reply(agent, path, "user-f", "web", "hello again")
+
+    assert reply == "Hello! I'm Pincer."
+    assert ONBOARDING_QUESTION_EN not in reply
+    complete_known.assert_awaited_once()
+    assert await _record(tmp_path, "user-f", "web") is None
 
 
 @pytest.mark.parametrize("session_key", [None, "voice:CA123"], ids=["no_key", "call_key"])
@@ -834,13 +1129,15 @@ async def test_preexisting_session_never_prompts(
     tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
     """Users with prior messages never see the onboarding question."""
-    await _store_history(session_manager, "user-old", "test")
+    await _store_history(session_manager, "user-old", "test", created_at=_long_ago())
 
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     result = await agent.handle_message("user-old", "test", "hello again")
 
     assert ONBOARDING_QUESTION_EN not in result.text
-    assert await _record(tmp_path, "user-old", "test") is None
+    record = await _record(tmp_path, "user-old", "test")
+    assert record is not None and record.completed_at is not None
+    assert record.closed_by == "existing"
 
 
 async def test_an_extraction_error_leaves_the_gate_untouched(

@@ -67,8 +67,10 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         stmt = stmt.order_by(col(ChatSession.updated_at).desc()).limit(1)
         return (await self.session.exec(stmt)).first()
 
-    async def exists_for(self, user_id: str, channel: str) -> bool:
+    async def exists_for(self, user_id: str, channel: str, *, created_before: float | None = None) -> bool:
         """True when the channel user has any stored session, conversations included.
+
+        With `created_before`, only a session created before that time counts.
 
         A memory-free conversation (a call summary, a knowledge-base question)
         is not counted: it is not the user talking to Pincer, so it must not
@@ -84,6 +86,8 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             )
             .limit(1)
         )
+        if created_before is not None:
+            stmt = stmt.where(col(ChatSession.created_at) < created_before)
         return (await self.session.exec(stmt)).first() is not None
 
     async def save(self, values: dict[str, Any]) -> None:

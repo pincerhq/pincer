@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Onboarding: no database read per turn for existing users (#271)
+
+Users who were onboarded before the `pincer_onboarding` table existed, and
+users with history from before onboarding, have no row in it, so every one of
+their messages read the table (sometimes twice) to find that out again. On
+their first message after the upgrade they now get a completed row
+(`closed_by` `legacy` or `existing`, logged once as `onboarding.closed_known`),
+and onboarding reads no database on their later turns. An `existing` row is
+written only once the user's oldest stored session on the channel is more than
+a day old, so a turn still asking a brand-new user is never cut off; until
+then those users read the table on each turn, as before. The row is permanent:
+a user who later deletes all their sessions is not asked, where before they
+would have looked new. If the write fails, a warning is logged once per outage
+and the turn goes on as before.
+
 #### LLM: effort and thinking settings, thinking kept within a turn, cut-off responses handled safely (#345)
 
 A model response that stops on its output limit (`max_tokens`) may end in a
@@ -689,6 +704,19 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- **Onboarding: an answer sent more than a day after the question is read
+  instead of dropped (#272).** Before, the first message after the 24-hour
+  answer window closed the gate without being read, so a late "I'm Ana,
+  mostly travel planning" was lost. Now that message is read like any other:
+  an answer completes onboarding and writes the profile, and anything else
+  closes the gate as expired. A failed extraction call leaves the gate open,
+  so the next message gets the same read. Such failures add to the
+  empty-reply count, and the gate closes as expired when that count reaches
+  two, so a persistently failing extractor stops being called. An answer may now take
+  over an expired close, as it already could an empty one, so a concurrent
+  task message cannot drop it. A row with no `asked_at` (a user asked before
+  the onboarding table existed) takes the time of its next empty reply as
+  one, so it expires like any other.
 - **Voice: an interrupted line is no longer reported as a delivery failure,
   and a German "Na, das war's. Tschüss." ends the call (#301).** Every agent
   transcript line now records its delivery outcome and the reason in the new

@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from pincer.db.engine import get_engine
+from pincer.db.session import session_scope
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
+from pincer.repositories.sessions import SessionRepository
 from pincer.services import onboarding as onboarding_module
 from pincer.services.identity import IdentityService
 from pincer.services.onboarding import OnboardingService
@@ -38,7 +40,7 @@ async def url(db_url: str):
 
 
 async def _store_session(
-    url: str, session_id: str, *, user_id: str, channel: str = "web", metadata: str = "{}"
+    url: str, session_id: str, *, user_id: str, channel: str = "web", metadata: str = "{}", created_at: float = 1.0
 ) -> None:
     await SessionService(url).save(
         session_id=session_id,
@@ -46,8 +48,8 @@ async def _store_session(
         channel=channel,
         messages="[]",
         metadata=metadata,
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=created_at,
+        updated_at=created_at,
     )
 
 
@@ -121,28 +123,85 @@ async def test_a_real_answer_can_win_after_an_empty_reply_closes_the_gate(url):
     assert await service.complete_answer("u", "web", now=50.0) is False
 
 
-@pytest.mark.parametrize("first_answer", [False, True])
-async def test_answer_cannot_take_over_expiry_or_another_answer(url, first_answer):
+async def test_an_answer_can_take_over_an_expiry(url):
+    """Expiry follows a read that found no answer; a concurrent message's
+    answer still wins over it."""
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+    assert await service.complete("u", "web", now=20.0) is True
+
+    assert await service.complete_answer("u", "web", now=30.0) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.completed_at, record.closed_by) == (30.0, "answer")
+
+
+@pytest.mark.parametrize("first", ["answer", "expired"])
+async def test_nothing_takes_over_an_answer(url, first):
     service = OnboardingService(url)
     await service.claim_prompt("u", "web", "web:u", now=10.0)
     await service.record_empty_reply("u", "web", max_empty=2, now=15.0)
-    close = service.complete_answer if first_answer else service.complete
-    assert await close("u", "web", now=20.0) is True
-    assert await service.complete_answer("u", "web", now=30.0) is False
+    assert await service.complete_answer("u", "web", now=20.0) is True
+
+    takeover = service.complete_answer if first == "answer" else service.complete
+    assert await takeover("u", "web", now=30.0) is False
+
     record = await service.get("u", "web")
     assert record is not None
-    assert (record.attempts, record.completed_at) == (1, 20.0)
+    assert (record.attempts, record.completed_at, record.closed_by) == (1, 20.0, "answer")
 
 
 async def test_an_empty_reply_without_a_row_inserts_one(url):
-    """A user asked before the table existed: an empty reply is counted too."""
+    """A user asked before the table existed: an empty reply is counted too,
+    and the row's answer window starts then."""
     service = OnboardingService(url)
 
     assert await service.record_empty_reply("u", "web", max_empty=2, now=20.0) is False
 
     record = await service.get("u", "web")
     assert record is not None
-    assert (record.asked_session_id, record.attempts, record.completed_at) == (None, 1, None)
+    assert (record.asked_session_id, record.asked_at, record.attempts, record.completed_at) == (None, 20.0, 1, None)
+
+
+async def test_an_empty_reply_starts_the_window_of_a_row_without_one(url):
+    """A row stored before `asked_at` was set on insert gets one on its next
+    empty reply, so its answer window can run out too."""
+    service = OnboardingService(url)
+    async with get_engine(url).begin() as conn:
+        await conn.execute(
+            Onboarding.__table__.insert().values(user_id="u", channel="web", attempts=0)  # type: ignore[attr-defined]
+        )
+
+    await service.record_empty_reply("u", "web", max_empty=3, now=20.0)
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_at, record.attempts) == (20.0, 1)
+
+
+async def test_failed_late_reads_close_the_gate_as_expired(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    assert await service.record_failed_late_read("u", "web", max_reads=2, now=20.0) is False
+    assert await service.record_failed_late_read("u", "web", max_reads=2, now=30.0) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at, record.closed_by) == (2, 30.0, "expired")
+    assert await service.complete_answer("u", "web", now=40.0) is True
+
+
+async def test_a_later_empty_reply_keeps_the_start_time(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    await service.record_empty_reply("u", "web", max_empty=3, now=20.0)
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_at, record.attempts) == (10.0, 1)
 
 
 async def test_completing_without_a_row_inserts_one(url):
@@ -154,6 +213,56 @@ async def test_completing_without_a_row_inserts_one(url):
     record = await service.get("u", "web")
     assert record is not None
     assert (record.asked_session_id, record.completed_at) == (None, 20.0)
+
+
+@pytest.mark.parametrize("reason", ["legacy", "existing"])
+async def test_closing_a_known_user_creates_a_completed_row(url, reason):
+    """A user who will never be asked gets a completed row, and why."""
+    service = OnboardingService(url)
+
+    assert await service.complete_known("u", "web", now=20.0, reason=reason) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.asked_at, record.completed_at, record.attempts) == (None, None, 20.0, 0)
+    assert record.closed_by == reason
+
+
+async def test_closing_a_known_user_leaves_an_open_row_as_it_is(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    assert await service.complete_known("u", "web", now=20.0, reason="existing") is False
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.asked_at, record.completed_at) == ("web:u", 10.0, None)
+
+
+@pytest.mark.parametrize("closed_by", ["answer", "expired", "empty"])
+async def test_closing_a_known_user_leaves_a_closed_row_as_it_is(url, closed_by):
+    service = OnboardingService(url)
+    if closed_by == "empty":
+        await service.record_empty_reply("u", "web", max_empty=1, now=10.0)
+    elif closed_by == "answer":
+        await service.complete_answer("u", "web", now=10.0)
+    else:
+        await service.complete("u", "web", now=10.0)
+
+    assert await service.complete_known("u", "web", now=20.0, reason="legacy") is False
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.completed_at, record.closed_by) == (10.0, closed_by)
+
+
+async def test_closing_a_known_user_fills_the_completed_cache(url):
+    service = OnboardingService(url)
+    assert service.is_completed_cached("u", "web") is False
+
+    await service.complete_known("u", "web", now=20.0, reason="existing")
+
+    assert service.is_completed_cached("u", "web") is True
 
 
 async def test_the_record_is_per_user_and_channel(url):
@@ -186,6 +295,18 @@ async def test_stored_sessions_leave_out_memory_free_conversations(url):
     assert await service.has_any("u", "web") is False
     assert await service.has_any("v", "web") is True
     assert await service.has_any("w", "web") is True
+
+
+async def test_stored_sessions_created_before_count_only_older_ones(url):
+    await _store_session(url, "web:u", user_id="u", created_at=10.0)
+    await _store_session(url, f"web:v:{_CONVERSATION}", user_id="v", created_at=5.0, metadata='{"memory_free": "true"}')
+
+    async with session_scope(url) as session:
+        repo = SessionRepository(session)
+        assert await repo.exists_for("u", "web", created_before=10.5) is True
+        assert await repo.exists_for("u", "web", created_before=10.0) is False
+        assert await repo.exists_for("u", "web", created_before=None) is True
+        assert await repo.exists_for("v", "web", created_before=10.0) is False  # memory-free, however old
 
 
 async def test_renaming_moves_onboarding_and_its_asking_session(url):
