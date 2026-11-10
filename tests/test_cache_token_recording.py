@@ -145,3 +145,34 @@ async def test_every_path_records_a_request_under_the_provider_that_served_it(  
     async with session_scope(get_database_url(tmp_path / "test.db")) as session:
         rows = await CostLogRepository(session).list()
     assert [(r.provider, r.model) for r in rows] == [("served-by-failover", "test-fixture-model")]
+
+
+@pytest.mark.parametrize("path", ["chat", "stream", "headless", "voice"])
+async def test_an_unpriced_model_never_costs_the_reply_and_is_not_stored(  # type: ignore[no-untyped-def]
+    settings, session_manager, cost_tracker, tool_registry, tmp_path, caplog, path: str
+) -> None:
+    """The provider has billed the request by the time it is recorded: a missing price is logged, the reply kept."""
+    import logging
+    from dataclasses import replace
+
+    from pincer.core.agent import Agent
+
+    unpriced = replace(_response(_FIRST), request_model="no-such-priced-model")
+    agent = Agent(settings, _scripted_llm(unpriced), session_manager, cost_tracker, tool_registry)
+    with caplog.at_level(logging.ERROR, logger="pincer.services.costs"):
+        if path == "chat":
+            reply = (await agent.handle_message("user", "chat", "hi", memory=False)).text
+        elif path == "stream":
+            chunks = [c async for c in agent.handle_message_stream("user", "web", "hi", memory=False)]
+            reply = chunks[-1].content
+        elif path == "headless":
+            reply = await agent.run_headless("hi", "user", "chat")
+        else:
+            chunks = [c async for c in agent.stream_voice_turn("user", "voice", "hi")]
+            reply = "".join(c.content for c in chunks if c.type.value == "text")
+
+    assert reply == "Done."
+    assert await _stored(tmp_path) == []
+    assert [r.getMessage() for r in caplog.records if r.name == "pincer.services.costs"] == [
+        "No [pricing] entry for model 'no-such-priced-model' (provider anthropic): the call is not recorded"
+    ]

@@ -200,14 +200,15 @@ def test_the_day_boundaries_used_above_are_what_they_claim():
     assert datetime.fromtimestamp(_FIRST_SECOND_OF_2026, UTC).isoformat() == "2026-01-01T00:00:00+00:00"
 
 
-async def test_an_unpriced_model_raises_logs_and_stores_nothing(url, caplog):
+async def test_an_unpriced_model_is_logged_costs_nothing_and_stores_nothing(url, caplog):
+    """The call has been billed already: recording it must not fail the caller (PR #366 review),
+    and an invented $0 is never stored."""
     import logging
 
-    from pincer.config.pricing import UnpricedModelError
-
     service = CostService(url, prices=_PRICES)
-    with caplog.at_level(logging.ERROR, logger="pincer.services.costs"), pytest.raises(UnpricedModelError):
-        await service.record("openai", "gpt-4o-2024-08-06", TokenUsage(input_tokens=1000, output_tokens=500))
+    with caplog.at_level(logging.ERROR, logger="pincer.services.costs"):
+        cost = await service.record("openai", "gpt-4o-2024-08-06", TokenUsage(input_tokens=1000, output_tokens=500))
+    assert cost == 0.0
     assert [(r.levelname, r.getMessage()) for r in caplog.records if r.name == "pincer.services.costs"] == [
         ("ERROR", "No [pricing] entry for model 'gpt-4o-2024-08-06' (provider openai): the call is not recorded")
     ]

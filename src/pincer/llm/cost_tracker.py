@@ -57,7 +57,7 @@ class CostTracker:
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
-        """Record a cost entry and return the cost. Always stores, over budget too (see `budget_reached`)."""
+        """Record a cost entry and return the cost; never raises (see `CostService.record`)."""
         return await self.service.record(provider, model, usage, session_id, is_free)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:

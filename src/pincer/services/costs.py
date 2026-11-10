@@ -94,9 +94,10 @@ class CostService:
 
         Every completed call is stored, even one that takes today's spend over
         the daily budget: the budget is checked before a call (`budget_reached`),
-        never here. Raises `UnpricedModelError` (logged, recording nothing) when
-        `model` has no `[pricing]` entry. `is_free` (e.g. a keyless local
-        endpoint) forces zero cost.
+        never here. A `model` with no `[pricing]` entry is logged at ERROR and
+        not stored, and its cost is 0.0: the provider has billed the call
+        already, so recording must never fail the turn or cut a phone call.
+        `is_free` (e.g. a keyless local endpoint) forces zero cost.
         """
         try:
             cost = 0.0 if is_free else self._price(provider, model, usage)
@@ -104,7 +105,7 @@ class CostService:
             # The startup check prices every model Pincer will call, so this is a model it
             # was never told about: loud, and never stored at an invented $0 (issue #357).
             logger.error("No [pricing] entry for model %r (provider %s): the call is not recorded", model, provider)
-            raise
+            return 0.0
         async with session_scope(self._url) as session:
             await CostLogRepository(session).add(
                 CostLog(
