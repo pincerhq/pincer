@@ -13,6 +13,10 @@ class LLMError(PincerError):
     """Error communicating with an LLM provider."""
 
 
+class DailyBudgetReachedError(PincerError):
+    """An LLM request was refused before it was sent: today's recorded spend is at the daily budget."""
+
+
 class LLMRateLimitError(LLMError):
     """Rate limit hit — should retry with backoff."""
 

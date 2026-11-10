@@ -1302,3 +1302,59 @@ async def test_clean_profile_value_normalizes():
     assert _clean_profile_value("null") is None
     assert _clean_profile_value("N/A") is None
     assert _clean_profile_value("") is None
+
+
+async def _rows(tmp_path: Path) -> int:
+    from pincer.db.session import session_scope
+    from pincer.repositories.costs import CostLogRepository
+
+    async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+        return len(await CostLogRepository(session).list())
+
+
+async def test_the_onboarding_extraction_is_recorded_like_any_request(  # type: ignore[no-untyped-def]
+    tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+) -> None:
+    llm = _scripted_llm(
+        "Hi!",
+        "Nice to meet you, Carol.",
+        '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await agent.handle_message("user-6", "test", "hi")
+    await agent.handle_message("user-6", "test", "I'm Carol")
+
+    assert llm.complete.await_count == 3  # precondition: two replies and the extraction
+    assert await _rows(tmp_path) == 3
+
+
+async def test_with_the_budget_reached_the_onboarding_extraction_is_not_requested(  # type: ignore[no-untyped-def]
+    tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """Like a failed extraction: no request, no attempt counted, the gate stays open."""
+    from pincer.config.pricing import TokenUsage, load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=1.0, prices=load_price_table())
+    await tracker.initialize()
+    llm = _scripted_llm("Hi!", "Nice to meet you, Carol.", '{"answers_question": true, "name": "Carol"}')
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 1.0}),
+        llm,
+        session_manager,
+        tracker,
+        tool_registry,
+        memory_store=memory_store,
+    )
+    try:
+        await agent.handle_message("user-7", "test", "hi")
+        await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000_000))  # $7 today
+        await agent.handle_message("user-7", "test", "I'm Carol")
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 1  # the first reply only
+    record = await _record(tmp_path, "user-7", "test")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (0, None)

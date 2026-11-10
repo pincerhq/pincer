@@ -9,7 +9,7 @@ Sampling is disabled by default. Enable in pincer.toml::
 
     [mcp.server.sampling]
     enabled = true
-    model = "claude-sonnet-4-20250514"
+    model = "claude-sonnet-5-5"
     budget_per_day = 5.00
 
 The SamplingHandler wraps a LLMBackend and enforces:
@@ -24,9 +24,17 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from pincer.exceptions import DailyBudgetReachedError
+
+if TYPE_CHECKING:
+    from pincer.llm.cost_tracker import CostTracker
 
 logger = logging.getLogger("pincer.mcp.sampling")
+
+DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
+_SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
 
 
 # ── LLM backend abstraction ────────────────────────────────────────────────────
@@ -95,17 +103,22 @@ class StandaloneLLMBackend(LLMBackend):
     Args:
         api_key:       Anthropic API key. Falls back to env vars if None.
         default_model: Model to use when caller doesn't specify one.
+        costs:         When given, every request goes through the daily budget check
+                       first and is recorded in the cost log after (issue #357).
     """
 
     def __init__(
         self,
         api_key: str | None = None,
-        default_model: str = "claude-sonnet-4-20250514",
+        default_model: str = DEFAULT_SAMPLING_MODEL,
+        costs: CostTracker | None = None,
     ) -> None:
         from pincer.config import get_settings_relaxed
 
         self._api_key = api_key or get_settings_relaxed().anthropic_api_key.get_secret_value() or ""
         self._default_model = default_model
+        self._costs = costs
+        self._costs_ready = False
 
     async def complete(
         self,
@@ -120,12 +133,25 @@ class StandaloneLLMBackend(LLMBackend):
 
         from typing import cast
 
+        if self._costs is not None:
+            if not self._costs_ready:
+                await self._costs.initialize()
+                self._costs_ready = True
+            if await self._costs.budget_reached():
+                raise DailyBudgetReachedError("daily budget reached: the sampling request was not sent")
+
+        sent_model = model or self._default_model
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
         resp = await client.messages.create(
-            model=model or self._default_model,
+            model=sent_model,
             messages=cast("Any", messages),
             max_tokens=max_tokens,
         )
+        if self._costs is not None:
+            from pincer.config.pricing import TokenUsage
+            from pincer.llm.anthropic_common import _usage_counts
+
+            await self._costs.record(_SAMPLING_PROVIDER, sent_model, TokenUsage(**_usage_counts(resp.usage)))
         content = resp.content
         if content and hasattr(content[0], "text"):
             return content[0].text
@@ -242,6 +268,9 @@ class SamplingHandler:
                 self._budget.remaining(),
             )
             return result
+        except DailyBudgetReachedError:
+            logger.info("Sampling request refused: the daily budget is reached")
+            return "[Sampling: daily budget reached]"
         except Exception as e:
             logger.exception("Sampling request failed: %s", e)
             return f"[Sampling error: {type(e).__name__}: {e}]"

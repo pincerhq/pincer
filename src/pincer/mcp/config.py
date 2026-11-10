@@ -151,7 +151,7 @@ class MCPSamplingConfig:
     """Sampling configuration — allows MCP server to handle LLM inference requests."""
 
     enabled: bool = False
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-5-5"
     budget_per_day: float = 5.00
     max_tokens: int = 1024
 
@@ -338,7 +338,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
     samp_raw = srv_raw.get("sampling", {})
     sampling = MCPSamplingConfig(
         enabled=samp_raw.get("enabled", False),
-        model=samp_raw.get("model", "claude-sonnet-4-20250514"),
+        model=samp_raw.get("model", "claude-sonnet-5-5"),
         budget_per_day=float(samp_raw.get("budget_per_day", 5.00)),
         max_tokens=int(samp_raw.get("max_tokens", 1024)),
     )

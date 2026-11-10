@@ -2356,11 +2356,17 @@ class Agent:
         `_ONBOARDING_MAX_EMPTY_REPLIES`: a failing extractor costs a user a
         bounded number of extra calls, and a transient outage still drops no
         answer while the next message is read again.
+
+        A reached budget sends no extraction request and leaves the gate as it
+        was, in or after the window: no call was made, so nothing is counted.
         """
         name: str | None = None
         use_case: str | None = None
         language: str | None = None
 
+        if await self._costs.budget_reached():
+            logger.info("Onboarding extraction skipped: the daily budget is reached; the gate is left as it was")
+            return
         try:
             extraction_msg = LLMMessage(
                 role=MessageRole.USER,
@@ -2389,6 +2395,7 @@ class Agent:
                 return
             logger.warning("Onboarding extraction failed; the gate is left as it was: %s", e)
             return
+        await self._record_cost(response, None)
         data = _safe_json_loads(response.content or "")
         if isinstance(data, dict) and data.get("answers_question") is True:
             name = _clean_profile_value(data.get("name"))

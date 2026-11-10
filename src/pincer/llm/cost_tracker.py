@@ -13,15 +13,18 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db import ensure_schema_current
 from pincer.db.engine import get_database_url
+from pincer.exceptions import DailyBudgetReachedError
+from pincer.llm.base import BaseLLMProvider
 from pincer.services.costs import CostService, CostSummary
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
     from pincer.config.pricing import PriceTable, TokenUsage
-    from pincer.llm.base import BaseLLMProvider, LLMResponse
+    from pincer.llm.base import LLMMessage, LLMResponse
 
-__all__ = ["CostSummary", "CostTracker", "get_cost_tracker", "record_response"]
+__all__ = ["CostSummary", "CostTracker", "MeteredLLM", "get_cost_tracker", "record_response"]
 
 
 class CostTracker:
@@ -114,6 +117,52 @@ async def record_response(
         session_id=session_id,
         is_free=llm.is_free(provider) if isinstance(llm, LLMRouter) else False,
     )
+
+
+class MeteredLLM(BaseLLMProvider):
+    """A provider whose every request goes through the daily budget check first and is
+    recorded after, for callers outside the agent's turn loops (a finished call's report).
+
+    A request refused by the budget raises `DailyBudgetReachedError` before anything is
+    sent; callers already treat a failed request as "no answer" and take their fallback.
+    `stream_turn` is the base fallback over `complete`, so it is metered the same way.
+    """
+
+    def __init__(self, llm: BaseLLMProvider, costs: CostTracker, default_provider: str) -> None:
+        self._llm = llm
+        self._costs = costs
+        self._default_provider = default_provider
+
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
+    ) -> LLMResponse:
+        if await self._costs.budget_reached():
+            raise DailyBudgetReachedError("daily budget reached: the request was not sent")
+        response = await self._llm.complete(
+            messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+            pinned=pinned,
+        )
+        await record_response(self._costs, self._llm, response, self._default_provider)
+        return response
+
+    async def close(self) -> None:
+        """Nothing to close: the wrapped provider belongs to whoever built it."""
 
 
 _cost_tracker: CostTracker | None = None

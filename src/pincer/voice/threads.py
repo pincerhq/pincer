@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
 from pincer.db.engine import get_database_url
 from pincer.db.ids import new_id
+from pincer.exceptions import DailyBudgetReachedError
 from pincer.services.voice import CallsService, ThreadsService
 
 logger = logging.getLogger(__name__)
@@ -361,6 +362,9 @@ async def merge_summary(
         summary = str((data or {}).get("summary", "")).strip()
         if not summary:
             raise ValueError("empty summary")
+    except DailyBudgetReachedError:
+        logger.info("Thread summary merge skipped: the daily budget is reached")
+        return _fallback()
     except Exception:
         logger.warning("Thread summary merge failed — keeping the previous summary", exc_info=True)
         return _fallback()

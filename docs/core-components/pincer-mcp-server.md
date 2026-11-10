@@ -360,7 +360,7 @@ Standalone mode can handle MCP sampling requests (LLM inference) directly:
 ```toml
 [mcp.server.sampling]
 enabled        = true
-model          = "claude-sonnet-4-20250514"
+model          = "claude-sonnet-5-5"
 budget_per_day = 5.00    # USD — resets at midnight UTC
 max_tokens     = 1024
 ```

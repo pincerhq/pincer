@@ -279,16 +279,17 @@ async def _build_core(settings: Settings) -> CoreComponents:
     # client) must not leave those first conversations without make_phone_call
     # ("Tool not found"). The voice channel/engine wiring stays in _run_agent.
     if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        # Sprint 13: exactly ONE ThreadManager per process (the Hotfix-3
+        # lesson — two instances would mean two truths about one thread). It
+        # owns the rolling-summary merge, so it gets the same LLM and memory
+        # store the post-call pipeline uses, metered like it (issue #357).
+        from pincer.llm.cost_tracker import MeteredLLM
         from pincer.tools.builtin.call_transcript import get_call_transcript
         from pincer.voice.call_tools import register_call_tools
         from pincer.voice.outbound import make_phone_call
         from pincer.voice.threads import init_thread_manager, register_thread_tools
 
-        # Sprint 13: exactly ONE ThreadManager per process (the Hotfix-3
-        # lesson — two instances would mean two truths about one thread). It
-        # owns the rolling-summary merge, so it gets the same LLM and memory
-        # store the post-call pipeline uses.
-        init_thread_manager(settings, llm=llm, memory=memory_store)
+        init_thread_manager(settings, llm=MeteredLLM(llm, cost_tracker, settings.default_provider), memory=memory_store)
         register_thread_tools(tools, settings)
 
         # Sprint 11: the Pincer-owned in-call tools (send_owner_message,
@@ -1654,6 +1655,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
                     memory=memory_store,
                     db_path=str(settings.db_path),
                     tool_registry=tools,  # Sprint 6: appointment calendar executor
+                    cost_tracker=cost_tracker,  # its outcome and thread requests are budget-checked and recorded
                 )
             )
 

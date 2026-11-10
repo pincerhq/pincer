@@ -171,9 +171,17 @@ class StandaloneMCPShell:
         if sampling_cfg is None or not getattr(sampling_cfg, "enabled", False):
             return None
 
+        from pincer.config import get_settings_relaxed
+        from pincer.config.pricing import load_price_table
+        from pincer.llm.cost_tracker import CostTracker
+        from pincer.mcp.sampling import DEFAULT_SAMPLING_MODEL
+
+        settings = get_settings_relaxed()
         return StandaloneLLMBackend(
             api_key=self._llm_api_key,
-            default_model=getattr(sampling_cfg, "model", "claude-sonnet-4-20250514"),
+            default_model=getattr(sampling_cfg, "model", DEFAULT_SAMPLING_MODEL),
+            # The same daily budget and cost log as the agent (issue #357)
+            costs=CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table()),
         )
 
     def _register_standalone_tools(self) -> None:

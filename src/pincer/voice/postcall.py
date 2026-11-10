@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.llm.cost_tracker import MeteredLLM
 from pincer.services.voice import CallsService
 from pincer.voice import analytics as an
 from pincer.voice import scheduling, status_notify, threads
@@ -37,6 +38,7 @@ from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
     from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.cost_tracker import CostTracker
     from pincer.memory.base import BaseMemoryBackend
     from pincer.voice.engine import CallState
     from pincer.voice.transcript import TranscriptLogger
@@ -73,9 +75,15 @@ class PostCallProcessor:
         memory: BaseMemoryBackend | None = None,
         db_path: str | None = None,
         tool_registry: Any = None,
+        cost_tracker: CostTracker | None = None,
     ) -> None:
         self._settings = settings
-        self._llm = llm
+        # Every request goes through the daily budget check and is recorded (issue #357)
+        self._llm = (
+            MeteredLLM(llm, cost_tracker, str(getattr(settings, "default_provider", "") or ""))
+            if llm is not None and cost_tracker is not None
+            else llm
+        )
         self._memory = memory
         self._db_path = str(db_path or getattr(settings, "db_path", "") or "")
         # Sprint 6: the appointment executor writes the calendar event through

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
+from pincer.exceptions import DailyBudgetReachedError
 
 if TYPE_CHECKING:
     from pincer.llm.base import BaseLLMProvider
@@ -310,6 +311,9 @@ async def extract_outcome(
             logger.warning("Outcome extraction returned unparseable JSON")
             return None
         return filter_ungrounded(outcome, transcript_text)
+    except DailyBudgetReachedError:
+        logger.info("Outcome extraction skipped: the daily budget is reached")
+        return None
     except Exception:
         logger.exception("Outcome extraction failed")
         return None

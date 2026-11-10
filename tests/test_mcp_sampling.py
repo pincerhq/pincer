@@ -160,3 +160,87 @@ async def test_agent_llm_backend_fallback_to_chat():
     backend = AgentLLMBackend(llm_router=FakeRouter())
     result = await backend.complete([])
     assert result == "chat response"
+
+
+# ── the daily budget and the cost log (issue #357, PR #366 review) ───────────
+
+
+class _FakeAnthropic:
+    """Stands in for `anthropic.AsyncAnthropic`: one answer, with a real `Usage`."""
+
+    created: list[dict] = []
+
+    def __init__(self, api_key: str = "") -> None:
+        from types import SimpleNamespace
+
+        self.messages = SimpleNamespace(create=self._create)
+
+    async def _create(self, **kwargs):  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace
+
+        from anthropic.types import Usage
+
+        _FakeAnthropic.created.append(kwargs)
+        return SimpleNamespace(
+            content=[SimpleNamespace(text="sampled")], usage=Usage(input_tokens=1_000, output_tokens=0)
+        )
+
+
+@pytest.fixture
+def fake_anthropic(monkeypatch):  # type: ignore[no-untyped-def]
+    import anthropic
+
+    _FakeAnthropic.created = []
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAnthropic)
+    return _FakeAnthropic
+
+
+async def _tracker(tmp_path, budget: float):  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    return CostTracker(tmp_path / "test.db", daily_budget=budget, prices=load_price_table())
+
+
+async def test_a_standalone_sampling_request_is_recorded(tmp_path, fake_anthropic):  # type: ignore[no-untyped-def]
+    from pincer.mcp.sampling import StandaloneLLMBackend
+
+    tracker = await _tracker(tmp_path, budget=0.0)
+    backend = StandaloneLLMBackend(api_key="sk-test", default_model="test-fixture-model", costs=tracker)
+    try:
+        reply = await SamplingHandler(llm_backend=backend, enabled=True).handle([{"role": "user", "content": "hi"}])
+        rows = await tracker.get_costs_by_model("2000-01-01", "2100-01-01")
+    finally:
+        await tracker.close()
+
+    assert reply == "sampled"
+    assert [(r["model"], r["total"]) for r in rows] == [("test-fixture-model", pytest.approx(0.007))]
+
+
+async def test_with_the_budget_reached_standalone_sampling_sends_nothing(tmp_path, fake_anthropic):  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import TokenUsage
+    from pincer.mcp.sampling import StandaloneLLMBackend
+
+    tracker = await _tracker(tmp_path, budget=0.007)
+    await tracker.initialize()
+    await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000))
+    backend = StandaloneLLMBackend(api_key="sk-test", default_model="test-fixture-model", costs=tracker)
+    try:
+        reply = await SamplingHandler(llm_backend=backend, enabled=True).handle([{"role": "user", "content": "hi"}])
+    finally:
+        await tracker.close()
+
+    assert reply == "[Sampling: daily budget reached]"
+    assert fake_anthropic.created == []
+
+
+def test_sampling_defaults_to_a_shipped_model() -> None:
+    """The retired claude-sonnet-4 default had no price, so its spend could never be recorded."""
+    from pincer.config.pricing import load_price_table
+    from pincer.mcp.config import MCPSamplingConfig
+    from pincer.mcp.sampling import StandaloneLLMBackend
+
+    assert MCPSamplingConfig().model == "claude-sonnet-5-5"
+    assert StandaloneLLMBackend(api_key="sk-test")._default_model == "claude-sonnet-5-5"
+    repo_root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    assert "claude-sonnet-5-5" in load_price_table(repo_root)
