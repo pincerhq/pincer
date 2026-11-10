@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,6 +15,18 @@ from pincer.config.mcp import MCPSettings
 from pincer.config.observability import ObservabilitySettings
 from pincer.config.tasks import TaskSettings
 from pincer.config.tools import ToolSettings
+from pincer.core.log_once import LogOncePerKey
+
+logger = logging.getLogger(__name__)
+
+#: The files `google_oauth_dir()` looks for (token_source.TOKEN_FILES + CREDENTIALS_FILE).
+_GOOGLE_OAUTH_FILES = ("google_workspace_token.json", "google_token.json", "google_credentials.json")
+# Once per directory: google_oauth_dir() runs on every token lookup.
+_LEGACY_OAUTH_DIR_LOG = LogOncePerKey(logger)
+
+
+def _has_google_oauth_files(directory: Path) -> bool:
+    return any((directory / name).exists() for name in _GOOGLE_OAUTH_FILES)
 
 
 class Settings(
@@ -72,13 +85,26 @@ class Settings(
         return self.data_dir / "logs"
 
     def google_oauth_dir(self) -> Path:
-        """Directory for Google OAuth credentials and token.
+        """Directory for Google OAuth credentials and token, independent of the working directory.
 
-        Prefers project-relative data/ (when running from repo root) if
-        google_credentials.json exists there; otherwise uses data_dir (e.g. ~/.pincer).
+        1. ``PINCER_GOOGLE_OAUTH_DIR``, when set;
+        2. ``data_dir``, when it holds a token or ``google_credentials.json``;
+        3. ``./data`` (deprecated), only when it holds one of those files — logged once;
+        4. otherwise ``data_dir`` (where ``pincer google setup`` writes).
         """
+        if self.google_oauth_dir_override is not None:
+            return self.google_oauth_dir_override.expanduser()
+        if _has_google_oauth_files(self.data_dir):
+            return self.data_dir
         cwd_data = Path.cwd() / "data"
-        if (cwd_data / "google_credentials.json").exists():
+        if cwd_data.resolve() != self.data_dir.resolve() and _has_google_oauth_files(cwd_data):
+            _LEGACY_OAUTH_DIR_LOG.log(
+                str(cwd_data),
+                "Using Google OAuth files in %s, found relative to the working directory — deprecated: "
+                "move them to %s or set PINCER_GOOGLE_OAUTH_DIR",
+                cwd_data,
+                self.data_dir,
+            )
             return cwd_data
         return self.data_dir
 

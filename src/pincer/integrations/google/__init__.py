@@ -69,11 +69,19 @@ def google_status(settings: Any = None) -> dict[str, Any]:
     default: the process settings).
 
     ``status`` is ``active`` (every configured service enabled), ``partial``
-    (the token lacks scopes for some services) or ``disabled``.
+    (the token lacks scopes for some services) or ``disabled``. ``source`` is
+    where the token comes from (``env`` / ``file``), ``client_source`` where its
+    OAuth client comes from (``token`` / ``file:<path>`` / ``env``).
     """
     resolved = _resolve_auth(settings)
     if resolved is None:
-        return {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None}
+        return {
+            "status": "disabled",
+            "enabled_services": [],
+            "missing_scopes": [],
+            "source": None,
+            "client_source": None,
+        }
     auth, skipped, missing = resolved
     if not auth.services:
         status = "disabled"
@@ -81,7 +89,13 @@ def google_status(settings: Any = None) -> dict[str, Any]:
         status = "partial"
     else:
         status = "active"
-    return {"status": status, "enabled_services": auth.services, "missing_scopes": missing, "source": auth.source}
+    return {
+        "status": status,
+        "enabled_services": auth.services,
+        "missing_scopes": missing,
+        "source": auth.source,
+        "client_source": auth.client_source,
+    }
 
 
 def get_google_factory() -> GoogleServiceFactory | None:

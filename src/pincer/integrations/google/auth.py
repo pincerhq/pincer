@@ -4,8 +4,11 @@ Google OAuth authentication for Workspace integrations.
 Uses InstalledAppFlow with a credentials JSON file (downloaded from Google
 Cloud Console) and a local token cache that auto-refreshes.
 
-Credentials file:  ~/.pincer/google_credentials.json  (or data/ in repo)
-Token cache:       ~/.pincer/google_workspace_token.json
+Credentials file:  <oauth dir>/google_credentials.json
+Token cache:       <oauth dir>/google_workspace_token.json
+
+where <oauth dir> is ``Settings.google_oauth_dir()``: ``PINCER_GOOGLE_OAUTH_DIR``,
+else the data dir (``~/.pincer``).
 
 Run ``pincer google setup`` to perform the one-time browser consent flow.
 
@@ -104,8 +107,10 @@ class GoogleAuth:
         token_path: str = "",
         services: list[str] | None = None,
         token_info: dict[str, Any] | None = None,
+        client_source: str = "token",
     ) -> None:
         self._credentials_path = Path(credentials_path)
+        self._client_source = client_source
         self._token_path = Path(token_path)
         self._token_info = token_info
         self._services = list(services) if services is not None else list(SERVICE_SCOPES)
@@ -263,6 +268,13 @@ class GoogleAuth:
     def source(self) -> str:
         """Where the token comes from: ``"env"`` or ``"file"``."""
         return "env" if self._token_info is not None else "file"
+
+    @property
+    def client_source(self) -> str:
+        """Where the token's OAuth client (id/secret) comes from: ``"token"`` (the token JSON
+        itself), ``"file:<path>"`` (``google_credentials.json``) or ``"env"``
+        (``PINCER_GOOGLE_CREDENTIALS_JSON``)."""
+        return self._client_source
 
     @property
     def credentials_path(self) -> Path:

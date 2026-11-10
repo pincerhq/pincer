@@ -479,11 +479,19 @@ def test_integration_entries_google_env_token(tmp_path: Path) -> None:
     settings = MagicMock()
     settings.google_oauth_dir.return_value = tmp_path  # no files at all
     settings.google_token_json = SecretStr(
-        json.dumps({"refresh_token": "rt", "scopes": ["https://www.googleapis.com/auth/calendar"]})
+        json.dumps(
+            {
+                "refresh_token": "rt",
+                "client_id": "cid",
+                "client_secret": "cs",
+                "scopes": ["https://www.googleapis.com/auth/calendar"],
+            }
+        )
     )
     with patch("pincer.config.get_settings_relaxed", return_value=settings):
         entries = _integration_entries()
     google = next(e for e in entries if "Google" in e["name"])
     assert google["status"] == "partial"
     assert google["token_source"] == "env"
+    assert google["client_source"] == "token"
     assert "PINCER_GOOGLE_TOKEN_JSON" in google["reauth_hint"]

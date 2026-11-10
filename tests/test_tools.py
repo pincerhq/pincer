@@ -191,6 +191,13 @@ def fresh_setup_hint(monkeypatch):
     from pincer.tools import bootstrap
 
     monkeypatch.setattr(bootstrap, "_SETUP_HINT_LOG", LogOnce(bootstrap.logger, logging.INFO))
+    monkeypatch.setattr(bootstrap, "_TOKEN_MISSING_LOG", LogOnce(bootstrap.logger))
+
+
+@pytest.fixture(autouse=True)
+def _google_settings_are_the_test_settings(settings, monkeypatch):
+    """Bootstrap looks the Google token up via get_settings_relaxed: not the developer's ~/.pincer."""
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
 
 
 def _no_token_located(monkeypatch, enabled: bool = True) -> None:
@@ -244,6 +251,53 @@ def test_no_google_token_points_at_google_setup(settings, monkeypatch, caplog, e
         register_default_tools(ToolRegistry(), settings)
     hints = [r for r in caplog.records if "pincer google setup" in r.getMessage()]
     assert [r.levelno for r in hints] == ([logging.INFO] if enabled else [])
+
+
+def _google_records(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "pincer.tools.bootstrap" and "Google Workspace" in r.getMessage()]
+
+
+@pytest.mark.usefixtures("fresh_setup_hint")
+def test_the_setup_hint_names_the_directory_looked_in(settings, monkeypatch, caplog) -> None:
+    _no_token_located(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="pincer.tools.bootstrap"):
+        register_default_tools(ToolRegistry(), settings)
+    [hint] = _google_records(caplog)
+    assert hint.levelno == logging.INFO
+    assert str(settings.google_oauth_dir()) in hint.getMessage()
+
+
+@pytest.mark.usefixtures("fresh_setup_hint")
+def test_an_oauth_client_without_a_token_is_a_warning_naming_the_paths(settings, monkeypatch, caplog) -> None:
+    """Issue #226: setup was started (or the token sits elsewhere) — say where the token was looked for."""
+    import json
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "google_credentials.json").write_text(
+        json.dumps({"installed": {"client_id": "cid", "client_secret": "cs"}})
+    )
+    with caplog.at_level(logging.INFO, logger="pincer.tools.bootstrap"):
+        register_default_tools(ToolRegistry(), settings)
+    [warning] = _google_records(caplog)
+    assert warning.levelno == logging.WARNING
+    assert str(settings.data_dir / "google_workspace_token.json") in warning.getMessage()
+    assert str(settings.data_dir / "google_credentials.json") in warning.getMessage()
+
+
+@pytest.mark.usefixtures("fresh_setup_hint")
+@pytest.mark.parametrize("token", ["not-a-token", '{"refresh_token": "rt"}'])
+def test_a_set_but_unusable_env_token_is_not_reported_as_a_missing_token(settings, monkeypatch, caplog, token) -> None:
+    """An undecodable or client-less PINCER_GOOGLE_TOKEN_JSON gets token_source's own warning instead."""
+    from pydantic import SecretStr
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "google_credentials.json").write_text("{}")  # not a usable client
+    settings.google_token_json = SecretStr(token)
+    with caplog.at_level(logging.INFO):
+        register_default_tools(ToolRegistry(), settings)
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("but no token at" in m for m in messages)
+    assert any("PINCER_GOOGLE_TOKEN_JSON" in m for m in messages)
 
 
 class TestScheduleToolRegistration:

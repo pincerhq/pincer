@@ -67,9 +67,10 @@ def test_env_token_info_reads_setting():
     assert env_token_info(_settings(token=encode_json_blob(TOKEN))) == TOKEN
 
 
-def test_env_token_info_invalid_logs_without_leaking(caplog):
+def test_invalid_env_token_logs_without_leaking(caplog, tmp_path):
     with caplog.at_level(logging.WARNING, logger="pincer.integrations.google.token_source"):
         assert env_token_info(_settings(token="1//secret-refresh-garbage")) is None
+        assert locate_token(_settings(token="1//secret-refresh-garbage", oauth_dir=tmp_path)) is None
     assert "PINCER_GOOGLE_TOKEN_JSON" in caplog.text
     assert "secret-refresh" not in caplog.text
 
@@ -88,7 +89,10 @@ def test_env_client_config_reads_setting():
 def test_locate_token_prefers_env_over_files(tmp_path):
     (tmp_path / "google_credentials.json").write_text("{}")
     (tmp_path / "google_workspace_token.json").write_text("{}")
-    assert locate_token(_settings(token=json.dumps(TOKEN), oauth_dir=tmp_path)) == {"token_info": TOKEN}
+    assert locate_token(_settings(token=json.dumps(TOKEN), oauth_dir=tmp_path)) == {
+        "token_info": TOKEN,
+        "client_source": "token",
+    }
 
 
 def test_locate_token_files(tmp_path):

@@ -2135,19 +2135,32 @@ class SecurityDoctor:
         """Whether a Google token is present with scopes — without it there are no calendar, Gmail or
         Drive tools. Read from the token file or env only: a revoked token still passes here."""
         from pincer.integrations import google
+        from pincer.integrations.google import token_source
         from pincer.integrations.google.config import load_config
 
         settings = self._cfg(cfg)
         name, setup = "google_workspace_token", "Run `pincer google setup`"
         if not load_config().enabled:
             return CheckResult(name, CheckStatus.SKIPPED, "Google integration disabled in config", category="google")
+        oauth_dir = settings.google_oauth_dir()
+        env_state = token_source.token_env_state(settings)
         state = google.google_status(settings)
+        origin = self._google_token_origin(state, oauth_dir)
+        if env_state == "invalid":
+            fallback = f"using {origin} instead" if state["status"] != "disabled" else f"no token file in {oauth_dir}"
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"{token_source.TOKEN_ENV} is set but cannot be decoded; {fallback}",
+                fix_hint=f"Fix or unset {token_source.TOKEN_ENV} (`pincer google setup --print-env` prints a new one)",
+                category="google",
+            )
         if state["status"] == "active":
             services = ", ".join(state["enabled_services"])
             return CheckResult(
                 name,
                 CheckStatus.PASS,
-                f"Google token found with scopes for: {services} (not checked against Google; "
+                f"Google token found with scopes for: {services} ({origin}; not checked against Google; "
                 "a revoked token still shows here)",
                 category="google",
             )
@@ -2155,17 +2168,46 @@ class SecurityDoctor:
             return CheckResult(
                 name,
                 CheckStatus.WARNING,
-                f"Google token is missing scopes; only {', '.join(state['enabled_services'])} enabled",
+                f"Google token is missing scopes; only {', '.join(state['enabled_services'])} enabled ({origin})",
                 fix_hint=f"{setup} to re-consent",
+                category="google",
+            )
+        if env_state == "ok":
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"{token_source.TOKEN_ENV} is set but unusable: no scopes for the configured services, or no "
+                f"client_id/client_secret and no matching OAuth client in {oauth_dir} or "
+                f"{token_source.CREDENTIALS_ENV}",
+                fix_hint=f"Run `pincer google setup --print-env` and update {token_source.TOKEN_ENV}",
+                category="google",
+            )
+        if token_source.client_config(settings) is not None:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"OAuth client found but no Google token in {oauth_dir} — no calendar, Gmail or Drive tools",
+                fix_hint=f"{setup}, or set PINCER_GOOGLE_OAUTH_DIR to the directory holding the token",
                 category="google",
             )
         return CheckResult(
             name,
             CheckStatus.SKIPPED,
-            "No usable Google token — no calendar, Gmail or Drive tools",
+            f"No usable Google token in {oauth_dir} — no calendar, Gmail or Drive tools",
             fix_hint=f"{setup} to connect",
             category="google",
         )
+
+    @staticmethod
+    def _google_token_origin(state: dict[str, Any], oauth_dir: Any) -> str:
+        """Where the token (and its OAuth client, if not its own) comes from, for the check message."""
+        from pincer.integrations.google.token_source import TOKEN_ENV, client_source_label
+
+        origin = TOKEN_ENV if state.get("source") == "env" else f"token file in {oauth_dir}"
+        client = state.get("client_source")
+        if client and client != "token":
+            origin += f", OAuth client from {client_source_label(client)}"
+        return origin
 
     # ── LLM effort and thinking (issue #345) ──────────────
 
