@@ -292,7 +292,7 @@ async def _web_chat(
     return events
 
 
-async def _post_message(agent: Agent, text: str = "hi") -> httpx.Response:
+async def _post_message(agent: Agent, text: str = "hi", conversation_id: str | None = None) -> httpx.Response:
     """One turn through the real `/api/chat/message` endpoint."""
     from pincer.api.chat import chat_user
     from pincer.api.server import create_app
@@ -300,7 +300,7 @@ async def _post_message(agent: Agent, text: str = "hi") -> httpx.Response:
     app = create_app()
     app.state.agent = agent
     app.dependency_overrides[chat_user] = lambda: "user"
-    body = {"text": text, "conversation_id": str(uuid.uuid4()), "memory": False}
+    body = {"text": text, "conversation_id": conversation_id or str(uuid.uuid4()), "memory": False}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         return await client.post("/api/chat/message", json=body)
 
@@ -876,13 +876,15 @@ async def test_a_metered_request_whose_cost_cannot_be_stored_still_returns_its_r
 # ── A budget stop after the turn placed a call: the client keeps waiting for its report ──
 
 
-def _dial_registry() -> Any:
-    """A registry whose make_phone_call places call CA9."""
+def _dial_registry(then: Callable[[], Awaitable[None]] | None = None) -> Any:
+    """A registry whose make_phone_call places call CA9, then runs `then`."""
     from pincer.tools.registry import ToolRegistry
 
     registry = ToolRegistry()
 
     async def make_phone_call(context: dict[str, Any] | None = None) -> str:
+        if then is not None:
+            await then()
         return "Call initiated successfully.\nCall SID: CA9\nTo: +4930123\nPurpose: x\n"
 
     registry.register(
@@ -914,3 +916,126 @@ async def test_a_web_chat_turn_that_placed_a_call_before_the_budget_stop_ends_wi
         ("done", {"text": _budget_text(_CALL_COST), "cost_usd": pytest.approx(_CALL_COST)}),
     ]
     assert len(llm.streams) == 1
+
+
+# ── The budget cannot be read during a turn (PR #366 review, lead ruling 2026-11-10) ──
+
+_CHECK_FAILED = "could not check the daily budget, no request was sent"
+_CHECK_FAILED_TEXT = "Warning: Could not check the daily budget, so I stopped before answering. Please try again."
+_CHECK_FAILED_MARKER = "(Stopped before answering: the daily budget could not be checked.)"
+
+
+async def _conversation_messages(session_manager: Any, conversation: str) -> list[Any]:
+    session = await session_manager.get_or_create(
+        "user", "web", session_key=conversation_key("user", "web", conversation)
+    )
+    return list(session.messages)
+
+
+async def test_a_chat_message_whose_budget_cannot_be_read_is_a_502_and_saves_nothing(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    settings, tracker = await budgeted(1.0)
+    await _drop_cost_table(tmp_path)
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+    conversation = str(uuid.uuid4())
+
+    response = await _post_message(agent, conversation_id=conversation)
+
+    assert (response.status_code, response.json()) == (502, {"detail": _CHECK_FAILED})
+    assert llm.complete.await_count == 0
+    assert await _conversation_messages(session_manager, conversation) == []
+
+
+async def test_a_web_chat_turn_whose_budget_cannot_be_read_is_one_error_and_saves_nothing(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    settings, tracker = await budgeted(1.0)
+    await _drop_cost_table(tmp_path)
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+    conversation = str(uuid.uuid4())
+
+    events = await _web_chat(agent, conversation_id=conversation)
+
+    assert events == [("error", {"message": f"LLM error: {_CHECK_FAILED}"})]
+    assert (llm.complete.await_count, len(llm.streams)) == (0, 0)
+    assert await _conversation_messages(session_manager, conversation) == []
+
+
+async def test_a_turn_that_loses_the_budget_mid_way_stops_closed_and_reports_its_call(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, caplog
+) -> None:
+    """Fails closed: no new paid request, the history closed by a marker, the ringing call still reported."""
+    settings, tracker = await budgeted(1.0)
+    llm = _scripted_llm(_response(_dial_call()), _response())
+    agent = Agent(settings, llm, session_manager, tracker, _dial_registry(then=lambda: _drop_cost_table(tmp_path)))
+
+    with caplog.at_level("ERROR", logger="pincer.core.agent"):
+        reply = await agent.handle_message("user", "chat", "call them", memory=False)
+
+    assert llm.complete.await_count == 1
+    assert (reply.text, reply.call_sids) == (_CHECK_FAILED_TEXT, ["CA9"])
+    assert (reply.budget_check_failed, reply.budget_reached) == (True, False)  # no budget was reached: no 402
+    session = await session_manager.get_or_create("user", "chat")
+    assert (session.messages[-1].role.value, session.messages[-1].content) == ("assistant", _CHECK_FAILED_MARKER)
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+
+
+async def test_a_web_chat_turn_that_loses_the_budget_after_a_dial_ends_with_done(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager
+) -> None:
+    settings, tracker = await budgeted(1.0)
+    llm = _scripted_llm(_response(_dial_call()), _response())
+    agent = Agent(settings, llm, session_manager, tracker, _dial_registry(then=lambda: _drop_cost_table(tmp_path)))
+    conversation = str(uuid.uuid4())
+
+    events = await _web_chat(agent, "call them", conversation_id=conversation)
+
+    assert events == [
+        ("tool", {"phase": "start", "name": "Using make_phone_call..."}),
+        ("tool", {"phase": "done", "name": "make_phone_call", "call_sid": "CA9"}),
+        ("done", {"text": _CHECK_FAILED_TEXT, "cost_usd": pytest.approx(_CALL_COST)}),
+    ]
+    assert len(llm.streams) == 1
+    messages = await _conversation_messages(session_manager, conversation)
+    assert (messages[-1].role.value, messages[-1].content) == ("assistant", _CHECK_FAILED_MARKER)
+
+
+def _lookup_registry(then: Callable[[], Awaitable[None]]) -> Any:
+    """A registry whose `lookup` runs `then` and places no call."""
+    from pincer.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+
+    async def lookup(context: dict[str, Any] | None = None) -> str:
+        await then()
+        return "found"
+
+    registry.register(
+        name="lookup", description="Looks up", handler=lookup, parameters={"type": "object", "properties": {}}
+    )
+    return registry
+
+
+@pytest.mark.parametrize("endpoint", ["message", "stream"])
+async def test_a_chat_turn_that_loses_the_budget_mid_way_is_no_payment_required_answer(  # type: ignore[no-untyped-def]
+    endpoint, tmp_path, budgeted, session_manager
+) -> None:
+    """The budget was never reached, so no 402: POST is a 503, the stream an `error` (lead ruling)."""
+    settings, tracker = await budgeted(1.0)
+    llm = _scripted_llm(_response([ToolCall(id="tc1", name="lookup", arguments={})]), _response())
+    agent = Agent(settings, llm, session_manager, tracker, _lookup_registry(lambda: _drop_cost_table(tmp_path)))
+    conversation = str(uuid.uuid4())
+
+    if endpoint == "message":
+        response = await _post_message(agent, "look it up", conversation_id=conversation)
+        assert (response.status_code, response.json()) == (503, {"detail": _CHECK_FAILED_TEXT})
+    else:
+        events = await _web_chat(agent, "look it up", conversation_id=conversation)
+        assert events[-1] == ("error", {"message": _CHECK_FAILED_TEXT, "cost_usd": pytest.approx(_CALL_COST)})
+    messages = await _conversation_messages(session_manager, conversation)
+    assert (messages[-1].role.value, messages[-1].content) == ("assistant", _CHECK_FAILED_MARKER)

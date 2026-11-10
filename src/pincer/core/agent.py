@@ -98,6 +98,13 @@ _HEADLESS_BUDGET_REACHED_TEXT = (
 # Closes the history of a turn the budget stopped after its tool rounds: the model next sees
 # its tool results answered, never a dangling one. Not the warning, which is no reply.
 _BUDGET_STOPPED_MARKER = "(Stopped before answering: the daily budget was reached.)"
+# The daily budget could not be read (PR #366 review): before a turn it is refused as an LLM
+# error; mid-turn it stops like a budget stop (fails closed) with its own text and marker.
+_BUDGET_CHECK_FAILED = "could not check the daily budget, no request was sent"
+_BUDGET_CHECK_FAILED_TEXT = (
+    "Warning: Could not check the daily budget, so I stopped before answering. Please try again."
+)
+_BUDGET_CHECK_FAILED_MARKER = "(Stopped before answering: the daily budget could not be checked.)"
 # A call turn whose model repeats this many tool calls it already made ends
 # with TOOL_NO_PROGRESS instead of another round (issue #300).
 _MAX_DUPLICATE_TOOL_CALLS = 2
@@ -322,6 +329,16 @@ class StreamChunk:
     call_sid: str = ""
     cost_usd: float = 0.0  # on DONE: the sum of the turn's recorded LLM costs
     budget_reached: bool = False  # on DONE: the budget refused a request; `content` is the budget message
+    budget_check_failed: bool = False  # on DONE: the budget could not be read mid-turn; `content` says so
+
+
+@dataclass(frozen=True, slots=True)
+class _BudgetStop:
+    """Why an admitted turn stops before its next request."""
+
+    text: str  # what the client gets, never saved
+    marker: str  # closes the turn's history after its tool results
+    check_failed: bool  # the budget could not be read, rather than reached
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +408,9 @@ class AgentResponse:
     call_sids: list[str] = field(default_factory=list)
     # The budget refused a request: `text` is the budget message, not a reply, and is not saved.
     budget_reached: bool = False
+    # The budget could not be read mid-turn, so the turn stopped (fails closed): no budget was
+    # reached, so this is not `budget_reached`; `text` says so, not a reply, and is not saved.
+    budget_check_failed: bool = False
 
 
 def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
@@ -867,7 +887,7 @@ class Agent:
         """
         self._last_active = (user_id, channel_name or channel)
         # A refused turn is no turn: nothing is persisted, its user message included (PR #366 review)
-        if await self._costs.budget_reached():
+        if not await self._turn_admitted():
             _log_turn(session.session_id, 0, TokenUsage(), 0.0)
             return AgentResponse(
                 text=_BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd), budget_reached=True
@@ -934,7 +954,7 @@ class Agent:
         tool_calls_count = 0
         call_sids: list[str] = []
         final_text = ""
-        budget_stop = False
+        budget_stop: _BudgetStop | None = None
         last_response: LLMResponse | None = None
         consecutive_errors = 0
         sanitize_attempts = 0
@@ -944,9 +964,8 @@ class Agent:
         for _iteration in range(self._settings.max_tool_iterations):
             # Checked again after every request, tool rounds included: the call that
             # crossed the limit was recorded, the next one is never made.
-            if turn_requests and await self._costs.budget_reached():
-                final_text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
-                budget_stop = True
+            if turn_requests and (budget_stop := await self._budget_stop()) is not None:
+                final_text = budget_stop.text
                 break
 
             # Proactive sanitization: fix orphaned pairs before they reach the API
@@ -1105,9 +1124,9 @@ class Agent:
         # A budget stop is no reply: it is neither saved, remembered, nor asked after; only the
         # marker closes the history after the turn's tool results (PR #366 review)
         reply = ""
-        if budget_stop:
+        if budget_stop is not None:
             await self._sessions.add_message(
-                session, LLMMessage(role=MessageRole.ASSISTANT, content=_BUDGET_STOPPED_MARKER)
+                session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
             )
         else:
             final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
@@ -1141,7 +1160,8 @@ class Agent:
             tool_calls_made=tool_calls_count,
             model=last_response.model if last_response else "",
             call_sids=call_sids,
-            budget_reached=budget_stop,
+            budget_reached=budget_stop is not None and not budget_stop.check_failed,
+            budget_check_failed=budget_stop is not None and budget_stop.check_failed,
         )
 
     async def run_headless(
@@ -1307,6 +1327,33 @@ class Agent:
             if session is not None:
                 self._schedule_compaction(session)
 
+    async def _turn_admitted(self) -> bool:
+        """False when the daily budget refuses the turn before its first request.
+
+        A budget that cannot be read refuses it too, as an `LLMError` (the web API's 502 or
+        stream `error`): no request is sent and nothing is persisted (PR #366 review).
+        """
+        try:
+            return not await self._costs.budget_reached()
+        except Exception as e:
+            logger.error("Daily budget check failed: the turn is refused before any request", exc_info=True)
+            raise LLMError(_BUDGET_CHECK_FAILED) from e
+
+    async def _budget_stop(self) -> _BudgetStop | None:
+        """Checked after each request of an admitted turn: None to go on, or why it stops.
+
+        A budget that cannot be read stops the turn too, before another paid request
+        (fails closed); a call it already placed is still reported (PR #366 review).
+        """
+        try:
+            if not await self._costs.budget_reached():
+                return None
+        except Exception:
+            logger.error("Daily budget check failed mid-turn: stopping before the next request", exc_info=True)
+            return _BudgetStop(_BUDGET_CHECK_FAILED_TEXT, _BUDGET_CHECK_FAILED_MARKER, check_failed=True)
+        text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+        return _BudgetStop(text, _BUDGET_STOPPED_MARKER, check_failed=False)
+
     async def _record_cost(self, response: LLMResponse, session_id: str | None) -> float:
         """Record one completed request (see `record_response`) and return its cost."""
         return await record_response(self._costs, self._llm, response, self._settings.default_provider, session_id)
@@ -1339,7 +1386,7 @@ class Agent:
         """
         self._last_active = (user_id, channel)
         # A refused turn is no turn: nothing is persisted, its user message included (PR #366 review)
-        if await self._costs.budget_reached():
+        if not await self._turn_admitted():
             _log_turn(session.session_id, 0, TokenUsage(), 0.0)
             yield StreamChunk(
                 StreamEventType.DONE,
@@ -1395,13 +1442,12 @@ class Agent:
         reply = ""  # the reply: saved as the turn's final assistant message
         step_text = ""  # what the current step streamed
         ending: str | None = None  # no request answers the turn's last tools
-        budget_stop = False
+        budget_stop: _BudgetStop | None = None
         try:
             # One streamed request per step, each with the turn's tools and system prompt
             for _iteration in range(self._settings.max_tool_iterations):
                 # Checked again after every request, as on the non-stream path
-                if turn_requests and await self._costs.budget_reached():
-                    budget_stop = True
+                if turn_requests and (budget_stop := await self._budget_stop()) is not None:
                     break
 
                 # Proactive sanitization: fix orphaned pairs before they reach the API
@@ -1548,20 +1594,21 @@ class Agent:
             # The failed step's text is in no saved message: it goes with the notice
             reply = step_text + ("\n\n" if step_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
 
-        if budget_stop:
+        if budget_stop is not None:
             # A refusal, not a reply (PR #366 review): no streamed text, no onboarding question,
             # and only the marker saved; the client gets it as the turn's end, flagged
             await self._sessions.add_message(
-                session, LLMMessage(role=MessageRole.ASSISTANT, content=_BUDGET_STOPPED_MARKER)
+                session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
             )
             if onboarding.ingest:
                 await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
             _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
             yield StreamChunk(
                 StreamEventType.DONE,
-                _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd),
+                budget_stop.text,
                 cost_usd=total_cost,
-                budget_reached=True,
+                budget_reached=not budget_stop.check_failed,
+                budget_check_failed=budget_stop.check_failed,
             )
             return
 

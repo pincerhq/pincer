@@ -163,10 +163,11 @@ async def post_message(
         )
     except LLMError as e:
         raise HTTPException(502, str(e)) from e
-    if resp.budget_reached and not resp.call_sids:
-        # A refusal, not a reply. A turn that placed a call still answers 200,
-        # so the client keeps waiting for that call's report.
-        raise HTTPException(402, resp.text)
+    if (resp.budget_reached or resp.budget_check_failed) and not resp.call_sids:
+        # A refusal, not a reply: 402 when the budget is reached, 503 when it could not be
+        # read mid-turn. A turn that placed a call still answers 200, so the client keeps
+        # waiting for that call's report.
+        raise HTTPException(503 if resp.budget_check_failed else 402, resp.text)
     return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model, "call_sids": resp.call_sids}
 
 
@@ -212,7 +213,7 @@ async def post_stream(
                                 placed_call = True
                             await queue.put(("tool", done))
                         elif chunk.type == StreamEventType.DONE:
-                            if chunk.budget_reached and not placed_call:
+                            if (chunk.budget_reached or chunk.budget_check_failed) and not placed_call:
                                 # A refusal, not a reply: clients key on the error event. A turn
                                 # that placed a call ends with `done`, as `POST /message` answers
                                 # 200, so the client keeps waiting for that call's report.
