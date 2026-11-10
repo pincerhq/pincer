@@ -217,7 +217,14 @@ async def voice_webhook(request: Request) -> Response:
 
     # Before answering (Q12): no speech, no LLM call, no minutes. A call in
     # progress is never cut off; only a new one may not start.
-    if await daily_budget_reached(_settings):
+    try:
+        over_budget = await daily_budget_reached(_settings)
+    except Exception:
+        # Fails open: the caller is on the line, and Twilio's "application
+        # error" is worse than one call over the budget (Q9's worst case).
+        logger.warning("Inbound call %s: daily budget check failed — answering the call", call_sid, exc_info=True)
+        over_budget = False
+    if over_budget:
         return await _decline_over_budget(call_sid, caller)
 
     from pincer.voice.engine import CallDirection

@@ -1414,6 +1414,8 @@ _ERROR_STATUS: list[tuple[str, int]] = [
     ("not enabled", 403),
     # The daily LLM budget (outbound.BUDGET_REFUSAL): a spend limit, not a rate limit
     ("daily budget reached", 402),
+    # outbound.BUDGET_CHECK_FAILED: the cost database is down, not Twilio
+    ("could not check the daily budget", 503),
     ("disabled", 403),
     ("Invalid phone number", 422),
     ("Daily outbound call limit", 429),

@@ -24,6 +24,8 @@ TOOL_NAME = "make_phone_call"
 # What every surface gets back when the daily budget is reached (Q12). The
 # dashboard maps it to 402 (api/voice._ERROR_STATUS).
 BUDGET_REFUSAL = "Error: daily budget reached, call not placed."
+# When the budget cannot be read (cost DB down or locked): the dial fails closed.
+BUDGET_CHECK_FAILED = "Error: could not check the daily budget, call not placed."
 # The line a placed call's result names it on. Only a placed call's result has
 # it; an "Error..." result may name a SID in passing, but no report follows it.
 _CALL_SID_LINE = "Call SID: {}"
@@ -374,7 +376,14 @@ async def make_phone_call(
     # daily limit and the outbound gate, so a refusal uses neither.
     from pincer.services.costs import daily_budget_reached
 
-    if await daily_budget_reached(settings):
+    try:
+        over_budget = await daily_budget_reached(settings)
+    except Exception:
+        # Fails closed: nobody is on the line yet, every surface can retry, and
+        # the outbound gate right after reads the same database anyway.
+        logger.warning("make_phone_call refused for user %s: daily budget check failed", user_id, exc_info=True)
+        return BUDGET_CHECK_FAILED
+    if over_budget:
         return await _refuse_over_budget(settings, validated, user_id, language)
 
     if not _check_daily_limit(user_id, settings.voice_outbound_max_daily):

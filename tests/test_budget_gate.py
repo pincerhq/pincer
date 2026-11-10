@@ -448,7 +448,9 @@ def voice_routes(monkeypatch: pytest.MonkeyPatch) -> Callable[[Settings], tuple[
         twiml_server.init_voice_routes(engine, settings)
         app = FastAPI()
         app.include_router(twiml_server.twilio_router)
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test"), engine
+        # A server error comes back as the 500 Twilio would get, not as a raised exception
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        return httpx.AsyncClient(transport=transport, base_url="http://test"), engine
 
     return make
 
@@ -710,3 +712,73 @@ def test_nothing_is_refused_by_an_exception_after_the_call_any_more() -> None:
     import pincer.exceptions
 
     assert not hasattr(pincer.exceptions, "BudgetExceededError")
+
+
+# ── The budget cannot be read (PR #366 review): inbound fails open, outbound fails closed ──
+
+
+def _unreadable_cost_db(settings: Settings, budget: float = 0.007) -> Settings:
+    """Settings whose database is a file of non-database bytes: every read raises `DatabaseError`."""
+    unreadable = settings.data_dir / "unreadable"
+    unreadable.mkdir(parents=True, exist_ok=True)
+    (unreadable / "pincer.db").write_bytes(b"not a database, " * 64)
+    return settings.model_copy(
+        update={"data_dir": unreadable, "daily_budget_usd": budget, "voice_allowed_callers": "*"}
+    )
+
+
+async def test_an_inbound_call_is_answered_when_the_budget_cannot_be_read(  # type: ignore[no-untyped-def]
+    settings, voice_routes, caplog
+) -> None:
+    """A caller is on the line: Twilio's "application error" is worse than one call over the budget."""
+    client, engine = voice_routes(_unreadable_cost_db(settings))
+
+    with caplog.at_level("WARNING", logger="pincer.voice.twiml_server"):
+        response = await _inbound(client, "CA_db")
+
+    assert response.status_code == 200
+    assert b"<Connect>" in response.content
+    engine.on_call_start.assert_awaited_once()
+    assert "Inbound call CA_db: daily budget check failed — answering the call" in caplog.messages
+
+
+async def test_the_dial_tool_places_no_call_when_the_budget_cannot_be_read(  # type: ignore[no-untyped-def]
+    settings, dialling, fake_twilio_rest, caplog
+) -> None:
+    """Nobody is waiting on a ringing line, and every surface can retry: refuse, in the tool's own words."""
+    from pincer.voice import outbound
+
+    dialling(_unreadable_cost_db(settings))
+
+    with caplog.at_level("WARNING", logger="pincer.voice.outbound"):
+        result = await _dial("u1")
+
+    assert result == "Error: could not check the daily budget, call not placed."
+    assert fake_twilio_rest.creates == []
+    assert outbound._daily_outbound_counts == {}
+    assert "make_phone_call refused for user u1: daily budget check failed" in caplog.messages
+
+
+async def test_a_dashboard_call_is_a_503_when_the_budget_cannot_be_read(  # type: ignore[no-untyped-def]
+    settings, dialling, fake_twilio_rest
+) -> None:
+    """A dependency that is down, not a Twilio failure (502)."""
+    from fastapi import FastAPI
+
+    from pincer.api.voice import router
+
+    dialling(_unreadable_cost_db(settings))
+    app = FastAPI()
+    app.include_router(router)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/voice/calls",
+            json={"target_number": "+14155551234", "purpose": "Confirm the dentist appointment"},
+        )
+
+    assert (response.status_code, response.json()) == (
+        503,
+        {"detail": "could not check the daily budget, call not placed."},
+    )
+    assert fake_twilio_rest.creates == []
