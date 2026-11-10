@@ -38,7 +38,7 @@ GOOGLE_TOKEN_MISSING = (
     "Google Workspace tools off (no calendar, Gmail or Drive): OAuth client found (%s) but no token at %s — "
     "run `pincer google setup`, or set PINCER_GOOGLE_OAUTH_DIR to the directory holding the token"
 )
-# Once per process at INFO: register_default_tools also runs on every GET /api/integrations.
+# Once at INFO until the tools register: register_default_tools also runs on every GET /api/integrations.
 _SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
 _TOKEN_MISSING_LOG = LogOnce(logger)
 # A crashing Workspace registration (with its traceback): WARNING once, DEBUG until it registers again.
@@ -363,6 +363,9 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
             return
         report["google"] = register_all_tools(tools, factory)
         _clear_failure_logs()
+        # A token is there now: if it goes missing later in this process, say so at full level again.
+        _SETUP_HINT_LOG.clear()
+        _TOKEN_MISSING_LOG.clear()
     except RuntimeError as e:  # e.g. a token missing a required scope: as repeating as any other failure
         _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
     except Exception as e:
@@ -379,12 +382,13 @@ def _log_no_google_token(settings: Settings) -> None:
 
     if token_source.token_env_state(settings) == "ok":
         return
-    paths = ", ".join(str(p) for p in token_source.searched_paths(settings))
-    client = token_source.client_config(settings)
+    oauth_dir = settings.google_oauth_dir()
+    paths = ", ".join(str(p) for p in token_source.searched_paths(settings, oauth_dir))
+    client = token_source.client_config(settings, oauth_dir)
     if client is not None:
         _TOKEN_MISSING_LOG.log(GOOGLE_TOKEN_MISSING, client.label, paths)
     else:
-        _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT, settings.google_oauth_dir())
+        _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT, oauth_dir)
 
 
 def _register_slack(tools: ToolRegistry, report: dict[str, int]) -> None:

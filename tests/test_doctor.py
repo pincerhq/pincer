@@ -1877,6 +1877,37 @@ def test_google_workspace_check_warns_on_an_env_token_without_a_client(tmp_path)
     assert "--print-env" in result.fix_hint
 
 
+def _gmail_only_token(directory):
+    import json
+
+    from pincer.integrations.google.auth import SERVICE_SCOPES
+
+    client = {"installed": {"client_id": "c", "client_secret": "s"}}
+    (directory / "google_credentials.json").write_text(json.dumps(client))
+    (directory / "google_workspace_token.json").write_text(json.dumps({"scopes": SERVICE_SCOPES["gmail"]}))
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_a_token_without_the_configured_scopes_is_not_a_missing_token(tmp_path):
+    """Calendar configured, a gmail-only token found: re-consent, not "no token" / PINCER_GOOGLE_OAUTH_DIR."""
+    _gmail_only_token(tmp_path)
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path))
+    assert result.status == CheckStatus.WARNING
+    assert "grants no scopes for the configured services" in result.message
+    assert f"token file in {tmp_path}" in result.message
+    assert "re-consent" in result.fix_hint
+    assert "PINCER_GOOGLE_OAUTH_DIR" not in result.fix_hint
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_undecodable_env_token_with_an_unusable_token_file(tmp_path):
+    _gmail_only_token(tmp_path)
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token="not-a-token"))
+    assert result.status == CheckStatus.WARNING
+    assert "grants no scopes for the configured services" in result.message
+    assert "no token file" not in result.message
+
+
 @pytest.mark.usefixtures("google_enabled")
 def test_google_workspace_check_names_an_oauth_client_taken_from_the_file(tmp_path):
     import json

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -198,3 +199,80 @@ def test_status_reports_a_file_token_with_its_own_client(dirs):
     (data_dir / "google_workspace_token.json").write_text(json.dumps(_full_token()))
     state = google_status(_settings())
     assert (state["status"], state["source"], state["client_source"]) == ("active", "file", "token")
+
+
+def test_a_token_in_cwd_data_wins_over_a_bare_client_file_in_data_dir(dirs, caplog):
+    """Only google_credentials.json in data_dir must not hide a working token in ./data."""
+    data_dir, cwd = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    legacy = cwd / "data"
+    legacy.mkdir()
+    (legacy / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    (legacy / "google_workspace_token.json").write_text(json.dumps(_full_token()))
+    with caplog.at_level(logging.WARNING, logger="pincer.config.main"):
+        settings = _settings()
+        assert settings.google_oauth_dir() == legacy
+        assert locate_token(settings)["token_path"] == str(legacy / "google_workspace_token.json")
+    assert len(_legacy_warnings(caplog)) == 1
+
+
+def test_a_client_file_in_data_dir_wins_over_one_in_cwd_data(dirs, caplog):
+    data_dir, cwd = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    assert _settings().google_oauth_dir() == data_dir
+    assert _legacy_warnings(caplog) == []
+
+
+def test_a_relative_explicit_dir_is_logged(dirs, monkeypatch, caplog):
+    _, cwd = dirs
+    monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", "oauth")
+    with caplog.at_level(logging.WARNING, logger="pincer.config.main"):
+        assert _settings().google_oauth_dir() == Path("oauth")
+    [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "is relative" in warning
+    assert str(cwd) in warning
+
+
+def test_absolute_explicit_dir_is_not_logged(dirs, tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", str(tmp_path / "oauth"))
+    with caplog.at_level(logging.WARNING, logger="pincer.config.main"):
+        _settings().google_oauth_dir()
+    assert caplog.records == []
+
+
+def test_a_stray_client_secret_is_not_paired_with_another_clients_id(dirs, monkeypatch):
+    """A token without client_id takes the id and the secret from one client, never half of each."""
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob({**TRIMMED_TOKEN, "client_secret": "stray"}))
+    info = locate_token(_settings())["token_info"]
+    assert (info["client_id"], info["client_secret"]) == ("file-cid", "file-secret")
+
+
+def test_a_token_with_its_client_id_gets_only_the_secret_of_that_client(dirs, monkeypatch):
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob({**TRIMMED_TOKEN, "client_id": "file-cid"}))
+    location = locate_token(_settings())
+    assert (location["token_info"]["client_secret"], location["client_source"]) == (
+        "file-secret",
+        f"file:{data_dir / 'google_credentials.json'}",
+    )
+
+
+def test_a_complete_env_token_reads_the_client_file_once(dirs, monkeypatch):
+    """The client only feeds a once-only mismatch warning: later lookups skip reading it."""
+    from pincer.integrations.google import token_source
+
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob(_full_token()))
+    reads: list[object] = []
+    real = token_source.client_config
+    monkeypatch.setattr(token_source, "client_config", lambda *a: reads.append(a) or real(*a))
+    settings = _settings()
+    for _ in range(3):
+        assert locate_token(settings)["client_source"] == "token"
+    assert len(reads) == 1

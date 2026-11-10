@@ -131,13 +131,14 @@ def google_auth() -> None:
 
     from pincer.config import get_settings
     from pincer.integrations.google.auth import SERVICE_SCOPES
+    from pincer.integrations.google.token_source import CREDENTIALS_FILE, TOKEN_FILES
 
     scopes = SERVICE_SCOPES["calendar"]
 
     settings = get_settings()
     oauth_dir = settings.google_oauth_dir()
-    credentials_path = oauth_dir / "google_credentials.json"
-    token_path = oauth_dir / "google_token.json"
+    credentials_path = oauth_dir / CREDENTIALS_FILE
+    token_path = oauth_dir / TOKEN_FILES[1]  # the legacy calendar-only token
 
     console.print("[bold]Google Calendar — OAuth Setup[/bold]\n")
 

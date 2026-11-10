@@ -16,17 +16,16 @@ from pincer.config.observability import ObservabilitySettings
 from pincer.config.tasks import TaskSettings
 from pincer.config.tools import ToolSettings
 from pincer.core.log_once import LogOncePerKey
+from pincer.integrations.google.token_source import CREDENTIALS_FILE, TOKEN_FILES
 
 logger = logging.getLogger(__name__)
 
-#: The files `google_oauth_dir()` looks for (token_source.TOKEN_FILES + CREDENTIALS_FILE).
-_GOOGLE_OAUTH_FILES = ("google_workspace_token.json", "google_token.json", "google_credentials.json")
-# Once per directory: google_oauth_dir() runs on every token lookup.
+# Once per directory (or relative value): google_oauth_dir() runs on every token lookup.
 _LEGACY_OAUTH_DIR_LOG = LogOncePerKey(logger)
 
 
-def _has_google_oauth_files(directory: Path) -> bool:
-    return any((directory / name).exists() for name in _GOOGLE_OAUTH_FILES)
+def _has_any(directory: Path, names: tuple[str, ...]) -> bool:
+    return any((directory / name).exists() for name in names)
 
 
 class Settings(
@@ -87,25 +86,41 @@ class Settings(
     def google_oauth_dir(self) -> Path:
         """Directory for Google OAuth credentials and token, independent of the working directory.
 
-        1. ``PINCER_GOOGLE_OAUTH_DIR``, when set;
-        2. ``data_dir``, when it holds a token or ``google_credentials.json``;
-        3. ``./data`` (deprecated), only when it holds one of those files — logged once;
+        1. ``PINCER_GOOGLE_OAUTH_DIR``, when set (a relative value is logged: it depends on the cwd);
+        2. the first of ``data_dir``, ``./data`` that holds a token file;
+        3. else the first of them that holds ``google_credentials.json``;
         4. otherwise ``data_dir`` (where ``pincer google setup`` writes).
+
+        ``./data`` is deprecated: choosing it is logged once.
         """
-        if self.google_oauth_dir_override is not None:
-            return self.google_oauth_dir_override.expanduser()
-        if _has_google_oauth_files(self.data_dir):
-            return self.data_dir
+        override = self.google_oauth_dir_override
+        if override is not None:
+            override = override.expanduser()
+            if not override.is_absolute():
+                _LEGACY_OAUTH_DIR_LOG.log(
+                    f"relative:{override}",
+                    "PINCER_GOOGLE_OAUTH_DIR=%s is relative, so it depends on the working directory (now %s) — "
+                    "set an absolute path",
+                    override,
+                    Path.cwd(),
+                )
+            return override
         cwd_data = Path.cwd() / "data"
-        if cwd_data.resolve() != self.data_dir.resolve() and _has_google_oauth_files(cwd_data):
-            _LEGACY_OAUTH_DIR_LOG.log(
-                str(cwd_data),
-                "Using Google OAuth files in %s, found relative to the working directory — deprecated: "
-                "move them to %s or set PINCER_GOOGLE_OAUTH_DIR",
-                cwd_data,
-                self.data_dir,
-            )
-            return cwd_data
+        candidates = [self.data_dir]
+        if cwd_data.resolve() != self.data_dir.resolve():
+            candidates.append(cwd_data)
+        for names in (TOKEN_FILES, (CREDENTIALS_FILE,)):
+            for directory in candidates:
+                if _has_any(directory, names):
+                    if directory is cwd_data:
+                        _LEGACY_OAUTH_DIR_LOG.log(
+                            str(cwd_data),
+                            "Using Google OAuth files in %s, found relative to the working directory — deprecated: "
+                            "move them to %s or set PINCER_GOOGLE_OAUTH_DIR",
+                            cwd_data,
+                            self.data_dir,
+                        )
+                    return directory
         return self.data_dir
 
     def ensure_dirs(self) -> None:

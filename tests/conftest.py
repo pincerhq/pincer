@@ -83,6 +83,7 @@ def _reset_google_oauth_logs(monkeypatch: pytest.MonkeyPatch) -> None:
     from pincer.integrations.google import token_source
 
     monkeypatch.setattr(token_source, "_LOG", LogOncePerKey(token_source.logger))
+    monkeypatch.setattr(token_source, "_MISMATCH_CHECKED", set())
     monkeypatch.setattr(config_main, "_LEGACY_OAUTH_DIR_LOG", LogOncePerKey(config_main.logger))
     monkeypatch.delenv("PINCER_GOOGLE_OAUTH_DIR", raising=False)
     monkeypatch.delenv("PINCER_GOOGLE_TOKEN_JSON", raising=False)

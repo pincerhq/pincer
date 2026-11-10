@@ -2146,8 +2146,15 @@ class SecurityDoctor:
         env_state = token_source.token_env_state(settings)
         state = google.google_status(settings)
         origin = self._google_token_origin(state, oauth_dir)
+        # "disabled" with a source: a token was found but covers none of the configured services.
+        token_found = state.get("source") is not None
         if env_state == "invalid":
-            fallback = f"using {origin} instead" if state["status"] != "disabled" else f"no token file in {oauth_dir}"
+            if state["status"] != "disabled":
+                fallback = f"using {origin} instead"
+            elif token_found:
+                fallback = f"the {origin} grants no scopes for the configured services"
+            else:
+                fallback = f"no token file in {oauth_dir}"
             return CheckResult(
                 name,
                 CheckStatus.WARNING,
@@ -2172,17 +2179,27 @@ class SecurityDoctor:
                 fix_hint=f"{setup} to re-consent",
                 category="google",
             )
+        if token_found:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"Google token found ({origin}) but it grants no scopes for the configured services — "
+                "no calendar, Gmail or Drive tools",
+                fix_hint=f"Run `pincer google setup --print-env` and update {token_source.TOKEN_ENV}"
+                if state.get("source") == "env"
+                else f"{setup} to re-consent",
+                category="google",
+            )
         if env_state == "ok":
             return CheckResult(
                 name,
                 CheckStatus.WARNING,
-                f"{token_source.TOKEN_ENV} is set but unusable: no scopes for the configured services, or no "
-                f"client_id/client_secret and no matching OAuth client in {oauth_dir} or "
-                f"{token_source.CREDENTIALS_ENV}",
+                f"{token_source.TOKEN_ENV} is set but unusable: no client_id/client_secret and no matching "
+                f"OAuth client in {oauth_dir} or {token_source.CREDENTIALS_ENV}",
                 fix_hint=f"Run `pincer google setup --print-env` and update {token_source.TOKEN_ENV}",
                 category="google",
             )
-        if token_source.client_config(settings) is not None:
+        if token_source.client_config(settings, oauth_dir) is not None:
             return CheckResult(
                 name,
                 CheckStatus.WARNING,

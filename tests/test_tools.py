@@ -300,6 +300,25 @@ def test_a_set_but_unusable_env_token_is_not_reported_as_a_missing_token(setting
     assert any("PINCER_GOOGLE_TOKEN_JSON" in m for m in messages)
 
 
+@pytest.mark.usefixtures("fresh_setup_hint")
+def test_a_token_that_goes_missing_after_registering_is_reported_again(settings, monkeypatch, caplog) -> None:
+    """The tools registered in between: the next missing token is a WARNING again, not DEBUG."""
+    import json
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "google_credentials.json").write_text(
+        json.dumps({"installed": {"client_id": "cid", "client_secret": "cs"}})
+    )
+    factories: list[object] = [None, object(), None]
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: factories.pop(0))
+    monkeypatch.setattr("pincer.integrations.google.register_all_tools", lambda _tools, _factory: 1)
+    with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
+        for _ in range(3):
+            register_default_tools(ToolRegistry(), settings)
+    levels = [r.levelno for r in caplog.records if "but no token at" in r.getMessage()]
+    assert levels == [logging.WARNING, logging.WARNING]
+
+
 class TestScheduleToolRegistration:
     def test_registered_by_default(self, settings) -> None:
         registry = ToolRegistry()

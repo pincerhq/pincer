@@ -174,7 +174,7 @@ class ToolSettings(BaseModel):
         default=None,
         validation_alias="PINCER_GOOGLE_OAUTH_DIR",
         description=(
-            "Directory for google_credentials.json and the Google token files. Unset = data_dir "
+            "Absolute directory for google_credentials.json and the Google token files. Unset = data_dir "
             "(or, deprecated, ./data when it already holds them)"
         ),
     )

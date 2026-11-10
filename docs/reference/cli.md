@@ -306,10 +306,12 @@ With `--print-env` nothing is written: the token is printed as `PINCER_GOOGLE_TO
 
 The OAuth directory does not depend on the directory Pincer is started from:
 
-1. `PINCER_GOOGLE_OAUTH_DIR`, when set;
-2. otherwise `PINCER_DATA_DIR` (default `~/.pincer`), when it holds a token or `google_credentials.json`;
-3. otherwise `./data` in the working directory, **deprecated**: only when it already holds one of those files, with a warning at startup — move them to the data directory or set `PINCER_GOOGLE_OAUTH_DIR`;
+1. `PINCER_GOOGLE_OAUTH_DIR`, when set — use an absolute path (a relative one depends on the working directory and is logged);
+2. otherwise the first of `PINCER_DATA_DIR` (default `~/.pincer`) and `./data` that holds a token file;
+3. otherwise the first of them that holds `google_credentials.json`;
 4. otherwise the data directory (where `pincer google setup` writes).
+
+`./data` in the working directory is **deprecated**: it is only used when it holds one of those files, with a warning at startup — move them to the data directory or set `PINCER_GOOGLE_OAUTH_DIR`.
 
 The token and the OAuth client can each come from a file or an env var:
 
