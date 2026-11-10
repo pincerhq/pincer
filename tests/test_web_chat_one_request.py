@@ -21,7 +21,6 @@ from anthropic_sse import ScriptedAnthropic, text, thinking, tool_use
 from pincer.core.agent import Agent
 from pincer.db.engine import get_database_url
 from pincer.db.session import session_scope
-from pincer.exceptions import LLMRateLimitError
 from pincer.llm.base import BaseLLMProvider, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.repositories.costs import CostLogRepository
 from pincer.tools.registry import ToolRegistry
@@ -173,44 +172,21 @@ async def test_the_next_step_of_a_turn_sends_the_turns_thinking_back(  # type: i
     assert all(not m.thinking_blocks for m in session.messages)  # the turn's end drops it
 
 
-class _RateLimitedOnce(BaseLLMProvider):
-    """The first request is refused with a 429 before any event; the next one answers."""
-
-    def __init__(self) -> None:
-        self.requests = 0
-
-    async def complete(self, *args: Any, **kwargs: Any) -> LLMResponse:
-        raise AssertionError("web chat must not use complete()")
-
-    async def stream_turn(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
-        self.requests += 1
-        if self.requests == 1:
-            raise LLMRateLimitError(retry_after=0.0)
-        yield StreamTurnEvent(text="Hello there")
-        yield StreamTurnEvent(
-            response=LLMResponse(
-                content="Hello there", request_model=_MODEL, input_tokens=10, output_tokens=5, stop_reason="end_turn"
-            )
-        )
-
-    async def close(self) -> None:
-        pass
-
-
-async def test_a_step_rate_limited_before_its_first_event_is_retried(  # type: ignore[no-untyped-def]
-    fixture_settings, session_manager, cost_tracker, tmp_path, caplog
+async def test_a_web_chat_step_rate_limited_before_its_first_event_is_retried_by_the_provider(  # type: ignore[no-untyped-def]
+    fixture_settings, session_manager, cost_tracker, tmp_path
 ) -> None:
-    """Nothing has streamed yet, so asking again is safe (as `complete` retries a 429)."""
-    llm = _RateLimitedOnce()
-    agent = Agent(fixture_settings, llm, session_manager, cost_tracker, _registry())
+    """The real SDK sends a 429 three times (its own two retries), then the provider asks again
+    as complete() would: the turn gets its reply, and only the answered request is recorded."""
+    async with ScriptedAnthropic(fixture_settings, [429, 429, 429, ([text("Hello there")], "end_turn")]) as llm:
+        agent = Agent(fixture_settings, llm.provider, session_manager, cost_tracker, _registry())
+        events = await _web_chat(agent)
 
-    with caplog.at_level("WARNING", logger="pincer.core.agent"):
-        chunks = [c async for c in agent.handle_message_stream("user1", "web", "hi", memory=False)]
-
-    assert llm.requests == 2
-    assert chunks[-1].content == "Hello there"
+    assert len(llm.requests) == 4
+    assert events == [
+        ("chunk", {"delta": "Hello there"}),
+        ("done", {"text": "Hello there", "cost_usd": pytest.approx(_REQUEST_COST)}),
+    ]
     assert await _stored_costs(tmp_path) == [pytest.approx(_REQUEST_COST)]
-    assert "Rate limited before the first event, retrying in 0.0s (attempt 1)" in caplog.text
 
 
 async def test_a_budget_stop_after_streamed_text_ends_the_turn_flagged_and_unsaved(  # type: ignore[no-untyped-def]
@@ -322,24 +298,3 @@ async def test_the_circuit_breaker_ends_the_turn_without_another_request(  # typ
     session = await session_manager.get_or_create("user1", "web")
     assert [m.role for m in session.messages[-2:]] == [MessageRole.TOOL_RESULT, MessageRole.ASSISTANT]
     assert session.messages[-1].content == expected[0]
-
-
-class _RateLimitedMidStream(_RateLimitedOnce):
-    """A 429 after the first text: asking again would stream that text twice."""
-
-    async def stream_turn(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
-        self.requests += 1
-        yield StreamTurnEvent(text="Hel")
-        raise LLMRateLimitError(retry_after=0.0)
-
-
-async def test_a_step_rate_limited_after_its_first_event_is_not_asked_again(  # type: ignore[no-untyped-def]
-    fixture_settings, session_manager, cost_tracker
-) -> None:
-    llm = _RateLimitedMidStream()
-    agent = Agent(fixture_settings, llm, session_manager, cost_tracker, _registry())
-
-    texts, done = await _turn(agent)
-
-    assert llm.requests == 1
-    assert (texts, done) == (["Hel"], "Hel")  # the text the user saw is kept as the reply

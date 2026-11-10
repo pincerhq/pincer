@@ -24,6 +24,7 @@ from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
+    RATE_LIMIT_ATTEMPTS,
     BaseLLMProvider,
     LLMMessage,
     LLMResponse,
@@ -32,6 +33,7 @@ from pincer.llm.base import (
     ThinkingBlock,
     TokenCounts,
     ToolCall,
+    rate_limit_backoff,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
 
@@ -181,21 +183,32 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): text deltas arrive as
         the model writes; the final message (tool calls + usage) comes from the
-        same stream — tools are never lost, nothing is generated twice."""
+        same stream — tools are never lost, nothing is generated twice.
+
+        A 429 before the first event is retried as `complete()` retries it; once
+        text has been yielded nothing is retried, since the caller already has it."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
-        try:
-            async with self._client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    yield StreamTurnEvent(text=text)
-                final: Message = await stream.get_final_message()
-        except anthropic.RateLimitError as e:
-            retry_after = float(e.response.headers.get("retry-after", "5"))
-            raise LLMRateLimitError(retry_after=retry_after) from e
-        except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
-        except anthropic.APIConnectionError as e:
-            raise LLMError(f"Anthropic connection error: {e}") from e
+        for attempt in range(RATE_LIMIT_ATTEMPTS):
+            started = False
+            try:
+                async with self._client.messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        started = True
+                        yield StreamTurnEvent(text=text)
+                    final: Message = await stream.get_final_message()
+                break
+            except anthropic.RateLimitError as e:
+                retry_after = float(e.response.headers.get("retry-after", "5"))
+                if started or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                    raise LLMRateLimitError(retry_after=retry_after) from e
+                wait = rate_limit_backoff(retry_after, attempt)
+                logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
+                await asyncio.sleep(wait)
+            except anthropic.APIStatusError as e:
+                raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
+            except anthropic.APIConnectionError as e:
+                raise LLMError(f"Anthropic connection error: {e}") from e
 
         result = self._parse_response(final)
         result.provider = self._provider_name
@@ -210,7 +223,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
     async def _call_with_retry(
         self,
         kwargs: dict[str, Any],
-        max_retries: int = 3,
+        max_retries: int = RATE_LIMIT_ATTEMPTS,
     ) -> Message:
         """Call API with exponential backoff on rate limits.
 
@@ -228,7 +241,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 retry_after = float(e.response.headers.get("retry-after", "5"))
                 if attempt == max_retries - 1:
                     raise LLMRateLimitError(retry_after=retry_after) from e
-                wait = min(retry_after * (2**attempt), 60)
+                wait = rate_limit_backoff(retry_after, attempt)
                 logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
                 await asyncio.sleep(wait)
         raise LLMError("Exhausted retries")  # unreachable but satisfies type checker

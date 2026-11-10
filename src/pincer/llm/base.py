@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 
 # The stop reason every provider reports when the output hit max_tokens
 STOP_REASON_MAX_TOKENS = "max_tokens"
+# A rate-limited (429) request is sent this many times in all, by complete() and by stream_turn()
+# before its first event; the wait doubles each time, up to the cap
+RATE_LIMIT_ATTEMPTS = 3
+_RATE_LIMIT_MAX_WAIT_S = 60.0
 # Where the requests of the current conversation get their prompt cache key (issue #357, Q21):
 # set by the agent around a turn, read by providers that route on it (OpenAI's prompt_cache_key)
 _prompt_cache_key_source: ContextVar[Callable[[], str] | None] = ContextVar("pincer_prompt_cache_key", default=None)
@@ -202,6 +206,11 @@ class LLMResponse:
     def truncated(self) -> bool:
         """The output stopped on max_tokens: its last block may be incomplete."""
         return self.stop_reason == STOP_REASON_MAX_TOKENS
+
+
+def rate_limit_backoff(retry_after: float, attempt: int) -> float:
+    """Seconds to wait after the `attempt`-th (0-based) 429: retry_after·2^attempt, at most 60 s."""
+    return min(retry_after * 2.0**attempt, _RATE_LIMIT_MAX_WAIT_S)
 
 
 def strip_thinking(messages: list[LLMMessage]) -> None:

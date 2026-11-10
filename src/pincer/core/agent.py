@@ -35,7 +35,7 @@ from pincer.core.onboarding import (
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.db.ids import new_id
-from pincer.exceptions import LLMError, LLMOutputTruncatedError, LLMRateLimitError, ToolNotFoundError
+from pincer.exceptions import LLMError, LLMOutputTruncatedError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -76,7 +76,6 @@ if TYPE_CHECKING:
     from pincer.config.llm import ReasoningEffort, ThinkingMode
     from pincer.core.compaction import Compactor
     from pincer.core.session import Session, SessionManager
-    from pincer.llm.base import StreamTurnEvent
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
@@ -110,10 +109,6 @@ _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please re
 # How a web chat turn ends when no request answers its last tools
 _MAX_ITERATIONS_TEXT = "Max iterations reached."
 _TOOL_FAILURES_TEXT = "I'm having repeated tool failures. Let me respond with what I have."
-# A web chat step refused with a 429 before its first event is asked again, as `complete` does
-_RATE_LIMIT_ATTEMPTS = 3
-_RATE_LIMIT_DEFAULT_WAIT_S = 5.0  # when the provider names no retry-after
-_RATE_LIMIT_MAX_WAIT_S = 60.0
 # Session metadata: the conversation's prompt cache key, a UUIDv7 minted on its first request
 # that sends one (issue #357, Q21: never derived from the session id, which names the user)
 PROMPT_CACHE_KEY = "prompt_cache_key"
@@ -1302,26 +1297,6 @@ class Agent:
         """Record one completed request (see `record_response`) and return its cost."""
         return await record_response(self._costs, self._llm, response, self._settings.default_provider, session_id)
 
-    async def _stream_step(
-        self, messages: list[LLMMessage], tools: list[dict[str, Any]] | None, system: str
-    ) -> AsyncGenerator[StreamTurnEvent]:
-        """One web chat step: `stream_turn`, asked again on a 429 raised before its first event.
-        Nothing has streamed then, so the retry is safe; a 429 after it propagates."""
-        for attempt in range(_RATE_LIMIT_ATTEMPTS):
-            started = False
-            try:
-                async for event in self._llm.stream_turn(messages=messages, tools=tools, system=system):
-                    started = True
-                    yield event
-                return
-            except LLMRateLimitError as e:
-                if started or attempt == _RATE_LIMIT_ATTEMPTS - 1:
-                    raise
-                after = _RATE_LIMIT_DEFAULT_WAIT_S if e.retry_after is None else e.retry_after
-                wait = min(after * (2**attempt), _RATE_LIMIT_MAX_WAIT_S)
-                logger.warning("Rate limited before the first event, retrying in %.1fs (attempt %d)", wait, attempt + 1)
-                await asyncio.sleep(wait)
-
     async def _handle_message_stream(
         self,
         user_id: str,
@@ -1413,7 +1388,9 @@ class Agent:
                 separator = _step_separator(full_text)
                 step: LLMResponse | None = None
                 try:
-                    async for event in self._stream_step(session.messages, tool_schemas, system_prompt):
+                    async for event in self._llm.stream_turn(
+                        messages=session.messages, tools=tool_schemas, system=system_prompt
+                    ):
                         if event.response is not None:
                             step = event.response
                         elif event.text:

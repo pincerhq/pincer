@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic_sse as sse
@@ -380,27 +381,101 @@ async def test_complete_rate_limit_exhausted(anthropic_settings):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
 
-@pytest.mark.asyncio
-async def test_stream_turn_rate_limit_error(anthropic_settings):
+def _streaming(message: Message, *texts: str, then: Exception | None = None) -> MagicMock:
+    """A `messages.stream()` context manager that streams `texts`, then raises `then` or finishes on `message`."""
+
+    async def text_stream():
+        for text in texts:
+            yield text
+        if then is not None:
+            raise then
+
+    stream = MagicMock(text_stream=text_stream())
+    stream.get_final_message = AsyncMock(return_value=message)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=stream)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _rate_limit(retry_after: str):
     import anthropic
 
-    from pincer.exceptions import LLMRateLimitError
+    return anthropic.RateLimitError("slow down", response=MagicMock(headers={"retry-after": retry_after}), body={})
+
+
+async def _stream_into(
+    events: list[Any], mocks: dict[str, MagicMock], anthropic_settings: Any, *streams: MagicMock
+) -> None:
+    """One `stream_turn` over `streams`: its events are appended to `events` as they come, so a
+    test still sees them when it raises; `mocks` gets "create" (`messages.stream`) and "sleep"."""
     from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 
-    rate_err = anthropic.RateLimitError("slow down", response=MagicMock(headers={"retry-after": "1"}), body={})
-    stream_cm = MagicMock()
-    stream_cm.__aenter__ = AsyncMock(side_effect=rate_err)
-    stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-    with patch(f"{MODULE}.AsyncAnthropic") as mock_cls:
+    mocks["create"] = MagicMock(side_effect=list(streams))
+    with (
+        patch(f"{MODULE}.AsyncAnthropic") as mock_cls,
+        patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        mocks["sleep"] = sleep
         mock_client = MagicMock()
-        mock_client.messages.stream = MagicMock(return_value=stream_cm)
+        mock_client.messages.stream = mocks["create"]
         mock_cls.return_value = mock_client
-
         provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
-        with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
-                pass
+        async for event in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
+            events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_retries_a_rate_limit_before_its_first_event(anthropic_settings):
+    """Nothing has streamed yet, so asking again is safe: the same policy as complete()."""
+    events: list[Any] = []
+    mocks: dict[str, MagicMock] = {}
+    await _stream_into(
+        events,
+        mocks,
+        anthropic_settings,
+        _failing_stream(_rate_limit("2")),
+        _streaming(_make_message("after retry"), "after retry"),
+    )
+
+    assert [e.text for e in events if e.response is None] == ["after retry"]
+    assert events[-1].response.content == "after retry"
+    assert mocks["create"].call_count == 2
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(2.0,)]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_never_retries_a_rate_limit_after_its_first_event(anthropic_settings):
+    """The caller already has "Hel": asking again would stream it twice."""
+    from pincer.exceptions import LLMRateLimitError
+
+    events: list[Any] = []
+    mocks: dict[str, MagicMock] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into(
+            events,
+            mocks,
+            anthropic_settings,
+            _streaming(_make_message("Hello"), "Hel", then=_rate_limit("0")),
+            _streaming(_make_message("Hello"), "Hello"),
+        )
+
+    assert [e.text for e in events] == ["Hel"]
+    assert mocks["create"].call_count == 1
+    mocks["sleep"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_rate_limit_error(anthropic_settings):
+    """Three attempts in all, waiting retry-after·2^attempt between them, as complete() does."""
+    from pincer.exceptions import LLMRateLimitError
+
+    mocks: dict[str, MagicMock] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into([], mocks, anthropic_settings, *(_failing_stream(_rate_limit("1")) for _ in range(3)))
+
+    assert mocks["create"].call_count == 3
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(1.0,), (2.0,)]
 
 
 @pytest.mark.asyncio

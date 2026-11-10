@@ -119,9 +119,11 @@ class ScriptedAnthropic:
         if not self._responses:
             raise AssertionError(f"unscripted request #{len(self.requests)}")
         scripted = self._responses.pop(0)
-        if isinstance(scripted, int):  # an HTTP error status (4xx is not retried by the SDK)
+        if isinstance(scripted, int):  # an HTTP error status (4xx is not retried by the SDK, except 429)
             error = {"type": "error", "error": {"type": "invalid_request_error", "message": "scripted failure"}}
-            return httpx.Response(scripted, json=error)
+            # A 429 asks for no wait: the SDK's own retries take 1 ms, the provider's retry 0 s
+            headers = {"retry-after-ms": "1", "retry-after": "0"} if scripted == 429 else None
+            return httpx.Response(scripted, json=error, headers=headers)
         blocks, stop_reason, *usage = scripted
         body = sse_body(blocks, stop_reason, usage=usage[0] if usage else None)
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)

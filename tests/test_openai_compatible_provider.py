@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import openai as _openai
@@ -390,24 +391,87 @@ async def test_stream_turn_with_tools(openai_settings):
     assert [e.text for e in events if e.response is None] == ["ok"]
 
 
-@pytest.mark.asyncio
-async def test_stream_turn_rate_limit_error(openai_settings):
-    from pincer.exceptions import LLMRateLimitError
+def _rate_limited() -> _openai.RateLimitError:
+    return _openai.RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+
+
+async def _stream_into(events: list[Any], mocks: dict[str, Any], openai_settings: Any, *steps: Any) -> None:
+    """One `stream_turn` whose n-th request is the n-th step: an exception `create` raises, or
+    `(texts, then)`: chunks streaming `texts`, then raising `then` (None: the stream ends). Events
+    are appended to `events` as they come; `mocks` gets "requests" (a count) and "sleep"."""
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
-    async def _raise(**kwargs):
-        raise _openai.RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+    pending = list(steps)
+    mocks["requests"] = 0
 
-    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+    async def _create(**kwargs):
+        mocks["requests"] += 1
+        step = pending.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        texts, then = step
+
+        async def _gen():
+            for text in texts:
+                yield _make_stream_chunk(text)
+            if then is not None:
+                raise then
+
+        return _gen()
+
+    with (
+        patch(f"{MODULE}.AsyncOpenAI") as mock_cls,
+        patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        mocks["sleep"] = sleep
         mock_client = MagicMock()
-        mock_client.chat.completions.create = _raise
+        mock_client.chat.completions.create = _create
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
-
         provider = OpenAICompatibleProvider(openai_settings, "openai")
-        with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
-                pass
+        async for event in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
+            events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_retries_a_rate_limit_before_its_first_event(openai_settings):
+    """Nothing has streamed yet, so asking again is safe: the same policy as complete()."""
+    events: list[Any] = []
+    mocks: dict[str, Any] = {}
+    await _stream_into(events, mocks, openai_settings, _rate_limited(), (["after retry"], None))
+
+    assert [e.text for e in events if e.response is None] == ["after retry"]
+    assert events[-1].response.content == "after retry"
+    assert mocks["requests"] == 2
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(5.0,)]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_never_retries_a_rate_limit_after_its_first_event(openai_settings):
+    """The caller already has "Hel": asking again would stream it twice."""
+    from pincer.exceptions import LLMRateLimitError
+
+    events: list[Any] = []
+    mocks: dict[str, Any] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into(events, mocks, openai_settings, (["Hel"], _rate_limited()), (["Hello"], None))
+
+    assert [e.text for e in events] == ["Hel"]
+    assert mocks["requests"] == 1
+    mocks["sleep"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_rate_limit_error(openai_settings):
+    """Three attempts in all, waiting 5 s then 10 s between them, as complete() does."""
+    from pincer.exceptions import LLMRateLimitError
+
+    mocks: dict[str, Any] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into([], mocks, openai_settings, *(_rate_limited() for _ in range(3)))
+
+    assert mocks["requests"] == 3
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(5.0,), (10.0,)]
 
 
 @pytest.mark.asyncio
