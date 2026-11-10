@@ -16,6 +16,7 @@ import pytest
 
 from pincer.config.pricing import TokenUsage, load_price_table
 from pincer.core.agent import Agent
+from pincer.core.session import conversation_key
 from pincer.db.engine import get_database_url
 from pincer.db.session import session_scope
 from pincer.llm.base import BaseLLMProvider, LLMResponse, StreamTurnEvent, ToolCall
@@ -98,6 +99,9 @@ async def _stored_costs(tmp_path: Path) -> list[float]:
     return [r.cost_usd for r in sorted(rows, key=lambda r: r.timestamp)]
 
 
+_STOPPED_MARKER = "(Stopped before answering: the daily budget was reached.)"
+
+
 def _budget_text(limit: float) -> str:
     return (
         f"Warning: Daily budget limit reached. Limit: ${limit:.2f}. "
@@ -120,7 +124,7 @@ async def test_a_turn_with_spend_at_the_budget_makes_no_llm_call(  # type: ignor
     assert reply.cost_usd == 0
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)]
     session = await session_manager.get_or_create("user", "chat")
-    assert [(m.role.value, m.content) for m in session.messages] == [("user", "hi")]  # the warning is not saved
+    assert session.messages == []  # a refused turn persists nothing, its user message included
 
 
 async def test_a_refused_turn_stores_no_exchange_memory(  # type: ignore[no-untyped-def]
@@ -180,7 +184,39 @@ async def test_a_tool_loop_that_crosses_the_budget_stops_before_its_next_llm_cal
     calls = [tc.id for m in session.messages for tc in m.tool_calls]
     results = [m.tool_call_id for m in session.messages if m.tool_call_id]
     assert calls == results == ["tc1", "tc2"]
-    assert session.messages[-1].tool_call_id == "tc2"  # the turn ends on its last tool result, no warning saved
+    # Closed by the marker, not the warning: no dangling tool result (PR #366 review)
+    assert (session.messages[-1].role.value, session.messages[-1].content) == ("assistant", _STOPPED_MARKER)
+
+
+async def test_the_turn_after_a_budget_stop_sends_a_well_formed_history(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """Once the budget allows again, the model sees the stopped turn closed by the marker (PR #366 review)."""
+    settings, tracker = await budgeted(0.01)
+    llm = _scripted_llm(_response(_greet(1)), _response(_greet(2)), _response())
+    stopped = await Agent(settings, llm, session_manager, tracker, tool_registry).handle_message(
+        "user", "chat", "greet Ann twice", memory=False
+    )
+    open_settings, open_tracker = await budgeted(0.0)
+    requests: list[list[Any]] = []
+    answer = llm.complete.side_effect
+    llm.complete.side_effect = lambda *a, **k: requests.append(list(k["messages"])) or answer(*a, **k)
+
+    await Agent(open_settings, llm, session_manager, open_tracker, tool_registry).handle_message(
+        "user", "chat", "and now?", memory=False
+    )
+
+    assert stopped.budget_reached  # precondition: the first turn was stopped mid-way
+    [sent] = requests  # the messages as sent, before the reply is appended
+    assert [(m.role.value, [tc.id for tc in m.tool_calls], m.content) for m in sent] == [
+        ("user", [], "greet Ann twice"),
+        ("assistant", ["tc1"], ""),
+        ("tool_result", [], sent[2].content),
+        ("assistant", ["tc2"], ""),
+        ("tool_result", [], sent[4].content),
+        ("assistant", [], _STOPPED_MARKER),
+        ("user", [], "and now?"),
+    ]
 
 
 async def test_a_budget_of_zero_never_refuses(  # type: ignore[no-untyped-def]
@@ -234,7 +270,9 @@ async def test_a_headless_tool_loop_that_crosses_the_budget_stops_before_its_nex
 # ── web chat (the streaming path) ───────────────────────────────────
 
 
-async def _web_chat(agent: Agent, text: str = "hi") -> list[tuple[str, dict[str, Any]]]:
+async def _web_chat(
+    agent: Agent, text: str = "hi", conversation_id: str | None = None
+) -> list[tuple[str, dict[str, Any]]]:
     """One turn through the real `/api/chat/stream` endpoint: its SSE events, in order."""
     from pincer.api.chat import chat_user
     from pincer.api.server import create_app
@@ -242,7 +280,7 @@ async def _web_chat(agent: Agent, text: str = "hi") -> list[tuple[str, dict[str,
     app = create_app()
     app.state.agent = agent
     app.dependency_overrides[chat_user] = lambda: "user"
-    body = {"text": text, "conversation_id": str(uuid.uuid4()), "memory": False}
+    body = {"text": text, "conversation_id": conversation_id or str(uuid.uuid4()), "memory": False}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/chat/stream", json=body)
     assert response.status_code == 200
@@ -307,13 +345,17 @@ async def test_a_web_chat_turn_with_spend_at_the_budget_makes_no_llm_call(  # ty
     llm = _scripted_llm(_response())
     agent = Agent(settings, llm, session_manager, tracker, tool_registry)
 
-    events = await _web_chat(agent)
+    conversation = str(uuid.uuid4())
+
+    events = await _web_chat(agent, conversation_id=conversation)
 
     assert events == [("error", {"message": _budget_text(_CALL_COST), "cost_usd": 0.0})]
     assert (llm.complete.await_count, len(llm.streams)) == (0, 0)
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)]
-    session = await session_manager.get_or_create("user", "web")
-    assert [m.role.value for m in session.messages if m.role.value == "assistant"] == []
+    session = await session_manager.get_or_create(
+        "user", "web", session_key=conversation_key("user", "web", conversation)
+    )
+    assert session.messages == []  # a refused turn persists nothing, its user message included
 
 
 async def _streamed_turn(agent: Agent, text: str = "hi") -> list[Any]:
@@ -369,7 +411,7 @@ async def test_a_streamed_tool_loop_that_crosses_the_budget_stops_before_its_nex
     calls = [tc.id for m in session.messages for tc in m.tool_calls]
     results = [m.tool_call_id for m in session.messages if m.tool_call_id]
     assert calls == results == ["tc1", "tc2"]
-    assert session.messages[-1].tool_call_id == "tc2"  # no warning saved
+    assert (session.messages[-1].role.value, session.messages[-1].content) == ("assistant", _STOPPED_MARKER)
 
 
 async def test_the_reply_step_after_a_tool_round_is_refused_at_the_budget(  # type: ignore[no-untyped-def]
@@ -389,7 +431,7 @@ async def test_the_reply_step_after_a_tool_round_is_refused_at_the_budget(  # ty
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
     session = await session_manager.get_or_create("user", "web")
     assert [m.tool_call_id for m in session.messages if m.tool_call_id] == ["tc1"]
-    assert session.messages[-1].tool_call_id == "tc1"  # no warning saved
+    assert (session.messages[-1].role.value, session.messages[-1].content) == ("assistant", _STOPPED_MARKER)
 
 
 async def test_the_web_chat_done_event_carries_the_cost_of_the_turn_s_recorded_requests(  # type: ignore[no-untyped-def]

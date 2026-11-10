@@ -193,7 +193,8 @@ async def test_a_budget_stop_after_streamed_text_ends_the_turn_flagged_and_unsav
     fixture_settings, session_manager, tmp_path
 ) -> None:
     """The tool step crosses the budget (one request = the whole budget): the next step is refused.
-    The refusal is no streamed text and is not saved: it is the turn's flagged end (PR #366 review)."""
+    The refusal is no streamed text and is not saved: it is the turn's flagged end, and a marker closes
+    the history after the tool result (PR #366 review)."""
     from pincer.config.pricing import load_price_table
     from pincer.llm.cost_tracker import CostTracker
 
@@ -212,7 +213,7 @@ async def test_a_budget_stop_after_streamed_text_ends_the_turn_flagged_and_unsav
     assert chunks[-1].content.startswith("Warning: Daily budget limit reached.")
     assert [c.content for c in chunks if c.type.value == "text"] == ["Let me look."]
     session = await session_manager.get_or_create("user1", "web")
-    assert session.messages[-1].tool_call_id == "toolu_1"  # the turn ends on its tool result
+    assert session.messages[-1].content == "(Stopped before answering: the daily budget was reached.)"
 
 
 class _Steps(BaseLLMProvider):

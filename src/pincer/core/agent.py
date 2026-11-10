@@ -95,6 +95,9 @@ _BUDGET_REACHED_TEXT = (
 _HEADLESS_BUDGET_REACHED_TEXT = (
     "Warning: Daily budget limit reached. Limit: ${limit:.2f}. Could not complete this scheduled action."
 )
+# Closes the history of a turn the budget stopped after its tool rounds: the model next sees
+# its tool results answered, never a dangling one. Not the warning, which is no reply.
+_BUDGET_STOPPED_MARKER = "(Stopped before answering: the daily budget was reached.)"
 # A call turn whose model repeats this many tool calls it already made ends
 # with TOOL_NO_PROGRESS instead of another round (issue #300).
 _MAX_DUPLICATE_TOOL_CALLS = 2
@@ -863,6 +866,12 @@ class Agent:
                 not count toward the user being known to onboarding.
         """
         self._last_active = (user_id, channel_name or channel)
+        # A refused turn is no turn: nothing is persisted, its user message included (PR #366 review)
+        if await self._costs.budget_reached():
+            _log_turn(session.session_id, 0, TokenUsage(), 0.0)
+            return AgentResponse(
+                text=_BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd), budget_reached=True
+            )
         memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
@@ -933,9 +942,9 @@ class Agent:
 
         # ── ReAct Loop ───────────────────────────────────
         for _iteration in range(self._settings.max_tool_iterations):
-            # Checked before every call, tool rounds included: the call that
+            # Checked again after every request, tool rounds included: the call that
             # crossed the limit was recorded, the next one is never made.
-            if await self._costs.budget_reached():
+            if turn_requests and await self._costs.budget_reached():
                 final_text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
                 budget_stop = True
                 break
@@ -1093,9 +1102,14 @@ class Agent:
             )
 
         # ── Save the reply, with the warm question on a fresh session ──────
-        # A budget refusal is no reply: it is neither saved, remembered, nor asked after (PR #366 review)
+        # A budget stop is no reply: it is neither saved, remembered, nor asked after; only the
+        # marker closes the history after the turn's tool results (PR #366 review)
         reply = ""
-        if not budget_stop:
+        if budget_stop:
+            await self._sessions.add_message(
+                session, LLMMessage(role=MessageRole.ASSISTANT, content=_BUDGET_STOPPED_MARKER)
+            )
+        else:
             final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
             reply = final_text
 
@@ -1324,6 +1338,15 @@ class Agent:
         ``memory``.
         """
         self._last_active = (user_id, channel)
+        # A refused turn is no turn: nothing is persisted, its user message included (PR #366 review)
+        if await self._costs.budget_reached():
+            _log_turn(session.session_id, 0, TokenUsage(), 0.0)
+            yield StreamChunk(
+                StreamEventType.DONE,
+                _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd),
+                budget_reached=True,
+            )
+            return
         memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
@@ -1376,8 +1399,8 @@ class Agent:
         try:
             # One streamed request per step, each with the turn's tools and system prompt
             for _iteration in range(self._settings.max_tool_iterations):
-                # Checked before every request, as on the non-stream path
-                if await self._costs.budget_reached():
+                # Checked again after every request, as on the non-stream path
+                if turn_requests and await self._costs.budget_reached():
                     budget_stop = True
                     break
 
@@ -1526,8 +1549,11 @@ class Agent:
             reply = step_text + ("\n\n" if step_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
 
         if budget_stop:
-            # A refusal, not a reply (PR #366 review): no streamed text, nothing saved, no
-            # onboarding question; the client gets it as the turn's end, flagged
+            # A refusal, not a reply (PR #366 review): no streamed text, no onboarding question,
+            # and only the marker saved; the client gets it as the turn's end, flagged
+            await self._sessions.add_message(
+                session, LLMMessage(role=MessageRole.ASSISTANT, content=_BUDGET_STOPPED_MARKER)
+            )
             if onboarding.ingest:
                 await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
             _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
