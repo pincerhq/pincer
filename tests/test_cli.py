@@ -476,6 +476,51 @@ async def test_build_core_returns_core_components(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_build_core_meters_the_thread_manager_s_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The rolling thread summary is a request like any other: the thread manager `pincer run`
+    installs refuses it at the budget, before the provider is asked (issue #357)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _build_core
+    from pincer.exceptions import DailyBudgetReachedError
+    from pincer.llm.base import LLMMessage, MessageRole
+
+    settings = _mock_settings_for_build_core(tmp_path)
+    settings.voice_enabled = True
+    settings.voice_outbound_enabled = False
+    settings.twilio_account_sid = "AC_test"
+    settings.receptionist_enabled = False
+    settings.default_provider = "anthropic"
+
+    provider = AsyncMock()
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = provider
+    tracker = AsyncMock()
+    tracker.budget_reached.return_value = True
+    installed: list[object] = []
+
+    monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=tracker))
+    monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
+    monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
+    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(side_effect=RuntimeError("no config in test env")))
+    monkeypatch.setattr(
+        "pincer.voice.threads.init_thread_manager", lambda settings, llm=None, memory=None: installed.append(llm)
+    )
+    monkeypatch.setattr("pincer.voice.threads.register_thread_tools", MagicMock())
+    monkeypatch.setattr("pincer.voice.call_tools.register_call_tools", MagicMock())
+
+    await _build_core(settings)
+
+    [thread_llm] = installed  # precondition: the voice block ran and installed a thread manager
+    with pytest.raises(DailyBudgetReachedError):
+        await thread_llm.complete([LLMMessage(role=MessageRole.USER, content="merge")])  # type: ignore[attr-defined]
+    provider.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_build_core_gives_the_compactor_the_summary_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

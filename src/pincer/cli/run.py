@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from pincer.security.rate_limiter import RateLimiter
     from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
+    from pincer.voice.postcall import PostCallProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -681,6 +682,27 @@ async def _build_core(settings: Settings) -> CoreComponents:
         skill_service=skill_service,
         mcp_manager=mcp_manager,
         agent=agent,
+    )
+
+
+def _post_call_processor(
+    settings: Settings,
+    llm: BaseLLMProvider,
+    memory_store: BaseMemoryBackend | None,
+    tools: ToolRegistry,
+    cost_tracker: CostTracker,
+) -> PostCallProcessor:
+    """The post-call pipeline `pincer run` installs on the voice channel. Its outcome and
+    thread-summary requests go through the daily budget check and are recorded (issue #357)."""
+    from pincer.voice.postcall import PostCallProcessor
+
+    return PostCallProcessor(
+        settings,
+        llm=llm,
+        memory=memory_store,
+        db_path=str(settings.db_path),
+        tool_registry=tools,  # Sprint 6: appointment calendar executor
+        cost_tracker=cost_tracker,
     )
 
 
@@ -1646,18 +1668,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             # notes, and follow-up proposals after every call.
             # (make_phone_call / get_call_transcript are registered earlier,
             # before channel startup, so early-started channels have them.)
-            from pincer.voice.postcall import PostCallProcessor
-
-            vc.set_post_call_processor(
-                PostCallProcessor(
-                    settings,
-                    llm=llm,
-                    memory=memory_store,
-                    db_path=str(settings.db_path),
-                    tool_registry=tools,  # Sprint 6: appointment calendar executor
-                    cost_tracker=cost_tracker,  # its outcome and thread requests are budget-checked and recorded
-                )
-            )
+            vc.set_post_call_processor(_post_call_processor(settings, llm, memory_store, tools, cost_tracker))
 
             console.print(f"[green]Voice calling enabled ({settings.voice_engine})[/green]")
         except Exception as e:

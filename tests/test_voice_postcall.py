@@ -556,3 +556,23 @@ async def test_a_thread_summary_is_metered_and_falls_back_when_the_budget_is_rea
     assert spent == pytest.approx(0.007)  # the seed, or the one merge request
     levels = [r.levelname for r in caplog.records if r.name == "pincer.voice.threads"]
     assert levels == (["INFO"] if budget_reached else [])
+
+
+async def test_the_post_call_pipeline_pincer_run_installs_is_metered(tmp_path, notify_capture):  # type: ignore[no-untyped-def]
+    """`pincer run` builds the pipeline through `_post_call_processor`: at the budget its outcome
+    extraction is not requested and the call gets the basic report."""
+    from pincer.cli.run import _post_call_processor
+    from pincer.config.pricing import TokenUsage
+
+    settings = _settings(tmp_path)
+    tracker = await _priced_tracker(tmp_path, budget=0.007)
+    await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000))
+    llm = _outcome_llm()
+    processor = _post_call_processor(settings, llm, None, None, tracker)  # type: ignore[arg-type]
+    try:
+        report = await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 0
+    assert "abgeschlossen" in report
