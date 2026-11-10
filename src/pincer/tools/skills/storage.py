@@ -67,10 +67,14 @@ def open_skills_root(location: str | Path, settings: Settings) -> SkillPath:
 def open_usable_skills_root(location: str | Path, settings: Settings) -> SkillPath:
     """`open_skills_root`, plus proof that a remote root can actually be used.
 
-    For a cloud URI this lists the root once — the same call discovery makes — so
-    missing or wrong credentials, a missing bucket or an unreachable endpoint fail
-    here, at startup, with what to configure. An empty prefix is fine (no skills
-    yet). Local paths are returned as-is: a missing local dir just has no skills.
+    For a cloud URI this checks whether the root exists and, if it does, lists it
+    once, so missing or wrong credentials, a missing bucket or an unreachable
+    endpoint fail here, at startup, with what to configure. A root that does not
+    exist yet is not an error (no skills yet): it is not listed, because on Azure
+    accounts with hierarchical namespace (ADLS Gen2) listing a missing directory
+    fails instead of returning nothing, and it is not created either — startup
+    never writes to storage. A warning names the URI so a mistyped path is
+    visible. Local paths are returned as-is: a missing local dir just has no skills.
     Startup calls this so a misconfigured remote root refuses to start.
     """
     root = open_skills_root(location, settings)
@@ -79,9 +83,22 @@ def open_usable_skills_root(location: str | Path, settings: Settings) -> SkillPa
     uri = str(location)
     hint = clients.STORAGE_HINTS.get(clients.uri_scheme(uri), "")
     try:
-        next(iter(root.iterdir()), None)
+        # is_dir() is False for a missing root but still raises for bad credentials,
+        # a missing bucket/container or an unreachable endpoint: with cloudpathlib
+        # 0.26 a missing object falls back to a prefix listing on every backend
+        # (S3 objects.filter, GCS list_blobs, Azure list_blobs), and that listing
+        # fails when the bucket or container is not there.
+        exists = root.is_dir()
+        if exists:
+            next(iter(root.iterdir()), None)
     except Exception as e:
         raise SkillLoadError(f"Skills root {uri} is not usable: {type(e).__name__}: {e}. {hint}") from e
+    if not exists:
+        logger.warning(
+            "Skills root %s does not exist; starting with no user skills. If the path is right, it is "
+            "created when the first skill is added",
+            uri,
+        )
     return root
 
 

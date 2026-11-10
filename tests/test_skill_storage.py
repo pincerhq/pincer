@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from conftest import _FAKE_AZURE_CONNECTION_STRING
 
 from pincer.config.main import _RelaxedSettings
 from pincer.exceptions import SkillLoadError
@@ -399,6 +400,151 @@ def test_usable_root_failed_listing_names_the_storage_settings(uri: str, expecte
         open_usable_skills_root(uri, _settings())
     for name in expected_settings:
         assert name in str(exc_info.value)
+
+
+# ── open_usable_skills_root: Azure with hierarchical namespace (ADLS Gen2) ───
+#
+# These run the real `AzureBlobClient` path logic (cloudpathlib 0.26) and mock
+# only the Azure SDK clients under it, so `is_dir()` takes the same route as on
+# an HNS account: DFS `get_file_properties`, then the `list_blobs` fallback.
+
+
+@pytest.fixture
+def hns_azure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Install a real AzureBlobClient over mocked SDK clients for an HNS account.
+
+    Returns the mocked service client; `.data_lake` is the mocked DFS client.
+    By default the container exists and `skills/` does not."""
+    pytest.importorskip("azure.storage.filedatalake")
+    from azure.core.exceptions import ResourceNotFoundError
+    from cloudpathlib import AzureBlobClient
+
+    client = AzureBlobClient(connection_string=_FAKE_AZURE_CONNECTION_STRING, local_cache_dir=tmp_path / "azure-cache")
+    service = MagicMock(name="BlobServiceClient")
+    service.get_account_information.return_value = {"is_hns_enabled": True}
+    service.get_container_client.return_value.list_blobs.side_effect = lambda **_: iter([])
+    data_lake = MagicMock(name="DataLakeServiceClient")
+    file_system = data_lake.get_file_system_client.return_value
+    file_system.get_file_client.return_value.get_file_properties.side_effect = ResourceNotFoundError(
+        "The specified path does not exist. ErrorCode:PathNotFound"
+    )
+    file_system.get_paths.side_effect = ResourceNotFoundError(
+        "The specified path does not exist. ErrorCode:PathNotFound"
+    )
+    client.service_client = service
+    client.data_lake_client = data_lake
+    service.data_lake = data_lake
+    monkeypatch.setattr("pincer.tools.skills.storage._build_client", lambda *_a: client)
+    return service
+
+
+def _assert_nothing_written(service: MagicMock) -> None:
+    file_system = service.data_lake.get_file_system_client.return_value
+    file_system.get_directory_client.return_value.create_directory.assert_not_called()
+    service.get_blob_client.return_value.upload_blob.assert_not_called()
+
+
+def test_usable_root_hns_missing_root_starts_empty_without_writing(
+    hns_azure: MagicMock, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from pincer.tools.skills.index import SkillIndex
+
+    with caplog.at_level(logging.WARNING, logger="pincer.tools.skills.storage"):
+        root = open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    assert str(root) == "az://3days/skills"
+    assert "Skills root az://3days/skills does not exist" in caplog.text
+    # Listing a missing HNS directory 404s, so it must not be listed.
+    hns_azure.data_lake.get_file_system_client.return_value.get_paths.assert_not_called()
+    _assert_nothing_written(hns_azure)
+
+    index = SkillIndex(bundled_dir=None, user_dir=root, max_per_root=100)
+    index.discover(strict=True)
+    assert index.all_skills() == []
+
+
+def test_usable_root_hns_missing_container_refuses_to_start(hns_azure: MagicMock, tmp_path: Path) -> None:
+    from azure.core.exceptions import ResourceNotFoundError
+
+    hns_azure.get_container_client.return_value.list_blobs.side_effect = ResourceNotFoundError(
+        "The specified container does not exist. ErrorCode:ContainerNotFound"
+    )
+    with pytest.raises(SkillLoadError, match="is not usable: ResourceNotFoundError.*ContainerNotFound"):
+        open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    _assert_nothing_written(hns_azure)
+
+
+def test_usable_root_hns_existing_root_is_listed(hns_azure: MagicMock, tmp_path: Path) -> None:
+    file_system = hns_azure.data_lake.get_file_system_client.return_value
+    file_system.get_file_client.return_value.get_file_properties.side_effect = None
+    file_system.get_file_client.return_value.get_file_properties.return_value = {"is_directory": True}
+    file_system.get_paths.side_effect = None
+    file_system.get_paths.return_value = [MagicMock(is_directory=True)]
+    file_system.get_paths.return_value[0].name = "skills/demo"
+
+    root = open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    file_system.get_paths.assert_called_once_with(path="skills", recursive=False)
+    _assert_nothing_written(hns_azure)
+    assert str(root) == "az://3days/skills"
+
+
+def test_usable_root_hns_auth_error_refuses_to_start(hns_azure: MagicMock, tmp_path: Path) -> None:
+    from azure.core.exceptions import ClientAuthenticationError
+
+    file_system = hns_azure.data_lake.get_file_system_client.return_value
+    file_system.get_file_client.return_value.get_file_properties.side_effect = ClientAuthenticationError(
+        "Server failed to authenticate the request"
+    )
+    with pytest.raises(SkillLoadError, match="is not usable: ClientAuthenticationError.*PINCER_STORAGE_AZURE"):
+        open_usable_skills_root("az://3days/skills", _settings(data_dir=tmp_path))
+    _assert_nothing_written(hns_azure)
+
+
+def _s3_client_without_bucket(tmp_path: Path):
+    from botocore.exceptions import ClientError
+    from cloudpathlib import S3Client
+
+    client = S3Client(aws_access_key_id="x", aws_secret_access_key="x", local_cache_dir=tmp_path / "s3-cache")
+    exceptions = client.client.exceptions  # cloudpathlib catches exceptions.NoSuchKey
+    client.client = MagicMock(name="boto3.client", exceptions=exceptions)
+    client.client.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
+    client.s3 = MagicMock(name="boto3.resource")
+    client.s3.Bucket.return_value.objects.filter.return_value.limit.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchBucket", "Message": "The specified bucket does not exist"}}, "ListObjectsV2"
+    )
+    return client
+
+
+def _gs_client_without_bucket(tmp_path: Path):
+    from cloudpathlib import GSClient
+    from google.api_core.exceptions import NotFound
+
+    storage_client = MagicMock(name="storage.Client")
+    storage_client.bucket.return_value.get_blob.return_value = None  # google-cloud-storage swallows the 404
+    storage_client.bucket.return_value.list_blobs.side_effect = NotFound("The specified bucket does not exist.")
+    return GSClient(storage_client=storage_client, local_cache_dir=tmp_path / "gs-cache")
+
+
+@pytest.mark.parametrize(
+    ("scheme", "make_client"), [("s3", _s3_client_without_bucket), ("gs", _gs_client_without_bucket)]
+)
+def test_usable_root_missing_bucket_refuses_to_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scheme: str, make_client
+) -> None:
+    """The real S3/GCS clients (cloudpathlib 0.26) over mocked SDKs: `is_dir()` on a
+    key in a missing bucket falls back to a prefix listing, which raises."""
+    monkeypatch.setattr("pincer.tools.skills.storage._build_client", lambda *_a: make_client(tmp_path))
+    with pytest.raises(SkillLoadError, match="is not usable: (ClientError.*NoSuchBucket|NotFound)"):
+        open_usable_skills_root(f"{scheme}://missing-bucket/skills", _settings(data_dir=tmp_path))
+
+
+@pytest.mark.parametrize(("backend", "scheme"), [("s3", "s3"), ("azure", "az"), ("gs", "gs")])
+def test_usable_root_flat_backends_missing_prefix_starts(mock_cloud_client, backend: str, scheme: str) -> None:
+    client = mock_cloud_client(backend)
+    client.CloudPath(f"{scheme}://bucket/other/SKILL.md").write_text("x", encoding="utf-8")
+    missing = client.CloudPath(f"{scheme}://bucket/skills")
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=missing):
+        assert open_usable_skills_root(f"{scheme}://bucket/skills", _settings()) == missing
+    assert list(missing.iterdir()) == []
 
 
 def test_client_construction_error_names_the_storage_settings(tmp_path: Path) -> None:
