@@ -745,7 +745,7 @@ class Agent:
     ) -> None:
         """Remember what the request `response` answers sent: the turn's last one decides compaction."""
         overhead = len(system or "") + (len(json.dumps(tools)) if tools else 0)
-        session.last_request = LastRequest(response.usage.prompt_tokens, len(session.messages), overhead)
+        session.last_request = LastRequest.measure(response.usage.prompt_tokens, session.messages, overhead)
 
     def _schedule_compaction(self, session: Session) -> None:
         """After a turn: compact the session in the background when its prompt went over the limit."""

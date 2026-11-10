@@ -18,7 +18,7 @@ from pydantic import SecretStr
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.compaction import Compactor, LastRequest, choose_cut
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ThinkingBlock, ToolCall
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.tools.registry import ToolRegistry
 
@@ -216,7 +216,7 @@ def test_a_cut_that_lands_inside_a_tool_pair_moves_past_its_results():
         _sized(MessageRole.ASSISTANT),
         _sized(MessageRole.USER),
     ]
-    last = LastRequest(prompt_tokens=8_000, sent_messages=len(messages), overhead_chars=0)
+    last = LastRequest.measure(8_000, messages, overhead_chars=0)
     # About 1,500 tokens must go: the oldest two messages, which would end the cut on a tool result
     cut = choose_cut(messages, last, target_tokens=8_000 + 2048 - 1_500)
 
@@ -598,3 +598,50 @@ def test_the_api_lifespan_cancels_the_agents_compactions(monkeypatch, tmp_path):
         get_settings_relaxed.cache_clear()
 
     agent.cancel_compactions.assert_awaited_once()
+
+
+async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_history(
+    settings, cost_tracker, tmp_path
+):
+    """The reviewer's case (PR #366): the turn's request sent 51 messages, then end_turn trimmed
+    52 to 30. The tokens-per-character rate must come from the 51 sent, not the 30 left."""
+    from pincer.core.session import SessionManager
+
+    sessions = SessionManager(tmp_path / "cap50.db", max_messages=50)
+    await sessions.initialize()
+    try:
+        session = await sessions.get_or_create("user1", "test")
+        for index in range(50):
+            role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
+            head = f"message {index} "
+            await sessions.add_message(session, LLMMessage(role=role, content=head + "x" * (10_000 - len(head))))
+        # 10 uncached + 110,450 read = 110,460: 0.22 tokens per character of what was sent
+        async with (
+            ScriptedAnthropic(settings, [_reply("Reply 1", 110_450)]) as llm,
+            ScriptedAnthropic(settings, [([text(_SUMMARY)], "end_turn")]) as summary_llm,
+        ):
+            compactor = _compactor(summary_llm.provider, cost_tracker, sessions)
+            agent = Agent(settings, llm.provider, sessions, cost_tracker, ToolRegistry(), compactor=compactor)
+            await agent.handle_message("user1", "test", "turn 1", memory=False)
+            await agent.wait_compactions()
+        assert len(llm.requests[0]["messages"]) == 51  # precondition: the request carried all 51
+    finally:
+        await sessions.close()
+
+    assert len(session.messages) == 24  # the summary + 23 of the 30 the trim left: 7 summarized
+    assert session.messages[0].content == f"[Previous conversation summary]\n{_SUMMARY}"
+    assert session.messages[1].content.startswith("message 29 ")
+
+
+def test_the_rate_counts_the_thinking_a_request_replayed():
+    """Within a turn, a tool-loop request resends the turn's thinking: its tokens are in the
+    prompt, so its characters must be in the calibration (end_turn strips them afterwards)."""
+    thought = ThinkingBlock("thinking", thinking="t" * 3_000, signature="sig")
+    sent = [
+        LLMMessage(role=MessageRole.USER, content="u" * 1_000),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, thinking_blocks=[thought]),
+    ]
+
+    last = LastRequest.measure(5_000, sent, overhead_chars=0)
+
+    assert last.tokens_per_char == 1.0  # 5,000 tokens over 1,000 + 1,000 + 3,000 characters

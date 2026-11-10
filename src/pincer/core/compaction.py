@@ -50,32 +50,47 @@ SUMMARY_THRESHOLD_DEPRECATED = (
 _MIN_CUT = 2
 
 
-@dataclass(frozen=True)
-class LastRequest:
-    """What a turn's last LLM request sent: its whole prompt in tokens, how many of the
-    session's messages it carried, and the characters of its system prompt and tools."""
-
-    prompt_tokens: int
-    sent_messages: int
-    overhead_chars: int
-
-
 def _chars(message: LLMMessage) -> int:
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
     return len(message.context) + len(message.content) + len(calls)
 
 
+def _sent_chars(message: LLMMessage) -> int:
+    """The characters a request carried for `message`: within its turn, its thinking too."""
+    return _chars(message) + sum(len(block.thinking) + len(block.data) for block in message.thinking_blocks)
+
+
+@dataclass(frozen=True)
+class LastRequest:
+    """What a turn's last LLM request sent: its whole prompt in tokens, the tokens per
+    character of what it carried, and the characters of its system prompt and tools."""
+
+    prompt_tokens: int
+    tokens_per_char: float
+    overhead_chars: int
+
+    @classmethod
+    def measure(cls, prompt_tokens: int, sent: list[LLMMessage], overhead_chars: int) -> LastRequest:
+        """Calibrate on the messages the request sent, as they were sent: end_turn later trims
+        the session and strips thinking and images, so they cannot be counted afterwards (PR #366).
+
+        Images carry prompt tokens but no characters, so the turn that sent one gets a higher
+        rate and may summarize a little more; they are dropped when the turn ends.
+        """
+        sent_chars = overhead_chars + sum(_sent_chars(m) for m in sent)
+        return cls(prompt_tokens, prompt_tokens / max(1, sent_chars), overhead_chars)
+
+
 def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int) -> int:
     """How many of the oldest messages to replace so the next prompt is about `target_tokens`.
 
-    Tokens per character are calibrated from the last request (its prompt tokens over the
-    characters it sent). The cut never ends inside a tool result run and never reaches the
-    last user message, so the latest exchange stays verbatim. 0 means nothing to cut.
+    The next prompt is estimated as the last request's tokens per character times the
+    history as it is now (after the turn's trim) plus the system prompt and tools. The cut
+    never ends inside a tool result run and never reaches the last user message, so the
+    latest exchange stays verbatim. 0 means nothing to cut.
     """
-    sent = min(last.sent_messages, len(messages))
-    sent_chars = last.overhead_chars + sum(_chars(m) for m in messages[:sent])
-    per_char = last.prompt_tokens / max(1, sent_chars)
-    estimate = last.prompt_tokens + per_char * sum(_chars(m) for m in messages[sent:]) + _SUMMARY_MAX_TOKENS
+    per_char = last.tokens_per_char
+    estimate = per_char * (last.overhead_chars + sum(_chars(m) for m in messages)) + _SUMMARY_MAX_TOKENS
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
     cut = 0
     while estimate > target_tokens and cut < floor:

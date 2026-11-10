@@ -141,7 +141,7 @@ async def _compact(llm, memory_store, session_manager, user_id: str, **compactor
     for i in range(8):
         role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
         await session_manager.add_message(session, LLMMessage(role=role, content=f"Message {i}"))
-    return await compactor.compact(session, LastRequest(prompt_tokens=100_000, sent_messages=8, overhead_chars=0))
+    return await compactor.compact(session, LastRequest.measure(100_000, session.messages, overhead_chars=0))
 
 
 @pytest.mark.asyncio

@@ -925,7 +925,7 @@ class TestGpt6Family:
             "s1", "u1", "test", messages=[LLMMessage(role=MessageRole.USER, content=f"m{i}") for i in range(6)]
         )
         try:
-            last = LastRequest(prompt_tokens=100_000, sent_messages=6, overhead_chars=0)
+            last = LastRequest.measure(100_000, session.messages, overhead_chars=0)
             assert await compactor.compact(session, last) is True
         finally:
             await provider.close()

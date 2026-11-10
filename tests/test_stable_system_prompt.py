@@ -345,7 +345,7 @@ def test_the_cut_counts_the_context_as_part_of_the_prompt():
         LLMMessage(role=MessageRole.USER, content="q", context="c" * 18_000),
         LLMMessage(role=MessageRole.ASSISTANT, content="r"),
     ]
-    last = LastRequest(prompt_tokens=20_000, sent_messages=4, overhead_chars=0)
+    last = LastRequest.measure(20_000, messages, overhead_chars=0)
 
     assert choose_cut(messages, last, target_tokens=20_500) == 2
 
