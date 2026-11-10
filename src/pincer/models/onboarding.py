@@ -19,7 +19,8 @@ class Onboarding(SQLModel, table=True):
 
     `asked_session_id` is the session whose reply carried the question. The
     user's next message in any session is checked for an answer; `attempts`
-    counts the ones that held none. Times are epoch seconds, as in
+    counts the ones that held none, and after the answer window also the
+    reads whose extraction call failed. Times are epoch seconds, as in
     `pincer_sessions`.
     """
 

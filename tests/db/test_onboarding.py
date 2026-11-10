@@ -123,28 +123,85 @@ async def test_a_real_answer_can_win_after_an_empty_reply_closes_the_gate(url):
     assert await service.complete_answer("u", "web", now=50.0) is False
 
 
-@pytest.mark.parametrize("first_answer", [False, True])
-async def test_answer_cannot_take_over_expiry_or_another_answer(url, first_answer):
+async def test_an_answer_can_take_over_an_expiry(url):
+    """Expiry follows a read that found no answer; a concurrent message's
+    answer still wins over it."""
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+    assert await service.complete("u", "web", now=20.0) is True
+
+    assert await service.complete_answer("u", "web", now=30.0) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.completed_at, record.closed_by) == (30.0, "answer")
+
+
+@pytest.mark.parametrize("first", ["answer", "expired"])
+async def test_nothing_takes_over_an_answer(url, first):
     service = OnboardingService(url)
     await service.claim_prompt("u", "web", "web:u", now=10.0)
     await service.record_empty_reply("u", "web", max_empty=2, now=15.0)
-    close = service.complete_answer if first_answer else service.complete
-    assert await close("u", "web", now=20.0) is True
-    assert await service.complete_answer("u", "web", now=30.0) is False
+    assert await service.complete_answer("u", "web", now=20.0) is True
+
+    takeover = service.complete_answer if first == "answer" else service.complete
+    assert await takeover("u", "web", now=30.0) is False
+
     record = await service.get("u", "web")
     assert record is not None
-    assert (record.attempts, record.completed_at) == (1, 20.0)
+    assert (record.attempts, record.completed_at, record.closed_by) == (1, 20.0, "answer")
 
 
 async def test_an_empty_reply_without_a_row_inserts_one(url):
-    """A user asked before the table existed: an empty reply is counted too."""
+    """A user asked before the table existed: an empty reply is counted too,
+    and the row's answer window starts then."""
     service = OnboardingService(url)
 
     assert await service.record_empty_reply("u", "web", max_empty=2, now=20.0) is False
 
     record = await service.get("u", "web")
     assert record is not None
-    assert (record.asked_session_id, record.attempts, record.completed_at) == (None, 1, None)
+    assert (record.asked_session_id, record.asked_at, record.attempts, record.completed_at) == (None, 20.0, 1, None)
+
+
+async def test_an_empty_reply_starts_the_window_of_a_row_without_one(url):
+    """A row stored before `asked_at` was set on insert gets one on its next
+    empty reply, so its answer window can run out too."""
+    service = OnboardingService(url)
+    async with get_engine(url).begin() as conn:
+        await conn.execute(
+            Onboarding.__table__.insert().values(user_id="u", channel="web", attempts=0)  # type: ignore[attr-defined]
+        )
+
+    await service.record_empty_reply("u", "web", max_empty=3, now=20.0)
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_at, record.attempts) == (20.0, 1)
+
+
+async def test_failed_late_reads_close_the_gate_as_expired(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    assert await service.record_failed_late_read("u", "web", max_reads=2, now=20.0) is False
+    assert await service.record_failed_late_read("u", "web", max_reads=2, now=30.0) is True
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at, record.closed_by) == (2, 30.0, "expired")
+    assert await service.complete_answer("u", "web", now=40.0) is True
+
+
+async def test_a_later_empty_reply_keeps_the_start_time(url):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+
+    await service.record_empty_reply("u", "web", max_empty=3, now=20.0)
+
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.asked_at, record.attempts) == (10.0, 1)
 
 
 async def test_completing_without_a_row_inserts_one(url):

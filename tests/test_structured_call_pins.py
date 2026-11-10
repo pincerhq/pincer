@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from anthropic_sse import ScriptedAnthropic, text
 
-from pincer.core.agent import Agent
+from pincer.core.agent import Agent, _Onboarding
 from pincer.voice.outcome import extract_outcome
 from pincer.voice.threads import merge_summary
 
@@ -41,7 +41,7 @@ async def _merge_request(settings) -> dict[str, Any]:
 async def _onboarding_request(settings, session_manager, cost_tracker, tool_registry) -> dict[str, Any]:
     async with ScriptedAnthropic(settings, _JSON_REPLY) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tool_registry)
-        await agent._ingest_onboarding_reply("I'm Bob", "user-pin", "web")
+        await agent._ingest_onboarding_reply("I'm Bob", "user-pin", "web", _Onboarding(prompt=False, ingest=True))
     return llm.requests[0]
 
 

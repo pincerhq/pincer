@@ -12,8 +12,10 @@ import pytest_asyncio
 from pincer.core.agent import (
     _ONBOARDING_ANSWER_WINDOW_S,
     _ONBOARDING_EXTRACTION_MAX_TOKENS,
+    _ONBOARDING_MAX_EMPTY_REPLIES,
     Agent,
     StreamEventType,
+    _Onboarding,
 )
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -322,26 +324,173 @@ async def test_two_empty_replies_close_the_gate(
     assert await memory_store.list_memories(user_id="user-q", category="profile") == []
 
 
+async def _asked_a_day_ago(session_manager, user_id: str) -> None:
+    """A question shown in the user's web session, asked more than a day ago."""
+    await _store_history(session_manager, user_id, "web", reply=f"Hello!\n\n{ONBOARDING_QUESTION_EN}")
+    past_window = time.time() - _ONBOARDING_ANSWER_WINDOW_S - 3600
+    assert await session_manager.onboarding.claim_prompt(user_id, "web", f"web:{user_id}", now=past_window)
+
+
 @_PATHS
 async def test_an_unanswered_question_expires_after_a_day(
     path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
-    """A question left unanswered for more than a day is closed by the next
-    message, which is not read for an answer."""
-    llm = _scripted_llm("Sure.")
+    """More than a day after the question, a message that is no answer closes
+    the gate as expired after one read, with no profile; nothing after it is read."""
+    llm = _scripted_llm("Sure.", _TASK_REPLIES["new_prompt_response"], "Done.")
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
-    await _store_history(session_manager, "user-e", "web")
-    a_day_ago = time.time() - 25 * 60 * 60
-    assert await session_manager.onboarding.claim_prompt("user-e", "web", "web:user-e", now=a_day_ago)
+    await _asked_a_day_ago(session_manager, "user-e")
 
-    await _reply(agent, path, "user-e", "web", "I'm Eve")
+    await _reply(agent, path, "user-e", "web", "Summarize this contract for me")
 
-    assert llm.complete.call_count == 1
-    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args.kwargs["system"]
+    assert llm.complete.call_count == 2
     record = await _record(tmp_path, "user-e", "web")
     assert record is not None
-    assert record.completed_at is not None
+    assert (record.attempts, record.completed_at is not None, record.closed_by) == (0, True, "expired")
     assert await memory_store.list_memories(user_id="user-e", category="profile") == []
+
+    await _reply(agent, path, "user-e", "web", "And the next one")
+
+    assert llm.complete.call_count == 3
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args_list[2].kwargs["system"]
+
+
+@_PATHS
+async def test_an_answer_after_a_day_is_read(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Asked at 23:00, answered at 23:30 the next day: the answer is still
+    taken, with the follow-up instruction, and the profile is written."""
+    llm = _scripted_llm(
+        "Nice to meet you, Ana.",
+        '{"answers_question": true, "name": "Ana", "use_case": "travel planning", "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    await _asked_a_day_ago(session_manager, "user-ana")
+
+    await _reply(agent, path, "user-ana", "web", "I'm Ana, mostly travel planning")
+
+    assert llm.complete.call_count == 2
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[0].kwargs["system"]
+    record = await _record(tmp_path, "user-ana", "web")
+    assert record is not None
+    assert (record.completed_at is not None, record.closed_by) == (True, "answer")
+    profiles = await memory_store.list_memories(user_id="user-ana", category="profile")
+    assert [("Ana" in p.content) for p in profiles] == [True]
+
+
+@_PATHS
+async def test_an_extraction_error_after_a_day_leaves_the_gate_open(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """A transient outage on the late read drops nothing: the gate stays open,
+    and the next message gets the same last chance."""
+    llm = _scripted_llm(
+        "Sure.",
+        RuntimeError("LLM down"),
+        "Nice to meet you, Ana.",
+        '{"answers_question": true, "name": "Ana", "use_case": null, "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    await _asked_a_day_ago(session_manager, "user-ana2")
+
+    await _reply(agent, path, "user-ana2", "web", "I'm Ana")
+
+    record = await _record(tmp_path, "user-ana2", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (1, None)
+
+    await _reply(agent, path, "user-ana2", "web", "I'm Ana, again")
+
+    record = await _record(tmp_path, "user-ana2", "web")
+    assert record is not None and record.closed_by == "answer"
+    assert len(await memory_store.list_memories(user_id="user-ana2", category="profile")) == 1
+
+
+def _extracting_llm(extract) -> AsyncMock:
+    """An LLM whose extraction calls go to ``extract(text)``; other calls reply "Ok."."""
+
+    async def complete(**kwargs):
+        if kwargs.get("max_tokens") == _ONBOARDING_EXTRACTION_MAX_TOKENS:
+            return await extract(kwargs["messages"][0].content)
+        return _llm_text("Ok.")
+
+    llm = AsyncMock()
+    llm.complete.side_effect = complete
+    _streams(llm, "Ok.")
+    return llm
+
+
+@_PATHS
+async def test_a_failing_extractor_after_a_day_stops_being_called(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Extraction that keeps failing after the window is retried a bounded
+    number of times, then the gate closes as expired and nothing more is read."""
+    extractions = []
+
+    async def extract(prompt: str) -> LLMResponse:
+        extractions.append(prompt)
+        raise BudgetExceededError("over budget")
+
+    agent = Agent(
+        settings, _extracting_llm(extract), session_manager, cost_tracker, tool_registry, memory_store=memory_store
+    )
+    await _asked_a_day_ago(session_manager, "user-f")
+
+    for n in range(_ONBOARDING_MAX_EMPTY_REPLIES + 2):
+        await _reply(agent, path, "user-f", "web", f"Task {n}")
+
+    assert len(extractions) == _ONBOARDING_MAX_EMPTY_REPLIES
+    record = await _record(tmp_path, "user-f", "web")
+    assert record is not None
+    assert (record.completed_at is not None, record.closed_by) == (True, "expired")
+    assert await memory_store.list_memories(user_id="user-f", category="profile") == []
+
+
+@_PATHS
+async def test_a_late_answer_takes_over_a_concurrent_late_expiry(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """After the window, a task and an answer are read at once. The task's
+    expiry lands first; the answer still completes onboarding and writes the profile."""
+    both_extracting = asyncio.Barrier(2)
+    expired = asyncio.Event()
+    onboarding = session_manager.onboarding
+    complete = onboarding.complete
+
+    async def expire_then_signal(*args, **kwargs):
+        won = await complete(*args, **kwargs)
+        expired.set()
+        return won
+
+    onboarding.complete = expire_then_signal
+
+    async def extract(prompt: str) -> LLMResponse:
+        await both_extracting.wait()
+        if "I'm Ana" in prompt:
+            await expired.wait()
+            return _llm_text('{"answers_question": true, "name": "Ana", "use_case": null, "language": null}')
+        return _llm_text(_TASK_REPLIES["new_prompt_response"])
+
+    agent = Agent(
+        settings, _extracting_llm(extract), session_manager, cost_tracker, tool_registry, memory_store=memory_store
+    )
+    await _asked_a_day_ago(session_manager, "user-r")
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            _reply(agent, path, "user-r", "web", "Summarize this contract for me"),
+            _reply(agent, path, "user-r", "web", "I'm Ana", session_key=conversation_key("user-r", "web", "b")),
+        ),
+        timeout=10,
+    )
+
+    assert expired.is_set()
+    record = await _record(tmp_path, "user-r", "web")
+    assert record is not None and record.closed_by == "answer"
+    profiles = await memory_store.list_memories(user_id="user-r", category="profile")
+    assert [("Ana" in p.content) for p in profiles] == [True]
 
 
 @_PATHS
@@ -570,7 +719,7 @@ async def test_inflight_answer_after_empty_closure_writes_profile(
     assert not await onboarding.record_empty_reply("user-race", "web", max_empty=2, now=2.0)
     assert await onboarding.record_empty_reply("user-race", "web", max_empty=2, now=3.0)
 
-    await agent._ingest_onboarding_reply("I'm Bob", "user-race", "web")
+    await agent._ingest_onboarding_reply("I'm Bob", "user-race", "web", _Onboarding(prompt=False, ingest=True))
 
     record = await onboarding.get("user-race", "web")
     assert record is not None and record.attempts == 2
