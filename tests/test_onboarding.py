@@ -1234,7 +1234,7 @@ async def test_preexisting_session_never_prompts(
 async def test_an_extraction_error_leaves_the_gate_untouched(
     tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
-    """A failed extraction call (an outage, the budget) is no reply at all: no
+    """A failed extraction call (an outage) is no reply at all: no
     attempt is counted, and the answer after it is still taken."""
     llm = _scripted_llm(
         "Hi!",
@@ -1332,7 +1332,7 @@ async def test_the_onboarding_extraction_is_recorded_like_any_request(  # type: 
 async def test_with_the_budget_reached_the_onboarding_extraction_is_not_requested(  # type: ignore[no-untyped-def]
     tmp_path, settings, session_manager, tool_registry, memory_store
 ) -> None:
-    """Like a failed extraction: no request, no attempt counted, the gate stays open."""
+    """A turn the budget refused is no turn: no reply, no extraction, no attempt counted, the gate stays open."""
     from pincer.config.pricing import TokenUsage, load_price_table
     from pincer.llm.cost_tracker import CostTracker
 
@@ -1390,4 +1390,72 @@ async def test_an_answer_turn_keeps_its_reply_when_its_costs_cannot_be_stored(  
     assert reply == "Nice to meet you, Carol."
     assert llm.complete.await_count == 3  # precondition: the extraction ran too
     record = await _record(tmp_path, "user-8", "test")
+    assert record is not None and record.completed_at is not None
+
+
+# test-model costs $0.00003 a request here (10 in at $1/MTok, 10 out at $2/MTok): a budget of
+# $0.00005 admits the second turn, whose own first request then crosses it.
+_CROSSED_BY_THE_ANSWER_TURN = 0.00005
+_CAROL = '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}'
+
+
+async def _budgeted_agent(tmp_path, settings, session_manager, tool_registry, memory_store, llm):  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=_CROSSED_BY_THE_ANSWER_TURN, prices=load_price_table())
+    await tracker.initialize()
+    settings = settings.model_copy(update={"daily_budget_usd": _CROSSED_BY_THE_ANSWER_TURN})
+    return Agent(settings, llm, session_manager, tracker, tool_registry, memory_store=memory_store), tracker
+
+
+@_PATHS
+async def test_a_turn_whose_own_reply_crosses_the_budget_still_reads_its_onboarding_answer(  # type: ignore[no-untyped-def]
+    path, tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """The turn was admitted, so it runs to its end, extraction included, as a call in progress does."""
+    llm = _scripted_llm("Hi!", "Nice to meet you, Carol.", _CAROL)
+    agent, tracker = await _budgeted_agent(tmp_path, settings, session_manager, tool_registry, memory_store, llm)
+    try:
+        await _reply(agent, path, "user-9", "test", "hi")
+        reply = await _reply(agent, path, "user-9", "test", "I'm Carol")
+    finally:
+        await tracker.close()
+
+    assert reply == "Nice to meet you, Carol."
+    assert llm.complete.await_count == 3
+    assert await _rows(tmp_path) == 3  # the extraction is recorded too
+    record = await _record(tmp_path, "user-9", "test")
+    assert record is not None and record.completed_at is not None
+    profiles = await memory_store.list_memories(user_id="user-9", category="profile")
+    assert [("Carol" in p.content) for p in profiles] == [True]
+
+
+async def test_a_web_chat_turn_stopped_by_the_budget_mid_way_still_reads_its_onboarding_answer(  # type: ignore[no-untyped-def]
+    tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """Admitted, then stopped after its tool step: the budget is not checked again for the extraction."""
+    from pincer.llm.base import ToolCall
+
+    greet = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc1", name="greet", arguments={"name": "Carol"})],
+        model="test-model",
+        input_tokens=10,
+        output_tokens=10,
+        stop_reason="tool_use",
+    )
+    llm = AsyncMock()
+    llm.complete.side_effect = [_llm_text("Hi!"), greet, _llm_text(_CAROL)]
+    _streams_from_complete(llm)
+    agent, tracker = await _budgeted_agent(tmp_path, settings, session_manager, tool_registry, memory_store, llm)
+    try:
+        await _reply(agent, "stream", "user-10", "web", "hi")
+        chunks = [c async for c in agent.handle_message_stream("user-10", "web", "I'm Carol, greet me")]
+    finally:
+        await tracker.close()
+
+    assert chunks[-1].budget_reached  # precondition: stopped before the reply step
+    assert llm.complete.await_count == 3  # hi, the tool step, the extraction
+    record = await _record(tmp_path, "user-10", "web")
     assert record is not None and record.completed_at is not None

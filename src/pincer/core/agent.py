@@ -2384,16 +2384,15 @@ class Agent:
         bounded number of extra calls, and a transient outage still drops no
         answer while the next message is read again.
 
-        A reached budget sends no extraction request and leaves the gate as it
-        was, in or after the window: no call was made, so nothing is counted.
+        The extraction belongs to its turn and is not budget-checked again: a
+        turn admitted under the daily budget reads its message even when its own
+        requests crossed the limit, as a call in progress is never cut. A turn
+        the budget refused never gets here (PR #366 review).
         """
         name: str | None = None
         use_case: str | None = None
         language: str | None = None
 
-        if await self._costs.budget_reached():
-            logger.info("Onboarding extraction skipped: the daily budget is reached; the gate is left as it was")
-            return
         try:
             extraction_msg = LLMMessage(
                 role=MessageRole.USER,
