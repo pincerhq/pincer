@@ -75,8 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude receives them all until its first compaction folds them into one.
 - The summary call's cost is recorded like any other LLM call. It is saved as
   a memory only when memory is on, never for a memory-free conversation. When
-  the daily budget is spent or the summary fails, the oldest messages are
-  dropped instead.
+  no summary can be had (the call fails or the daily budget is spent), the
+  history is kept and compaction is tried again after a later turn.
 - The every-20-messages summary is gone, and with it
   `PINCER_SUMMARY_THRESHOLD`: when it is still set, Pincer logs a warning at
   startup and `pincer doctor` reports it; it has no effect.

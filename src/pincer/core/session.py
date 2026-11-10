@@ -158,8 +158,8 @@ class SessionManager:
             else:
                 self._turn_locks[key] = (current_lock, users - 1)
 
-    async def compact(self, session: Session, prefix: list[LLMMessage], replacement: LLMMessage | None) -> bool:
-        """Replace the session's oldest messages `prefix` by `replacement` (None: drop them), between turns.
+    async def compact(self, session: Session, prefix: list[LLMMessage], replacement: LLMMessage) -> bool:
+        """Replace the session's oldest messages `prefix` by `replacement`, between turns.
 
         Applies only while `prefix` is still the start of the cached session's history (the
         same message objects), so a turn, repair, clear or trim since it was chosen wins.
@@ -171,7 +171,7 @@ class SessionManager:
             head = session.messages[: len(prefix)]
             if len(head) != len(prefix) or any(a is not b for a, b in zip(head, prefix, strict=True)):
                 return False
-            session.messages = ([replacement] if replacement else []) + session.messages[len(prefix) :]
+            session.messages = [replacement, *session.messages[len(prefix) :]]
             session.updated_at = time.time()
             await self._persist(session)
             return True

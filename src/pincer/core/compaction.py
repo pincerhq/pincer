@@ -1,5 +1,5 @@
 """
-History compaction by prompt tokens (issue #357, owner ruling Q20).
+History compaction by prompt tokens (issue #357, owner rulings Q20 and Q22).
 
 After a turn whose last request's whole prompt (uncached input, cache writes
 and cache reads, from the API usage) went over `at_tokens`, the oldest
@@ -7,8 +7,9 @@ messages are replaced by one summary message so the whole prompt comes down to
 about `to_tokens`. Tool call/result pairs stay whole and the latest exchange is
 kept verbatim. The summary is a SYSTEM-role history message at the head of the
 session (never part of the system prompt, which stays byte-identical); the
-providers send it as a message of its own. When summarizing fails, the same
-messages are dropped instead.
+providers send it as a message of its own. When no summary can be had (the call
+fails, or the daily budget is reached), the history is kept as it is: compaction is
+tried again after a later turn, and the message-count trim still bounds the session.
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ class Compactor:
         return last.prompt_tokens > self._at_tokens
 
     async def compact(self, session: Session, last: LastRequest) -> bool:
-        """Replace the oldest messages by a summary (or drop them when that fails).
+        """Replace the oldest messages by a summary; without one, change nothing.
 
         The summary call runs without the session's turn lock, so a turn arriving meanwhile
         runs on the full history; the swap then applies only if those messages are still
@@ -143,22 +144,25 @@ class Compactor:
             return False
         prefix = list(session.messages[:cut])
         summary = await self._summarize(session, prefix)
-        replacement = LLMMessage(role=MessageRole.SYSTEM, content=SUMMARY_PREFIX + summary) if summary else None
-        applied = await self._sessions.compact(session, prefix, replacement)
-        if not applied:
+        if not summary:
+            # A short provider error must never erase history (Q22): the next turn over the limit retries
+            logger.warning(
+                "Session %s: no summary, history kept; compaction will be retried after a later turn",
+                session.session_id,
+            )
+            return False
+        replacement = LLMMessage(role=MessageRole.SYSTEM, content=SUMMARY_PREFIX + summary)
+        if not await self._sessions.compact(session, prefix, replacement):
             logger.info("Session %s changed while it was being compacted; compaction discarded", session.session_id)
             return False
-        if replacement is None:
-            logger.warning("Session %s: summary failed, dropped its %d oldest messages", session.session_id, cut)
-        else:
-            logger.info("Session %s compacted: %d oldest messages summarized", session.session_id, cut)
-            await self._remember(session, summary)
+        logger.info("Session %s compacted: %d oldest messages summarized", session.session_id, cut)
+        await self._remember(session, summary)
         return True
 
     async def _summarize(self, session: Session, messages: list[LLMMessage]) -> str:
         """The summary text, or "" when it cannot be had (budget spent, call failed)."""
         if await self._costs.budget_reached():  # the pre-call budget check every LLM call goes through
-            logger.warning("Daily budget reached: session %s is compacted without a summary", session.session_id)
+            logger.warning("Daily budget reached: session %s is not compacted", session.session_id)
             return ""
         request = LLMMessage(role=MessageRole.USER, content=f"Summarize this conversation:\n\n{_transcript(messages)}")
         try:

@@ -289,7 +289,7 @@ async def test_the_summary_is_a_memory_only_with_memory_on(settings, session_man
     assert memories.stored == expected
 
 
-async def test_a_failed_summary_drops_the_oldest_messages_instead(settings, session_manager, cost_tracker, caplog):
+async def test_a_failed_summary_keeps_the_history_and_saves_nothing(settings, session_manager, cost_tracker, caplog):
     turns = [_reply("Reply 1", 70_000), _reply("Reply 2", 100_000)]
     async with (
         ScriptedAnthropic(settings, turns) as llm,
@@ -297,11 +297,34 @@ async def test_a_failed_summary_drops_the_oldest_messages_instead(settings, sess
     ):
         await _compacted_session(settings, session_manager, cost_tracker, llm, summary_llm)
 
+    assert len(summary_llm.requests) == 1  # precondition: the summary was asked for, and failed
     session = await session_manager.get_or_create("user1", "test")
-    assert len(session.messages) == 8
-    assert session.messages[0].role == MessageRole.USER
-    assert session.messages[0].content == _earlier(6)
-    assert any("summary failed, dropped its 6 oldest messages" in r.getMessage() for r in caplog.records)
+    assert len(session.messages) == 14
+    assert session.messages[0].content == _earlier(0)
+    stored = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
+    assert stored is not None
+    assert stored["messages"].count('"role"') == 14
+    assert any(
+        "no summary, history kept; compaction will be retried after a later turn" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_a_later_turn_over_the_limit_retries_the_compaction(settings, session_manager, cost_tracker):
+    turns = [_reply("Reply 1", 70_000), _reply("Reply 2", 100_000), _reply("Reply 3", 100_000)]
+    async with (
+        ScriptedAnthropic(settings, turns) as llm,
+        ScriptedAnthropic(settings, [400, ([text(_SUMMARY)], "end_turn")]) as summary_llm,
+    ):
+        agent = await _compacted_session(settings, session_manager, cost_tracker, llm, summary_llm)
+        await agent.handle_message("user1", "test", "turn 3", memory=False)
+        await agent.wait_compactions()
+
+    assert len(summary_llm.requests) == 2
+    session = await session_manager.get_or_create("user1", "test")
+    assert len(session.messages) == 11
+    assert session.messages[0].content == f"[Previous conversation summary]\n{_SUMMARY}"
+    assert session.messages[1].content == _earlier(6)
 
 
 async def test_the_message_backstop_cuts_51_messages_to_the_newest_30(tmp_path):
@@ -430,9 +453,7 @@ async def test_streamed_and_voice_turns_compact_after_the_reply_even_when_the_re
     assert session.messages[-1].content == "Reply 1"
 
 
-async def test_with_the_budget_spent_the_oldest_messages_are_dropped_without_a_summary_call(
-    settings, session_manager, tmp_path
-):
+async def test_with_the_budget_spent_the_history_is_kept_without_a_summary_call(settings, session_manager, tmp_path):
     from pincer.config.pricing import load_price_table
     from pincer.llm.cost_tracker import CostTracker
 
@@ -455,7 +476,7 @@ async def test_with_the_budget_spent_the_oldest_messages_are_dropped_without_a_s
 
     assert summary_llm.requests == []
     session = await session_manager.get_or_create("user1", "test")
-    assert [m.content for m in session.messages] == [_earlier(i) for i in range(6, 10)] + ["turn 1", "Reply 1"]
+    assert [m.content for m in session.messages] == [_earlier(i) for i in range(10)] + ["turn 1", "Reply 1"]
 
 
 def test_the_compaction_target_must_be_below_its_limit():
