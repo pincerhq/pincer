@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import logging
 import os
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -20,10 +23,12 @@ from typing import TYPE_CHECKING, Any, cast
 from pincer.integrations.google.email_guard import EmailGuard, EmailVerdict
 from pincer.integrations.google.models import fmt_list, fmt_message_full, fmt_message_summary
 from pincer.integrations.google.quota import with_backoff
+from pincer.tools.attachments import Attachment, AttachmentError, attachment_names, load_attachments
 from pincer.utils.csv_list import split_csv
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from email.message import Message
 
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
@@ -89,7 +94,7 @@ def _extract_body(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _build_raw(
+def _build_mime(
     to: str,
     subject: str,
     body: str,
@@ -99,12 +104,26 @@ def _build_raw(
     in_reply_to: str = "",
     references: str = "",
     from_: str = "",
-) -> str:
+    attachments: list[Attachment] | None = None,
+) -> Message:
     if body_type == "html":
-        msg: MIMEMultipart | MIMEText = MIMEMultipart("alternative")
-        msg.attach(MIMEText(body, "html"))  # type: ignore[union-attr]
+        body_part: MIMEMultipart | MIMEText = MIMEMultipart("alternative")
+        body_part.attach(MIMEText(body, "html"))  # type: ignore[union-attr]
     else:
-        msg = MIMEText(body, "plain")
+        body_part = MIMEText(body, "plain")
+
+    msg: MIMEMultipart | MIMEText
+    if attachments:
+        msg = MIMEMultipart("mixed")
+        msg.attach(body_part)
+        for att in attachments:
+            part = MIMEBase(att.maintype, att.subtype)
+            part.set_payload(att.data)
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=att.filename)
+            msg.attach(part)
+    else:
+        msg = body_part
     msg["to"] = to
     msg["subject"] = subject
     if cc:
@@ -116,7 +135,80 @@ def _build_raw(
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references or in_reply_to
+    return msg
+
+
+def _build_raw(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    body_type: str = "plain",
+    in_reply_to: str = "",
+    references: str = "",
+    from_: str = "",
+    attachments: list[Attachment] | None = None,
+) -> str:
+    msg = _build_mime(
+        to,
+        subject,
+        body,
+        cc=cc,
+        bcc=bcc,
+        body_type=body_type,
+        in_reply_to=in_reply_to,
+        references=references,
+        from_=from_,
+        attachments=attachments,
+    )
     return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+def _media_upload(msg: Message) -> Any:
+    """Wrap a MIME message for the Gmail upload endpoint.
+
+    A ``raw`` JSON body is capped at about 5 MB, so messages carrying attachments
+    go through the media upload path instead (up to Gmail's 25 MB limit).
+    """
+    from googleapiclient.http import MediaIoBaseUpload
+
+    return MediaIoBaseUpload(io.BytesIO(msg.as_bytes()), mimetype="message/rfc822", resumable=True)
+
+
+async def _gmail_send(svc: Any, msg: Message, thread_id: str = "", has_attachments: bool = False) -> Any:
+    """Send *msg*: as a ``raw`` body normally, or via media upload when it carries attachments."""
+    if has_attachments:
+        meta: dict[str, Any] = {"threadId": thread_id} if thread_id else {}
+        media = _media_upload(msg)
+        return await with_backoff(
+            lambda: svc.users().messages().send(userId="me", body=meta, media_body=media).execute()
+        )
+    body: dict[str, Any] = {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+    if thread_id:
+        body["threadId"] = thread_id
+    return await with_backoff(lambda: svc.users().messages().send(userId="me", body=body).execute())
+
+
+async def _gmail_create_draft(svc: Any, msg: Message, has_attachments: bool = False) -> Any:
+    """Create a draft from *msg*, using media upload when it carries attachments."""
+    if has_attachments:
+        media = _media_upload(msg)
+        return await with_backoff(
+            lambda: svc.users().drafts().create(userId="me", body={"message": {}}, media_body=media).execute()
+        )
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    return await with_backoff(
+        lambda: svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    )
+
+
+def _attachments_or_error(attachments: list[str] | str | None) -> tuple[list[Attachment], str | None]:
+    """Load attachments; on failure return the error text the tool should return (nothing is sent)."""
+    try:
+        return load_attachments(attachments), None
+    except AttachmentError as e:
+        return [], f"Email NOT sent: {e}"
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -325,12 +417,16 @@ async def google__send_message(
     cc: str = "",
     bcc: str = "",
     body_type: str = "plain",
+    attachments: list[str] | str | None = None,
 ) -> str:
     """Send a new email."""
+    files, err = _attachments_or_error(attachments)
+    if err:
+        return err
     svc = await factory.get("gmail")
-    raw = _build_raw(to, subject, body, cc=cc, bcc=bcc, body_type=body_type)
-    await with_backoff(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
-    return f'Email sent to {to}: "{subject}"'
+    msg = _build_mime(to, subject, body, cc=cc, bcc=bcc, body_type=body_type, attachments=files)
+    await _gmail_send(svc, msg, has_attachments=bool(files))
+    return f'Email sent to {to}: "{subject}"{attachment_names(files)}'
 
 
 async def google__reply_to_message(
@@ -338,9 +434,13 @@ async def google__reply_to_message(
     message_id: str,
     body: str,
     body_type: str = "plain",
+    attachments: list[str] | str | None = None,
     _guard: EmailGuard | None = None,
 ) -> str:
     """Reply to a message (in-thread)."""
+    files, err = _attachments_or_error(attachments)
+    if err:
+        return err
     svc = await factory.get("gmail")
     orig = await with_backoff(
         lambda: (
@@ -369,11 +469,11 @@ async def google__reply_to_message(
     else:
         warning = ""
 
-    raw = _build_raw(to, subject, body, body_type=body_type, in_reply_to=in_reply_to, references=references)
-    await with_backoff(
-        lambda: svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
+    msg = _build_mime(
+        to, subject, body, body_type=body_type, in_reply_to=in_reply_to, references=references, attachments=files
     )
-    return f"Reply sent to {to}{warning}"
+    await _gmail_send(svc, msg, thread_id=thread_id, has_attachments=bool(files))
+    return f"Reply sent to {to}{attachment_names(files)}{warning}"
 
 
 async def google__reply_all(
@@ -381,9 +481,13 @@ async def google__reply_all(
     message_id: str,
     body: str,
     body_type: str = "plain",
+    attachments: list[str] | str | None = None,
     _guard: EmailGuard | None = None,
 ) -> str:
     """Reply-all to a message."""
+    files, err = _attachments_or_error(attachments)
+    if err:
+        return err
     svc = await factory.get("gmail")
     orig = await with_backoff(
         lambda: (
@@ -415,11 +519,11 @@ async def google__reply_all(
     else:
         warning = ""
 
-    raw = _build_raw(all_recipients, subject, body, cc=cc, body_type=body_type, in_reply_to=in_reply_to)
-    await with_backoff(
-        lambda: svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
+    msg = _build_mime(
+        all_recipients, subject, body, cc=cc, body_type=body_type, in_reply_to=in_reply_to, attachments=files
     )
-    return f"Reply-all sent to {all_recipients}{warning}"
+    await _gmail_send(svc, msg, thread_id=thread_id, has_attachments=bool(files))
+    return f"Reply-all sent to {all_recipients}{attachment_names(files)}{warning}"
 
 
 async def google__forward_message(
@@ -427,8 +531,12 @@ async def google__forward_message(
     message_id: str,
     to: str,
     note: str = "",
+    attachments: list[str] | str | None = None,
 ) -> str:
     """Forward a message to a new recipient."""
+    files, err = _attachments_or_error(attachments)
+    if err:
+        return err
     svc = await factory.get("gmail")
     orig = await with_backoff(lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute())
     hdrs = {h["name"]: h["value"] for h in orig.get("payload", {}).get("headers", [])}
@@ -437,9 +545,9 @@ async def google__forward_message(
     sep = "---------- Forwarded message ----------\n"
     prefix = note + "\n\n" + sep if note else sep
     fwd_body = prefix + body
-    raw = _build_raw(to, subject, fwd_body)
-    await with_backoff(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
-    return f'Forwarded to {to}: "{subject}"'
+    msg = _build_mime(to, subject, fwd_body, attachments=files)
+    await _gmail_send(svc, msg, has_attachments=bool(files))
+    return f'Forwarded to {to}: "{subject}"{attachment_names(files)}'
 
 
 async def google__create_draft(
@@ -449,14 +557,16 @@ async def google__create_draft(
     body: str,
     cc: str = "",
     body_type: str = "plain",
+    attachments: list[str] | str | None = None,
 ) -> str:
     """Create an email draft."""
+    files, err = _attachments_or_error(attachments)
+    if err:
+        return err
     svc = await factory.get("gmail")
-    raw = _build_raw(to, subject, body, cc=cc, body_type=body_type)
-    result = await with_backoff(
-        lambda: svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-    )
-    return f'Draft created (id={result.get("id", "")}) to {to}: "{subject}"'
+    msg = _build_mime(to, subject, body, cc=cc, body_type=body_type, attachments=files)
+    result = await _gmail_create_draft(svc, msg, has_attachments=bool(files))
+    return f'Draft created (id={result.get("id", "")}) to {to}: "{subject}"{attachment_names(files)}'
 
 
 async def google__send_draft(
@@ -566,6 +676,22 @@ async def google__create_label(
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
+
+_ATTACH_HINT = (
+    " To send a Google Doc, first call google__export_google_doc (e.g. format pdf), "
+    "then pass the returned path in `attachments`. Files must be in ~/.pincer/downloads "
+    "or ~/.pincer/workspace; total size up to 18 MB."
+)
+
+_ATTACHMENTS_PARAM: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": (
+        "Local file paths to attach, e.g. the 'Saved to' path from google__export_google_doc, "
+        "google__download_file or google__get_attachment."
+    ),
+    "default": [],
+}
 
 
 def register_gmail_tools(
@@ -743,7 +869,7 @@ def register_gmail_tools(
     )
     registry.register(
         name="google__send_message",
-        description="Send a new email. Supports plain text and HTML, CC, and BCC.",
+        description="Send a new email. Supports plain text and HTML, CC, BCC, and file attachments." + _ATTACH_HINT,
         handler=_h_send(google__send_message, "to", "cc", "bcc"),
         parameters={
             "type": "object",
@@ -759,6 +885,7 @@ def register_gmail_tools(
                     "description": "Body format (default: plain)",
                     "default": "plain",
                 },
+                "attachments": _ATTACHMENTS_PARAM,
             },
             "required": ["to", "subject", "body"],
         },
@@ -766,7 +893,7 @@ def register_gmail_tools(
     )
     registry.register(
         name="google__reply_to_message",
-        description="Reply to a specific message, keeping it in-thread.",
+        description="Reply to a specific message, keeping it in-thread. Can attach files." + _ATTACH_HINT,
         handler=_h_reply(google__reply_to_message),
         parameters={
             "type": "object",
@@ -774,6 +901,7 @@ def register_gmail_tools(
                 "message_id": {"type": "string", "description": "Message ID to reply to"},
                 "body": {"type": "string", "description": "Reply body"},
                 "body_type": {"type": "string", "enum": ["plain", "html"], "default": "plain"},
+                "attachments": _ATTACHMENTS_PARAM,
             },
             "required": ["message_id", "body"],
         },
@@ -781,7 +909,7 @@ def register_gmail_tools(
     )
     registry.register(
         name="google__reply_all",
-        description="Reply-all to a message (responds to all recipients).",
+        description="Reply-all to a message (responds to all recipients). Can attach files." + _ATTACH_HINT,
         handler=_h_reply(google__reply_all),
         parameters={
             "type": "object",
@@ -789,6 +917,7 @@ def register_gmail_tools(
                 "message_id": {"type": "string", "description": "Message ID to reply-all to"},
                 "body": {"type": "string", "description": "Reply body"},
                 "body_type": {"type": "string", "enum": ["plain", "html"], "default": "plain"},
+                "attachments": _ATTACHMENTS_PARAM,
             },
             "required": ["message_id", "body"],
         },
@@ -796,7 +925,11 @@ def register_gmail_tools(
     )
     registry.register(
         name="google__forward_message",
-        description="Forward an email to a new recipient.",
+        description=(
+            "Forward an email to a new recipient. `attachments` adds local files; "
+            "the original message's attachments are not re-attached."
+        )
+        + _ATTACH_HINT,
         handler=_h_send(google__forward_message, "to"),
         parameters={
             "type": "object",
@@ -804,6 +937,7 @@ def register_gmail_tools(
                 "message_id": {"type": "string", "description": "Message ID to forward"},
                 "to": {"type": "string", "description": "Recipient to forward to"},
                 "note": {"type": "string", "description": "Optional note to prepend", "default": ""},
+                "attachments": _ATTACHMENTS_PARAM,
             },
             "required": ["message_id", "to"],
         },
@@ -811,7 +945,7 @@ def register_gmail_tools(
     )
     registry.register(
         name="google__create_draft",
-        description="Create an email draft (not sent yet).",
+        description="Create an email draft (not sent yet). Can attach files." + _ATTACH_HINT,
         handler=_h_send(google__create_draft, "to", "cc"),
         parameters={
             "type": "object",
@@ -821,6 +955,7 @@ def register_gmail_tools(
                 "body": {"type": "string"},
                 "cc": {"type": "string", "default": ""},
                 "body_type": {"type": "string", "enum": ["plain", "html"], "default": "plain"},
+                "attachments": _ATTACHMENTS_PARAM,
             },
             "required": ["to", "subject", "body"],
         },

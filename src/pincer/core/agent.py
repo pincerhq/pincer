@@ -55,6 +55,7 @@ from pincer.memory.base import (
     PINCER_MEMORY_USER_REQUEST_PREFIX,
 )
 from pincer.memory.profile import get_preferred_language
+from pincer.tools.attachments import approval_display_args
 from pincer.tools.builtin.language_pref import TOOL_NAME as LANGUAGE_TOOL_NAME
 from pincer.tools.path_sandbox import SandboxDenied
 from pincer.voice.localtime import get_voice_timezone
@@ -2654,7 +2655,7 @@ class Agent:
                 try:
                     approved = await self._approval_callback(
                         tool_call.name,
-                        tool_call.arguments,
+                        approval_display_args(tool_call.arguments),
                         user_id,
                         channel_name or channel,
                     )

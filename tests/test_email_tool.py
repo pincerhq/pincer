@@ -145,6 +145,75 @@ class TestEmailSend:
             assert "Error" in result
 
 
+def _smtp_settings():
+    s = MagicMock()
+    s.email_from = "test@example.com"
+    s.email_username = "test@example.com"
+    s.email_smtp_host = "smtp.example.com"
+    s.email_smtp_port = 587
+    s.email_password.get_secret_value.return_value = "pass"
+    return s
+
+
+@pytest.fixture
+def pincer_downloads(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    downloads = tmp_path / ".pincer" / "downloads"
+    downloads.mkdir(parents=True)
+    return downloads
+
+
+@pytest.mark.asyncio
+class TestEmailSendAttachments:
+    async def test_attachment_builds_multipart(self, pincer_downloads):
+        (pincer_downloads / "report.pdf").write_bytes(b"%PDF-1.4 test")
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            result = await email_send("user@example.com", "Report", "See attached", attachments=["report.pdf"])
+
+        assert "report.pdf" in result
+        message = mock_send.call_args.args[0]
+        assert message.get_content_type() == "multipart/mixed"
+        parts = list(message.iter_attachments())
+        assert len(parts) == 1
+        assert parts[0].get_filename() == "report.pdf"
+        assert parts[0].get_content_type() == "application/pdf"
+        assert parts[0].get_content() == b"%PDF-1.4 test"
+        assert message.get_body(("plain",)).get_content().strip() == "See attached"
+
+    async def test_disallowed_path_rejected(self, pincer_downloads):
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            result = await email_send("user@example.com", "x", "y", attachments=["/etc/passwd"])
+
+        assert "NOT sent" in result
+        mock_send.assert_not_called()
+
+    async def test_oversize_rejected_before_send(self, pincer_downloads, monkeypatch):
+        import pincer.tools.attachments as att
+
+        monkeypatch.setattr(att, "MAX_ATTACHMENT_BYTES", 4)
+        (pincer_downloads / "big.bin").write_bytes(b"12345")
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            result = await email_send("user@example.com", "x", "y", attachments="big.bin")
+
+        assert "limit is" in result
+        mock_send.assert_not_called()
+
+
 # ── email_search ─────────────────────────────────
 
 

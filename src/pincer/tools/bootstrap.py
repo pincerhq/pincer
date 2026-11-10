@@ -224,7 +224,10 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
         name="email_send",
         description=(
             "Send an email. Requires recipient, subject, body. "
-            "Use when the user asks to send, write, or compose an email."
+            "Use when the user asks to send, write, or compose an email. "
+            "To attach files, pass their paths in `attachments`. Files must be in "
+            "~/.pincer/downloads or ~/.pincer/workspace (e.g. a path returned by "
+            "google__export_google_doc, google__download_file, file_write or python_exec)."
         ),
         handler=email_send,
         parameters={
@@ -234,6 +237,12 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
                 "subject": {"type": "string"},
                 "body": {"type": "string"},
                 "cc": {"type": "string", "default": ""},
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "File paths to attach (from ~/.pincer/downloads or ~/.pincer/workspace).",
+                    "default": [],
+                },
             },
             "required": ["to", "subject", "body"],
         },

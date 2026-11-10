@@ -763,7 +763,9 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
             "Use this for non-Google files (PDFs, images, ZIPs, Office docs, etc.). "
             "For Google Docs/Sheets/Slides, use google__export_google_doc instead. "
             "Returns the saved file path, filename, and size. "
-            "The file is saved automatically — do NOT use python_exec to save it again."
+            "The file is saved automatically — do NOT use python_exec to save it again. "
+            "To email it, pass the returned path in `attachments` of google__send_message, "
+            "google__reply_to_message, google__create_draft (or email_send)."
         ),
         handler=_h(google__download_file),
         parameters={
@@ -782,7 +784,9 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
             "Supported formats: pdf, docx, xlsx, csv, pptx, txt, html, png, jpg, svg. "
             "Default export format is 'pdf'. "
             "Returns the saved file path, filename, and size. "
-            "The file is saved automatically — do NOT use python_exec to save it again."
+            "The file is saved automatically — do NOT use python_exec to save it again. "
+            "To email it, pass the returned path in `attachments` of google__send_message, "
+            "google__reply_to_message, google__create_draft (or email_send)."
         ),
         handler=_h(google__export_google_doc),
         parameters={

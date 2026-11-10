@@ -19,6 +19,7 @@ from email.message import EmailMessage
 from typing import Any
 
 from pincer.config import get_settings
+from pincer.tools.attachments import AttachmentError, attachment_names, load_attachments
 from pincer.utils.csv_list import split_csv
 
 logger = logging.getLogger(__name__)
@@ -230,8 +231,19 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
 # ── Tool: email_send ─────────────────────────────
 
 
-async def email_send(to: str, subject: str, body: str, cc: str = "") -> str:
-    """Send an email via SMTP. Returns a status message."""
+async def email_send(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    attachments: list[str] | str | None = None,
+) -> str:
+    """Send an email via SMTP, optionally with file attachments. Returns a status message."""
+    try:
+        files = load_attachments(attachments)
+    except AttachmentError as e:
+        return f"Email NOT sent: {e}"
+
     try:
         import aiosmtplib
 
@@ -243,6 +255,8 @@ async def email_send(to: str, subject: str, body: str, cc: str = "") -> str:
         if cc:
             message["Cc"] = cc
         message.set_content(body)
+        for f in files:
+            message.add_attachment(f.data, maintype=f.maintype, subtype=f.subtype, filename=f.filename)
 
         await aiosmtplib.send(
             message,
@@ -255,7 +269,7 @@ async def email_send(to: str, subject: str, body: str, cc: str = "") -> str:
         )
 
         logger.info("Email sent to %s: %s", to, subject)
-        return f"Email sent to {to} — Subject: {subject}"
+        return f"Email sent to {to} — Subject: {subject}{attachment_names(files)}"
 
     except Exception as e:
         logger.error("email_send error: %s", e, exc_info=True)
