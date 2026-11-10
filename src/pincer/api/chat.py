@@ -188,6 +188,7 @@ async def post_stream(
         token = set_send_event(send_event)
 
         async def driver() -> None:
+            placed_call = False
             try:
                 async with contextlib.aclosing(
                     agent.handle_message_stream(
@@ -208,10 +209,13 @@ async def post_stream(
                             # A placed call: its report comes later from /call-reports.
                             if chunk.call_sid:
                                 done["call_sid"] = chunk.call_sid
+                                placed_call = True
                             await queue.put(("tool", done))
                         elif chunk.type == StreamEventType.DONE:
-                            if chunk.budget_reached:
-                                # A refusal, not a reply: clients key on the error event
+                            if chunk.budget_reached and not placed_call:
+                                # A refusal, not a reply: clients key on the error event. A turn
+                                # that placed a call ends with `done`, as `POST /message` answers
+                                # 200, so the client keeps waiting for that call's report.
                                 await queue.put(("error", {"message": chunk.content, "cost_usd": chunk.cost_usd}))
                             else:
                                 await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))

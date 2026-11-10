@@ -829,3 +829,46 @@ async def test_a_metered_request_whose_cost_cannot_be_stored_still_returns_its_r
     response = await MeteredLLM(llm, tracker, "anthropic").complete([])
 
     assert response.content == "Done."
+
+
+# ── A budget stop after the turn placed a call: the client keeps waiting for its report ──
+
+
+def _dial_registry() -> Any:
+    """A registry whose make_phone_call places call CA9."""
+    from pincer.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+
+    async def make_phone_call(context: dict[str, Any] | None = None) -> str:
+        return "Call initiated successfully.\nCall SID: CA9\nTo: +4930123\nPurpose: x\n"
+
+    registry.register(
+        name="make_phone_call",
+        description="Places a call",
+        handler=make_phone_call,
+        parameters={"type": "object", "properties": {}},
+    )
+    return registry
+
+
+def _dial_call() -> list[ToolCall]:
+    return [ToolCall(id="tc1", name="make_phone_call", arguments={})]
+
+
+async def test_a_web_chat_turn_that_placed_a_call_before_the_budget_stop_ends_with_done(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager
+) -> None:
+    """As `POST /message` answers 200: an `error` would end the turn and the wait for the call's report."""
+    settings, tracker = await budgeted(_CALL_COST)  # the dialling request crosses it
+    llm = _scripted_llm(_response(_dial_call()), _response())
+    agent = Agent(settings, llm, session_manager, tracker, _dial_registry())
+
+    events = await _web_chat(agent, "call them")
+
+    assert events == [
+        ("tool", {"phase": "start", "name": "Using make_phone_call..."}),
+        ("tool", {"phase": "done", "name": "make_phone_call", "call_sid": "CA9"}),
+        ("done", {"text": _budget_text(_CALL_COST), "cost_usd": pytest.approx(_CALL_COST)}),
+    ]
+    assert len(llm.streams) == 1
