@@ -410,7 +410,7 @@ def render(
             text = _tpl("memory_note.ok", language)
         elif tool_name == "contact_lookup":
             text = _render_contacts(result, language)
-        elif tool_name == "memory_search":
+        elif tool_name == "call_memory_search":
             text = _render_memory_search(result, language)
         elif tool_name == "business_profile_lookup":
             text = _render_profile(result, language)

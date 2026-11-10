@@ -8,8 +8,14 @@ that no integration provides:
   call, so it survives transcript retention.
 - ``contact_lookup`` (R): read the ``phone_contacts`` table (the Sprint 7
   phone-contacts skill data) by name.
+- ``call_memory_search`` (R, outbound only — issue #252): a few short snippets
+  from the memory of the user who placed the call, never anyone else's.
 
-All three resolve the current call through the Sprint 9 call-cost ContextVar
+Owner-facing results are linked back to where the call came from (#252):
+messages also land in the chat session that asked for the call, and notes
+are stored under the owner's canonical id with the call's thread/session tags.
+
+All of them resolve the current call through the Sprint 9 call-cost ContextVar
 (``current_call_sid``), so they only work inside a live turn; outside a call
 they return an honest "Error: …" string (tool contract — never raise).
 """
@@ -33,12 +39,45 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_LEN = 500
 MAX_NOTE_LEN = 500
+MAX_SEARCH_RESULTS = 3
+MAX_SNIPPET_LEN = 200
+MAX_QUERY_LEN = 200
 
 
 def _call_sid() -> str:
     from pincer.observability.call_costs import current_call_sid
 
     return current_call_sid()
+
+
+def _owner_id(call_sid: str) -> str:
+    """The canonical id of the user who placed this call ("" when unknown).
+
+    Resolved server-side from the call's tracking, never from the turn
+    context: on an outbound call that context's user is the callee's number."""
+    from pincer.voice import status_notify
+
+    return status_notify.owner_id_for_call(call_sid)
+
+
+async def _call_link_tags(call_sid: str, settings: Any) -> list[str]:
+    """``thread:<id>`` / ``session:<key>`` tags for a call's notes (best effort)."""
+    from pincer.voice import status_notify
+
+    tags: list[str] = []
+    try:
+        from pincer.voice.threads import get_thread_manager
+
+        thread_id = await get_thread_manager(settings).thread_for_call(call_sid)
+    except Exception:
+        logger.debug("Thread lookup for call note failed [%s]", call_sid, exc_info=True)
+        thread_id = ""
+    if thread_id:
+        tags.append(f"thread:{thread_id}")
+    info = status_notify.get_call_info(call_sid)
+    if info is not None and info.session_key:
+        tags.append(f"session:{info.session_key}")
+    return tags
 
 
 def make_send_owner_message(settings: Any) -> Any:
@@ -62,8 +101,17 @@ def make_send_owner_message(settings: Any) -> Any:
         if not user_id:
             return "Error: no initiating user is known for this call."
         delivered = await status_notify.send_user_message(user_id, channel, f"📞 {body}")
-        if not delivered:
+        # Issue #252: the chat that asked for the call sees the message too.
+        target = (info.target_name or info.target_number) if info else ""
+        linked = await status_notify.append_to_session(
+            call_sid, f"📞 Message during the call{f' with {target}' if target else ''}: {body}"
+        )
+        if not delivered and not linked:
             return "Error: the message could not be delivered to the user's channel."
+        if not delivered:
+            return "The message was added to the user's chat, but the channel push failed."
+        if linked is False:
+            return "Message delivered to the user, but it could not be added to the chat that asked for this call."
         return "Message delivered to the user."
 
     return send_owner_message
@@ -82,16 +130,16 @@ def make_memory_note(settings: Any, memory: BaseMemoryBackend | None) -> Any:
         body = str(note or "").strip()[:MAX_NOTE_LEN]
         if not body:
             return "Error: empty note."
-        from pincer.voice import status_notify
 
-        info = status_notify.get_call_info(call_sid)
-        user_id = (info.user_id if info else "") or str((context or {}).get("pincer_user_id") or "") or "voice"
+        # The owner's canonical id: the key their chat recall searches under.
+        user_id = _owner_id(call_sid) or str((context or {}).get("pincer_user_id") or "") or "voice"
+        tags = ["source:voice_call", f"call:{call_sid}", "in_call_note", *await _call_link_tags(call_sid, settings)]
         try:
             await memory.store_memory(
                 user_id=user_id,
                 content=f"[Call note] {body}",
                 category="voice_call",
-                extra_tags=["source:voice_call", f"call:{call_sid}", "in_call_note"],
+                extra_tags=tags,
             )
         except Exception as e:
             logger.exception("memory_note failed [%s]", call_sid)
@@ -99,6 +147,39 @@ def make_memory_note(settings: Any, memory: BaseMemoryBackend | None) -> Any:
         return "Note stored."
 
     return memory_note
+
+
+def make_memory_search(settings: Any, memory: BaseMemoryBackend | None) -> Any:
+    async def call_memory_search(query: str) -> str:
+        """Search the memory of the user who placed this call (outbound calls
+        only). Returns at most a few short snippets."""
+        call_sid = _call_sid()
+        if not call_sid:
+            return "Error: call_memory_search is only available during a live phone call."
+        if memory is None:
+            return "Error: memory is not enabled."
+        text = str(query or "").strip()[:MAX_QUERY_LEN]
+        if not text:
+            return "Error: query is required."
+        owner = _owner_id(call_sid)
+        if not owner:
+            # Never fall back to an unscoped search: that would read everyone's memory.
+            return "Error: no initiating user is known for this call."
+        try:
+            found = await memory.search_text(text, user_id=owner, limit=MAX_SEARCH_RESULTS)
+        except Exception as e:
+            logger.exception("call_memory_search failed [%s]", call_sid)
+            return f"Error: memory search failed: {e}"
+        # Belt and braces: a backend that ignores user_id must not leak.
+        snippets = [
+            str(m.content or "").strip()[:MAX_SNIPPET_LEN]
+            for m in found
+            if getattr(m, "user_id", owner) == owner and str(m.content or "").strip()
+        ][:MAX_SEARCH_RESULTS]
+        # One snippet per line: the shape the spoken renderer reads.
+        return "\n".join(f"- {snippet}" for snippet in snippets) if snippets else "Nothing noted about that."
+
+    return call_memory_search
 
 
 def make_contact_lookup(settings: Any) -> Any:
@@ -176,12 +257,27 @@ def register_call_tools(registry: ToolRegistry, settings: Any, memory: BaseMemor
         },
         require_approval=False,
     )
-    return ["send_owner_message", "memory_note", "contact_lookup"]
+    registry.register(
+        name="call_memory_search",
+        description=(
+            "During an outbound phone call: search the memory of the user you are calling for (preferences, "
+            "addresses, earlier arrangements). Returns at most a few short snippets."
+        ),
+        handler=make_memory_search(settings, memory),
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "What to look up"}},
+            "required": ["query"],
+        },
+        require_approval=False,
+    )
+    return ["send_owner_message", "memory_note", "contact_lookup", "call_memory_search"]
 
 
 __all__ = [
     "make_contact_lookup",
     "make_memory_note",
+    "make_memory_search",
     "make_send_owner_message",
     "register_call_tools",
 ]

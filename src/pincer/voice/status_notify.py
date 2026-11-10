@@ -67,6 +67,10 @@ class _OutboundCallInfo:
     # The chat session that asked for the call; "" for calls with no chat
     # (dashboard, scheduled, demo, canary), which skip the session report.
     session_key: str = ""
+    # Issue #252: R/W tools the owner granted for this call (make_phone_call
+    # allow_tools, validated against the tier table at dial time). In memory
+    # only: a call that outlives a restart has lost its live state anyway.
+    tool_grants: frozenset[str] = frozenset()
     # Reloaded from its origin row after a restart: any live state it had is gone.
     restored: bool = False
     notified_stages: set[str] = field(default_factory=set)
@@ -115,6 +119,7 @@ def register_outbound_call(
     instructions: str = "",
     pincer_user_id: str = "",
     session_key: str = "",
+    tool_grants: frozenset[str] | set[str] | list[str] | tuple[str, ...] = (),
 ) -> None:
     """Track an outbound call so status updates can reach its initiating user
     (name and instructions ride along into the call prompt). In memory only;
@@ -131,12 +136,13 @@ def register_outbound_call(
         instructions=instructions,
         pincer_user_id=pincer_user_id,
         session_key=session_key,
+        tool_grants=frozenset(tool_grants or ()),
     )
     while len(_outbound_calls) > _MAX_TRACKED:
         _outbound_calls.pop(next(iter(_outbound_calls)), None)
 
 
-async def track_outbound_call(call_sid: str, user_id: str, **fields: str) -> None:
+async def track_outbound_call(call_sid: str, user_id: str, **fields: Any) -> None:
     """`register_outbound_call`, then write the call's origin row.
 
     The in-memory record stays the read path; the row is what a restart
@@ -177,6 +183,17 @@ def get_call_language(call_sid: str) -> str:
     """Language of a tracked outbound call ('' if unknown)."""
     info = _outbound_calls.get(call_sid)
     return info.language if info else ""
+
+
+def owner_id_for_call(call_sid: str) -> str:
+    """The canonical id of the user who placed a tracked call ("" if none).
+
+    The Pincer identity when known, else the channel-native id — the key the
+    owner's chat recall searches memory under."""
+    info = _outbound_calls.get(call_sid)
+    if info is None:
+        return ""
+    return info.pincer_user_id or info.user_id
 
 
 def get_call_info(call_sid: str) -> _OutboundCallInfo | None:
@@ -309,6 +326,39 @@ async def _report_to_session(call_sid: str, info: _OutboundCallInfo, text: str) 
         await _session_reporter(info.pincer_user_id or info.user_id, info.channel, info.session_key, note)
     except Exception:
         logger.exception("Call report not added to its chat session [%s]", call_sid)
+
+
+# How long a mid-call owner message waits for its chat session before the
+# append goes on in the background (the call turn must not stall on a chat lock).
+SESSION_APPEND_WAIT_S = 2.0
+
+
+async def append_to_session(call_sid: str, text: str, *, wait_s: float | None = None) -> bool | None:
+    """Add a mid-call note to the chat session that asked for the call (#252).
+
+    Returns None when there is nothing to link to (no tracked call, no chat
+    session, no reporter), True when the note landed or is still being
+    written in the background after ``wait_s``, and False when it failed.
+    """
+    info = _outbound_calls.get(call_sid)
+    if info is None or not info.session_key or _session_reporter is None:
+        return None
+    reporter = _session_reporter
+    owner, channel, session_key = info.pincer_user_id or info.user_id, info.channel, info.session_key
+
+    async def _append() -> bool:
+        try:
+            await reporter(owner, channel, session_key, text)
+        except Exception:
+            logger.exception("Owner message not added to its chat session [%s]", call_sid)
+            return False
+        return True
+
+    task = _spawn(_append(), name=f"call-owner-note-{call_sid}")
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=SESSION_APPEND_WAIT_S if wait_s is None else wait_s)
+    except TimeoutError:
+        return True  # waiting for the chat's turn lock; it lands when that turn ends
 
 
 async def drain(timeout: float = DRAIN_TIMEOUT_S) -> None:

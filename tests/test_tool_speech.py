@@ -110,7 +110,7 @@ def test_contact_and_memory_search():
     text = ts.render("contact_lookup", contacts, "de")
     assert text == "Kontakt gefunden: Dr. Müller und Dr. Meier."
     assert ts.render("contact_lookup", "[]", "en") == "I have no contact on file for that."
-    assert ts.render("memory_search", "- prefers mornings\n- 2026-08-18T10:00 said hello", "en").startswith(
+    assert ts.render("call_memory_search", "- prefers mornings\n- 2026-08-18T10:00 said hello", "en").startswith(
         "Noted earlier: prefers mornings and said hello"
     )
 

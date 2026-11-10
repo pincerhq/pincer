@@ -319,6 +319,7 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.tool_policy import CALLER_GUEST, CALLER_USER, META_CALLER_CLASS
 
         state.metadata[META_CALLER_CLASS] = CALLER_GUEST
+        self._resolve_principal(call_sid, state)
         outbound = state.direction == CallDirection.OUTBOUND
         number = (state.target_number or state.caller_number) if outbound else state.caller_number
         if not number:
@@ -338,6 +339,40 @@ class VoiceChannel(BaseChannel):
             if not outbound:
                 state.pincer_user_id = owner
         logger.info("Call party [%s]: %s", call_sid, f"registered user {owner}" if owner else "guest")
+
+    def _resolve_principal(self, call_sid: str, state: CallState) -> None:
+        """Issue #252: on whose authority the agent acts on this call.
+
+        ``owner`` only for an outbound generic call (not an appointment call)
+        with a tracked initiating user — make_phone_call's tracking, or the
+        owner it recorded on the pre-registered state for a relay setup that
+        beat the tracking. Everything else, inbound and receptionist calls
+        included, is ``remote``. Always overwritten here, so no earlier value
+        of the key survives into the gate.
+        """
+        from pincer.voice import scheduling, status_notify
+        from pincer.voice.tool_policy import (
+            META_OWNER_GRANTS,
+            META_OWNER_USER,
+            META_PRINCIPAL,
+            PRINCIPAL_OWNER,
+            PRINCIPAL_REMOTE,
+        )
+
+        principal = PRINCIPAL_REMOTE
+        grants: frozenset[str] = frozenset()
+        if state.direction == CallDirection.OUTBOUND and scheduling.get_appointment(call_sid) is None:
+            info = status_notify.get_call_info(call_sid)
+            if info is not None and info.user_id and info.user_id != "unknown":
+                principal = PRINCIPAL_OWNER
+                grants = frozenset(info.tool_grants)
+            elif state.metadata.get(META_OWNER_USER) not in (None, "", "unknown"):
+                principal = PRINCIPAL_OWNER
+                grants = frozenset(state.metadata.get(META_OWNER_GRANTS) or ())
+        state.metadata[META_PRINCIPAL] = principal
+        state.metadata[META_OWNER_GRANTS] = grants if principal == PRINCIPAL_OWNER else frozenset()
+        if principal == PRINCIPAL_OWNER:
+            logger.info("Call principal [%s]: owner (grants: %s)", call_sid, sorted(grants) or "none")
 
     @staticmethod
     def _session_key(state: CallState) -> str:
@@ -594,7 +629,18 @@ class VoiceChannel(BaseChannel):
         """
         from pincer.voice import scheduling, status_notify
         from pincer.voice.in_call_tools import InCallToolGate
-        from pincer.voice.tool_policy import allowed_tools_for_call, caller_class_of
+        from pincer.voice.tool_policy import (
+            META_OWNER_CHANNEL,
+            META_OWNER_GRANTS,
+            META_OWNER_USER,
+            META_PRINCIPAL,
+            PRINCIPAL_OWNER,
+            PRINCIPAL_REMOTE,
+            allowed_tools_for_call,
+            caller_class_of,
+            owner_grants_of,
+            principal_of,
+        )
 
         if self._receptionist_call(state):
             kind = "receptionist"  # Sprint 12 §9: the public line's exact, minimal tool set
@@ -603,17 +649,38 @@ class VoiceChannel(BaseChannel):
         else:
             kind = "generic"
         caller = caller_class_of(state)
-        allowed = allowed_tools_for_call(self._settings, kind=kind, direction=str(state.direction), caller_class=caller)
+        if kind != "generic":
+            # Fixed-purpose calls keep their own approval rules (#252).
+            state.metadata[META_PRINCIPAL] = PRINCIPAL_REMOTE
+            state.metadata[META_OWNER_GRANTS] = frozenset()
+        principal = principal_of(state)
+        allowed = allowed_tools_for_call(
+            self._settings,
+            kind=kind,
+            direction=str(state.direction),
+            caller_class=caller,
+            principal=principal,
+            owner_grants=owner_grants_of(state),
+        )
         info = status_notify.get_call_info(call_sid)
         if info is not None and info.user_id:
             target: tuple[str, str] = (info.user_id, info.channel)
+        elif principal == PRINCIPAL_OWNER and state.metadata.get(META_OWNER_USER):
+            # Answered before make_phone_call tracked it: the owner it recorded pre-dial.
+            target = (str(state.metadata[META_OWNER_USER]), str(state.metadata.get(META_OWNER_CHANNEL) or ""))
         else:
             # Inbound: the OWNER (never the caller) approves `user`-mode writes —
             # not state.pincer_user_id, which is the caller's identity on a
             # call from a confirmed phone.
             target = (str(getattr(self._settings, "default_user_id", "") or ""), "")
         logger.info(
-            "In-call tool scope [%s]: %s (%s, %s) -> %s", call_sid, kind, state.direction, caller, sorted(allowed)
+            "In-call tool scope [%s]: %s (%s, %s, principal=%s) -> %s",
+            call_sid,
+            kind,
+            state.direction,
+            caller,
+            principal,
+            sorted(allowed),
         )
         return InCallToolGate(
             call_sid=call_sid,

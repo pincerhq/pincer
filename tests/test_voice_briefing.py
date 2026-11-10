@@ -1158,3 +1158,48 @@ async def test_inbound_calls_are_answered_on_registration(voice):
     state = await voice.engine.on_call_start("CA_in2", "+4917612345", CallDirection.INBOUND, language="en")
     assert state.metadata.get("answered_at") is not None
     assert voice.channel.get_state_machine("CA_in2") is not None
+
+
+# ── Issue #252: the owner's per-call tool grants ─────────────────────
+
+
+async def test_allow_tools_rejects_ungrantable_names_before_dialling(voice):
+    result = await outbound.make_phone_call(
+        TARGET, TASK, context={"user_id": "u1"}, allow_tools=["google__create_event", "email_send", "srv__tool"]
+    )
+    assert result.startswith("Error") and "email_send" in result and "srv__tool" in result
+    assert "google__create_event" not in result
+    assert voice.placed == []
+
+
+async def test_allow_tools_ride_on_the_pending_state_and_the_tracking(voice):
+    from pincer.voice import tool_policy as tp
+
+    seen: list[dict[str, Any]] = []
+    original = voice.engine.register_pending_outbound
+
+    async def _spy(*args: Any, **kwargs: Any) -> Any:
+        state = await original(*args, **kwargs)
+        seen.append(dict(state.metadata))
+        return state
+
+    voice.engine.register_pending_outbound = _spy  # type: ignore[method-assign]
+    result = await outbound.make_phone_call(
+        TARGET,
+        TASK,
+        context={"user_id": "u1", "channel": "telegram", "pincer_user_id": "owner-1"},
+        allow_tools=["google__create_event", "google__update_event"],
+    )
+    assert "Call SID: CA_1" in result
+    grants = {"google__create_event", "google__update_event"}
+    assert seen[0][tp.META_OWNER_USER] == "u1"
+    assert seen[0][tp.META_OWNER_CHANNEL] == "telegram"
+    assert seen[0][tp.META_OWNER_GRANTS] == grants
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None and info.tool_grants == grants and info.pincer_user_id == "owner-1"
+
+
+async def test_no_allow_tools_means_no_grants(voice):
+    await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None and info.tool_grants == frozenset()

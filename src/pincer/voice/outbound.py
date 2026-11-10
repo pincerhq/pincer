@@ -280,6 +280,7 @@ async def make_phone_call(
     thread_kind: str = "",
     thread_subject: str = "",
     source: str = "",
+    allow_tools: list[str] | None = None,
 ) -> str:
     """Place a phone call to a number on behalf of the user.
 
@@ -294,6 +295,12 @@ async def make_phone_call(
         that pass a thread_id but no kind get `followup`
     thread_subject: Internal — title for the thread created when thread_id is empty
     source: Internal — which surface asked for the call (dashboard | chat | api | scheduler)
+    allow_tools: Extra in-call tools you grant for THIS call (e.g. ["google__create_event",
+        "google__update_event"] to book or move an event in the user's calendar, or
+        ["websearch__search"]). The call always has calendar reads, contact lookup, the user's memory,
+        and messages/notes to the user; grant writes only when the task needs them. Each write still
+        waits for the user's approval unless their approval policy allows it. Only call-safe tools
+        can be granted: anything else is rejected and the call is not placed.
 
     purpose and instructions are the agent's briefing for the call: purpose is
     the reason and goal the agent opens the call with, and it is REQUIRED.
@@ -336,6 +343,19 @@ async def make_phone_call(
     except BriefingError as e:
         logger.info("make_phone_call aborted: %s", e)
         return f"Error: {e}"
+
+    # Issue #252: the owner's per-call grants, validated against the in-call
+    # tier table before anything is dialled. A rejected name is an error the
+    # agent sees, never silently dropped (it would believe the call can do it).
+    from pincer.voice.tool_policy import validate_tool_grants
+
+    tool_grants, rejected_tools = validate_tool_grants(allow_tools or [])
+    if rejected_tools:
+        logger.info("make_phone_call aborted: tools not grantable on a call: %s", rejected_tools)
+        return (
+            f"Error: these tools cannot be used on a phone call: {', '.join(rejected_tools)}. "
+            "Grant only call-safe tools (calendar, web search), or leave allow_tools empty."
+        )
 
     thread_id = str(thread_id or "").strip()
     attach_kind = str(thread_kind or "").strip() or (KIND_FOLLOWUP if thread_id else KIND_ORIGIN)
@@ -425,8 +445,17 @@ async def make_phone_call(
         engine = _voice_engine()
         pre_state = None
         if engine is not None:
+            from pincer.voice.tool_policy import META_OWNER_CHANNEL, META_OWNER_GRANTS, META_OWNER_USER
+
+            owner_meta: dict[str, Any] = {}
+            if user_id and user_id != "unknown":
+                owner_meta = {
+                    META_OWNER_USER: user_id,
+                    META_OWNER_CHANNEL: str(ctx.get("channel", "") or ""),
+                    META_OWNER_GRANTS: tool_grants,
+                }
             pre_state = await engine.register_pending_outbound(
-                briefing, validated, language=call_language, instructions=briefing.instructions
+                briefing, validated, language=call_language, instructions=briefing.instructions, metadata=owner_meta
             )
 
         # Telephony telemetry starts BEFORE the dial: an outbound call that
@@ -584,6 +613,7 @@ async def make_phone_call(
             instructions=str(instructions or "").strip(),
             pincer_user_id=str(ctx.get("pincer_user_id") or ""),
             session_key=str(ctx.get("session_key") or ""),
+            tool_grants=tool_grants,
         )
         if finished:
             logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)

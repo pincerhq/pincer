@@ -421,6 +421,20 @@ async def _build_core(settings: Settings) -> CoreComponents:
                             ),
                             "default": "",
                         },
+                        "allow_tools": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Extra tools the call may use on the user's behalf, for THIS call only. "
+                                "Without it the call can read the calendar, look up contacts, search the "
+                                "user's memory and message/note things to the user. Grant calendar writes "
+                                "when the task needs them ('book the delivery slot in my calendar' → "
+                                '["google__create_event"]; moving an event → "google__update_event"), '
+                                'web search with "websearch__search". Writes still need the user\'s '
+                                "approval per their approval policy; other tools are rejected."
+                            ),
+                            "default": [],
+                        },
                     },
                     "required": ["target_number", "purpose"],
                 },

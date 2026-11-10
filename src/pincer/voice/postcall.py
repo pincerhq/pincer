@@ -94,6 +94,9 @@ class PostCallProcessor:
         info = status_notify.get_call_info(call_sid)
         language = (info.language if info and info.language else "") or state.language or "en"
         user_id = (info.user_id if info else "") or state.pincer_user_id or state.caller_number
+        # Memory is keyed by the canonical id the owner's chat recall searches
+        # under (#252), not the channel-native id the status push uses.
+        memory_user_id = (info.pincer_user_id if info else "") or user_id
         target_label = state.target_name or state.target_number or state.caller_number or "unknown"
 
         # Sprint 12: receptionist calls report to the OWNER with the §12 template
@@ -152,7 +155,7 @@ class PostCallProcessor:
         )
 
         if outcome is not None:
-            await self._write_memory_notes(call_sid, user_id, target_label, outcome)
+            await self._write_memory_notes(call_sid, memory_user_id, target_label, outcome)
 
         # Did the agent actually open the call with the task it was given?
         # A smoke detector, never a gate: it only logs and counts.
@@ -196,7 +199,7 @@ class PostCallProcessor:
         deferred = list(state.metadata.get("deferred_actions") or [])
         if deferred:
             report = f"{report}\n{self._render_deferred(deferred, language)}"
-            await self._write_deferred_followups(call_sid, user_id, target_label, deferred)
+            await self._write_deferred_followups(call_sid, memory_user_id, target_label, deferred)
 
         if not persisted:
             report = f"{report}\n{self._persist_failure_note(language)}"

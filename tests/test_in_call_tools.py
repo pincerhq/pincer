@@ -81,7 +81,11 @@ async def _start(
     direction=CallDirection.OUTBOUND,
     modes=None,
     tools=None,
+    owner=True,
+    grants=(),
 ):
+    """``owner=False`` places the outbound call with no tracked initiating
+    user, so it stays on the remote party's authority (#252)."""
     settings = settings or _settings()
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
@@ -94,7 +98,10 @@ async def _start(
         return "Entschuldigung, hier ist die korrigierte Antwort auf Deutsch für Sie."
 
     await channel.start(_blocking_handler)
-    status_notify.register_outbound_call(CALL, user_id="12345", channel="telegram", language=language)
+    if owner:
+        status_notify.register_outbound_call(
+            CALL, user_id="12345", channel="telegram", language=language, tool_grants=grants
+        )
     if appointment:
         scheduling.register_appointment(
             CALL,
@@ -464,7 +471,13 @@ async def test_generic_guest_call_has_no_calendar_writes_unless_allowed():
     status_notify._reset_for_tests()
     agent2 = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT)]])
     settings = _settings(voice_guests_tools_allowed="google__*, email_send")
-    channel2, engine2, state2 = await _start(agent2, settings=settings)
+    # #252: the guest list never widens a call the owner placed…
+    channel3, engine3, state3 = await _start(ToolAgent([]), settings=settings)
+    assert "google__create_event" not in state3.metadata["allowed_tools"]
+    await channel3.stop()
+    status_notify._reset_for_tests()
+    # …only a call on the remote party's authority.
+    channel2, engine2, state2 = await _start(agent2, settings=settings, owner=False)
     await engine2.on_speech_input(CALL, "Trag das ein.")
     # In scope now, but a guest's write waits for a spoken yes
     assert agent2.gate_results[0].decision.action == "need_verbal"
@@ -570,7 +583,7 @@ async def test_registered_caller_write_unknown_to_the_registry_is_confirmed(owne
             return ["google__list_events"]
 
     agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT)]])
-    channel, engine, state = await _start(agent, tools=_Partial())
+    channel, engine, state = await _start(agent, tools=_Partial(), owner=False)
     await engine.on_speech_input(CALL, "Trag das ein.")
     assert agent.gate_results[0].decision.action == "need_verbal"
     assert agent.executed == []
@@ -595,7 +608,7 @@ async def test_websearch_is_not_offered_to_a_guest_by_default():
 
 async def test_registered_owner_critical_write_needs_spoken_yes(owner_phone):
     agent = ToolAgent([[Tool("send_owner_message", {"text": "Bitte zurückrufen"}, result="sent")]])
-    channel, engine, state = await _start(agent, tools=_Registry())
+    channel, engine, state = await _start(agent, tools=_Registry(), owner=False)
     await engine.on_speech_input(CALL, "Schick mir eine Nachricht.")
     assert agent.gate_results[0].decision.action == "need_verbal"
     assert agent.executed == []
@@ -642,7 +655,7 @@ async def test_guest_confirms_once_and_the_write_runs_once():
         confirm_reply="Der Termin ist eingetragen.",
     )
     settings = _settings(voice_guests_tools_allowed="google__*")
-    channel, engine, state = await _start(agent, settings=settings, tools=_Registry())
+    channel, engine, state = await _start(agent, settings=settings, tools=_Registry(), owner=False)
     await engine.on_speech_input(CALL, "Trag Dienstag 14 Uhr ein.")
     verify_lines = [line for line in engine.spoken[CALL] if line.startswith("Zur Bestätigung")]
     assert len(verify_lines) == 1
@@ -812,7 +825,9 @@ async def test_websearch_on_the_guest_list_plays_the_filler_and_logs_r_auto():
             ]
         ]
     )
-    channel, engine, state = await _start(agent, settings=_settings(voice_guests_tools_allowed="websearch__search"))
+    channel, engine, state = await _start(
+        agent, settings=_settings(voice_guests_tools_allowed="websearch__search"), owner=False
+    )
     await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
 
     spoken = engine.spoken[CALL]
@@ -846,7 +861,7 @@ async def test_websearch_timeout_says_so_and_queues_no_follow_up():
     settings = _settings(voice_guests_tools_allowed="websearch__search")
     settings.voice_tool_timeout_s = 0.05  # type: ignore[assignment]
     agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT, delay_s=1.0)]])
-    channel, engine, state = await _start(agent, settings=settings)
+    channel, engine, state = await _start(agent, settings=settings, owner=False)
     await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
 
     assert agent.gate_results[0].deny_reason == "tool_timeout"
@@ -859,7 +874,7 @@ async def test_websearch_timeout_says_so_and_queues_no_follow_up():
 async def test_websearch_error_says_so_and_queues_no_follow_up():
     settings = _settings(voice_guests_tools_allowed="websearch__search")
     agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result="Error: provider down", is_error=True)]])
-    channel, engine, state = await _start(agent, settings=settings)
+    channel, engine, state = await _start(agent, settings=settings, owner=False)
     await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
 
     assert agent.gate_results[0].deny_reason == "tool_error"
@@ -888,7 +903,7 @@ async def test_a_repeated_call_is_logged_as_denied():
 
 
 async def test_inbound_call_excludes_memory_search():
-    agent = ToolAgent([[Tool("memory_search", {"query": "x"}, result="nothing")]])
+    agent = ToolAgent([[Tool("call_memory_search", {"query": "x"}, result="nothing")]])
     channel, engine, state = await _start(agent, direction=CallDirection.INBOUND)
     await engine.on_speech_input(CALL, "Was wissen Sie über mich?")
     assert agent.gate_results[0].deny_reason == "not_in_call_scope"
@@ -1169,3 +1184,188 @@ def test_a_deferred_draft_pins_the_calls_zone(tool, args, draft):
     from zoneinfo import ZoneInfo
 
     assert ict.draft_in_call_zone(tool, args, ZoneInfo("Europe/Berlin")) == draft
+
+
+# ── Issue #252: an outbound call acts on the owner's authority ───────
+
+
+async def test_owner_principal_only_on_tracked_outbound_generic_calls(owner_phone):
+    channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
+    assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_OWNER
+    await channel.stop()
+    for kwargs in (
+        {"owner": False},
+        {"appointment": True},
+        {"direction": CallDirection.INBOUND},
+    ):
+        status_notify._reset_for_tests()
+        scheduling._reset_for_tests()
+        channel, engine, state = await _start(ToolAgent([]), tools=_Registry(), **kwargs)
+        assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_REMOTE, kwargs
+        assert state.metadata[tp.META_OWNER_GRANTS] == frozenset()
+        await channel.stop()
+
+
+async def test_forged_principal_is_overwritten_at_call_start():
+    """Nothing set before the call starts survives: the principal is decided
+    from trusted tracking only."""
+    settings = _settings()
+    engine = FakeVoiceEngine(settings)
+    channel = VoiceChannel(settings)
+    channel.set_engine(engine)
+    channel.set_stream_agent(ToolAgent([]))
+    await channel.start(lambda incoming: None)
+    from pincer.voice.engine import CallState
+
+    state = CallState(call_sid="CA_forged", direction=CallDirection.INBOUND, caller_number="+4917000000")
+    state.metadata[tp.META_PRINCIPAL] = tp.PRINCIPAL_OWNER
+    state.metadata[tp.META_OWNER_USER] = "someone"
+    state.metadata[tp.META_OWNER_GRANTS] = frozenset({"google__create_event"})
+    channel._resolve_principal("CA_forged", state)
+    assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_REMOTE
+    assert state.metadata[tp.META_OWNER_GRANTS] == frozenset()
+    await channel.stop()
+
+
+async def test_pre_registered_owner_covers_a_setup_that_beats_tracking():
+    """make_phone_call records the owner on the pending state before the dial;
+    a call answered before it is tracked still acts for the owner."""
+    settings = _settings()
+    channel = VoiceChannel(settings)
+    from pincer.voice.engine import CallState
+
+    state = CallState(call_sid="CA_fast", direction=CallDirection.OUTBOUND, caller_number="+4930123456")
+    state.metadata[tp.META_OWNER_USER] = "12345"
+    state.metadata[tp.META_OWNER_CHANNEL] = "telegram"
+    state.metadata[tp.META_OWNER_GRANTS] = frozenset({"google__create_event"})
+    channel._resolve_principal("CA_fast", state)
+    assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_OWNER
+    assert state.metadata[tp.META_OWNER_GRANTS] == {"google__create_event"}
+    gate = channel._create_tool_gate("CA_fast", state, MagicMock())
+    assert gate.approval_target == ("12345", "telegram")
+    assert "google__create_event" in gate.allowed_tools
+
+
+async def test_owner_call_relays_message_and_note_without_asking_the_callee():
+    """The pizza case: the restaurant moves the delivery time. The note and the
+    owner message run at once — nobody asks the restaurant to confirm them."""
+    agent = ToolAgent(
+        [
+            [
+                Tool("memory_note", {"note": "Pizza kommt um 19:30 statt 19:00"}, result="Note stored."),
+                Tool(
+                    "send_owner_message",
+                    {"text": "Lieferung verschiebt sich auf 19:30."},
+                    result="Message delivered to the user.",
+                    then="Alles klar, danke.",
+                ),
+            ]
+        ]
+    )
+    channel, engine, state = await _start(agent, tools=_Registry())
+    assert state.metadata[tp.META_CALLER_CLASS] == "guest"
+    await engine.on_speech_input(CALL, "Wir schaffen es erst um halb acht.")
+    assert [name for name, _ in agent.executed] == ["memory_note", "send_owner_message"]
+    assert all(r.decision.action == "execute" for r in agent.gate_results)
+    assert not any(line.startswith("Zur Bestätigung") for line in engine.spoken[CALL])
+    modes = [a.approval_mode for a in channel.get_transcript(CALL).actions if a.action_type == "tool_execute"]
+    assert modes == ["policy", "policy"]
+    await channel.stop()
+
+
+async def test_owner_call_calendar_write_needs_a_grant():
+    agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT)]])
+    channel, engine, state = await _start(agent, tools=_Registry())
+    await engine.on_speech_input(CALL, "Trag die Lieferung ein.")
+    assert agent.gate_results[0].deny_reason == "not_in_call_scope"
+    assert agent.executed == []
+    await channel.stop()
+
+
+async def test_owner_granted_calendar_write_goes_to_the_owner_card(monkeypatch):
+    monkeypatch.setattr(ict, "HOLD_REASSURE_INTERVAL_S", 0.05)
+    cards = _Cards()
+    approvals.set_presenter(cards.presenter)
+    approvals.set_finalizer(cards.finalizer)
+
+    class _AllWrites(_Registry):
+        def requires_approval(self, name: str) -> bool:
+            return name == "google__create_event"
+
+    agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT, then="Eingetragen.")]])
+    channel, engine, state = await _start(
+        agent, settings=_user_mode_settings(), tools=_AllWrites(), grants={"google__create_event"}
+    )
+
+    async def _approve_later():
+        while not cards.requests:
+            await asyncio.sleep(0.01)
+        assert approvals.resolve(cards.requests[0].approval_id, True, by_user_id="12345")
+
+    approver = asyncio.create_task(_approve_later())
+    await engine.on_speech_input(CALL, "Die Lieferung kommt Dienstag um 14 Uhr.")
+    await approver
+    req = cards.requests[0]
+    assert (req.user_id, req.channel) == ("12345", "telegram")  # the owner, never the callee
+    assert [name for name, _ in agent.executed] == ["google__create_event"]
+    assert not any(line.startswith("Zur Bestätigung") for line in engine.spoken[CALL])
+    action = [a for a in channel.get_transcript(CALL).actions if a.action_type == "tool_execute"][-1]
+    assert action.approval_mode == "user" and action.user_confirmed is True
+    await channel.stop()
+
+
+async def test_owner_card_timeout_defers_and_never_falls_back_to_the_callee(monkeypatch):
+    monkeypatch.setattr(ict, "HOLD_REASSURE_INTERVAL_S", 0.05)
+    cards = _Cards()
+    approvals.set_presenter(cards.presenter)
+    approvals.set_finalizer(cards.finalizer)
+    settings = _user_mode_settings()
+    settings.voice_approval_timeout_s = 0.2  # type: ignore[assignment]
+
+    class _Strict(_Registry):
+        def requires_approval(self, name: str) -> bool:
+            return True
+
+    agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT)]])
+    channel, engine, state = await _start(agent, settings=settings, tools=_Strict(), grants={"google__create_event"})
+    await engine.on_speech_input(CALL, "Dienstag 14 Uhr.")
+    assert agent.executed == []
+    assert engine.spoken[CALL][-1] == de_pack.TOOL_TIMEOUT_DEFER
+    assert not any(line.startswith("Zur Bestätigung") for line in engine.spoken[CALL])
+    deferred = state.metadata["deferred_actions"]
+    assert deferred[0]["tool"] == "google__create_event" and deferred[0]["reason"] == "approval_timeout"
+    await channel.stop()
+
+
+async def test_owner_card_without_presenter_defers():
+    settings = _user_mode_settings()
+    settings.voice_approval_timeout_s = 0.2  # type: ignore[assignment]
+
+    class _Strict(_Registry):
+        def requires_approval(self, name: str) -> bool:
+            return True
+
+    agent = ToolAgent([[Tool("memory_note", {"note": "x"}, result="Note stored.")]])
+    channel, engine, state = await _start(agent, settings=settings, tools=_Strict())
+    await engine.on_speech_input(CALL, "Merken Sie sich das.")
+    assert agent.executed == []
+    assert agent.gate_results[0].decision.action == "need_user_approval"
+    assert state.metadata["deferred_actions"][0]["tool"] == "memory_note"
+    await channel.stop()
+
+
+async def test_owner_write_budget_still_applies():
+    settings = _settings(voice_max_writes_per_call=1)
+    agent = ToolAgent(
+        [
+            [
+                Tool("send_owner_message", {"text": "eins"}, result="Message delivered to the user."),
+                Tool("send_owner_message", {"text": "zwei"}, result="Message delivered to the user."),
+            ]
+        ]
+    )
+    channel, engine, state = await _start(agent, settings=settings, tools=_Registry())
+    await engine.on_speech_input(CALL, "Sagen Sie ihm Bescheid.")
+    assert len(agent.executed) == 1
+    assert agent.gate_results[1].deny_reason == "write_budget_exhausted"
+    await channel.stop()

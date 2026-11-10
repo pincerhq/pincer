@@ -872,8 +872,12 @@ class VoiceEngine(ABC):
         target_number: str,
         language: str = "",
         instructions: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> CallState:
         """Register a briefed outbound call before it is dialled.
+
+        ``metadata`` is trusted, dial-time call metadata (issue #252: the
+        initiating owner and the tool grants they gave this call).
 
         Returns a CallState under a temporary ``pending:<uuid>`` key. It is NOT
         in `_active_calls` and the on_call_start callback has NOT fired: the
@@ -897,6 +901,8 @@ class VoiceEngine(ABC):
             language=resolve_call_language(self._settings, language),
             engine_type=self.engine_name,
         )
+        if metadata:
+            state.metadata.update(metadata)
         state.metadata["briefing"] = briefing
         self._pending_outbound[pending_sid] = state
         logger.info("Outbound call pre-registered %s -> %s", pending_sid, target_number)
