@@ -4,14 +4,13 @@ Tests for Gmail tools — one test per tool (19 tools).
 
 from __future__ import annotations
 
-import base64
 import email
 import email.policy
 
 import pytest
 
 from pincer.integrations.google.tools_gmail import (
-    _build_raw,
+    _build_mime,
     _extract_attachments,
     google__add_label,
     google__create_draft,
@@ -491,14 +490,16 @@ async def test_fallback_guard_pattern_matching():
 @pytest.fixture
 def downloads(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("pincer.tools.attachments._configured_data_dir", lambda: None)
     d = tmp_path / ".pincer" / "downloads"
     d.mkdir(parents=True)
     (d / "report.pdf").write_bytes(b"%PDF-1.4 report")
     return d
 
 
-def _parse_raw(raw: str) -> email.message.EmailMessage:
-    return email.message_from_bytes(base64.urlsafe_b64decode(raw), policy=email.policy.default)
+def _parse(*args, **kwargs) -> email.message.EmailMessage:
+    """Build with _build_mime and re-parse the bytes, as a recipient would see them."""
+    return email.message_from_bytes(_build_mime(*args, **kwargs).as_bytes(), policy=email.policy.default)
 
 
 def _sent_call(mock_method):
@@ -514,19 +515,19 @@ def _uploaded(call) -> email.message.EmailMessage:
     return email.message_from_bytes(media.getbytes(0, media.size()), policy=email.policy.default)
 
 
-def test_build_raw_without_attachments_unchanged():
-    msg = _parse_raw(_build_raw("bob@example.com", "Hi", "Body"))
+def test_build_mime_without_attachments_unchanged():
+    msg = _parse("bob@example.com", "Hi", "Body")
     assert msg.get_content_type() == "text/plain"
     assert msg["to"] == "bob@example.com"
-    html = _parse_raw(_build_raw("bob@example.com", "Hi", "<b>x</b>", body_type="html"))
+    html = _parse("bob@example.com", "Hi", "<b>x</b>", body_type="html")
     assert html.get_content_type() == "multipart/alternative"
 
 
-def test_build_raw_with_attachments(downloads):
+def test_build_mime_with_attachments(downloads):
     from pincer.tools.attachments import load_attachments
 
     files = load_attachments(["report.pdf"])
-    msg = _parse_raw(_build_raw("bob@example.com", "Hi", "Body", attachments=files, in_reply_to="<m@x>"))
+    msg = _parse("bob@example.com", "Hi", "Body", attachments=files, in_reply_to="<m@x>")
     assert msg.get_content_type() == "multipart/mixed"
     assert msg["In-Reply-To"] == "<m@x>"
     parts = list(msg.iter_parts())
@@ -537,16 +538,26 @@ def test_build_raw_with_attachments(downloads):
     assert parts[1].get_content() == b"%PDF-1.4 report"
 
 
-def test_build_raw_html_with_attachments(downloads):
+def test_build_mime_html_with_attachments(downloads):
     from pincer.tools.attachments import load_attachments
 
-    msg = _parse_raw(
-        _build_raw("b@x.com", "Hi", "<b>x</b>", body_type="html", attachments=load_attachments("report.pdf"))
-    )
+    msg = _parse("b@x.com", "Hi", "<b>x</b>", body_type="html", attachments=load_attachments("report.pdf"))
     parts = list(msg.iter_parts())
     assert msg.get_content_type() == "multipart/mixed"
     assert parts[0].get_content_type() == "multipart/alternative"
     assert parts[1].get_filename() == "report.pdf"
+
+
+def test_build_mime_embeds_eml_without_base64(downloads):
+    from pincer.tools.attachments import load_attachments
+
+    (downloads / "fwd.eml").write_bytes(b"Subject: inner\r\nFrom: x@y.z\r\n\r\ninner body\r\n")
+    msg = _parse("b@x.com", "Fwd", "see below", attachments=load_attachments("fwd.eml"))
+    part = list(msg.iter_parts())[1]
+    assert part.get_content_type() == "message/rfc822"
+    assert part.get_filename() == "fwd.eml"
+    assert part["Content-Transfer-Encoding"] in (None, "7bit", "8bit")
+    assert part.get_content()["subject"] == "inner"
 
 
 async def test_send_message_with_attachment_uses_media_upload(mock_factory, mock_gmail_service, downloads):

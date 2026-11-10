@@ -134,7 +134,7 @@ class PincerToolExporter:
         async def _call(kwargs: dict[str, Any]) -> str:
             if needs_approval and approval_cb:
                 try:
-                    approved = await approval_cb(pincer_name, approval_display_args(kwargs))
+                    approved = await approval_cb(pincer_name, approval_display_args(pincer_name, kwargs))
                 except Exception:
                     logger.exception("Approval callback raised for '%s'", pincer_name)
                     approved = False

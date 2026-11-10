@@ -158,6 +158,7 @@ def _smtp_settings():
 @pytest.fixture
 def pincer_downloads(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("pincer.tools.attachments._configured_data_dir", lambda: None)
     downloads = tmp_path / ".pincer" / "downloads"
     downloads.mkdir(parents=True)
     return downloads
@@ -184,6 +185,24 @@ class TestEmailSendAttachments:
         assert parts[0].get_content_type() == "application/pdf"
         assert parts[0].get_content() == b"%PDF-1.4 test"
         assert message.get_body(("plain",)).get_content().strip() == "See attached"
+
+    async def test_eml_embedded_as_message(self, pincer_downloads):
+        (pincer_downloads / "fwd.eml").write_bytes(b"Subject: inner\r\nFrom: x@y.z\r\n\r\ninner body\r\n")
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            result = await email_send("user@example.com", "Fwd", "see below", attachments=["fwd.eml"])
+
+        assert "fwd.eml" in result
+        message = mock_send.call_args.args[0]
+        [part] = list(message.iter_attachments())
+        assert part.get_content_type() == "message/rfc822"
+        assert part.get_filename() == "fwd.eml"
+        assert part["Content-Transfer-Encoding"] in (None, "7bit", "8bit")
+        assert part.get_content()["subject"] == "inner"
 
     async def test_disallowed_path_rejected(self, pincer_downloads):
         with (

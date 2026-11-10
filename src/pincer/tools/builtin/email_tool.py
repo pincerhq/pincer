@@ -19,7 +19,7 @@ from email.message import EmailMessage
 from typing import Any
 
 from pincer.config import get_settings
-from pincer.tools.attachments import AttachmentError, attachment_names, load_attachments
+from pincer.tools.attachments import AttachmentError, attachment_names, load_attachments_async
 from pincer.utils.csv_list import split_csv
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,7 @@ async def email_send(
 ) -> str:
     """Send an email via SMTP, optionally with file attachments. Returns a status message."""
     try:
-        files = load_attachments(attachments)
+        files = await load_attachments_async(attachments)
     except AttachmentError as e:
         return f"Email NOT sent: {e}"
 
@@ -256,7 +256,12 @@ async def email_send(
             message["Cc"] = cc
         message.set_content(body)
         for f in files:
-            message.add_attachment(f.data, maintype=f.maintype, subtype=f.subtype, filename=f.filename)
+            if (f.maintype, f.subtype) == ("message", "rfc822"):
+                # RFC 2046 forbids base64 for message/rfc822, so embed the parsed message.
+                embedded = email.message_from_bytes(f.data, policy=email.policy.default)
+                message.add_attachment(embedded, filename=f.filename)
+            else:
+                message.add_attachment(f.data, maintype=f.maintype, subtype=f.subtype, filename=f.filename)
 
         await aiosmtplib.send(
             message,
