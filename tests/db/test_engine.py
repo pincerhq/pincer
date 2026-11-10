@@ -438,7 +438,8 @@ async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monk
                     refresh=False,
                 )
             async with session_scope(runtime_url) as session:
-                assert await CostLogRepository(session).totals() == (0.5, 1, 1, 2)
+                # spend, calls, input, output, cache read, 5-minute and 1-hour cache writes
+                assert await CostLogRepository(session).totals() == (0.5, 1, 1, 2, 0, 0, 0)
                 assert (await session.exec(sa.text("SELECT current_schema()"))).scalar() == (schema or "public")
         finally:
             await dispose_engines()
