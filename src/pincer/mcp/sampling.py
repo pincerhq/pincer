@@ -31,6 +31,7 @@ from pincer.exceptions import BudgetCheckFailedError, DailyBudgetReachedError
 from pincer.llm.base import LLMMessage, MessageRole
 
 if TYPE_CHECKING:
+    from pincer.config.pricing import PriceTable
     from pincer.llm.cost_tracker import MeteredLLM
 
 logger = logging.getLogger("pincer.mcp.sampling")
@@ -105,14 +106,19 @@ class StandaloneLLMBackend(LLMBackend):
     and is recorded in the cost log after (`MeteredLLM`, issue #357); like the agent's
     other internal calls it pins its own effort and thinking, not the operator's.
 
+    Only priced models are sent: a model the caller asks for that has no `[pricing]`
+    entry would be billed but never counted, so the configured model is sent instead.
+
     Args:
         llm:           The metered Anthropic provider.
-        default_model: Model to use when caller doesn't specify one.
+        default_model: Model to use when caller doesn't specify one, or asks for an unpriced one.
+        prices:        The price table the cost log prices with.
     """
 
-    def __init__(self, llm: MeteredLLM, default_model: str = DEFAULT_SAMPLING_MODEL) -> None:
+    def __init__(self, llm: MeteredLLM, default_model: str, prices: PriceTable) -> None:
         self._llm = llm
         self._default_model = default_model
+        self._prices = prices
 
     async def complete(
         self,
@@ -120,9 +126,15 @@ class StandaloneLLMBackend(LLMBackend):
         model: str | None = None,
         max_tokens: int = 1024,
     ) -> str:
+        sent = model or self._default_model
+        if sent not in self._prices:
+            logger.info(
+                "MCP sampling: no [pricing] entry for the requested model %r; using %r", sent, self._default_model
+            )
+            sent = self._default_model
         response = await self._llm.complete(
             _to_llm_messages(messages),
-            model=model or self._default_model,
+            model=sent,
             max_tokens=max_tokens,
             reasoning_effort=STRUCTURED_CALL_EFFORT,
             thinking=STRUCTURED_CALL_THINKING,

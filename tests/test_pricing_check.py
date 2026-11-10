@@ -496,3 +496,39 @@ def test_several_conflicts_are_listed_once_each_with_one_explanation(tmp_path: P
         "    Fix: use gpt-6.1-terra, gpt-6-sol, gpt-6-luna or a gpt-5 model for voice; gpt-6.1-sol is fine as the "
         "summary model.\n" + _GPT6_FOOTER
     )
+
+
+# ── the MCP sampling model (PR #366 review) ──────────────────────────────────
+
+_SAMPLING_ON = '[mcp.server]\nenabled = true\n[mcp.server.sampling]\nenabled = true\nmodel = "claude-s"\n'
+
+
+def _with_sampling(config: Path, toml: str = _SAMPLING_ON) -> Path:
+    with (config / "pincer.toml").open("a", encoding="utf-8") as f:
+        f.write(toml)
+    return config
+
+
+def test_an_unpriced_sampling_model_is_named(tmp_path: Path) -> None:
+    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
+        "No price for 1 model Pincer will call:\n  - claude-s: sampling on anthropic"
+    )
+
+
+def test_a_priced_sampling_model_passes(tmp_path: Path) -> None:
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a", "claude-s"))) is None
+
+
+def test_a_sampling_model_is_not_checked_while_sampling_or_the_mcp_server_is_off(tmp_path: Path) -> None:
+    """Only the standalone MCP server samples, so both switches must be on."""
+    sampling_off = _SAMPLING_ON.replace("sampling]\nenabled = true", "sampling]\nenabled = false")
+    server_off = _SAMPLING_ON.replace("[mcp.server]\nenabled = true", "[mcp.server]\nenabled = false")
+    for name, toml in (("sampling-off", sampling_off), ("server-off", server_off)):
+        (tmp_path / name).mkdir()
+        assert toml != _SAMPLING_ON
+        assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path / name, "claude-a"), toml)) is None, name
+
+
+def test_a_sampling_model_is_not_checked_without_an_anthropic_key(tmp_path: Path) -> None:
+    settings = _settings(anthropic_api_key="", openai_api_key="sk-test", default_provider="openai", openai_model="m")
+    assert pricing_problems(settings, _with_sampling(_priced(tmp_path, "claude-a", "m"))) is None

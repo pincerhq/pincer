@@ -195,7 +195,8 @@ class StandaloneMCPShell:
             return None
         # The same daily budget and cost log as the agent (issue #357)
         try:
-            costs = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
+            prices = load_price_table()
+            costs = CostTracker(settings.db_path, settings.daily_budget_usd, prices)
             await costs.initialize()
         except Exception:
             # Not retried per request: the server keeps its tools, and sampling fails closed
@@ -205,10 +206,15 @@ class StandaloneMCPShell:
             )
             await provider.close()
             return MeteringUnavailableBackend()
-        return StandaloneLLMBackend(
-            MeteredLLM(provider, costs, SAMPLING_PROVIDER),
-            default_model=getattr(sampling_cfg, "model", DEFAULT_SAMPLING_MODEL),
-        )
+        model = getattr(sampling_cfg, "model", DEFAULT_SAMPLING_MODEL)
+        if model not in prices:
+            logger.error(
+                "MCP sampling: no [pricing] entry for the sampling model %r; every sampling request will be refused",
+                model,
+            )
+            await provider.close()
+            return MeteringUnavailableBackend()
+        return StandaloneLLMBackend(MeteredLLM(provider, costs, SAMPLING_PROVIDER), default_model=model, prices=prices)
 
     def _register_standalone_tools(self) -> None:
         """Register built-in Pincer tools that are safe without a full agent."""

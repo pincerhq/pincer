@@ -353,6 +353,51 @@ async def test_when_the_budget_cannot_be_read_a_sampling_request_is_refused(
     assert anthropic_api.requests == []
 
 
+async def test_a_client_asking_for_an_unpriced_model_gets_the_configured_one(
+    tmp_path, anthropic_api, use_settings, caplog
+):  # type: ignore[no-untyped-def]
+    """An unpriced call would be billed but never counted against the daily budget."""
+    import logging
+
+    settings = use_settings(_settings(tmp_path))
+
+    with caplog.at_level(logging.INFO, logger="pincer.mcp.sampling"):
+        reply = await _sample(_shell("test-fixture-model"), model="claude-unpriced")
+
+    assert reply == "sampled"
+    assert [r["model"] for r in anthropic_api.requests] == ["test-fixture-model"]
+    assert [model for model, _ in await _stored(settings)] == ["test-fixture-model"]
+    assert (
+        "MCP sampling: no [pricing] entry for the requested model 'claude-unpriced'; using 'test-fixture-model'"
+        in caplog.messages
+    )
+
+
+async def test_a_client_asking_for_a_priced_model_gets_it(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    settings = use_settings(_settings(tmp_path))
+
+    reply = await _sample(_shell("test-fixture-model"), model="claude-opus-4-7")
+
+    assert reply == "sampled"
+    assert [r["model"] for r in anthropic_api.requests] == ["claude-opus-4-7"]
+    assert [model for model, _ in await _stored(settings)] == ["claude-opus-4-7"]
+
+
+async def test_with_an_unpriced_configured_model_every_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, caplog
+):  # type: ignore[no-untyped-def]
+    use_settings(_settings(tmp_path))
+
+    replies = await _sample_twice(_shell("claude-unpriced"))
+
+    assert replies == [_UNCHECKED, _UNCHECKED]
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == [
+        "MCP sampling: no [pricing] entry for the sampling model 'claude-unpriced'; "
+        "every sampling request will be refused"
+    ]
+
+
 def test_sampling_defaults_to_a_shipped_model() -> None:
     """The retired claude-sonnet-4 default had no price, so its spend could never be recorded."""
     from pincer.config.pricing import load_price_table
