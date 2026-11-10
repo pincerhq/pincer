@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -398,3 +399,55 @@ async def test_a_memory_free_turn_sends_the_time_only_after_the_history_summary(
             ],
         }
     ]
+
+
+class _OverlapMemory:
+    """A memory store whose search and profile read each wait (up to 1 s) for the other to start,
+    and record whether it did: both True only when the two run concurrently."""
+
+    def __init__(self) -> None:
+        self.search_started = asyncio.Event()
+        self.language_started = asyncio.Event()
+        self.overlap = {"search": False, "language": False}
+
+    @staticmethod
+    async def _saw(event: asyncio.Event) -> bool:
+        try:
+            await asyncio.wait_for(event.wait(), timeout=1.0)
+        except TimeoutError:
+            return False
+        return True
+
+    async def search_text(self, query: str, **_: Any) -> list[SimpleNamespace]:
+        self.search_started.set()
+        self.overlap["search"] = await self._saw(self.language_started)
+        return [SimpleNamespace(content="likes green tea")]
+
+    async def list_memories(self, **kwargs: Any) -> list[SimpleNamespace]:
+        if kwargs.get("category") != "profile":
+            return []
+        self.language_started.set()
+        self.overlap["language"] = await self._saw(self.search_started)
+        return [SimpleNamespace(id="p1", content="Preferred language: uk.")]
+
+    async def store_memory(self, **_: Any) -> None:
+        return None
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["chat", "web-chat"])
+async def test_the_memory_search_and_the_language_read_run_concurrently(
+    settings, session_manager, cost_tracker, clock, streaming
+):
+    await _onboarded(session_manager)
+    memory = _OverlapMemory()
+    async with ScriptedAnthropic(settings, [([text("Reply")], "end_turn")]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, ToolRegistry(), memory_store=memory)
+        if streaming:
+            [c async for c in agent.handle_message_stream("user1", "test", "turn 1")]
+        else:
+            await agent.handle_message("user1", "test", "turn 1")
+
+    assert memory.overlap == {"search": True, "language": True}
+    request = llm.requests[0]
+    assert "[User preferred language: uk]" in json.dumps(request["system"])
+    assert request["messages"][-1]["content"][0]["text"].startswith(f"{MEMORY_BLOCK_HEADER}\n- likes green tea\n\n")

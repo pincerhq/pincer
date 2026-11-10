@@ -2101,6 +2101,45 @@ async def test_loading_a_skill_reselects_tools_mid_turn(settings, mock_llm, sess
     assert "google__" in second.kwargs["system"]
 
 
+async def test_a_reselect_rebuild_reads_the_language_again(settings, mock_llm, session_manager, cost_tracker):
+    """The turn's first prompt takes the language read alongside the memory search; a prompt
+    rebuilt after a skill loads reads it again, so a language changed mid-turn is sent."""
+    skill = "Budget skill: find the sheet with google__search_drive_files"
+    stored = ["de"]
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+
+    async def list_memories(**kwargs: Any) -> list[SimpleNamespace]:
+        if kwargs.get("category") != "profile":
+            return []
+        language = stored[0]
+        stored[0] = "uk"  # set_preferred_language ran during the turn
+        return [SimpleNamespace(id="p1", content=f"Preferred language: {language}.")]
+
+    memory.list_memories.side_effect = list_memories
+    for streaming in (False, True):
+        stored[0] = "de"
+        mock_llm.complete.reset_mock()
+        mock_llm.complete.side_effect = _load_skill_then_answer()
+        agent = Agent(
+            settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry(skill), memory_store=memory
+        )
+        agent.tool_selector = _RecordingSelector(
+            settings, {"whoami", "load_skill"}, {"load_skill", "google__search_drive_files"}
+        )
+        user = f"user-{streaming}"
+        if streaming:
+            mock_llm.stream_turn = _steps_from(mock_llm.complete)
+            async for _chunk in agent.handle_message_stream(user_id=user, channel="test", text="Budget?"):
+                pass
+        else:
+            await agent.handle_message(user, "test", "Budget?")
+
+        first, second = mock_llm.complete.call_args_list
+        assert "[User preferred language: de]" in first.kwargs["system"], streaming
+        assert "[User preferred language: uk]" in second.kwargs["system"], streaming
+
+
 def _load_skill_then_answer() -> list[LLMResponse]:
     return [
         LLMResponse(
