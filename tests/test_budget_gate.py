@@ -116,9 +116,31 @@ async def test_a_turn_with_spend_at_the_budget_makes_no_llm_call(  # type: ignor
     reply = await agent.handle_message("user", "chat", "hi", memory=False)
 
     assert llm.complete.await_count == 0
-    assert reply.text == _budget_text(_CALL_COST)
+    assert (reply.text, reply.budget_reached) == (_budget_text(_CALL_COST), True)
     assert reply.cost_usd == 0
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)]
+    session = await session_manager.get_or_create("user", "chat")
+    assert [(m.role.value, m.content) for m in session.messages] == [("user", "hi")]  # the warning is not saved
+
+
+async def test_a_refused_turn_stores_no_exchange_memory(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    from pincer.memory.store import MemoryStore
+
+    settings, tracker = await budgeted(_CALL_COST)
+    await _seed(tmp_path, _CALL)
+    memory = MemoryStore(tmp_path / "mem.db")
+    await memory.initialize()
+    agent = Agent(settings, _scripted_llm(_response()), session_manager, tracker, tool_registry, memory_store=memory)
+    try:
+        reply = await agent.handle_message("user", "chat", "hi")
+        stored = await memory.list_memories(user_id="user", category="exchange")
+    finally:
+        await memory.close()
+
+    assert reply.budget_reached  # precondition: refused
+    assert stored == []
 
 
 async def test_the_call_that_crosses_the_budget_is_recorded_and_the_next_turn_is_refused(  # type: ignore[no-untyped-def]
@@ -158,7 +180,7 @@ async def test_a_tool_loop_that_crosses_the_budget_stops_before_its_next_llm_cal
     calls = [tc.id for m in session.messages for tc in m.tool_calls]
     results = [m.tool_call_id for m in session.messages if m.tool_call_id]
     assert calls == results == ["tc1", "tc2"]
-    assert session.messages[-1].content == _budget_text(0.01)
+    assert session.messages[-1].tool_call_id == "tc2"  # the turn ends on its last tool result, no warning saved
 
 
 async def test_a_budget_of_zero_never_refuses(  # type: ignore[no-untyped-def]
@@ -232,6 +254,51 @@ async def _web_chat(agent: Agent, text: str = "hi") -> list[tuple[str, dict[str,
     return events
 
 
+async def _post_message(agent: Agent, text: str = "hi") -> httpx.Response:
+    """One turn through the real `/api/chat/message` endpoint."""
+    from pincer.api.chat import chat_user
+    from pincer.api.server import create_app
+
+    app = create_app()
+    app.state.agent = agent
+    app.dependency_overrides[chat_user] = lambda: "user"
+    body = {"text": text, "conversation_id": str(uuid.uuid4()), "memory": False}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post("/api/chat/message", json=body)
+
+
+async def test_a_chat_message_over_the_budget_is_a_402_with_the_budget_text(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """Clients key on the status (PR #366 review): a refusal is not a reply."""
+    settings, tracker = await budgeted(_CALL_COST)
+    await _seed(tmp_path, _CALL)
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    response = await _post_message(agent)
+
+    assert (response.status_code, response.json()) == (402, {"detail": _budget_text(_CALL_COST)})
+    assert llm.complete.await_count == 0
+
+
+async def test_a_chat_message_that_placed_a_call_before_the_budget_stop_answers_200() -> None:
+    """The ringing call must reach the client, which then waits for its report."""
+    from unittest.mock import MagicMock
+
+    from pincer.core.agent import AgentResponse
+
+    agent = MagicMock()
+    agent.handle_message = AsyncMock(
+        return_value=AgentResponse(text=_budget_text(0.01), call_sids=["CA9"], budget_reached=True)
+    )
+
+    response = await _post_message(agent)
+
+    assert response.status_code == 200
+    assert (response.json()["reply"], response.json()["call_sids"]) == (_budget_text(0.01), ["CA9"])
+
+
 async def test_a_web_chat_turn_with_spend_at_the_budget_makes_no_llm_call(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
@@ -242,12 +309,11 @@ async def test_a_web_chat_turn_with_spend_at_the_budget_makes_no_llm_call(  # ty
 
     events = await _web_chat(agent)
 
-    assert events == [
-        ("chunk", {"delta": _budget_text(_CALL_COST)}),
-        ("done", {"text": _budget_text(_CALL_COST), "cost_usd": 0.0}),
-    ]
+    assert events == [("error", {"message": _budget_text(_CALL_COST), "cost_usd": 0.0})]
     assert (llm.complete.await_count, len(llm.streams)) == (0, 0)
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)]
+    session = await session_manager.get_or_create("user", "web")
+    assert [m.role.value for m in session.messages if m.role.value == "assistant"] == []
 
 
 async def _streamed_turn(agent: Agent, text: str = "hi") -> list[Any]:
@@ -295,14 +361,15 @@ async def test_a_streamed_tool_loop_that_crosses_the_budget_stops_before_its_nex
     chunks = await _streamed_turn(agent, "greet Ann twice")
 
     assert (llm.complete.await_count, len(llm.streams)) == (0, 2)
-    assert [c.content for c in chunks if c.type.value == "text"] == [_budget_text(0.01)]
+    assert [c.content for c in chunks if c.type.value == "text"] == []  # the warning is no streamed text
     assert (chunks[-1].content, chunks[-1].cost_usd) == (_budget_text(0.01), pytest.approx(0.014))
+    assert chunks[-1].budget_reached
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
     session = await session_manager.get_or_create("user", "web")
     calls = [tc.id for m in session.messages for tc in m.tool_calls]
     results = [m.tool_call_id for m in session.messages if m.tool_call_id]
     assert calls == results == ["tc1", "tc2"]
-    assert session.messages[-1].content == _budget_text(0.01)
+    assert session.messages[-1].tool_call_id == "tc2"  # no warning saved
 
 
 async def test_the_reply_step_after_a_tool_round_is_refused_at_the_budget(  # type: ignore[no-untyped-def]
@@ -318,10 +385,11 @@ async def test_the_reply_step_after_a_tool_round_is_refused_at_the_budget(  # ty
 
     assert (llm.complete.await_count, len(llm.streams)) == (0, 1)
     assert (chunks[-1].content, chunks[-1].cost_usd) == (_budget_text(0.014), pytest.approx(_CALL_COST))
+    assert chunks[-1].budget_reached
     assert await _stored_costs(tmp_path) == [pytest.approx(_CALL_COST)] * 2
     session = await session_manager.get_or_create("user", "web")
     assert [m.tool_call_id for m in session.messages if m.tool_call_id] == ["tc1"]
-    assert session.messages[-1].content == _budget_text(0.014)
+    assert session.messages[-1].tool_call_id == "tc1"  # no warning saved
 
 
 async def test_the_web_chat_done_event_carries_the_cost_of_the_turn_s_recorded_requests(  # type: ignore[no-untyped-def]

@@ -163,6 +163,10 @@ async def post_message(
         )
     except LLMError as e:
         raise HTTPException(502, str(e)) from e
+    if resp.budget_reached and not resp.call_sids:
+        # A refusal, not a reply. A turn that placed a call still answers 200,
+        # so the client keeps waiting for that call's report.
+        raise HTTPException(402, resp.text)
     return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model, "call_sids": resp.call_sids}
 
 
@@ -206,7 +210,11 @@ async def post_stream(
                                 done["call_sid"] = chunk.call_sid
                             await queue.put(("tool", done))
                         elif chunk.type == StreamEventType.DONE:
-                            await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))
+                            if chunk.budget_reached:
+                                # A refusal, not a reply: clients key on the error event
+                                await queue.put(("error", {"message": chunk.content, "cost_usd": chunk.cost_usd}))
+                            else:
+                                await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))
             except LLMError as e:
                 await queue.put(("error", {"message": f"LLM error: {e}"}))
             except Exception as e:  # noqa: BLE001

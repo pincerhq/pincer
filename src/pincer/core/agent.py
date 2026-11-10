@@ -323,6 +323,7 @@ class StreamChunk:
     content: str
     call_sid: str = ""
     cost_usd: float = 0.0  # on DONE: the sum of the turn's recorded LLM costs
+    budget_reached: bool = False  # on DONE: the budget refused a request; `content` is the budget message
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +391,8 @@ class AgentResponse:
     model: str = ""
     # Calls this turn placed, each of which reports back later.
     call_sids: list[str] = field(default_factory=list)
+    # The budget refused a request: `text` is the budget message, not a reply, and is not saved.
+    budget_reached: bool = False
 
 
 def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
@@ -930,6 +933,7 @@ class Agent:
         tool_calls_count = 0
         call_sids: list[str] = []
         final_text = ""
+        budget_stop = False
         last_response: LLMResponse | None = None
         consecutive_errors = 0
         sanitize_attempts = 0
@@ -941,6 +945,7 @@ class Agent:
             # crossed the limit was recorded, the next one is never made.
             if await self._costs.budget_reached():
                 final_text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+                budget_stop = True
                 break
 
             # Proactive sanitization: fix orphaned pairs before they reach the API
@@ -1094,14 +1099,18 @@ class Agent:
             )
 
         # ── Save the reply, with the warm question on a fresh session ──────
-        final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
+        # A budget refusal is no reply: it is neither saved, remembered, nor asked after (PR #366 review)
+        reply = ""
+        if not budget_stop:
+            final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
+            reply = final_text
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
         # Store the final exchange as a memory for future retrieval
-        if self._memory and memory and final_text:
+        if self._memory and memory and reply:
             try:
                 tag_channel = channel_name or channel
                 extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
@@ -1124,6 +1133,7 @@ class Agent:
             tool_calls_made=tool_calls_count,
             model=last_response.model if last_response else "",
             call_sids=call_sids,
+            budget_reached=budget_stop,
         )
 
     async def run_headless(
@@ -1392,16 +1402,13 @@ class Agent:
         reply = ""  # the reply: saved as the turn's final assistant message
         step_text = ""  # what the current step streamed
         ending: str | None = None  # no request answers the turn's last tools
+        budget_stop = False
         try:
             # One streamed request per step, each with the turn's tools and system prompt
             for _iteration in range(self._settings.max_tool_iterations):
                 # Checked before every request, as on the non-stream path
                 if await self._costs.budget_reached():
-                    reply = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
-                    if separator := _step_separator(full_text):
-                        yield StreamChunk(StreamEventType.TEXT, separator)
-                    full_text += separator + reply
-                    yield StreamChunk(StreamEventType.TEXT, reply)
+                    budget_stop = True
                     break
 
                 # Proactive sanitization: fix orphaned pairs before they reach the API
@@ -1543,6 +1550,20 @@ class Agent:
             yield StreamChunk(StreamEventType.TEXT, tail)
             # The failed step's text is in no saved message: it goes with the notice
             reply = step_text + ("\n\n" if step_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
+
+        if budget_stop:
+            # A refusal, not a reply (PR #366 review): no streamed text, nothing saved, no
+            # onboarding question; the client gets it as the turn's end, flagged
+            if onboarding.ingest:
+                await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
+            _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
+            yield StreamChunk(
+                StreamEventType.DONE,
+                _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd),
+                cost_usd=total_cost,
+                budget_reached=True,
+            )
+            return
 
         # ── Save the reply, with the warm question on a fresh session ──────
         # Saved and recorded before the client sees the question: a disconnect
