@@ -67,14 +67,14 @@ def open_skills_root(location: str | Path, settings: Settings) -> SkillPath:
 def open_usable_skills_root(location: str | Path, settings: Settings) -> SkillPath:
     """`open_skills_root`, plus proof that a remote root can actually be used.
 
-    For a cloud URI this lists the root once — the same call discovery makes — so
-    missing or wrong credentials, a missing bucket or an unreachable endpoint fail
-    here, at startup, with what to configure. An empty prefix is fine (no skills
-    yet). A root that does not exist yet is created when possible; if it cannot
-    be (e.g. read-only access) it is treated as empty, with a warning. Creating it
-    matters on Azure accounts with hierarchical namespace (ADLS Gen2), where
-    listing a missing directory fails instead of returning nothing.
-    Local paths are returned as-is: a missing local dir just has no skills.
+    For a cloud URI this checks whether the root exists and, if it does, lists it
+    once, so missing or wrong credentials, a missing bucket or an unreachable
+    endpoint fail here, at startup, with what to configure. A root that does not
+    exist yet is not an error (no skills yet): it is not listed, because on Azure
+    accounts with hierarchical namespace (ADLS Gen2) listing a missing directory
+    fails instead of returning nothing, and it is not created either — startup
+    never writes to storage. A warning names the URI so a mistyped path is
+    visible. Local paths are returned as-is: a missing local dir just has no skills.
     Startup calls this so a misconfigured remote root refuses to start.
     """
     root = open_skills_root(location, settings)
@@ -83,37 +83,23 @@ def open_usable_skills_root(location: str | Path, settings: Settings) -> SkillPa
     uri = str(location)
     hint = clients.STORAGE_HINTS.get(clients.uri_scheme(uri), "")
     try:
-        # is_dir() reports a missing root as False, but still raises for bad
-        # credentials, a missing bucket/container or an unreachable endpoint.
-        if root.is_dir():
+        # is_dir() is False for a missing root but still raises for bad credentials,
+        # a missing bucket/container or an unreachable endpoint: with cloudpathlib
+        # 0.26 a missing object falls back to a prefix listing on every backend
+        # (S3 objects.filter, GCS list_blobs, Azure list_blobs), and that listing
+        # fails when the bucket or container is not there.
+        exists = root.is_dir()
+        if exists:
             next(iter(root.iterdir()), None)
-        else:
-            _create_missing_root(root, uri)
     except Exception as e:
         raise SkillLoadError(f"Skills root {uri} is not usable: {type(e).__name__}: {e}. {hint}") from e
-    return root
-
-
-def _create_missing_root(root: CloudPath, uri: str) -> None:
-    """Create a cloud skills root that does not exist yet, or warn if that fails.
-
-    On an Azure account with hierarchical namespace this creates a real
-    directory; on flat object storage a prefix needs no creation and this is a
-    no-op. Failing to create it (no write access) does not stop startup:
-    discovery treats a missing root as empty.
-    """
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
+    if not exists:
         logger.warning(
-            "Skills root %s does not exist and could not be created (%s: %s); starting with no user "
-            "skills — create it or grant write access",
+            "Skills root %s does not exist; starting with no user skills. If the path is right, it is "
+            "created when the first skill is added",
             uri,
-            type(e).__name__,
-            e,
         )
-        return
-    logger.debug("Skills root %s did not exist; ensured it exists", uri)
+    return root
 
 
 def open_user_skills_root(settings: Settings) -> SkillPath | None:

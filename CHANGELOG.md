@@ -722,10 +722,11 @@ mounting a directory. Install the new `remote-skills` extra
   that does not exist fails with `PathNotFound` instead of returning nothing,
   so `PINCER_SKILLS_DIR=az://<container>/<folder>` for a folder not created yet
   refused to start ("Skills root … is not usable: ResourceNotFoundError").
-  Startup now creates a missing cloud skills root. If it cannot (read-only
-  access), pincer starts with no user skills and logs a warning. Bad
-  credentials, a missing container or an unreachable endpoint still refuse to
-  start.
+  Startup no longer lists a cloud skills root that does not exist: it starts
+  with no user skills and logs a warning naming the URI (check it for typos).
+  Nothing is written to storage at startup; the folder is created when the
+  first skill is added. Bad credentials, a missing bucket or container, or an
+  unreachable endpoint still refuse to start.
 - **Voice: an interrupted line is no longer reported as a delivery failure,
   and a German "Na, das war's. Tschüss." ends the call (#301).** Every agent
   transcript line now records its delivery outcome and the reason in the new
