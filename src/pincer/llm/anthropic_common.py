@@ -24,7 +24,6 @@ from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
-    RATE_LIMIT_ATTEMPTS,
     BaseLLMProvider,
     LLMMessage,
     LLMResponse,
@@ -33,6 +32,7 @@ from pincer.llm.base import (
     ThinkingBlock,
     TokenCounts,
     ToolCall,
+    rate_limit_attempts,
     rate_limit_backoff,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
@@ -189,10 +189,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         text has been yielded nothing is retried, since the caller already has it."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
-        for attempt in range(RATE_LIMIT_ATTEMPTS):
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
             started = False
             try:
-                async with self._client.messages.stream(**kwargs) as stream:
+                async with self._request_client().messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
                         started = True
                         yield StreamTurnEvent(text=text)
@@ -200,7 +201,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 break
             except anthropic.RateLimitError as e:
                 retry_after = float(e.response.headers.get("retry-after", "5"))
-                if started or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                if started or attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=retry_after) from e
                 wait = rate_limit_backoff(retry_after, attempt)
                 logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
@@ -220,11 +221,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
     # ── Internal ─────────────────────────────────────────
 
-    async def _call_with_retry(
-        self,
-        kwargs: dict[str, Any],
-        max_retries: int = RATE_LIMIT_ATTEMPTS,
-    ) -> Message:
+    def _request_client(self) -> AsyncAnthropic:
+        """The client for one request: without the SDK's own retries when a 429 must fail over
+        at once (`rate_limit_retries(False)`). The copy shares the HTTP connection pool."""
+        if rate_limit_attempts() > 1:
+            return self._client
+        return self._client.with_options(max_retries=0)
+
+    async def _call_with_retry(self, kwargs: dict[str, Any]) -> Message:
         """Call API with exponential backoff on rate limits.
 
         The request is streamed although only the final message is used: the
@@ -232,14 +236,15 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         running past its 10-minute timeout (anything above ~21k tokens, less
         for some models), and a streamed one has no such limit.
         """
-        for attempt in range(max_retries):
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
             try:
-                async with self._client.messages.stream(**kwargs) as stream:
+                async with self._request_client().messages.stream(**kwargs) as stream:
                     result: Message = await stream.get_final_message()
                 return result
             except anthropic.RateLimitError as e:
                 retry_after = float(e.response.headers.get("retry-after", "5"))
-                if attempt == max_retries - 1:
+                if attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=retry_after) from e
                 wait = rate_limit_backoff(retry_after, attempt)
                 logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)

@@ -21,7 +21,7 @@ from pincer.config import get_settings
 from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, StreamTurnEvent
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, StreamTurnEvent, rate_limit_retries
 from pincer.llm.openai_common import OpenAICompatibleProvider
 
 if TYPE_CHECKING:
@@ -376,27 +376,19 @@ class LLMRouter(BaseLLMProvider):
         pinned: bool = False,
     ) -> LLMResponse:
         """Primary first, then failovers in random order. An explicit ``model``
-        goes to the primary only: failovers use their own model (see ``stream_turn``)."""
+        goes to the primary only: failovers use their own model (see ``stream_turn``).
+        Every provider but the last raises a 429 at once (see ``stream_turn``)."""
         primary, failovers = self._primary_and_failovers()
-        try:
-            return await primary.complete(
-                messages,
-                tools=tools,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                reasoning_effort=reasoning_effort,
-                thinking=thinking,
-                pinned=pinned,
-            )
-        except (LLMError, LLMRateLimitError) as primary_err:
-            for provider in random.sample(failovers, len(failovers)):
-                try:
+        ordered = [primary, *random.sample(failovers, len(failovers))]
+        last = len(ordered) - 1
+        errors: list[Exception] = []
+        for index, provider in enumerate(ordered):
+            try:
+                with rate_limit_retries(index == last):
                     return await provider.complete(
                         messages,
                         tools=tools,
-                        model=None,
+                        model=model if index == 0 else None,
                         max_tokens=max_tokens,
                         temperature=temperature,
                         system=system,
@@ -404,10 +396,11 @@ class LLMRouter(BaseLLMProvider):
                         thinking=thinking,
                         pinned=pinned,
                     )
-                except (LLMError, LLMRateLimitError) as err:
+            except (LLMError, LLMRateLimitError) as err:
+                if index > 0:
                     logger.warning("Failover provider failed: %s — trying next", err)
-                    continue
-            raise primary_err
+                errors.append(err)
+        raise errors[0]  # every provider failed: report the primary's error
 
     async def stream_turn(
         self,
@@ -422,6 +415,8 @@ class LLMRouter(BaseLLMProvider):
     ) -> AsyncIterator[StreamTurnEvent]:
         """Failover discipline: providers are tried in order
         until one produces its first event; a mid-stream failure propagates.
+        Every provider but the last raises a 429 at once, so the next one takes over
+        without a wait (Q23: fail over first); the last one retries it.
 
         An explicit ``model`` is the primary's id (e.g. a voice turn's
         ``azure:gpt-5-mini`` on an azure default): a failover leaf of another
@@ -429,29 +424,34 @@ class LLMRouter(BaseLLMProvider):
         primary, failovers = self._primary_and_failovers()
         ordered = [primary, *random.sample(failovers, len(failovers))]
         primary_err: Exception | None = None
+        last = len(ordered) - 1
         for index, provider in enumerate(ordered):
-            started = False
+            stream = provider.stream_turn(
+                messages,
+                tools=tools,
+                model=model if index == 0 else None,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                reasoning_effort=reasoning_effort,
+                thinking=thinking,
+            )
             try:
-                async for event in provider.stream_turn(
-                    messages,
-                    tools=tools,
-                    model=model if index == 0 else None,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system,
-                    reasoning_effort=reasoning_effort,
-                    thinking=thinking,
-                ):
-                    started = True
-                    yield event
-                return
+                # Only the first event: the provider's retries all happen before it, and the
+                # setting must not be in force while our consumer handles an event.
+                with rate_limit_retries(index == last):
+                    first = await anext(stream, None)
             except (LLMError, LLMRateLimitError) as err:
                 if index == 0:
                     primary_err = err
-                if started:
-                    raise  # mid-stream failure propagates — no mid-stream failover
                 logger.warning("stream_turn provider %d failed before first event: %s — trying next", index, err)
                 continue
+            if first is None:
+                return
+            yield first
+            async for event in stream:  # a mid-stream failure propagates — no mid-stream failover
+                yield event
+            return
         if primary_err is not None:
             raise primary_err
 

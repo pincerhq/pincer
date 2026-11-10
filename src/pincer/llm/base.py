@@ -28,6 +28,9 @@ STOP_REASON_MAX_TOKENS = "max_tokens"
 # before its first event; the wait doubles each time, up to the cap
 RATE_LIMIT_ATTEMPTS = 3
 _RATE_LIMIT_MAX_WAIT_S = 60.0
+# False while the router sends a request that fails over on a 429 (Q23: fail over first): set by
+# the router around one provider call, read by the providers before their first request
+_rate_limit_retries: ContextVar[bool] = ContextVar("pincer_rate_limit_retries", default=True)
 # Where the requests of the current conversation get their prompt cache key (issue #357, Q21):
 # set by the agent around a turn, read by providers that route on it (OpenAI's prompt_cache_key)
 _prompt_cache_key_source: ContextVar[Callable[[], str] | None] = ContextVar("pincer_prompt_cache_key", default=None)
@@ -51,6 +54,24 @@ def prompt_cache_key() -> str:
     """The current conversation's prompt cache key; "" outside a conversation."""
     source = _prompt_cache_key_source.get()
     return source() if source is not None else ""
+
+
+@contextmanager
+def rate_limit_retries(enabled: bool) -> Iterator[None]:
+    """Requests made inside retry a 429 (``enabled``) or raise it at once, SDK retries included,
+    so the router can fail over without waiting. Never hold it across a yield: the consumer of
+    a stream would run with it set."""
+    token = _rate_limit_retries.set(enabled)
+    try:
+        yield
+    finally:
+        _rate_limit_retries.reset(token)
+
+
+def rate_limit_attempts() -> int:
+    """How many times a provider sends a rate-limited request: ``RATE_LIMIT_ATTEMPTS``, or 1
+    inside ``rate_limit_retries(False)``."""
+    return RATE_LIMIT_ATTEMPTS if _rate_limit_retries.get() else 1
 
 
 class MessageRole(StrEnum):

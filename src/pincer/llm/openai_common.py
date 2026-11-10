@@ -17,7 +17,6 @@ from openai import AsyncOpenAI
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
-    RATE_LIMIT_ATTEMPTS,
     STOP_REASON_MAX_TOKENS,
     BaseLLMProvider,
     LLMMessage,
@@ -27,6 +26,7 @@ from pincer.llm.base import (
     TokenCounts,
     ToolCall,
     prompt_cache_key,
+    rate_limit_attempts,
     rate_limit_backoff,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
@@ -366,7 +366,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 
-        for attempt in range(RATE_LIMIT_ATTEMPTS):
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
             started = False
             text_parts: list[str] = []
             tool_accum: dict[int, dict[str, str]] = {}
@@ -374,7 +375,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             model_name = ""
             usage: Any = None
             try:
-                stream = await self._client.chat.completions.create(**kwargs)
+                stream = await self._request_client().chat.completions.create(**kwargs)
                 async for chunk in stream:
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
@@ -400,7 +401,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                         finish_reason = choice.finish_reason
                 break
             except openai.RateLimitError as e:
-                if started or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                if started or attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e
                 wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
                 logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
@@ -435,17 +436,21 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     async def close(self) -> None:
         await self._client.close()
 
-    async def _call_with_retry(
-        self,
-        kwargs: dict[str, Any],
-        max_retries: int = RATE_LIMIT_ATTEMPTS,
-    ) -> ChatCompletion:
-        for attempt in range(max_retries):
+    def _request_client(self) -> AsyncOpenAI:
+        """The client for one request: without the SDK's own retries when a 429 must fail over
+        at once (`rate_limit_retries(False)`). The copy shares the HTTP connection pool."""
+        if rate_limit_attempts() > 1:
+            return self._client
+        return self._client.with_options(max_retries=0)
+
+    async def _call_with_retry(self, kwargs: dict[str, Any]) -> ChatCompletion:
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
             try:
-                result: ChatCompletion = await self._client.chat.completions.create(**kwargs)
+                result: ChatCompletion = await self._request_client().chat.completions.create(**kwargs)
                 return result
             except openai.RateLimitError as e:
-                if attempt == max_retries - 1:
+                if attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e
                 wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
                 logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)

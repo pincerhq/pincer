@@ -44,11 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without tools and threw the earlier answer away: a plain turn was 2 requests
   and one tool round 3; now they are 1 and 2. Text written before a tool call
   now reaches the chat, followed by a blank line.
-- Streamed requests, web chat and phone calls alike, retry a rate limit (429)
-  that arrives before the first token, with the same backoff as other requests
-  (three attempts, the wait doubling up to 60 s); once text has streamed,
-  nothing is retried. On a call, the worst case is about 15 s of silence before
-  a failover provider or the spoken error.
+- With a fallback provider configured, a rate limit (429) switches to the
+  fallback at once, on web chat and phone calls alike: the rate-limited provider
+  is not asked again, and any other error its SDK would retry (a timeout, a 5xx,
+  an overload) also switches at once. The last provider tried, or the only one,
+  retries a 429 that arrives before its first token: three attempts, the wait
+  doubling up to 60 s. Once text has streamed, nothing is retried.
 
 #### The system prompt stays the same for a whole conversation (#357)
 

@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic_sse as sse
+import httpx
 import pytest
 
 from pincer.core.log_once import LogOncePerKey
-from pincer.exceptions import LLMError
+from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm import router as router_mod
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
+from pincer.llm.base import (
+    RATE_LIMIT_ATTEMPTS,
+    BaseLLMProvider,
+    LLMMessage,
+    LLMResponse,
+    MessageRole,
+    StreamTurnEvent,
+    rate_limit_attempts,
+)
 from pincer.llm.router import LLMRouter
 
 
@@ -477,3 +486,182 @@ async def test_failover_off_sonnet_5_5_resolves_disabled_for_its_own_model(setti
     assert primary.requests[0]["thinking"] == {"type": "between_tools"}  # the precondition: Sonnet 5.5 got its form
     assert failover.requests[0]["model"] == "claude-haiku-5-5"
     assert failover.requests[0]["thinking"] == {"type": "disabled"}
+
+
+# ── A rate limit fails over first (PR #366 review, Q23) ──────────────────────
+
+_RATE_LIMITED_EVERY_TIME = [429] * 9  # more than 3 SDK tries × 3 provider attempts could use
+_SLEEP = "pincer.llm.anthropic_common.asyncio.sleep"
+
+
+async def _answer(router: LLMRouter, method: str) -> LLMResponse:
+    """The router's answer to one `method` call; a stream's text must be its response's text."""
+    messages = [LLMMessage(role=MessageRole.USER, content="hi")]
+    if method == "complete":
+        return await router.complete(messages)
+    events = [e async for e in router.stream_turn(messages)]
+    final = events[-1].response
+    assert final is not None
+    assert "".join(e.text for e in events[:-1]) == final.content
+    return final
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_a_rate_limited_primary_fails_over_at_once(settings, method):
+    """With a fallback configured, the primary's 429 goes straight to the router: one HTTP
+    request (no SDK retry, no provider retry), no wait, and the fallback answers."""
+    with patch(_SLEEP, new_callable=AsyncMock) as sleep:
+        async with (
+            sse.ScriptedAnthropic(settings, _RATE_LIMITED_EVERY_TIME) as primary,
+            sse.ScriptedAnthropic(settings, [([sse.text("from the fallback")], "end_turn")]) as fallback,
+        ):
+            router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
+            answer = await _answer(router, method)
+
+    assert answer.content == "from the fallback"
+    assert len(fallback.requests) == 1
+    assert len(primary.requests) == 1
+    sleep.assert_not_awaited()
+
+
+async def _rate_limited_openai(settings) -> tuple[BaseLLMProvider, list[httpx.Request]]:
+    """An OpenAI provider on the real SDK whose every request is answered 429 (asking for no wait),
+    and the requests it sent."""
+    from openai import AsyncOpenAI
+    from pydantic import SecretStr
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    sent: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        error = {"error": {"type": "rate_limit_exceeded", "message": "scripted 429"}}
+        return httpx.Response(429, json=error, headers={"retry-after-ms": "1", "retry-after": "0"})
+
+    provider = OpenAICompatibleProvider(
+        settings.model_copy(update={"openai_api_key": SecretStr("sk-test"), "openai_model": "gpt-5-mini"}), "openai"
+    )
+    await provider.close()
+    provider._client = AsyncOpenAI(  # type: ignore[attr-defined]
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    return provider, sent
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_a_rate_limited_openai_primary_fails_over_at_once(settings, method):
+    primary, sent = await _rate_limited_openai(settings)
+    with patch("pincer.llm.openai_common.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        async with sse.ScriptedAnthropic(settings, [([sse.text("from the fallback")], "end_turn")]) as fallback:
+            router = _router_with_pool("a", ["b"], {"a": primary, "b": fallback.provider})
+            try:
+                answer = await _answer(router, method)
+            finally:
+                await primary.close()
+
+    assert answer.content == "from the fallback"
+    assert len(sent) == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+@pytest.mark.parametrize("chain", ["alone", "after_a_failover"])
+async def test_the_last_provider_keeps_the_rate_limit_retry(settings, method, chain):
+    """With nothing left to fail over to, a 429 is retried as before: 3 attempts of 3 SDK tries,
+    two waits (retry-after 0 doubles to 0.0), then the rate limit is raised."""
+    with patch(_SLEEP, new_callable=AsyncMock) as sleep:
+        async with (
+            sse.ScriptedAnthropic(settings, _RATE_LIMITED_EVERY_TIME) as primary,
+            sse.ScriptedAnthropic(settings, _RATE_LIMITED_EVERY_TIME) as last,
+        ):
+            if chain == "alone":
+                router = _router_with_pool("z", [], {"z": last.provider})
+            else:
+                router = _router_with_pool("a", ["z"], {"a": primary.provider, "z": last.provider})
+            with pytest.raises(LLMRateLimitError):
+                await _answer(router, method)
+
+    assert len(last.requests) == 9
+    assert [c.args for c in sleep.await_args_list] == [(0.0,), (0.0,)]
+    assert len(primary.requests) == (0 if chain == "alone" else 1)
+
+
+class _RateLimitedRecorder(BaseLLMProvider):
+    """Raises a 429 on every call, after noting how many attempts it was allowed."""
+
+    def __init__(self, seen: list[int]) -> None:
+        self._seen = seen
+
+    async def complete(self, messages=None, **kwargs):  # type: ignore[override]
+        self._seen.append(rate_limit_attempts())
+        raise LLMRateLimitError(retry_after=1.0)
+
+    async def stream_turn(self, messages=None, **kwargs):  # type: ignore[override]
+        self._seen.append(rate_limit_attempts())
+        raise LLMRateLimitError(retry_after=1.0)
+        yield StreamTurnEvent()  # pragma: no cover - makes this an async generator
+
+    async def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_only_the_last_provider_in_a_chain_retries(method):
+    """Primary and the first failover may not retry; whichever failover comes last may."""
+    seen: list[int] = []
+    pool = {name: _RateLimitedRecorder(seen) for name in ("a", "b", "c")}
+    router = _router_with_pool("a", ["b", "c"], pool)
+
+    with pytest.raises(LLMRateLimitError):
+        await _answer(router, method)
+
+    assert seen == [1, 1, RATE_LIMIT_ATTEMPTS]
+
+
+async def test_the_retry_setting_never_reaches_a_streams_consumer():
+    """The primary (not last) streams: while the consumer handles each event, and after, its
+    own requests still retry a 429."""
+    primary = FakeProvider("primary", stream_tokens=["He", "llo"])
+    router = _router_with_pool("primary", ["fb"], {"primary": primary, "fb": FakeProvider("fb")})
+
+    seen: list[tuple[str, int]] = []
+    async for event in router.stream_turn(messages=[]):
+        seen.append((event.text, rate_limit_attempts()))
+
+    assert seen == [("He", RATE_LIMIT_ATTEMPTS), ("llo", RATE_LIMIT_ATTEMPTS)]
+    assert rate_limit_attempts() == RATE_LIMIT_ATTEMPTS
+
+
+async def test_a_concurrent_turn_keeps_its_rate_limit_retry():
+    """Turn A's primary waits inside its first request with retries off; turn B, running
+    meanwhile, still retries. Then A fails over."""
+    import asyncio
+
+    inside, release = asyncio.Event(), asyncio.Event()
+    seen_by_a: list[int] = []
+
+    class _Blocking(FakeProvider):
+        async def stream_turn(self, messages=None, **kwargs):  # type: ignore[override]
+            seen_by_a.append(rate_limit_attempts())
+            inside.set()
+            await release.wait()
+            raise LLMRateLimitError(retry_after=1.0)
+            yield StreamTurnEvent()  # pragma: no cover - makes this an async generator
+
+    router = _router_with_pool("a", ["b"], {"a": _Blocking("a"), "b": FakeProvider("b", stream_tokens=["from b"])})
+
+    async def turn_a() -> list[str]:
+        return [e.text async for e in router.stream_turn(messages=[])]
+
+    async def turn_b() -> int:
+        await inside.wait()
+        attempts = rate_limit_attempts()
+        release.set()
+        return attempts
+
+    tokens, seen_by_b = await asyncio.gather(turn_a(), turn_b())
+
+    assert seen_by_a == [1]  # the precondition: A's request really ran with retries off
+    assert seen_by_b == RATE_LIMIT_ATTEMPTS
+    assert tokens == ["from b"]
