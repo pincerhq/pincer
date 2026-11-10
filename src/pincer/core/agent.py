@@ -315,6 +315,16 @@ def _reading_onboarding(session: Session, *, last_chance: bool = False) -> _Onbo
     return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session), last_chance=last_chance)
 
 
+def _with_onboarding_question(text: str, *, streamed: bool) -> str:
+    """`text` followed by the onboarding question after a blank line. A
+    streamed reply was already sent, so it is only extended: the newlines
+    still missing are added, and nothing is stripped from it."""
+    if not streamed:
+        return text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
+    trailing = len(text) - len(text.rstrip("\n"))
+    return text + "\n" * max(0, 2 - trailing) + ONBOARDING_QUESTION_EN
+
+
 def _no_router_build(name: str, model_hint: str) -> str:
     """``plan_voice_turn``'s build step without an ``LLMRouter``: nothing else can be built."""
     return f"provider {name!r} needs an LLMRouter to be built per call"
@@ -1028,21 +1038,8 @@ class Agent:
                 else "I seem to be going in circles. Let me give you what I have so far."
             )
 
-        # ── Onboarding: append warm question on a fresh session ────────────
-        asking = bool(final_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
-        try:
-            if asking:
-                final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
-
-            # Save final assistant message
-            if final_text:
-                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=final_text)
-                await self._sessions.add_message(session, final_msg)
-            if asking:
-                await self._record_onboarding_prompt(session, user_id, channel)
-        finally:
-            if asking:
-                self._onboarding_reserved.discard((user_id, channel))
+        # ── Save the reply, with the warm question on a fresh session ──────
+        final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
@@ -1469,25 +1466,13 @@ class Agent:
             full_text += tail
             yield StreamChunk(StreamEventType.TEXT, tail)
 
-        # ── Onboarding: append warm question on a fresh session ────────────
-        asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
-        try:
-            if asking:
-                # Extend what the client already received: only the newlines still missing for a
-                # blank line before the question are added, never stripped from the reply
-                trailing = len(full_text) - len(full_text.rstrip("\n"))
-                tail = "\n" * max(0, 2 - trailing) + ONBOARDING_QUESTION_EN
-                full_text += tail
-                yield StreamChunk(StreamEventType.TEXT, tail)
-
-            if full_text:
-                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
-                await self._sessions.add_message(session, final_msg)
-            if asking:
-                await self._record_onboarding_prompt(session, user_id, channel)
-        finally:
-            if asking:
-                self._onboarding_reserved.discard((user_id, channel))
+        # ── Save the reply, with the warm question on a fresh session ──────
+        # Saved and recorded before the client sees the question: a disconnect
+        # while it streams still leaves the user asked.
+        saved = await self._save_reply(session, onboarding, user_id, channel, full_text, streamed=True)
+        if saved != full_text:
+            yield StreamChunk(StreamEventType.TEXT, saved[len(full_text) :])
+            full_text = saved
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
@@ -2214,14 +2199,59 @@ class Agent:
             self._onboarding_reserved.discard(key)
         return not claimed
 
-    async def _record_onboarding_prompt(self, session: Session, user_id: str, channel: str) -> None:
-        """Record the question as asked, once the reply carrying it is saved:
-        a turn cut off before then leaves no claim behind."""
-        if await self._sessions.onboarding.claim_prompt(user_id, channel, session.session_id, now=time.time()):
+    async def _save_reply(
+        self,
+        session: Session,
+        onboarding: _Onboarding,
+        user_id: str,
+        channel: str,
+        text: str,
+        *,
+        streamed: bool,
+    ) -> str:
+        """Save the turn's reply, with the onboarding question appended when
+        this turn asks it, and return the saved text. A streamed turn sends
+        the part after `text` only once this returns.
+
+        The question is claimed before the save, and the claim undone if the
+        save fails, so a recorded question is one the history holds. A turn
+        that loses the claim to another process leaves the question out.
+        """
+        if not text:
+            return text
+        if not await self._reserve_onboarding_prompt(onboarding, user_id, channel):
+            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+            return text
+        claimed: bool | None = None  # None: claim_prompt raised, and its insert may have committed
+        try:
+            try:
+                claimed = await self._sessions.onboarding.claim_prompt(
+                    user_id, channel, session.session_id, now=time.time()
+                )
+                if claimed:
+                    text = _with_onboarding_question(text, streamed=streamed)
+                await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+            except BaseException:
+                if claimed is not False:
+                    await self._release_onboarding_prompt(session, user_id, channel)
+                raise
+        finally:
+            self._onboarding_reserved.discard((user_id, channel))
+        if claimed:
             logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
         else:
-            # Another process asked first; this session showed the question too.
             logger.info("onboarding.prompt_already_recorded user=%s channel=%s", user_id, channel)
+        return text
+
+    async def _release_onboarding_prompt(self, session: Session, user_id: str, channel: str) -> None:
+        """Best-effort undo of this turn's claim after its reply failed to save.
+        If it fails too, the next message is read for an answer to a question
+        the user never saw; the empty-reply count and expiry close that."""
+        try:
+            if await self._sessions.onboarding.release_prompt(user_id, channel, session.session_id):
+                logger.info("onboarding.prompt_released user=%s channel=%s", user_id, channel)
+        except Exception:
+            logger.warning("onboarding.prompt_release_failed user=%s channel=%s", user_id, channel, exc_info=True)
 
     async def _ingest_onboarding_reply(
         self,

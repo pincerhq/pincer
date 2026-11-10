@@ -543,36 +543,129 @@ async def test_a_turn_without_memory_is_not_read_for_an_answer(
 
 
 @_PATHS
-async def test_a_disconnect_before_the_reply_is_saved_leaves_no_claim(
+@pytest.mark.parametrize("failing", ["save", "claim"])
+async def test_a_failed_save_or_claim_sends_and_records_no_question(
+    path, failing, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A turn whose reply or claim fails to save neither sends the question nor
+    leaves it recorded. A claim whose insert committed before it raised is
+    undone."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    key = conversation_key("user-d", "web", "a")
+    onboarding = session_manager.onboarding
+    save, claim = session_manager.add_message, onboarding.claim_prompt
+
+    async def add_message(session, message):
+        if message.role == MessageRole.ASSISTANT:
+            raise ConnectionResetError("store went away")
+        await save(session, message)
+
+    async def claim_prompt(*args, **kwargs):
+        await claim(*args, **kwargs)
+        raise ConnectionResetError("store went away")
+
+    if failing == "save":
+        session_manager.add_message = add_message
+    else:
+        onboarding.claim_prompt = claim_prompt
+    chunks = []
+    with pytest.raises(ConnectionResetError):
+        if path == "blocking":
+            await agent.handle_message("user-d", "web", "Hi!", session_key=key)
+        else:
+            async for chunk in agent.handle_message_stream("user-d", "web", "Hi!", session_key=key):
+                chunks.append(chunk)
+    session_manager.add_message, onboarding.claim_prompt = save, claim
+
+    assert not any(ONBOARDING_QUESTION_EN in c.content for c in chunks)
+    assert StreamEventType.DONE not in [c.type for c in chunks]
+    assert await _record(tmp_path, "user-d", "web") is None
+    session = await session_manager.get_or_create("user-d", "web", session_key=key)
+    assert [m.role for m in session.messages] == [MessageRole.USER]
+    assert agent._onboarding_reserved == set()
+
+
+@_PATHS
+async def test_a_turn_that_loses_the_claim_does_not_ask(
     path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    """The question counts as asked only once the reply carrying it is saved."""
+    """Another process claims between this turn's check and its claim: the
+    question is left out, since the claim, not this turn, says who reads the
+    answer."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    other = conversation_key("user-r", "web", "a")
+    onboarding = session_manager.onboarding
+    claim = onboarding.claim_prompt
+
+    async def claim_prompt(user_id, channel, session_id, *, now):
+        await claim(user_id, channel, other, now=now)  # the other process, just first
+        return await claim(user_id, channel, session_id, now=now)
+
+    onboarding.claim_prompt = claim_prompt
+    reply = await _reply(agent, path, "user-r", "web", "Hi!", session_key=conversation_key("user-r", "web", "b"))
+    onboarding.claim_prompt = claim
+
+    assert reply == "Hello! I'm Pincer."
+    record = await _record(tmp_path, "user-r", "web")
+    assert record is not None
+    assert record.asked_session_id == other
+
+
+async def _drop_stream_on_question(agent: Agent, user_id: str, key: str) -> None:
+    """Run a streamed first turn and disconnect on the chunk carrying the question."""
+    stream = agent.handle_message_stream(user_id, "web", "Hi!", session_key=key)
+    async for chunk in stream:
+        if ONBOARDING_QUESTION_EN in chunk.content:
+            break
+    else:
+        pytest.fail("the question was never streamed")
+    await stream.aclose()
+
+
+async def test_a_disconnect_after_the_question_is_streamed_still_records_it(
+    tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """The reply and the claim are saved before the question is streamed: a
+    client that drops on it leaves the user asked."""
     _streams(mock_llm, "Hello! I'm Pincer.")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     key = conversation_key("user-d", "web", "a")
 
-    if path == "blocking":
-        save = session_manager.add_message
+    await _drop_stream_on_question(agent, "user-d", key)
 
-        async def add_message(session, message):
-            if message.role == MessageRole.ASSISTANT:
-                raise ConnectionResetError("client went away")
-            await save(session, message)
+    record = await _record(tmp_path, "user-d", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.completed_at) == (key, None)
+    session = await session_manager.get_or_create("user-d", "web", session_key=key)
+    assert session.messages[-1].role == MessageRole.ASSISTANT
+    assert session.messages[-1].content.endswith(ONBOARDING_QUESTION_EN)
+    assert agent._onboarding_reserved == set()
 
-        session_manager.add_message = add_message
-        with pytest.raises(ConnectionResetError):
-            await agent.handle_message("user-d", "web", "Hi!", session_key=key)
-        session_manager.add_message = save
-    else:
-        stream = agent.handle_message_stream("user-d", "web", "Hi!", session_key=key)
-        async for chunk in stream:
-            if ONBOARDING_QUESTION_EN in chunk.content:
-                break
-        else:
-            pytest.fail("the question was never streamed")
-        await stream.aclose()
 
-    assert await _record(tmp_path, "user-d", "web") is None
+async def test_the_answer_after_a_disconnect_on_the_question_is_read(
+    tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """The message after a stream dropped on the question gets the follow-up
+    instruction and completes onboarding."""
+    llm = _scripted_llm(
+        "Hello!",
+        "Nice to meet you, Bob.",
+        '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "en"}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    key = conversation_key("user-d", "web", "a")
+    await _drop_stream_on_question(agent, "user-d", key)
+
+    await _reply(agent, "stream", "user-d", "web", "I'm Bob, accountant", session_key=key)
+
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[1].kwargs["system"]
+    record = await _record(tmp_path, "user-d", "web")
+    assert record is not None
+    assert record.completed_at is not None
+    profiles = await memory_store.list_memories(user_id="user-d", category="profile")
+    assert [("Bob" in p.content) for p in profiles] == [True]
 
 
 # What an extraction prompt elicits from a model for a task message. These are
@@ -706,6 +799,21 @@ async def test_concurrent_answers_write_one_profile(
 
     assert writes == ["user-c2"]
     assert len(await memory_store.list_memories(user_id="user-c2", category="profile")) == 1
+
+
+async def test_releasing_a_claim_leaves_others_and_read_ones(session_manager):
+    """`release_prompt` removes only the caller's own claim, and only while no
+    reply has been read against it."""
+    onboarding = session_manager.onboarding
+    assert await onboarding.claim_prompt("user-x", "web", "web:a", now=1.0)
+    assert not await onboarding.release_prompt("user-x", "web", "web:b")
+    assert not await onboarding.record_empty_reply("user-x", "web", max_empty=3, now=2.0)
+    assert not await onboarding.release_prompt("user-x", "web", "web:a")
+    assert await onboarding.get("user-x", "web") is not None
+
+    assert await onboarding.claim_prompt("user-y", "web", "web:a", now=1.0)
+    assert await onboarding.release_prompt("user-y", "web", "web:a")
+    assert await onboarding.get("user-y", "web") is None
 
 
 async def test_inflight_answer_after_empty_closure_writes_profile(
