@@ -352,3 +352,22 @@ def test_an_unknown_home_in_the_explicit_dir_is_a_config_error(dirs, monkeypatch
 def test_the_explicit_dir_expands_the_home(dirs, monkeypatch):
     monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", "~/pincer-oauth")
     assert _settings().google_oauth_dir() == Path.home() / "pincer-oauth"
+
+
+def test_an_unreadable_client_file_falls_back_to_the_client_env(dirs, monkeypatch, caplog):
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text("{not json")
+    monkeypatch.setenv("PINCER_GOOGLE_CREDENTIALS_JSON", json.dumps(ENV_CLIENT))
+    with caplog.at_level(logging.WARNING, logger="pincer.integrations.google.token_source"):
+        client = client_config(_settings())
+    assert client is not None
+    assert client.source == "env"
+    assert f"Ignoring {data_dir / 'google_credentials.json'}" in caplog.text
+
+
+def test_an_undecodable_client_env_is_logged_without_leaking(dirs, monkeypatch, caplog):
+    monkeypatch.setenv("PINCER_GOOGLE_CREDENTIALS_JSON", "secret-client-garbage")
+    with caplog.at_level(logging.WARNING, logger="pincer.integrations.google.token_source"):
+        assert client_config(_settings()) is None
+    assert "Ignoring PINCER_GOOGLE_CREDENTIALS_JSON" in caplog.text
+    assert "secret-client-garbage" not in caplog.text

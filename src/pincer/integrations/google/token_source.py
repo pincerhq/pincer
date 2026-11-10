@@ -139,11 +139,9 @@ class OAuthClient:
 
 
 def client_source_label(source: str) -> str:
-    """``"file:<path>"`` → the path, ``"env"`` → the env var name, ``"token"`` → ``"the token itself"``."""
+    """An OAuth client source for messages: ``"file:<path>"`` → the path, ``"env"`` → the env var name."""
     if source == "env":
         return CREDENTIALS_ENV
-    if source == "token":
-        return "the token itself"
     return source.removeprefix("file:")
 
 

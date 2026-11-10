@@ -1868,6 +1868,13 @@ def test_google_workspace_check_warns_on_an_undecodable_env_token(tmp_path):
 
 
 @pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_undecodable_env_token_without_a_token_file(tmp_path):
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token="not-a-token"))
+    assert result.status == CheckStatus.WARNING
+    assert f"no token file in {tmp_path}" in result.message
+
+
+@pytest.mark.usefixtures("google_enabled")
 def test_google_workspace_check_warns_on_an_env_token_without_a_client(tmp_path):
     import json
 
