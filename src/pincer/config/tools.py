@@ -179,6 +179,21 @@ class ToolSettings(BaseModel):
         ),
     )
 
+    @field_validator("google_oauth_dir_override", mode="after")
+    @classmethod
+    def _expand_google_oauth_dir(cls, value: Path | None) -> Path | None:
+        """Expand ``~`` once, at load: an unknown ``~user`` is a config error naming the
+        setting, not a RuntimeError from every token lookup, doctor run and CLI command."""
+        if value is None:
+            return None
+        try:
+            return value.expanduser()
+        except RuntimeError as exc:
+            raise ValueError(
+                f"PINCER_GOOGLE_OAUTH_DIR={value}: cannot expand '{value.parts[0]}' ({exc}) — "
+                "use an absolute path or an existing user's ~"
+            ) from exc
+
     # ── Scheduling ────────────────────────────────────────
     schedule_tool_enabled: bool = Field(default=True, description="Enable schedule_create/list/remove/toggle tools")
     max_schedules_per_user: int = Field(

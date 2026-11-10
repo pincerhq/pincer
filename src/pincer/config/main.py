@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 _LEGACY_OAUTH_DIR_LOG = LogOncePerKey(logger)
 
 
-def _has_any(directory: Path, names: tuple[str, ...]) -> bool:
-    return any((directory / name).exists() for name in names)
-
-
 class Settings(
     BaseSettings,
     LLMSettings,
@@ -87,15 +83,16 @@ class Settings(
         """Directory for Google OAuth credentials and token, independent of the working directory.
 
         1. ``PINCER_GOOGLE_OAUTH_DIR``, when set (a relative value is logged: it depends on the cwd);
-        2. the first of ``data_dir``, ``./data`` that holds a token file;
-        3. else the first of them that holds ``google_credentials.json``;
-        4. otherwise ``data_dir`` (where ``pincer google setup`` writes).
+        2. the first of ``data_dir``, ``./data`` that holds ``google_workspace_token.json``;
+        3. else the first that holds the legacy calendar-only ``google_token.json`` (so a leftover
+           one in ``data_dir`` does not hide a full token in ``./data``);
+        4. else the first that holds ``google_credentials.json``;
+        5. otherwise ``data_dir`` (where ``pincer google setup`` writes).
 
         ``./data`` is deprecated: choosing it is logged once.
         """
-        override = self.google_oauth_dir_override
+        override = self.google_oauth_dir_override  # `~` already expanded by its validator
         if override is not None:
-            override = override.expanduser()
             if not override.is_absolute():
                 _LEGACY_OAUTH_DIR_LOG.log(
                     f"relative:{override}",
@@ -109,9 +106,9 @@ class Settings(
         candidates = [self.data_dir]
         if cwd_data.resolve() != self.data_dir.resolve():
             candidates.append(cwd_data)
-        for names in (TOKEN_FILES, (CREDENTIALS_FILE,)):
+        for name in (*TOKEN_FILES, CREDENTIALS_FILE):  # full token, legacy token, then the client
             for directory in candidates:
-                if _has_any(directory, names):
+                if (directory / name).exists():
                     if directory is cwd_data:
                         _LEGACY_OAUTH_DIR_LOG.log(
                             str(cwd_data),

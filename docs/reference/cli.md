@@ -307,9 +307,10 @@ With `--print-env` nothing is written: the token is printed as `PINCER_GOOGLE_TO
 The OAuth directory does not depend on the directory Pincer is started from:
 
 1. `PINCER_GOOGLE_OAUTH_DIR`, when set — use an absolute path (a relative one depends on the working directory and is logged);
-2. otherwise the first of `PINCER_DATA_DIR` (default `~/.pincer`) and `./data` that holds a token file;
-3. otherwise the first of them that holds `google_credentials.json`;
-4. otherwise the data directory (where `pincer google setup` writes).
+2. otherwise the first of `PINCER_DATA_DIR` (default `~/.pincer`) and `./data` that holds `google_workspace_token.json`;
+3. otherwise the first of them that holds the legacy calendar-only `google_token.json`;
+4. otherwise the first of them that holds `google_credentials.json`;
+5. otherwise the data directory (where `pincer google setup` writes).
 
 `./data` in the working directory is **deprecated**: it is only used when it holds one of those files, with a warning at startup — move them to the data directory or set `PINCER_GOOGLE_OAUTH_DIR`.
 
@@ -320,9 +321,10 @@ The token and the OAuth client can each come from a file or an env var:
 | `google_workspace_token.json` (or legacy `google_token.json`) | — | The token file carries its client id/secret; `google_credentials.json` is only needed to run `pincer google setup` again |
 | `PINCER_GOOGLE_TOKEN_JSON` with `client_id`/`client_secret` | — | Used as is, no files needed. If `google_credentials.json` / `PINCER_GOOGLE_CREDENTIALS_JSON` holds a *different* client, a warning says so: the token keeps its own client |
 | `PINCER_GOOGLE_TOKEN_JSON` without `client_id`/`client_secret` | `google_credentials.json` | The client is filled in from the file |
+| `PINCER_GOOGLE_TOKEN_JSON` with `client_id` but no `client_secret` | the file or `PINCER_GOOGLE_CREDENTIALS_JSON` | The secret comes from whichever of the two holds a client with that id |
 | `PINCER_GOOGLE_TOKEN_JSON` without `client_id`/`client_secret` | `PINCER_GOOGLE_CREDENTIALS_JSON` | The client is filled in from the env var (the file wins when both are set) |
 
-`PINCER_GOOGLE_TOKEN_JSON` wins over the token files. If it cannot be decoded, a warning says so and the token files are used. A token without a client and no client anywhere turns the Google tools off at startup with a warning. `pincer doctor` (check `google_workspace_token`) shows the directory it looked in and where the token and client came from.
+An OAuth client counts only with both `client_id` and `client_secret`. `PINCER_GOOGLE_TOKEN_JSON` wins over the token files. If it cannot be decoded, a warning says so and the token files are used. A token without a client and no client anywhere turns the Google tools off at startup with a warning. `pincer doctor` (check `google_workspace_token`) shows the directory it looked in and where the token and client came from.
 
 ### Getting `google_credentials.json`
 

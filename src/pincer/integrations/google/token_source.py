@@ -37,6 +37,7 @@ CREDENTIALS_FILE = "google_credentials.json"
 
 # locate_token runs on every GET /api/integrations and doctor run: each problem is one WARNING, then DEBUG.
 _LOG = LogOncePerKey(logger)
+_NO_CLIENT = "no 'installed' or 'web' OAuth client with client_id and client_secret"
 # client_ids of complete env tokens already checked against the configured OAuth client: the check only
 # feeds a once-only warning, so later lookups skip reading google_credentials.json.
 _MISMATCH_CHECKED: set[str] = set()
@@ -147,21 +148,22 @@ def client_source_label(source: str) -> str:
 
 
 def _client_section(data: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``installed`` / ``web`` client, only with both ``client_id`` and ``client_secret``:
+    a client without a secret can neither run the consent flow nor refresh a token."""
     for key in ("installed", "web"):
         section = data.get(key)
-        if isinstance(section, dict) and section.get("client_id"):
+        if isinstance(section, dict) and section.get("client_id") and section.get("client_secret"):
             return section
     return None
 
 
-def client_config(settings: Any, oauth_dir: Path | None = None) -> OAuthClient | None:
-    """The OAuth client: ``google_credentials.json`` in ``settings.google_oauth_dir()``, else
-    ``PINCER_GOOGLE_CREDENTIALS_JSON``; None when neither holds an ``installed``/``web`` client.
-
-    The one rule for both the consent flow (``pincer google setup``) and filling in the
-    client of an env token that lacks ``client_id`` / ``client_secret``. Pass *oauth_dir*
-    when the caller already resolved ``settings.google_oauth_dir()``.
+def oauth_clients(settings: Any, oauth_dir: Path | None = None) -> list[OAuthClient]:
+    """Every usable OAuth client, in priority order: ``google_credentials.json`` in
+    ``settings.google_oauth_dir()``, then ``PINCER_GOOGLE_CREDENTIALS_JSON``. A source
+    without an ``installed``/``web`` client holding ``client_id`` and ``client_secret``
+    is logged and skipped. Pass *oauth_dir* when the caller already resolved it.
     """
+    clients: list[OAuthClient] = []
     path = (oauth_dir if oauth_dir is not None else settings.google_oauth_dir()) / CREDENTIALS_FILE
     if path.exists():
         try:
@@ -169,16 +171,27 @@ def client_config(settings: Any, oauth_dir: Path | None = None) -> OAuthClient |
         except (OSError, ValueError):
             data = None
         if isinstance(data, dict) and _client_section(data):
-            return OAuthClient(data, f"file:{path}")
-        _LOG.log(
-            f"bad-client-file:{path}", "Ignoring %s: not an OAuth client JSON (no 'installed' or 'web' client)", path
-        )
+            clients.append(OAuthClient(data, f"file:{path}"))
+        else:
+            _LOG.log(f"bad-client-file:{path}", "Ignoring %s: %s", path, _NO_CLIENT)
     env = env_client_config(settings)
     if env is not None:
         if _client_section(env):
-            return OAuthClient(env, "env")
-        _LOG.log("bad-env-client:section", "Ignoring %s: no 'installed' or 'web' client", CREDENTIALS_ENV)
-    return None
+            clients.append(OAuthClient(env, "env"))
+        else:
+            _LOG.log("bad-env-client:section", "Ignoring %s: %s", CREDENTIALS_ENV, _NO_CLIENT)
+    return clients
+
+
+def client_config(settings: Any, oauth_dir: Path | None = None) -> OAuthClient | None:
+    """The OAuth client: the first of :func:`oauth_clients` (the file wins over the env var), or None.
+
+    The one rule for both the consent flow (``pincer google setup``) and filling in the
+    client of an env token that lacks ``client_id``. Pass *oauth_dir* when the caller
+    already resolved ``settings.google_oauth_dir()``.
+    """
+    clients = oauth_clients(settings, oauth_dir)
+    return clients[0] if clients else None
 
 
 def _client_locations(oauth_dir: Path) -> str:
@@ -186,13 +199,13 @@ def _client_locations(oauth_dir: Path) -> str:
 
 
 def _env_location(settings: Any, token_info: dict[str, Any]) -> dict[str, Any] | None:
-    """``GoogleAuth`` kwargs for an env token, its OAuth client filled in from
-    :func:`client_config` when the token lacks one; None when there is none to fill in.
+    """``GoogleAuth`` kwargs for an env token, its OAuth client filled in when the token
+    lacks one; None when there is none to fill in.
 
     The client id and secret always come from one client: a token without ``client_id``
-    takes both from the configured client (a stray ``client_secret`` of its own cannot be
-    paired with it); a token with ``client_id`` but no secret takes the secret only from
-    the client with that id.
+    takes both from :func:`client_config` (a stray ``client_secret`` of its own cannot be
+    paired with it); a token with ``client_id`` but no secret takes the secret from
+    whichever of :func:`oauth_clients` has that id, file or env.
     """
     info = dict(token_info)
     token_client_id = str(info.get("client_id") or "")
@@ -200,23 +213,29 @@ def _env_location(settings: Any, token_info: dict[str, Any]) -> dict[str, Any] |
     if complete and token_client_id in _MISMATCH_CHECKED:
         return {"token_info": info, "client_source": "token"}
     oauth_dir = settings.google_oauth_dir()
-    client = client_config(settings, oauth_dir)
-    mismatch = client is not None and bool(token_client_id) and token_client_id != client.client_id
-    if mismatch and client is not None:
+    clients = oauth_clients(settings, oauth_dir)
+    primary = clients[0] if clients else None
+    if primary is not None and token_client_id and token_client_id != primary.client_id:
         # The token wins: it was issued for its own client, and refreshing it needs that client's secret.
         _LOG.log(
-            f"client-mismatch:{token_client_id}:{client.client_id}",
+            f"client-mismatch:{token_client_id}:{primary.client_id}",
             "%s was issued for OAuth client %s, but the OAuth client in %s is %s — using the token's own "
             "client; re-running `pincer google setup` would issue a token for a different OAuth client",
             TOKEN_ENV,
             token_client_id,
-            client.label,
-            client.client_id,
+            primary.label,
+            primary.client_id,
         )
     if complete:
         _MISMATCH_CHECKED.add(token_client_id)
         return {"token_info": info, "client_source": "token"}
-    if client is None or mismatch:
+    if token_client_id:
+        client = next((c for c in clients if c.client_id == token_client_id), None)
+        keys: tuple[str, ...] = ("client_secret", "token_uri")
+    else:
+        client = primary
+        keys = ("client_id", "client_secret", "token_uri")
+    if client is None:
         _LOG.log(
             "env-token-without-client",
             "Google Workspace tools off: %s lacks client_id/client_secret and no matching OAuth client found in %s",
@@ -224,7 +243,6 @@ def _env_location(settings: Any, token_info: dict[str, Any]) -> dict[str, Any] |
             _client_locations(oauth_dir),
         )
         return None
-    keys = ("client_secret", "token_uri") if token_client_id else ("client_id", "client_secret", "token_uri")
     for key in keys:
         if client.section.get(key) and (key != "token_uri" or not info.get(key)):
             info[key] = client.section[key]

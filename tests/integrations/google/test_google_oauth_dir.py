@@ -270,9 +270,85 @@ def test_a_complete_env_token_reads_the_client_file_once(dirs, monkeypatch):
     (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
     monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob(_full_token()))
     reads: list[object] = []
-    real = token_source.client_config
-    monkeypatch.setattr(token_source, "client_config", lambda *a: reads.append(a) or real(*a))
+    real = token_source.oauth_clients
+    monkeypatch.setattr(token_source, "oauth_clients", lambda *a: reads.append(a) or real(*a))
     settings = _settings()
     for _ in range(3):
         assert locate_token(settings)["client_source"] == "token"
     assert len(reads) == 1
+
+
+# ── Review round 2 (PR #368) ──────────────────────────────────────────────
+
+
+def test_a_token_with_a_client_id_gets_the_secret_from_the_env_client_with_that_id(dirs, monkeypatch, caplog):
+    """The file holds another client: the env client with the token's id supplies the secret."""
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_CREDENTIALS_JSON", json.dumps(ENV_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob({**TRIMMED_TOKEN, "client_id": "env-cid"}))
+    with caplog.at_level(logging.WARNING, logger="pincer.integrations.google.token_source"):
+        location = locate_token(_settings())
+    assert location is not None
+    assert (location["token_info"]["client_id"], location["token_info"]["client_secret"]) == ("env-cid", "env-secret")
+    assert location["client_source"] == "env"
+    assert not any("no matching OAuth client" in r.getMessage() for r in caplog.records)
+
+
+def test_a_token_with_a_client_id_no_source_has_is_turned_off(dirs, monkeypatch, caplog):
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_CREDENTIALS_JSON", json.dumps(ENV_CLIENT))
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob({**TRIMMED_TOKEN, "client_id": "other-cid"}))
+    with caplog.at_level(logging.WARNING, logger="pincer.integrations.google.token_source"):
+        assert locate_token(_settings()) is None
+    assert any("no matching OAuth client" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("source", ["file", "env"])
+def test_a_client_without_a_secret_is_not_used(dirs, monkeypatch, caplog, source):
+    """Filling in only client_id would register the tools and fail at the first call."""
+    data_dir, _ = dirs
+    no_secret = json.dumps({"installed": {"client_id": "G"}})
+    if source == "file":
+        (data_dir / "google_credentials.json").write_text(no_secret)
+    else:
+        monkeypatch.setenv("PINCER_GOOGLE_CREDENTIALS_JSON", no_secret)
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob(TRIMMED_TOKEN))
+    with caplog.at_level(logging.WARNING, logger="pincer.integrations.google.token_source"):
+        assert client_config(_settings()) is None
+        assert locate_token(_settings()) is None
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "client_id and client_secret" in messages
+    assert "Google Workspace tools off" in messages
+
+
+def test_a_legacy_token_in_data_dir_does_not_hide_a_full_token_in_cwd_data(dirs):
+    data_dir, cwd = dirs
+    (data_dir / "google_token.json").write_text(json.dumps(_full_token()))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_workspace_token.json").write_text(json.dumps(_full_token()))
+    settings = _settings()
+    assert settings.google_oauth_dir() == cwd / "data"
+    assert locate_token(settings)["token_path"] == str(cwd / "data" / "google_workspace_token.json")
+
+
+def test_a_legacy_token_in_data_dir_still_wins_over_a_bare_client_in_cwd_data(dirs):
+    data_dir, cwd = dirs
+    (data_dir / "google_token.json").write_text(json.dumps(_full_token()))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    assert _settings().google_oauth_dir() == data_dir
+
+
+def test_an_unknown_home_in_the_explicit_dir_is_a_config_error(dirs, monkeypatch):
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", "~nouserxyz-pincer/x")
+    with pytest.raises(ValidationError, match="PINCER_GOOGLE_OAUTH_DIR=~nouserxyz-pincer/x: cannot expand"):
+        _settings()
+
+
+def test_the_explicit_dir_expands_the_home(dirs, monkeypatch):
+    monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", "~/pincer-oauth")
+    assert _settings().google_oauth_dir() == Path.home() / "pincer-oauth"
