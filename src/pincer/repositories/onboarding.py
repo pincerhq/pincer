@@ -29,6 +29,18 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
+    async def delete_unread_claim(self, user_id: str, channel: str, session_id: str) -> bool:
+        """Delete the row `session_id` claimed, while no reply has been read
+        against it; False when there is none (or it is another turn's)."""
+        removed = await self.delete_where(
+            col(Onboarding.user_id) == user_id,
+            col(Onboarding.channel) == channel,
+            col(Onboarding.asked_session_id) == session_id,
+            col(Onboarding.completed_at).is_(None),
+            col(Onboarding.attempts) == 0,
+        )
+        return removed == 1
+
     async def mark_completed(
         self, user_id: str, channel: str, completed_at: float, *, reason: Literal["answer", "expired"]
     ) -> bool:

@@ -76,6 +76,12 @@ class OnboardingService(DatabaseService):
                 {"user_id": user_id, "channel": channel, "asked_session_id": session_id, "asked_at": now}
             )
 
+    async def release_prompt(self, user_id: str, channel: str, session_id: str) -> bool:
+        """Undo `claim_prompt` for a turn whose reply was never saved. Leaves
+        the row alone once a reply has been read against it."""
+        async with session_scope(self._url) as session:
+            return await OnboardingRepository(session).delete_unread_claim(user_id, channel, session_id)
+
     async def complete(self, user_id: str, channel: str, *, now: float) -> bool:
         """Close an open gate as expired: the answer window passed and the
         message read after it held no answer."""
