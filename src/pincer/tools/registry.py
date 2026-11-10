@@ -41,6 +41,11 @@ class ToolDef:
     handler: Callable[..., Awaitable[str]]
     require_approval: bool = False
     """Declared intent: this tool changes something. See `tools.approval`."""
+    file_path_params: tuple[str, ...] = ()
+    """Parameters holding local file paths the tool will read and send (e.g. email ``attachments``).
+
+    Approval prompts show them resolved, with sizes, ahead of the other arguments.
+    """
 
 
 class ToolRegistry:
@@ -65,6 +70,7 @@ class ToolRegistry:
         handler: Callable[..., Awaitable[str]],
         parameters: dict[str, Any] | None = None,
         require_approval: bool = False,
+        file_path_params: tuple[str, ...] = (),
     ) -> None:
         """Register a tool. If parameters is None, auto-generates schema from type hints."""
         if parameters is None:
@@ -76,6 +82,7 @@ class ToolRegistry:
             parameters=parameters,
             handler=handler,
             require_approval=require_approval,
+            file_path_params=file_path_params,
         )
         logger.info("Registered tool: %s", name)
 
@@ -107,6 +114,20 @@ class ToolRegistry:
         if tool is None:
             return False
         return self._approval_policy.requires_approval(name, declared=tool.require_approval)
+
+    async def approval_display_args(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Arguments as an approval prompt should show them. The tool still runs with *arguments*.
+
+        For a tool registered with ``file_path_params``, those paths are shown
+        resolved, with sizes, first. Other tools' arguments are returned as is.
+        The single display hook for the agent loop and the MCP exporter.
+        """
+        tool = self._tools.get(name)
+        if tool is None or not tool.file_path_params:
+            return arguments
+        from pincer.tools.attachments import approval_display_args
+
+        return await approval_display_args(arguments, tool.file_path_params)
 
     def declares_approval(self, name: str) -> bool:
         """The tool's registration-time flag, before policy. For audit/introspection."""

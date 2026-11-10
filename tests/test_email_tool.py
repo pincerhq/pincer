@@ -1,5 +1,7 @@
 """Tests for email tool."""
 
+import email
+import email.policy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -177,7 +179,12 @@ class TestEmailSendAttachments:
             result = await email_send("user@example.com", "Report", "See attached", attachments=["report.pdf"])
 
         assert "report.pdf" in result
-        message = mock_send.call_args.args[0]
+        raw = mock_send.call_args.args[0]
+        assert isinstance(raw, bytes)  # built and serialised off the event loop
+        assert mock_send.call_args.kwargs["sender"] == "test@example.com"
+        assert mock_send.call_args.kwargs["recipients"] == ["user@example.com"]
+        message = email.message_from_bytes(raw, policy=email.policy.default)
+        assert message["To"] == "user@example.com"
         assert message.get_content_type() == "multipart/mixed"
         parts = list(message.iter_attachments())
         assert len(parts) == 1
@@ -197,12 +204,40 @@ class TestEmailSendAttachments:
             result = await email_send("user@example.com", "Fwd", "see below", attachments=["fwd.eml"])
 
         assert "fwd.eml" in result
-        message = mock_send.call_args.args[0]
+        message = email.message_from_bytes(mock_send.call_args.args[0], policy=email.policy.default)
         [part] = list(message.iter_attachments())
         assert part.get_content_type() == "message/rfc822"
         assert part.get_filename() == "fwd.eml"
         assert part["Content-Transfer-Encoding"] in (None, "7bit", "8bit")
         assert part.get_content()["subject"] == "inner"
+
+    async def test_cc_recipients_and_display_names(self, pincer_downloads):
+        (pincer_downloads / "a.txt").write_bytes(b"hi")
+        s = _smtp_settings()
+        s.email_from = "Me <me@example.com>"
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=s),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            await email_send("Ann <ann@x.com>, bob@x.com", "s", "b", cc="cat@x.com", attachments=["a.txt"])
+
+        assert mock_send.call_args.kwargs["sender"] == "me@example.com"
+        assert mock_send.call_args.kwargs["recipients"] == ["ann@x.com", "bob@x.com", "cat@x.com"]
+
+    async def test_without_attachments_sends_message_object(self):
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            await email_send("user@example.com", "s", "b")
+
+        message = mock_send.call_args.args[0]
+        assert message.get_content_type() == "text/plain"
+        assert "recipients" not in mock_send.call_args.kwargs
 
     async def test_disallowed_path_rejected(self, pincer_downloads):
         with (

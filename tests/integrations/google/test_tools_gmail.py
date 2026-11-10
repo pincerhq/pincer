@@ -644,3 +644,16 @@ async def test_bad_attachment_blocks_before_api_call(mock_factory, mock_gmail_se
     assert "NOT sent" in result
     send.assert_not_called()
     get.assert_not_called()
+
+
+async def test_send_with_control_char_filename(mock_factory, mock_gmail_service, downloads):
+    (downloads / "a\nBcc: x@evil.com\n.pdf").write_bytes(b"%PDF")
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "s"}
+    result = await google__send_message(
+        mock_factory, to="b@x.com", subject="S", body="B", attachments=["a\nBcc: x@evil.com\n.pdf"]
+    )
+    assert "Email sent" in result
+    sent = _uploaded(_sent_call(send))
+    assert sent["bcc"] is None
+    assert [p.get_filename() for p in sent.iter_attachments()] == ["a_Bcc: x@evil.com_.pdf"]

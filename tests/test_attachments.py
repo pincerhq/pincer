@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -9,10 +11,14 @@ import pytest
 from pincer.tools import attachments as att
 from pincer.tools.attachments import (
     AttachmentError,
-    approval_display_args,
+    describe_attachments,
     load_attachments,
     resolve_attachment_path,
 )
+from pincer.tools.registry import ToolRegistry
+from pincer.utils.file_search import iter_named_files
+
+_REAL_CONFIGURED_DATA_DIR = att._configured_data_dir
 
 
 @pytest.fixture
@@ -106,6 +112,41 @@ def test_outside_candidate_is_skipped_not_reported(home: Path) -> None:
     assert resolve_attachment_path("config.toml") == f.resolve()
 
 
+def test_relative_path_with_folder_wins_over_basename_matches(home: Path) -> None:
+    direct = _write(home / ".pincer" / "downloads" / "report.pdf")
+    _write(home / ".pincer" / "workspace" / "exec_output" / "report.pdf")
+    assert resolve_attachment_path("downloads/report.pdf") == direct.resolve()
+    with pytest.raises(AttachmentError, match="matches 2 files"):
+        resolve_attachment_path("report.pdf")
+
+
+def test_relative_path_with_folder_falls_back_to_basename_search(home: Path) -> None:
+    f = _write(home / ".pincer" / "workspace" / "exec_output" / "chart.png")
+    assert resolve_attachment_path("charts/chart.png") == f.resolve()
+
+
+def test_data_dir_settings_failure_is_logged(home: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(att, "_configured_data_dir", _REAL_CONFIGURED_DATA_DIR)
+    import pincer.config
+
+    def broken():
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(pincer.config, "get_settings_relaxed", broken)
+    monkeypatch.setattr(att, "_data_dir_failure", att.LogOnce(att.logger, logging.WARNING))
+    with caplog.at_level(logging.WARNING, logger=att.logger.name):
+        assert att._configured_data_dir() is None
+    assert "Could not read data_dir" in caplog.text
+
+
+def test_iter_named_files(tmp_path: Path) -> None:
+    _write(tmp_path / "a" / "x.txt")
+    _write(tmp_path / "a" / ".hidden" / "x.txt")
+    _write(tmp_path / "b" / "deep" / "x.txt")
+    found = list(iter_named_files([tmp_path / "a", tmp_path / "missing", tmp_path / "b"], "x.txt"))
+    assert found == [tmp_path / "a" / "x.txt", tmp_path / "b" / "deep" / "x.txt"]
+
+
 def test_outside_candidate_alone_is_not_found(home: Path) -> None:
     _write(home / ".pincer" / "pincer.db")
     with pytest.raises(AttachmentError, match="not found"):
@@ -194,15 +235,15 @@ def test_load_caps_bytes_read_not_just_stat(home: Path, monkeypatch: pytest.Monk
     # A file that grows between the stat check and the read is still capped.
     monkeypatch.setattr(att, "MAX_ATTACHMENT_BYTES", 10)
     f = _write(home / ".pincer" / "downloads" / "growing.csv", b"x" * 5)
-    real_read = att._read_capped
+    real_read = att._read_verified
 
-    def grow_then_read(path: Path, budget: int) -> bytes:
+    def grow_then_read(path: Path, budget: int, allowed: list[Path]) -> bytes:
         f.write_bytes(b"x" * 50)
-        data = real_read(path, budget)
+        data = real_read(path, budget, allowed)
         assert len(data) <= budget + 1
         return data
 
-    monkeypatch.setattr(att, "_read_capped", grow_then_read)
+    monkeypatch.setattr(att, "_read_verified", grow_then_read)
     with pytest.raises(AttachmentError, match="limit is"):
         load_attachments(["growing.csv"])
 
@@ -223,6 +264,46 @@ def test_load_rejects_symlink_swapped_after_resolve(home: Path, monkeypatch: pyt
         load_attachments(["a.txt"])
 
 
+def _resolve_to(monkeypatch: pytest.MonkeyPatch, fn) -> None:
+    """Make load_attachments see *fn*'s path, as if the file changed after resolve()."""
+    monkeypatch.setattr(att, "resolve_attachment_path", fn)
+
+
+def test_load_rejects_fifo_without_hanging(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fifo = home / ".pincer" / "downloads" / "pipe.pdf"
+    os.mkfifo(fifo)
+    _resolve_to(monkeypatch, lambda p: fifo.resolve())
+    with pytest.raises(AttachmentError, match="not a regular file"):
+        load_attachments(["pipe.pdf"])
+
+
+def test_load_rejects_intermediate_dir_swapped_for_symlink(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    outside = home / "outside"
+    _write(outside / "a.txt", b"secret")
+    sub = home / ".pincer" / "workspace" / "exec_output" / "sub"
+    f = _write(sub / "a.txt", b"ok")
+    resolved = f.resolve()
+
+    def resolve_then_swap(p: str) -> Path:
+        (sub / "a.txt").unlink()
+        sub.rmdir()
+        sub.symlink_to(outside, target_is_directory=True)
+        return resolved
+
+    _resolve_to(monkeypatch, resolve_then_swap)
+    with pytest.raises(AttachmentError, match="outside the allowed folders"):
+        load_attachments(["sub/a.txt"])
+
+
+def test_control_characters_in_filename_replaced(home: Path) -> None:
+    _write(home / ".pincer" / "downloads" / "a\nBcc: x@evil.com\n.pdf")
+    [a] = load_attachments(["a\nBcc: x@evil.com\n.pdf"])
+    assert a.filename == "a_Bcc: x@evil.com_.pdf"
+    part = att.attachment_part(a)
+    assert "\n" not in part.get_filename()
+    part.as_bytes()  # serialises without HeaderParseError
+
+
 def test_message_types(home: Path) -> None:
     _write(home / ".pincer" / "downloads" / "fwd.eml", b"Subject: hi\n\nbody")
     [eml] = load_attachments(["fwd.eml"])
@@ -240,22 +321,48 @@ def test_load_rejects_disallowed_path(home: Path) -> None:
         load_attachments(["/etc/passwd"])
 
 
-# ── approval_display_args ────────────────────────────────────────────────────
+# ── Approval display ─────────────────────────────────────────────────────────
 
 
-def test_approval_display_args_email_tool(home: Path) -> None:
-    args = {"to": "a@b.c", "attachments": [f"{home}/.pincer/downloads/Q3 report.pdf", "/app/data/workspace/x.xlsx"]}
-    shown = approval_display_args("google__send_message", args)
-    assert shown["attachments"] == "~/.pincer/downloads/Q3 report.pdf, /app/data/workspace/x.xlsx"
-    assert shown["to"] == "a@b.c"
-    assert isinstance(args["attachments"], list)  # original untouched
-    assert approval_display_args("email_send", {"attachments": "a.pdf, b.pdf"})["attachments"] == "a.pdf, b.pdf"
+def test_describe_attachments_shows_resolved_path_and_size(home: Path) -> None:
+    _write(home / ".pincer" / "downloads" / "Q3 report.pdf", b"x" * 2500)
+    _write(home / ".pincer" / "downloads" / "a.pdf, ~/.pincer/downloads/b.pdf")
+    text = describe_attachments(["Q3 report.pdf", "~/.pincer/downloads/a.pdf, ~/.pincer/downloads/b.pdf", "nope.pdf"])
+    lines = text.strip().split("\n")
+    assert lines == [
+        "• ~/.pincer/downloads/Q3 report.pdf (2 KB)",
+        "• ~/.pincer/downloads/a.pdf, ~/.pincer/downloads/b.pdf (5 B)",
+        "• nope.pdf (will not be attached: Attachment not found: 'nope.pdf')",
+    ]
 
 
-def test_approval_display_args_other_tools_untouched() -> None:
+def _registry() -> ToolRegistry:
+    async def handler(**kwargs):
+        return "ok"
+
+    reg = ToolRegistry()
+    reg.register("email_send", "send", handler, {"type": "object"}, True, file_path_params=("attachments",))
+    reg.register("slack__post", "post", handler, {"type": "object"}, True)
+    return reg
+
+
+async def test_registry_approval_display_puts_attachments_first(home: Path) -> None:
+    _write(home / ".pincer" / "workspace" / "uploads" / "secret.pdf")
+    args = {"to": "a@b.c", "body": "B" * 300, "attachments": ["secret.pdf"]}
+    shown = await _registry().approval_display_args("email_send", args)
+    assert list(shown) == ["attachments", "to", "body"]
+    assert "~/.pincer/workspace/uploads/secret.pdf" in shown["attachments"]
+    # The preview a channel builds now names the file within its first 200 chars.
+    assert "secret.pdf" in ", ".join(f"{k}={v}" for k, v in shown.items())[:200]
+    assert args["attachments"] == ["secret.pdf"]  # the tool still gets the original
+
+
+async def test_registry_approval_display_leaves_other_args_alone(home: Path) -> None:
+    reg = _registry()
     slack_args = {"attachments": [{"text": "", "footer": "https://x/y"}]}
-    assert approval_display_args("slack__chat_postMessage", slack_args) is slack_args
-    args = {"to": "a@b.c"}
-    assert approval_display_args("email_send", args) is args
+    assert await reg.approval_display_args("slack__post", slack_args) is slack_args
+    assert await reg.approval_display_args("unknown_tool", slack_args) is slack_args
+    plain = {"to": "a@b.c"}
+    assert await reg.approval_display_args("email_send", plain) is plain
     weird = {"attachments": {"a": 1}}
-    assert approval_display_args("email_send", weird) is weird
+    assert await reg.approval_display_args("email_send", weird) is weird

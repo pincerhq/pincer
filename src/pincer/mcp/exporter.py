@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, MCP_TOOL_CONTEXT, CalendarTodayAlias
 from pincer.mcp.config import missing_export_log_level
-from pincer.tools.attachments import approval_display_args
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -134,7 +133,8 @@ class PincerToolExporter:
         async def _call(kwargs: dict[str, Any]) -> str:
             if needs_approval and approval_cb:
                 try:
-                    approved = await approval_cb(pincer_name, approval_display_args(pincer_name, kwargs))
+                    shown = await registry.approval_display_args(pincer_name, kwargs)
+                    approved = await approval_cb(pincer_name, shown)
                 except Exception:
                     logger.exception("Approval callback raised for '%s'", pincer_name)
                     approved = False
