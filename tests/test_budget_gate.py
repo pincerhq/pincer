@@ -782,3 +782,50 @@ async def test_a_dashboard_call_is_a_503_when_the_budget_cannot_be_read(  # type
         {"detail": "could not check the daily budget, call not placed."},
     )
     assert fake_twilio_rest.creates == []
+
+
+# ── A cost that cannot be stored (PR #366 review): the call was paid, the turn goes on ──
+
+
+def _not_a_database(tmp_path: Path) -> str:
+    """The URL of a file of non-database bytes: every write raises `DatabaseError`."""
+    path = tmp_path / "broken" / "pincer.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a database, " * 64)
+    return get_database_url(path)
+
+
+async def test_a_cost_that_cannot_be_stored_is_logged_and_still_returned(tmp_path, caplog) -> None:  # type: ignore[no-untyped-def]
+    service = CostService(_not_a_database(tmp_path), prices=load_price_table())
+
+    with caplog.at_level("ERROR", logger="pincer.services.costs"):
+        cost = await service.record("anthropic", _MODEL, _CALL)
+
+    assert cost == pytest.approx(_CALL_COST)
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert _MODEL in errors[0].getMessage()
+    assert errors[0].exc_info is not None
+
+
+async def _drop_cost_table(tmp_path: Path) -> None:
+    """Every later cost write (and read) on the session DB raises: the table is gone."""
+    from sqlalchemy import text
+
+    async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+        await (await session.connection()).execute(text("DROP TABLE pincer_cost_logs"))
+
+
+async def test_a_metered_request_whose_cost_cannot_be_stored_still_returns_its_response(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted
+) -> None:
+    """A finished call's outcome or a thread summary: the paid answer is used, not dropped as "no answer"."""
+    from pincer.llm.cost_tracker import MeteredLLM
+
+    _, tracker = await budgeted(0.0)  # no budget: nothing is read
+    await _drop_cost_table(tmp_path)
+    llm = _scripted_llm(_response())
+
+    response = await MeteredLLM(llm, tracker, "anthropic").complete([])
+
+    assert response.content == "Done."

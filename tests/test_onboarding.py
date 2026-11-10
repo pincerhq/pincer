@@ -1358,3 +1358,36 @@ async def test_with_the_budget_reached_the_onboarding_extraction_is_not_requeste
     record = await _record(tmp_path, "user-7", "test")
     assert record is not None
     assert (record.attempts, record.completed_at) == (0, None)
+
+
+@_PATHS
+async def test_an_answer_turn_keeps_its_reply_when_its_costs_cannot_be_stored(  # type: ignore[no-untyped-def]
+    path, tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """A cost-DB error after the reply was saved (or streamed) never replaces it (PR #366 review)."""
+    from sqlalchemy import text
+
+    from pincer.config.pricing import load_price_table
+    from pincer.db.session import session_scope
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=0.0, prices=load_price_table())  # no reads
+    await tracker.initialize()
+    llm = _scripted_llm(
+        "Hi!",
+        "Nice to meet you, Carol.",
+        '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry, memory_store=memory_store)
+    try:
+        await _reply(agent, path, "user-8", "test", "hi")
+        async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+            await (await session.connection()).execute(text("DROP TABLE pincer_cost_logs"))
+        reply = await _reply(agent, path, "user-8", "test", "I'm Carol")
+    finally:
+        await tracker.close()
+
+    assert reply == "Nice to meet you, Carol."
+    assert llm.complete.await_count == 3  # precondition: the extraction ran too
+    record = await _record(tmp_path, "user-8", "test")
+    assert record is not None and record.completed_at is not None

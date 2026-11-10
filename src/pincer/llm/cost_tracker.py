@@ -60,7 +60,11 @@ class CostTracker:
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
-        """Record a cost entry and return the cost; never raises (see `CostService.record`)."""
+        """Record a cost entry and return the cost.
+
+        An unpriced model or a failed write is logged and returns without raising
+        (see `CostService.record`); a tracker used before `initialize()` raises.
+        """
         return await self.service.record(provider, model, usage, session_id, is_free)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:

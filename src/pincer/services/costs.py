@@ -94,9 +94,12 @@ class CostService:
 
         Every completed call is stored, even one that takes today's spend over
         the daily budget: the budget is checked before a call (`budget_reached`),
-        never here. A `model` with no `[pricing]` entry is logged at ERROR and
-        not stored, and its cost is 0.0: the provider has billed the call
-        already, so recording must never fail the turn or cut a phone call.
+        never here. The provider has billed the call already, so recording
+        never fails the turn or cuts a phone call:
+        - a `model` with no `[pricing]` entry is logged at ERROR, not stored,
+          and its cost is 0.0;
+        - a row the database will not take (locked, unreachable) is logged at
+          ERROR, and its computed cost is still returned.
         `is_free` (e.g. a keyless local endpoint) forces zero cost.
         """
         try:
@@ -106,21 +109,32 @@ class CostService:
             # was never told about: loud, and never stored at an invented $0 (issue #357).
             logger.error("No [pricing] entry for model %r (provider %s): the call is not recorded", model, provider)
             return 0.0
-        async with session_scope(self._url) as session:
-            await CostLogRepository(session).add(
-                CostLog(
-                    timestamp=time.time(),
-                    provider=provider,
-                    model=model,
-                    input_tokens=usage.input_tokens,
-                    cache_write_5m_tokens=usage.cache_write_5m_tokens,
-                    cache_write_1h_tokens=usage.cache_write_1h_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    output_tokens=usage.output_tokens,
-                    cost_usd=cost,
-                    session_id=session_id,
-                ),
-                refresh=False,
+        try:
+            async with session_scope(self._url) as session:
+                await CostLogRepository(session).add(
+                    CostLog(
+                        timestamp=time.time(),
+                        provider=provider,
+                        model=model,
+                        input_tokens=usage.input_tokens,
+                        cache_write_5m_tokens=usage.cache_write_5m_tokens,
+                        cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        output_tokens=usage.output_tokens,
+                        cost_usd=cost,
+                        session_id=session_id,
+                    ),
+                    refresh=False,
+                )
+        except Exception:
+            # The call is billed and its reply in hand: a database that is locked or
+            # unreachable must not turn it into a failed turn (PR #366 review).
+            logger.error(
+                "Could not store the cost of a call to %r (provider %s, $%.6f): the call is not recorded",
+                model,
+                provider,
+                cost,
+                exc_info=True,
             )
 
         # Sprint 9 (T9.1): attribute this spend to the voice call currently
