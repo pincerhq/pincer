@@ -1203,3 +1203,16 @@ async def test_no_allow_tools_means_no_grants(voice):
     await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
     info = status_notify.get_call_info("CA_1")
     assert info is not None and info.tool_grants == frozenset()
+
+
+async def test_allow_tools_rejects_tools_this_setup_does_not_have(voice, monkeypatch):
+    monkeypatch.setattr(outbound, "_registered_tools", lambda: ["websearch__search", "make_phone_call"])
+    result = await outbound.make_phone_call(
+        TARGET, TASK, context={"user_id": "u1"}, allow_tools=["google__create_event", "websearch__search"]
+    )
+    assert result.startswith("Error") and "google__create_event" in result and "not connected" in result
+    assert voice.placed == []
+    ok = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}, allow_tools=["websearch__search"])
+    assert "Call SID: CA_1" in ok
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None and info.tool_grants == {"websearch__search"}

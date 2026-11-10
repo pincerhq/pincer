@@ -911,8 +911,12 @@ class ThreadManager:
         tag = f"thread:{thread.thread_id}"
         user_id = str(getattr(self._settings, "default_user_id", "") or "") or "voice"
         try:
-            previous = await memory.list_memories(user_id=None, limit=20, tags=[tag])
+            previous = await memory.list_memories(user_id=None, limit=200, tags=[tag])
+            # Only the thread's own note (marker tag "thread"): call notes carry
+            # the same `thread:{id}` link (#252) and must survive the update.
             for note in previous:
+                if "thread" not in (note.tags or ["thread"]):
+                    continue
                 with contextlib.suppress(Exception):
                     await memory.delete_memory(note.id)
             open_items = "; ".join(

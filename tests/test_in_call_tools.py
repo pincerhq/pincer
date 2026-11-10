@@ -1221,10 +1221,23 @@ async def test_forged_principal_is_overwritten_at_call_start():
     state.metadata[tp.META_PRINCIPAL] = tp.PRINCIPAL_OWNER
     state.metadata[tp.META_OWNER_USER] = "someone"
     state.metadata[tp.META_OWNER_GRANTS] = frozenset({"google__create_event"})
-    channel._resolve_principal("CA_forged", state)
+    channel._resolve_principal("CA_forged", state, "generic")
     assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_REMOTE
     assert state.metadata[tp.META_OWNER_GRANTS] == frozenset()
     await channel.stop()
+
+
+@pytest.mark.parametrize("kind", ["appointment", "receptionist"])
+async def test_fixed_purpose_kinds_never_get_the_owner_principal(kind):
+    """The principal is decided from the call kind, in one place."""
+    from pincer.voice.engine import CallState
+
+    channel = VoiceChannel(_settings())
+    status_notify.register_outbound_call("CA_kind", user_id="12345", channel="telegram")
+    state = CallState(call_sid="CA_kind", direction=CallDirection.OUTBOUND, caller_number="+4930123456")
+    state.metadata[tp.META_OWNER_USER] = "12345"
+    assert channel._resolve_principal("CA_kind", state, kind) == tp.PRINCIPAL_REMOTE
+    assert state.metadata[tp.META_OWNER_GRANTS] == frozenset()
 
 
 async def test_pre_registered_owner_covers_a_setup_that_beats_tracking():
@@ -1238,12 +1251,22 @@ async def test_pre_registered_owner_covers_a_setup_that_beats_tracking():
     state.metadata[tp.META_OWNER_USER] = "12345"
     state.metadata[tp.META_OWNER_CHANNEL] = "telegram"
     state.metadata[tp.META_OWNER_GRANTS] = frozenset({"google__create_event"})
-    channel._resolve_principal("CA_fast", state)
+    state.metadata[tp.META_OWNER_PINCER_ID] = "owner-1"
+    state.metadata[tp.META_OWNER_SESSION] = "telegram:12345"
+    gate = channel._create_tool_gate("CA_fast", state, MagicMock())
     assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_OWNER
     assert state.metadata[tp.META_OWNER_GRANTS] == {"google__create_event"}
-    gate = channel._create_tool_gate("CA_fast", state, MagicMock())
     assert gate.approval_target == ("12345", "telegram")
     assert "google__create_event" in gate.allowed_tools
+    # The call tools see the same owner before tracking lands…
+    assert status_notify.owner_id_for_call("CA_fast") == "owner-1"
+    provisional = status_notify.owner_info_for_call("CA_fast")
+    assert provisional is not None and provisional.session_key == "telegram:12345"
+    # …but the stage notices and the final report do not: their routing is tracking's.
+    assert status_notify.get_call_info("CA_fast") is None
+    # Once tracking lands, it wins.
+    status_notify.register_outbound_call("CA_fast", user_id="12345", channel="telegram", pincer_user_id="owner-2")
+    assert status_notify.owner_id_for_call("CA_fast") == "owner-2"
 
 
 async def test_owner_call_relays_message_and_note_without_asking_the_callee():

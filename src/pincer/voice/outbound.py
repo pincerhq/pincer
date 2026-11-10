@@ -11,7 +11,7 @@ import asyncio
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pincer.core.phone import normalize_e164
@@ -19,6 +19,9 @@ from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_boun
 from pincer.voice.engine import CLAIMED_SID_KEY
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
 from pincer.voice.twilio_rest import DialOutcomeUnknown
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 TOOL_NAME = "make_phone_call"
 # The line a placed call's result names it on. Only a placed call's result has
@@ -36,6 +39,17 @@ def placed_call_sid(result: str) -> str:
 
 
 logger = logging.getLogger(__name__)
+
+# The tool names this process has registered (cli/run.py wires the registry's
+# `list_tools`). Unset (API-only process, tests): grants are checked against
+# the in-call tier table only.
+_registered_tools: Callable[[], Iterable[str]] | None = None
+
+
+def set_registered_tools_provider(provider: Callable[[], Iterable[str]] | None) -> None:
+    """Install the source of registered tool names `allow_tools` is checked against (#252)."""
+    global _registered_tools  # noqa: PLW0603
+    _registered_tools = provider
 
 
 #: SGR/CSI sequences. `TwilioRestException.__str__` colours its output whenever
@@ -356,6 +370,20 @@ async def make_phone_call(
             f"Error: these tools cannot be used on a phone call: {', '.join(rejected_tools)}. "
             "Grant only call-safe tools (calendar, web search), or leave allow_tools empty."
         )
+    if tool_grants and _registered_tools is not None:
+        try:
+            registered = frozenset(_registered_tools())
+        except Exception:
+            logger.warning("Registered tools unavailable — checking allow_tools by tier only", exc_info=True)
+            registered = None
+        if registered is not None:
+            tool_grants, missing_tools = validate_tool_grants(allow_tools or [], available=registered)
+            if missing_tools:
+                logger.info("make_phone_call aborted: granted tools not available here: %s", missing_tools)
+                return (
+                    f"Error: these tools are not available in this setup: {', '.join(missing_tools)} "
+                    "(the integration is not connected). Place the call without them, or tell the user."
+                )
 
     thread_id = str(thread_id or "").strip()
     attach_kind = str(thread_kind or "").strip() or (KIND_FOLLOWUP if thread_id else KIND_ORIGIN)
@@ -445,7 +473,13 @@ async def make_phone_call(
         engine = _voice_engine()
         pre_state = None
         if engine is not None:
-            from pincer.voice.tool_policy import META_OWNER_CHANNEL, META_OWNER_GRANTS, META_OWNER_USER
+            from pincer.voice.tool_policy import (
+                META_OWNER_CHANNEL,
+                META_OWNER_GRANTS,
+                META_OWNER_PINCER_ID,
+                META_OWNER_SESSION,
+                META_OWNER_USER,
+            )
 
             owner_meta: dict[str, Any] = {}
             if user_id and user_id != "unknown":
@@ -453,6 +487,8 @@ async def make_phone_call(
                     META_OWNER_USER: user_id,
                     META_OWNER_CHANNEL: str(ctx.get("channel", "") or ""),
                     META_OWNER_GRANTS: tool_grants,
+                    META_OWNER_PINCER_ID: str(ctx.get("pincer_user_id") or ""),
+                    META_OWNER_SESSION: str(ctx.get("session_key") or ""),
                 }
             pre_state = await engine.register_pending_outbound(
                 briefing, validated, language=call_language, instructions=briefing.instructions, metadata=owner_meta

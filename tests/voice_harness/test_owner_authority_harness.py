@@ -191,7 +191,7 @@ async def test_pizza_delivery_change_reaches_the_owner_without_asking_the_restau
             "owner-1",
             "telegram",
             SESSION,
-            "📞 Message during the call with Pizzeria Roma: Die Pizzeria liefert erst um 19:30.",
+            '📞 Message relayed during the call with Pizzeria Roma: "Die Pizzeria liefert erst um 19:30."',
         )
     ]
     # Ran without anyone confirming → disclosed in the owner's post-call report

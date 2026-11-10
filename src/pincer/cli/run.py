@@ -299,6 +299,11 @@ async def _build_core(settings: Settings) -> CoreComponents:
         # memory_note, contact_lookup). Whether the LLM sees them on a call is
         # decided per call by voice.tool_policy (tiers + call scope).
         register_call_tools(tools, settings, memory=memory_store)
+        # Issue #252: make_phone_call's allow_tools may only grant tools this
+        # process actually has (read at dial time, so late MCP tools count).
+        from pincer.voice.outbound import set_registered_tools_provider
+
+        set_registered_tools_provider(tools.list_tools)
 
         # Sprint 12: the inbound receptionist — the business profile is loaded
         # and validated here (fail fast: a bad profile refuses to start), and

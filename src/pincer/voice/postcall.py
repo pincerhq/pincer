@@ -154,8 +154,14 @@ class PostCallProcessor:
             call_sid, state, transcript, outcome, call_analytics, language
         )
 
+        # The same thread/session links the in-call notes carry (#252).
+        link_tags: list[str] = []
+        if thread_update is not None and thread_update.thread.thread_id:
+            link_tags.append(f"thread:{thread_update.thread.thread_id}")
+        if info is not None and info.session_key:
+            link_tags.append(f"session:{info.session_key}")
         if outcome is not None:
-            await self._write_memory_notes(call_sid, memory_user_id, target_label, outcome)
+            await self._write_memory_notes(call_sid, memory_user_id, target_label, outcome, link_tags)
 
         # Did the agent actually open the call with the task it was given?
         # A smoke detector, never a gate: it only logs and counts.
@@ -199,7 +205,7 @@ class PostCallProcessor:
         deferred = list(state.metadata.get("deferred_actions") or [])
         if deferred:
             report = f"{report}\n{self._render_deferred(deferred, language)}"
-            await self._write_deferred_followups(call_sid, memory_user_id, target_label, deferred)
+            await self._write_deferred_followups(call_sid, memory_user_id, target_label, deferred, link_tags)
 
         if not persisted:
             report = f"{report}\n{self._persist_failure_note(language)}"
@@ -592,13 +598,14 @@ class PostCallProcessor:
         user_id: str,
         target_label: str,
         deferred: list[dict[str, Any]],
+        link_tags: list[str] | None = None,
     ) -> None:
         """Deferred in-call actions become follow-up drafts in memory — the
         same T3.4 shape the outcome extractor uses, so the agent loop (with
         its approval gates) can execute them when the user says so."""
         if self._memory is None or not user_id:
             return
-        tags = ["source:voice_call", f"call:{call_sid}", "followup", "deferred_in_call"]
+        tags = ["source:voice_call", f"call:{call_sid}", "followup", "deferred_in_call", *(link_tags or ())]
         try:
             for item in deferred:
                 await self._memory.store_memory(
@@ -677,13 +684,14 @@ class PostCallProcessor:
         user_id: str,
         target_label: str,
         outcome: CallOutcome,
+        link_tags: list[str] | None = None,
     ) -> None:
         """Key facts and commitments land in cross-channel memory, tagged with
         the call. If the transcript is later purged (retention), the notes keep
         the fact — only the raw transcript reference goes stale."""
         if self._memory is None or not user_id:
             return
-        tags = ["source:voice_call", f"call:{call_sid}"]
+        tags = ["source:voice_call", f"call:{call_sid}", *(link_tags or ())]
         try:
             for fact in outcome.key_facts:
                 await self._memory.store_memory(

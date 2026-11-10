@@ -326,3 +326,12 @@ def test_websearch_cap_covers_the_source_prefixes(language):
 def test_websearch_without_url_names_no_domain():
     text = ts.render("websearch__search", _websearch({"title": "Preis", "snippet": "1,60"}), "en")
     assert text.startswith("According to a website: 1,60. ")
+
+
+def test_memory_search_keeps_a_snippet_that_starts_with_no():
+    """#252: "No onions" is a remembered preference, not an empty result."""
+    spoken = ts.render("call_memory_search", "- No onions, nut allergy", "en")
+    assert "onions" in spoken
+    assert (
+        ts.render("call_memory_search", "Nothing noted about that.", "en") == en_pack.TOOL_SPEECH["memory_search.none"]
+    )

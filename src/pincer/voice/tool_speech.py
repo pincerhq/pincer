@@ -296,8 +296,14 @@ def _render_contacts(result: str, language: str) -> str:
 
 
 def _render_memory_search(result: str, language: str) -> str:
-    lines = [ln.strip(" -•\t") for ln in result.splitlines() if ln.strip()]
-    lines = [ln for ln in lines if not ln.lower().startswith(("no ", "nothing", "keine", "нічого"))]
+    raw = [ln.strip() for ln in result.splitlines() if ln.strip()]
+    # A bulleted line is a snippet, whatever it says ("No onions — allergy" is a
+    # preference, not an empty result); only an unbulleted line can be the sentinel.
+    lines = [
+        ln.strip(" -•\t")
+        for ln in raw
+        if ln.startswith(("-", "•")) or not ln.lower().startswith(("no ", "nothing", "keine", "нічого"))
+    ]
     if not lines:
         return _tpl("memory_search.none", language)
     cleaned = [ISO_TIMESTAMP_RE.sub("", ln).strip() for ln in lines[:MAX_LIST_ITEMS]]

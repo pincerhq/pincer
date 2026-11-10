@@ -22,6 +22,7 @@ they return an honest "Error: …" string (tool contract — never raise).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -57,7 +58,7 @@ def _owner_id(call_sid: str) -> str:
     context: on an outbound call that context's user is the callee's number."""
     from pincer.voice import status_notify
 
-    return status_notify.owner_id_for_call(call_sid)
+    return status_notify.owner_id_for_call(call_sid)  # tracking, else the pre-dial owner
 
 
 async def _call_link_tags(call_sid: str, settings: Any) -> list[str]:
@@ -74,7 +75,7 @@ async def _call_link_tags(call_sid: str, settings: Any) -> list[str]:
         thread_id = ""
     if thread_id:
         tags.append(f"thread:{thread_id}")
-    info = status_notify.get_call_info(call_sid)
+    info = status_notify.owner_info_for_call(call_sid)
     if info is not None and info.session_key:
         tags.append(f"session:{info.session_key}")
     return tags
@@ -95,24 +96,37 @@ def make_send_owner_message(settings: Any) -> Any:
         if not body:
             return "Error: empty message."
         body = body[:MAX_MESSAGE_LEN]
-        info = status_notify.get_call_info(call_sid)
+        info = status_notify.owner_info_for_call(call_sid)
         user_id = (info.user_id if info else "") or str((context or {}).get("pincer_user_id") or "")
         channel = info.channel if info else ""
         if not user_id:
             return "Error: no initiating user is known for this call."
-        delivered = await status_notify.send_user_message(user_id, channel, f"📞 {body}")
         # Issue #252: the chat that asked for the call sees the message too.
+        # Both deliveries at once: the call turn waits on this tool. The chat
+        # copy is quoted and labelled as relayed: its wording may come from the
+        # person on the phone, so it must read as a report, not as an instruction.
         target = (info.target_name or info.target_number) if info else ""
-        linked = await status_notify.append_to_session(
-            call_sid, f"📞 Message during the call{f' with {target}' if target else ''}: {body}"
+        quoted = body.replace('"', "'")
+        delivered, linked = await asyncio.gather(
+            status_notify.send_user_message(user_id, channel, f"📞 {body}"),
+            status_notify.append_to_session(
+                call_sid, f'📞 Message relayed during the call{f" with {target}" if target else ""}: "{quoted}"'
+            ),
         )
-        if not delivered and not linked:
-            return "Error: the message could not be delivered to the user's channel."
-        if not delivered:
+        if delivered:
+            if linked == status_notify.APPEND_FAILED:
+                return "Message delivered to the user, but it could not be added to the chat that asked for this call."
+            return "Message delivered to the user."
+        if linked == status_notify.APPEND_DONE:
             return "The message was added to the user's chat, but the channel push failed."
-        if linked is False:
-            return "Message delivered to the user, but it could not be added to the chat that asked for this call."
-        return "Message delivered to the user."
+        if linked == status_notify.APPEND_PENDING:
+            # Not delivered yet, and not lost: say exactly that. Not an error —
+            # the gate would defer it, and the follow-up would send it twice.
+            return (
+                "The channel push failed; a copy is queued for the user's chat and appears there once that "
+                "chat is free. The user does not have the message yet."
+            )
+        return "Error: the message could not be delivered to the user's channel."
 
     return send_owner_message
 
@@ -171,8 +185,9 @@ def make_memory_search(settings: Any, memory: BaseMemoryBackend | None) -> Any:
             logger.exception("call_memory_search failed [%s]", call_sid)
             return f"Error: memory search failed: {e}"
         # Belt and braces: a backend that ignores user_id must not leak.
+        # Whitespace collapsed: a multi-line memory must stay ONE snippet line.
         snippets = [
-            str(m.content or "").strip()[:MAX_SNIPPET_LEN]
+            " ".join(str(m.content or "").split())[:MAX_SNIPPET_LEN]
             for m in found
             if getattr(m, "user_id", owner) == owner and str(m.content or "").strip()
         ][:MAX_SEARCH_RESULTS]

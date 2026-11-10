@@ -80,6 +80,11 @@ _notifier: Callable[[str, str, str], Awaitable[bool]] | None = None
 _session_reporter: Callable[[str, str, str, str], Awaitable[None]] | None = None
 _db_path: str = ""
 _outbound_calls: dict[str, _OutboundCallInfo] = {}
+# Issue #252: the owner make_phone_call recorded on the pre-registered state,
+# for a call answered before it was tracked. Read ONLY by the owner-facing call
+# tools (owner_info_for_call) — never by the stage notices or the final report,
+# whose routing (and its origin row) is track_outbound_call's alone.
+_provisional_owners: dict[str, _OutboundCallInfo] = {}
 # Calls whose final report is being delivered: a second ending (the /status
 # webhook racing the post-call pipeline) must not deliver it again meanwhile.
 _finalizing: set[str] = set()
@@ -185,12 +190,47 @@ def get_call_language(call_sid: str) -> str:
     return info.language if info else ""
 
 
+def set_provisional_owner(
+    call_sid: str,
+    user_id: str,
+    *,
+    channel: str = "",
+    pincer_user_id: str = "",
+    session_key: str = "",
+    target_number: str = "",
+    target_name: str = "",
+    tool_grants: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Remember the pre-dial owner of a call that is not tracked yet (#252).
+
+    Tracking, once it lands, always wins (owner_info_for_call reads it first)."""
+    if not call_sid or not user_id:
+        return
+    _provisional_owners[call_sid] = _OutboundCallInfo(
+        user_id=user_id,
+        channel=channel,
+        pincer_user_id=pincer_user_id,
+        session_key=session_key,
+        target_number=target_number,
+        target_name=target_name,
+        tool_grants=frozenset(tool_grants),
+    )
+    while len(_provisional_owners) > _MAX_TRACKED:
+        _provisional_owners.pop(next(iter(_provisional_owners)), None)
+
+
+def owner_info_for_call(call_sid: str) -> _OutboundCallInfo | None:
+    """The owner routing the in-call tools use: the tracking, else the
+    provisional pre-dial owner of a call answered before it was tracked."""
+    return _outbound_calls.get(call_sid) or _provisional_owners.get(call_sid)
+
+
 def owner_id_for_call(call_sid: str) -> str:
-    """The canonical id of the user who placed a tracked call ("" if none).
+    """The canonical id of the user who placed a call ("" if none).
 
     The Pincer identity when known, else the channel-native id — the key the
     owner's chat recall searches memory under."""
-    info = _outbound_calls.get(call_sid)
+    info = owner_info_for_call(call_sid)
     if info is None:
         return ""
     return info.pincer_user_id or info.user_id
@@ -203,6 +243,7 @@ def get_call_info(call_sid: str) -> _OutboundCallInfo | None:
 def clear_call(call_sid: str) -> None:
     """Stop tracking a call (after its final message has been delivered)."""
     _outbound_calls.pop(call_sid, None)
+    _provisional_owners.pop(call_sid, None)
 
 
 async def send_user_message(user_id: str, channel: str, text: str) -> bool:
@@ -307,6 +348,7 @@ async def finalize_report(call_sid: str, text: str, outcome: str = "") -> bool:
         return delivered
     finally:
         _outbound_calls.pop(call_sid, None)
+        _provisional_owners.pop(call_sid, None)
         _finalizing.discard(call_sid)
 
 
@@ -333,32 +375,39 @@ async def _report_to_session(call_sid: str, info: _OutboundCallInfo, text: str) 
 SESSION_APPEND_WAIT_S = 2.0
 
 
-async def append_to_session(call_sid: str, text: str, *, wait_s: float | None = None) -> bool | None:
+# append_to_session outcomes
+APPEND_NONE = "none"  # nothing to link to: no owner, no chat session, no reporter
+APPEND_DONE = "done"  # the note is in the chat session
+APPEND_PENDING = "pending"  # still waiting for the chat's turn lock after the wait
+APPEND_FAILED = "failed"  # the session write raised
+
+
+async def append_to_session(call_sid: str, text: str, *, wait_s: float | None = None) -> str:
     """Add a mid-call note to the chat session that asked for the call (#252).
 
-    Returns None when there is nothing to link to (no tracked call, no chat
-    session, no reporter), True when the note landed or is still being
-    written in the background after ``wait_s``, and False when it failed.
+    Waits at most ``wait_s`` (the call turn is waiting on this); a note still
+    queued behind the chat's turn lock then lands in the background, and the
+    caller is told it is ``APPEND_PENDING`` — not that it landed.
     """
-    info = _outbound_calls.get(call_sid)
+    info = owner_info_for_call(call_sid)
     if info is None or not info.session_key or _session_reporter is None:
-        return None
+        return APPEND_NONE
     reporter = _session_reporter
-    owner, channel, session_key = info.pincer_user_id or info.user_id, info.channel, info.session_key
+    owner, channel, session_key = owner_id_for_call(call_sid), info.channel, info.session_key
 
-    async def _append() -> bool:
+    async def _append() -> str:
         try:
             await reporter(owner, channel, session_key, text)
         except Exception:
             logger.exception("Owner message not added to its chat session [%s]", call_sid)
-            return False
-        return True
+            return APPEND_FAILED
+        return APPEND_DONE
 
     task = _spawn(_append(), name=f"call-owner-note-{call_sid}")
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=SESSION_APPEND_WAIT_S if wait_s is None else wait_s)
     except TimeoutError:
-        return True  # waiting for the chat's turn lock; it lands when that turn ends
+        return APPEND_PENDING
 
 
 async def drain(timeout: float = DRAIN_TIMEOUT_S) -> None:
@@ -578,6 +627,7 @@ def _reset_for_tests() -> None:
     _session_reporter = None
     _db_path = ""
     _outbound_calls.clear()
+    _provisional_owners.clear()
     _finalizing.clear()
     for task in _background:
         task.cancel()

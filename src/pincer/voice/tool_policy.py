@@ -105,7 +105,7 @@ CALLER_USER = "user"
 CALLER_GUEST = "guest"
 
 # On whose authority the agent acts (CallState.metadata[META_PRINCIPAL]).
-# "owner" is set only by trusted code (`_resolve_caller`) for an outbound
+# "owner" is set only by trusted code (`_resolve_principal`) for an outbound
 # generic call with a tracked initiating user; anything else, a missing or
 # forged value included, is "remote" (fail closed).
 PRINCIPAL_OWNER = "owner"
@@ -181,6 +181,8 @@ META_OWNER_GRANTS = "owner_tool_grants"
 # make_phone_call (trusted code), for a relay setup that beats call tracking.
 META_OWNER_USER = "owner_user_id"
 META_OWNER_CHANNEL = "owner_channel"
+META_OWNER_PINCER_ID = "owner_pincer_user_id"
+META_OWNER_SESSION = "owner_session_key"
 
 
 # Modes the inbound receptionist may pin onto google__create_event. "verbal"
@@ -257,13 +259,18 @@ def unmatched_guest_tool_entries(raw: str) -> list[str]:
     return [entry for entry in _guest_entries(raw) if not _entry_matches(entry)]
 
 
-def validate_tool_grants(names: object) -> tuple[frozenset[str], list[str]]:
+def validate_tool_grants(
+    names: object, available: frozenset[str] | set[str] | None = None
+) -> tuple[frozenset[str], list[str]]:
     """Split owner-requested tool grants into (granted, rejected).
 
     Each entry is an exact name or an fnmatch pattern; it is granted only
     when it names at least one R/W tool of the tier table. Tier X, unknown
     and MCP-only names are rejected — the caller reports them, never drops
-    them silently.
+    them silently. With ``available`` (the registered tools), a grant must
+    also name a tool this deployment actually has: granting a calendar write
+    without the calendar connected would let the agent promise a booking it
+    cannot make.
     """
     if isinstance(names, str):
         entries = split_csv(names)
@@ -275,6 +282,8 @@ def validate_tool_grants(names: object) -> tuple[frozenset[str], list[str]]:
     rejected: list[str] = []
     for entry in entries:
         matched = _entry_matches(entry)
+        if available is not None:
+            matched &= frozenset(available)
         if matched:
             granted |= matched
         else:
@@ -525,6 +534,8 @@ __all__ = [
     "META_MODE_OVERRIDES",
     "META_OWNER_CHANNEL",
     "META_OWNER_GRANTS",
+    "META_OWNER_PINCER_ID",
+    "META_OWNER_SESSION",
     "META_OWNER_USER",
     "META_PRINCIPAL",
     "OWNER_SELF_TOOLS",

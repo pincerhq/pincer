@@ -612,3 +612,13 @@ def test_trusted_mode_override_still_wins_on_owner_call():
     state = _owner_state(grants={"google__create_event"})
     _pin(state, google__create_event="off")
     assert tp.decide("google__create_event", state, _settings(), {}, lambda _n: True).reason == "mode_off"
+
+
+def test_validate_tool_grants_against_registered_tools():
+    registered = {"websearch__search", "send_owner_message"}  # no calendar connected
+    granted, rejected = tp.validate_tool_grants(["google__create_event", "websearch__search"], available=registered)
+    assert granted == {"websearch__search"}
+    assert rejected == ["google__create_event"]
+    # A pattern is granted only for what is actually registered
+    granted, rejected = tp.validate_tool_grants(["google__*"], available={"google__list_events"})
+    assert granted == {"google__list_events"} and rejected == []
