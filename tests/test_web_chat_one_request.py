@@ -213,10 +213,11 @@ async def test_a_step_rate_limited_before_its_first_event_is_retried(  # type: i
     assert "Rate limited before the first event, retrying in 0.0s (attempt 1)" in caplog.text
 
 
-async def test_a_budget_stop_after_streamed_text_follows_it_after_a_blank_line(  # type: ignore[no-untyped-def]
+async def test_a_budget_stop_after_streamed_text_ends_the_turn_flagged_and_unsaved(  # type: ignore[no-untyped-def]
     fixture_settings, session_manager, tmp_path
 ) -> None:
-    """The tool step crosses the budget (one request = the whole budget): the next step is refused."""
+    """The tool step crosses the budget (one request = the whole budget): the next step is refused.
+    The refusal is no streamed text and is not saved: it is the turn's flagged end (PR #366 review)."""
     from pincer.config.pricing import load_price_table
     from pincer.llm.cost_tracker import CostTracker
 
@@ -231,11 +232,11 @@ async def test_a_budget_stop_after_streamed_text_follows_it_after_a_blank_line( 
     finally:
         await tracker.close()
 
-    budget_text = chunks[-1].content.removeprefix("Let me look.\n\n")
-    assert budget_text.startswith("Warning: Daily budget limit reached.")
-    assert [c.content for c in chunks if c.type.value == "text"] == ["Let me look.", "\n\n", budget_text]
+    assert chunks[-1].budget_reached
+    assert chunks[-1].content.startswith("Warning: Daily budget limit reached.")
+    assert [c.content for c in chunks if c.type.value == "text"] == ["Let me look."]
     session = await session_manager.get_or_create("user1", "web")
-    assert session.messages[-1].content == budget_text
+    assert session.messages[-1].tool_call_id == "toolu_1"  # the turn ends on its tool result
 
 
 class _Steps(BaseLLMProvider):
