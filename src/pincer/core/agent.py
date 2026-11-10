@@ -47,6 +47,7 @@ from pincer.llm.base import (
     prompt_cache_session,
     strip_thinking,
 )
+from pincer.llm.cost_tracker import record_response
 from pincer.llm.model_params import model_max_output_tokens
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
@@ -979,17 +980,7 @@ class Agent:
                 final_text = _CALL_PLACED_THEN_FAILED_TEXT
                 break
 
-            # Track cost. Attribute it to the provider that actually served (may
-            # be a failover), not the configured primary.
-            provider = response.provider or self._settings.default_provider
-            is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-            total_cost += await self._costs.record(
-                provider=provider,
-                model=response.request_model or response.model,
-                usage=response.usage,
-                session_id=session.session_id,
-                is_free=is_free,
-            )
+            total_cost += await self._record_cost(response, session.session_id)
             turn_usage += response.usage
             turn_requests += 1
 
@@ -1191,15 +1182,7 @@ class Agent:
                 logger.exception("run_headless: LLM call failed")
                 return _HEADLESS_LLM_ERROR_TEXT
 
-            provider = response.provider or self._settings.default_provider
-            is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-            await self._costs.record(
-                provider=provider,
-                model=response.request_model or response.model,
-                usage=response.usage,
-                session_id=None,
-                is_free=is_free,
-            )
+            await self._record_cost(response, None)
 
             try:
                 _refuse_truncated_output(response, self._settings.max_tokens)
@@ -1308,16 +1291,8 @@ class Agent:
                 self._schedule_compaction(session)
 
     async def _record_cost(self, response: LLMResponse, session_id: str | None) -> float:
-        """Record one completed request against the provider that served it (may be
-        a failover, not the configured primary) and return its cost."""
-        provider = response.provider or self._settings.default_provider
-        return await self._costs.record(
-            provider=provider,
-            model=response.request_model or response.model,
-            usage=response.usage,
-            session_id=session_id,
-            is_free=self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False,
-        )
+        """Record one completed request (see `record_response`) and return its cost."""
+        return await record_response(self._costs, self._llm, response, self._settings.default_provider, session_id)
 
     async def _stream_step(
         self, messages: list[LLMMessage], tools: list[dict[str, Any]] | None, system: str
@@ -1829,15 +1804,7 @@ class Agent:
                         timings.setdefault("turn_model", response.model)
 
                 # A call in progress is never gated (Q11): this utterance ran, so it is recorded
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                await self._costs.record(
-                    provider=provider,
-                    model=response.request_model or response.model,
-                    usage=response.usage,
-                    session_id=session.session_id,
-                    is_free=is_free,
-                )
+                await self._record_cost(response, session.session_id)
 
                 if not response.truncated:
                     break

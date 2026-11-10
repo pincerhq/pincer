@@ -119,3 +119,29 @@ async def test_a_phone_call_is_billed_its_llm_cost_with_the_cache_tokens(cost_tr
     usage = call_costs.end_call("CA1")
     assert (usage.input_tokens, usage.output_tokens) == (100, 50)
     assert usage.cost_usd == pytest.approx(_FIRST_COST, abs=1e-12)
+
+
+@pytest.mark.parametrize("path", ["chat", "stream", "headless", "voice"])
+async def test_every_path_records_a_request_under_the_provider_that_served_it(  # type: ignore[no-untyped-def]
+    settings, session_manager, cost_tracker, tool_registry, tmp_path, path: str
+) -> None:
+    """A failover answers from another provider than the configured default: the row names the one that served."""
+    from dataclasses import replace
+
+    from pincer.core.agent import Agent
+
+    served = replace(_response(_FIRST), provider="served-by-failover")
+    assert settings.default_provider != served.provider  # precondition: the two names differ
+    agent = Agent(settings, _scripted_llm(served), session_manager, cost_tracker, tool_registry)
+    if path == "chat":
+        await agent.handle_message("user", "chat", "hi", memory=False)
+    elif path == "stream":
+        [chunk async for chunk in agent.handle_message_stream("user", "web", "hi", memory=False)]
+    elif path == "headless":
+        await agent.run_headless("hi", "user", "chat")
+    else:
+        [chunk async for chunk in agent.stream_voice_turn("user", "voice", "hi")]
+
+    async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+        rows = await CostLogRepository(session).list()
+    assert [(r.provider, r.model) for r in rows] == [("served-by-failover", "test-fixture-model")]

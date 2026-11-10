@@ -19,8 +19,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pincer.config.pricing import PriceTable, TokenUsage
+    from pincer.llm.base import BaseLLMProvider, LLMResponse
 
-__all__ = ["CostSummary", "CostTracker", "get_cost_tracker"]
+__all__ = ["CostSummary", "CostTracker", "get_cost_tracker", "record_response"]
 
 
 class CostTracker:
@@ -88,6 +89,31 @@ class CostTracker:
 
     async def get_budget_status(self) -> dict[str, Any]:
         return await self.service.get_budget_status()
+
+
+async def record_response(
+    costs: CostTracker,
+    llm: BaseLLMProvider,
+    response: LLMResponse,
+    default_provider: str,
+    session_id: str | None = None,
+) -> float:
+    """Record one completed request and return its cost.
+
+    It is attributed to the provider that actually served it (a failover may
+    differ from the configured primary), priced under the model name that was
+    sent, and free when the router says that provider is (a keyless local endpoint).
+    """
+    from pincer.llm.router import LLMRouter
+
+    provider = response.provider or default_provider
+    return await costs.record(
+        provider=provider,
+        model=response.request_model or response.model,
+        usage=response.usage,
+        session_id=session_id,
+        is_free=llm.is_free(provider) if isinstance(llm, LLMRouter) else False,
+    )
 
 
 _cost_tracker: CostTracker | None = None
