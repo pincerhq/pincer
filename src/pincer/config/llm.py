@@ -118,6 +118,11 @@ class LLMSettings(BaseModel):
     openai_compatible_model: str = Field(
         default="", description="Model for the OpenAI-wire compatible endpoint (defaults to default_model)"
     )
+    prompt_cache_key_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["openai", "azure", "azure-openai"],
+        description="OpenAI-wire providers sent a prompt_cache_key (comma-separated names); other endpoints may "
+        "reject the unknown field. A keyless endpoint never gets one",
+    )
     anthropic_compatible_provider: str = Field(
         default="", description="Name for the Anthropic-wire compatible endpoint"
     )
@@ -129,7 +134,7 @@ class LLMSettings(BaseModel):
         default="", description="Model for the Anthropic-wire compatible endpoint (defaults to default_model)"
     )
 
-    @field_validator("fallback_providers", mode="before")
+    @field_validator("fallback_providers", "prompt_cache_key_providers", mode="before")
     @classmethod
     def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):

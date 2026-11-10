@@ -143,23 +143,52 @@ async def test_the_stream_and_voice_paths_send_their_sessions_cache_key(openai_s
     assert keys[3] == voice_key
 
 
-@pytest.mark.parametrize(("api_key", "sends_key"), [("", False), ("sk-azure", True)])
-async def test_only_a_keyed_endpoint_gets_the_cache_key(settings, api_key, sends_key):
-    """A keyless local server (Ollama, LM Studio) has no paid cache to key and may reject unknown fields."""
-    local = settings.model_copy(
+def _compatible(settings, name: str, api_key: str, **update: Any):
+    """Settings whose OpenAI-compatible endpoint is called `name` and has `api_key` ("" = keyless)."""
+    return settings.model_copy(
         update={
-            "openai_compatible_provider": "local",
-            "openai_compatible_base_url": "http://127.0.0.1:11434/v1",
+            "openai_compatible_provider": name,
+            "openai_compatible_base_url": "http://127.0.0.1:8000/v1",
             "openai_compatible_api_key": SecretStr(api_key),
             "openai_compatible_model": "gpt-4o",
+            **update,
         }
     )
-    llm = _ScriptedOpenAI(local, ["Hi"], provider="local")
+
+
+async def _sends_cache_key(settings, provider: str) -> bool:
+    llm = _ScriptedOpenAI(settings, ["Hi"], provider=provider)
     with prompt_cache_session(lambda: "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b"):
         await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hello")])
-
     [request] = llm.requests
-    assert ("prompt_cache_key" in request) is sends_key
+    return "prompt_cache_key" in request
+
+
+@pytest.mark.parametrize(
+    ("name", "api_key", "sends_key"),
+    [("azure-openai", "", False), ("groq", "sk-groq", False), ("azure-openai", "sk-azure", True)],
+    ids=["listed-but-keyless", "keyed-but-unlisted", "listed-and-keyed"],
+)
+async def test_only_listed_providers_get_the_cache_key(settings, name, api_key, sends_key):
+    """Strict endpoints (Groq, DeepSeek, a vLLM proxy) reject the unknown field with a 400, and a keyless
+    local server has no paid cache to key: by default only openai and Azure OpenAI get it."""
+    assert await _sends_cache_key(_compatible(settings, name, api_key), name) is sends_key
+
+
+async def test_a_provider_listed_in_the_setting_gets_the_cache_key(settings):
+    """A proxy that does accept the key, or an Azure endpoint named differently, opts in by name."""
+    opted_in = _compatible(settings, "groq", "sk-groq", prompt_cache_key_providers=["openai", "groq"])
+    assert await _sends_cache_key(opted_in, "groq") is True
+
+
+def test_the_cache_key_providers_come_from_a_comma_separated_env_list(monkeypatch, tmp_path):
+    from pincer.config import Settings
+
+    default = Settings(anthropic_api_key="sk-ant-test-key", data_dir=tmp_path, _env_file=None)  # type: ignore[arg-type,call-arg]
+    assert default.prompt_cache_key_providers == ["openai", "azure", "azure-openai"]
+    monkeypatch.setenv("PINCER_PROMPT_CACHE_KEY_PROVIDERS", "openai, vllm")
+    listed = Settings(anthropic_api_key="sk-ant-test-key", data_dir=tmp_path, _env_file=None)  # type: ignore[arg-type,call-arg]
+    assert listed.prompt_cache_key_providers == ["openai", "vllm"]
 
 
 async def test_the_background_compaction_summary_carries_no_cache_key(openai_settings, session_manager, cost_tracker):

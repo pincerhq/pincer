@@ -239,8 +239,11 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         from pincer.llm.router import is_free_provider  # the router imports this module
 
-        # A keyless local endpoint has no paid cache to key and may reject unknown fields
-        self._sends_cache_key = not is_free_provider(settings, provider)
+        # Strict endpoints reject the unknown field (a 400 on every request), and a keyless local
+        # endpoint has no paid cache to key: only the providers listed as accepting it get a key
+        self._sends_cache_key = provider in settings.prompt_cache_key_providers and not is_free_provider(
+            settings, provider
+        )
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
         self._default_model = model
         self._default_max_tokens = settings.max_tokens

@@ -15,8 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same `prompt_cache_key`, so its requests reach the same prompt cache. The key
   is a random UUIDv7 minted on the conversation's first such request and kept
   with the session, so it survives a restart. It is never derived from the
-  session or user id. Keyless local endpoints (Ollama, LM Studio) get no key.
-  Summaries and scheduled runs send none.
+  session or user id. Only providers named in
+  `PINCER_PROMPT_CACHE_KEY_PROVIDERS` get it (default `openai`, `azure`,
+  `azure-openai`): other endpoints, such as Groq or a vLLM proxy, may reject
+  the unknown field. A keyless endpoint never gets one. Summaries and scheduled
+  runs send none.
 - With tool selection on (an OpenAI-wire provider and more than
   `PINCER_TOOL_SELECTION_MAX` tools), a conversation keeps the list of tools it
   sends, also across a restart. Each later turn, and a skill loaded mid-turn,
