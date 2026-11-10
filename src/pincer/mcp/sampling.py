@@ -26,15 +26,17 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
 from pincer.exceptions import DailyBudgetReachedError
+from pincer.llm.base import LLMMessage, MessageRole
 
 if TYPE_CHECKING:
-    from pincer.llm.cost_tracker import CostTracker
+    from pincer.llm.cost_tracker import MeteredLLM
 
 logger = logging.getLogger("pincer.mcp.sampling")
 
 DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
-_SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
+SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
 
 
 # ── LLM backend abstraction ────────────────────────────────────────────────────
@@ -97,28 +99,18 @@ class StandaloneLLMBackend(LLMBackend):
     """
     LLM backend that calls the Anthropic API directly (no agent required).
 
-    Used in standalone mode. Requires PINCER_LLM_API_KEY or ANTHROPIC_API_KEY
-    in the environment, or an explicit api_key argument.
+    Used in standalone mode. Every request goes through the daily budget check first
+    and is recorded in the cost log after (`MeteredLLM`, issue #357); like the agent's
+    other internal calls it pins its own effort and thinking, not the operator's.
 
     Args:
-        api_key:       Anthropic API key. Falls back to env vars if None.
+        llm:           The metered Anthropic provider.
         default_model: Model to use when caller doesn't specify one.
-        costs:         When given, every request goes through the daily budget check
-                       first and is recorded in the cost log after (issue #357).
     """
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        default_model: str = DEFAULT_SAMPLING_MODEL,
-        costs: CostTracker | None = None,
-    ) -> None:
-        from pincer.config import get_settings_relaxed
-
-        self._api_key = api_key or get_settings_relaxed().anthropic_api_key.get_secret_value() or ""
+    def __init__(self, llm: MeteredLLM, default_model: str = DEFAULT_SAMPLING_MODEL) -> None:
+        self._llm = llm
         self._default_model = default_model
-        self._costs = costs
-        self._costs_ready = False
 
     async def complete(
         self,
@@ -126,36 +118,31 @@ class StandaloneLLMBackend(LLMBackend):
         model: str | None = None,
         max_tokens: int = 1024,
     ) -> str:
-        try:
-            import anthropic
-        except ImportError as e:
-            raise RuntimeError("anthropic package required for standalone sampling: uv pip install anthropic") from e
-
-        from typing import cast
-
-        if self._costs is not None:
-            if not self._costs_ready:
-                await self._costs.initialize()
-                self._costs_ready = True
-            if await self._costs.budget_reached():
-                raise DailyBudgetReachedError("daily budget reached: the sampling request was not sent")
-
-        sent_model = model or self._default_model
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
-        resp = await client.messages.create(
-            model=sent_model,
-            messages=cast("Any", messages),
+        response = await self._llm.complete(
+            _to_llm_messages(messages),
+            model=model or self._default_model,
             max_tokens=max_tokens,
+            reasoning_effort=STRUCTURED_CALL_EFFORT,
+            thinking=STRUCTURED_CALL_THINKING,
+            pinned=True,
         )
-        if self._costs is not None:
-            from pincer.config.pricing import TokenUsage
-            from pincer.llm.anthropic_common import _usage_counts
+        return response.content
 
-            await self._costs.record(_SAMPLING_PROVIDER, sent_model, TokenUsage(**_usage_counts(resp.usage)))
-        content = resp.content
-        if content and hasattr(content[0], "text"):
-            return content[0].text
-        return str(content)
+
+def _to_llm_messages(messages: list[dict[str, Any]]) -> list[LLMMessage]:
+    """MCP sampling messages as Pincer's: text only, as a string, a text block or a list of them."""
+    return [LLMMessage(role=MessageRole(m["role"]), content=_text(m.get("content", ""))) for m in messages]
+
+
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict) and content.get("type") == "text":
+        return str(content.get("text", ""))
+    if isinstance(content, list):
+        return "".join(_text(block) for block in content)
+    kind = content.get("type") if isinstance(content, dict) else type(content).__name__
+    raise ValueError(f"unsupported sampling content: {kind}")
 
 
 # ── Sampling handler ───────────────────────────────────────────────────────────

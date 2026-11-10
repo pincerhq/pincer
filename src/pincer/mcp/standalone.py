@@ -25,10 +25,11 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pincer.mcp.sampling import StandaloneLLMBackend
+from pincer.mcp.sampling import DEFAULT_SAMPLING_MODEL, SAMPLING_PROVIDER, StandaloneLLMBackend
 
 if TYPE_CHECKING:
     from pincer.mcp.config import MCPConfig
+    from pincer.mcp.sampling import LLMBackend
 
 logger = logging.getLogger("pincer.mcp.standalone")
 
@@ -82,7 +83,7 @@ class StandaloneMCPShell:
         from pincer.mcp.core import MCPServiceCore
 
         approval = self._build_approval_backend()
-        llm = self._build_llm_backend()
+        llm = await self._build_llm_backend()
 
         self._core = MCPServiceCore(
             config=self._config,
@@ -162,7 +163,8 @@ class StandaloneMCPShell:
         policy = self._approval_policy or {"default": "deny"}
         return PolicyApprovalBackend(policy=policy)
 
-    def _build_llm_backend(self) -> Any | None:
+    async def _build_llm_backend(self) -> LLMBackend | None:
+        """The sampling backend, set up once at startup: None when sampling is off or has no API key."""
         server_cfg = getattr(self._config, "server", None)
         if server_cfg is None:
             return None
@@ -171,17 +173,27 @@ class StandaloneMCPShell:
         if sampling_cfg is None or not getattr(sampling_cfg, "enabled", False):
             return None
 
+        from pydantic import SecretStr
+
         from pincer.config import get_settings_relaxed
         from pincer.config.pricing import load_price_table
-        from pincer.llm.cost_tracker import CostTracker
-        from pincer.mcp.sampling import DEFAULT_SAMPLING_MODEL
+        from pincer.llm.anthropic_common import AnthropicCompatibleProvider
+        from pincer.llm.cost_tracker import CostTracker, MeteredLLM
 
         settings = get_settings_relaxed()
+        if self._llm_api_key:
+            settings = settings.model_copy(update={"anthropic_api_key": SecretStr(self._llm_api_key)})
+        try:
+            provider = AnthropicCompatibleProvider(settings, SAMPLING_PROVIDER)
+        except ValueError:
+            logger.error("MCP sampling is enabled but has no Anthropic API key (PINCER_ANTHROPIC_API_KEY)")
+            return None
+        # The same daily budget and cost log as the agent (issue #357)
+        costs = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
+        await costs.initialize()
         return StandaloneLLMBackend(
-            api_key=self._llm_api_key,
+            MeteredLLM(provider, costs, SAMPLING_PROVIDER),
             default_model=getattr(sampling_cfg, "model", DEFAULT_SAMPLING_MODEL),
-            # The same daily budget and cost log as the agent (issue #357)
-            costs=CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table()),
         )
 
     def _register_standalone_tools(self) -> None:
