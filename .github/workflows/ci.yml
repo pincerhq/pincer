@@ -5,9 +5,10 @@
 # any test job failed, then runs format, lint, mypy and bandit on the whole
 # repo. `checks` and `dependency-audit` are the required status checks.
 #
-# Every job but postgres runs on the self-hosted runner (non-root, no sudo, no
-# Docker). YAML anchors are not supported in workflows, so the `runs-on` block
-# is repeated in each job.
+# The test jobs run on GitHub-hosted ubuntu-latest. `changes`, `checks` and
+# `dependency-audit` run on the self-hosted runner (non-root, no sudo, no
+# Docker); YAML anchors are not supported in workflows, so its `runs-on` block
+# is repeated in each of those jobs.
 name: CI
 on:
   push:
@@ -82,9 +83,7 @@ jobs:
   pincer:
     needs: changes
     if: needs.changes.outputs.pincer == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -111,8 +110,6 @@ jobs:
   # The SQLModel layer must behave the same on Postgres as on SQLite. Every
   # test parametrised by the `db_url` fixture runs its Postgres variant here
   # (they skip elsewhere); the set grows as each domain moves onto the engine.
-  # The service container needs Docker, which the self-hosted runner does not
-  # have, so this job stays on a GitHub-hosted runner.
   postgres:
     needs: changes
     if: needs.changes.outputs.postgres == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
@@ -142,9 +139,7 @@ jobs:
   ms365-mcp:
     needs: changes
     if: needs.changes.outputs.ms365 == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -156,9 +151,7 @@ jobs:
   doctr-mcp:
     needs: changes
     if: needs.changes.outputs.doctr == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -170,9 +163,7 @@ jobs:
   memory-mcp:
     needs: changes
     if: needs.changes.outputs.memory == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -184,9 +175,7 @@ jobs:
   dashboard:
     needs: changes
     if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: dashboard
