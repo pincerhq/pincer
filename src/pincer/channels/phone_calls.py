@@ -316,9 +316,10 @@ class VoiceChannel(BaseChannel):
         row, transcript, memory). An outbound call stays with the user who
         placed it; the callee's identity only widens the tool scope.
         """
-        from pincer.voice.tool_policy import CALLER_GUEST, CALLER_USER, META_CALLER_CLASS
+        from pincer.voice.tool_policy import CALLER_GUEST, CALLER_USER, META_CALLER_CLASS, META_REMOTE_USER
 
         state.metadata[META_CALLER_CLASS] = CALLER_GUEST
+        state.metadata[META_REMOTE_USER] = ""
         outbound = state.direction == CallDirection.OUTBOUND
         number = (state.target_number or state.caller_number) if outbound else state.caller_number
         if not number:
@@ -335,6 +336,7 @@ class VoiceChannel(BaseChannel):
             return
         if owner:
             state.metadata[META_CALLER_CLASS] = CALLER_USER
+            state.metadata[META_REMOTE_USER] = owner
             if not outbound:
                 state.pincer_user_id = owner
         logger.info("Call party [%s]: %s", call_sid, f"registered user {owner}" if owner else "guest")
@@ -358,21 +360,26 @@ class VoiceChannel(BaseChannel):
             META_OWNER_SESSION,
             META_OWNER_USER,
             META_PRINCIPAL,
+            META_REMOTE_IS_OWNER,
+            META_REMOTE_USER,
             PRINCIPAL_OWNER,
             PRINCIPAL_REMOTE,
         )
 
         principal = PRINCIPAL_REMOTE
         grants: frozenset[str] = frozenset()
+        owner_identity = ""
         if kind == "generic" and state.direction == CallDirection.OUTBOUND:
             info = status_notify.get_call_info(call_sid)
             pending_owner = str(state.metadata.get(META_OWNER_USER) or "")
             if info is not None and info.user_id and info.user_id != "unknown":
                 principal = PRINCIPAL_OWNER
                 grants = frozenset(info.tool_grants)
+                owner_identity = info.pincer_user_id
             elif pending_owner and pending_owner != "unknown":
                 principal = PRINCIPAL_OWNER
                 grants = frozenset(state.metadata.get(META_OWNER_GRANTS) or ())
+                owner_identity = str(state.metadata.get(META_OWNER_PINCER_ID) or "")
                 status_notify.set_provisional_owner(
                     call_sid,
                     pending_owner,
@@ -385,6 +392,13 @@ class VoiceChannel(BaseChannel):
                 )
         state.metadata[META_PRINCIPAL] = principal
         state.metadata[META_OWNER_GRANTS] = grants
+        # The owner answering their own phone: the callee's confirmed-phone
+        # identity is the identity that placed the call. No identity on
+        # either side never matches.
+        remote = str(state.metadata.get(META_REMOTE_USER) or "")
+        state.metadata[META_REMOTE_IS_OWNER] = bool(
+            principal == PRINCIPAL_OWNER and owner_identity and remote == owner_identity
+        )
         if principal == PRINCIPAL_OWNER:
             logger.info("Call principal [%s]: owner (grants: %s)", call_sid, sorted(grants) or "none")
         return principal
@@ -647,6 +661,7 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.tool_policy import (
             META_OWNER_CHANNEL,
             META_OWNER_USER,
+            META_REMOTE_IS_OWNER,
             PRINCIPAL_OWNER,
             allowed_tools_for_call,
             caller_class_of,
@@ -668,6 +683,7 @@ class VoiceChannel(BaseChannel):
             caller_class=caller,
             principal=principal,
             owner_grants=owner_grants_of(state),
+            remote_is_owner=state.metadata.get(META_REMOTE_IS_OWNER) is True,
         )
         info = status_notify.get_call_info(call_sid)
         if info is not None and info.user_id:

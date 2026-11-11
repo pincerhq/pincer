@@ -40,18 +40,6 @@ def placed_call_sid(result: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-# The tool names this process has registered (cli/run.py wires the registry's
-# `list_tools`). Unset (API-only process, tests): grants are checked against
-# the in-call tier table only.
-_registered_tools: Callable[[], Iterable[str]] | None = None
-
-
-def set_registered_tools_provider(provider: Callable[[], Iterable[str]] | None) -> None:
-    """Install the source of registered tool names `allow_tools` is checked against (#252)."""
-    global _registered_tools  # noqa: PLW0603
-    _registered_tools = provider
-
-
 #: SGR/CSI sequences. `TwilioRestException.__str__` colours its output whenever
 #: stderr is a tty, and its own source notes the hazard: "someone might catch
 #: this error and try to display the message from it to an end user". We do
@@ -295,6 +283,7 @@ async def make_phone_call(
     thread_subject: str = "",
     source: str = "",
     allow_tools: list[str] | None = None,
+    registered_tools: Callable[[], Iterable[str]] | None = None,
 ) -> str:
     """Place a phone call to a number on behalf of the user.
 
@@ -315,6 +304,8 @@ async def make_phone_call(
         and messages/notes to the user; grant writes only when the task needs them. Each write still
         waits for the user's approval unless their approval policy allows it. Only call-safe tools
         can be granted: anything else is rejected and the call is not placed.
+    registered_tools: Internal — the registry's tool names (the chat tool wires
+        it); `allow_tools` must name tools this setup has. None checks by tier only.
 
     purpose and instructions are the agent's briefing for the call: purpose is
     the reason and goal the agent opens the call with, and it is REQUIRED.
@@ -363,21 +354,25 @@ async def make_phone_call(
     # agent sees, never silently dropped (it would believe the call can do it).
     from pincer.voice.tool_policy import validate_tool_grants
 
-    tool_grants, rejected_tools = validate_tool_grants(allow_tools or [])
+    try:
+        tool_grants, rejected_tools = validate_tool_grants(allow_tools)
+    except TypeError:
+        logger.info("make_phone_call aborted: allow_tools is a %s", type(allow_tools).__name__)
+        return 'Error: allow_tools must be a list of tool names, e.g. ["google__create_event"].'
     if rejected_tools:
         logger.info("make_phone_call aborted: tools not grantable on a call: %s", rejected_tools)
         return (
             f"Error: these tools cannot be used on a phone call: {', '.join(rejected_tools)}. "
             "Grant only call-safe tools (calendar, web search), or leave allow_tools empty."
         )
-    if tool_grants and _registered_tools is not None:
+    if tool_grants and registered_tools is not None:
         try:
-            registered = frozenset(_registered_tools())
+            registered = frozenset(registered_tools())
         except Exception:
             logger.warning("Registered tools unavailable — checking allow_tools by tier only", exc_info=True)
             registered = None
         if registered is not None:
-            tool_grants, missing_tools = validate_tool_grants(allow_tools or [], available=registered)
+            tool_grants, missing_tools = validate_tool_grants(allow_tools, available=registered)
             if missing_tools:
                 logger.info("make_phone_call aborted: granted tools not available here: %s", missing_tools)
                 return (

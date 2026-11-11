@@ -549,23 +549,59 @@ def test_owner_grants_never_reach_inbound_calls():
     assert "call_memory_search" not in scope
 
 
-def test_registered_callee_scope_unchanged_on_owner_call():
+def test_registered_callee_does_not_widen_an_owner_call():
+    """A registered user answering the owner's call gets the owner's scope
+    (default set + grants), not every R/W tool: the tools act for the owner."""
+    guest = tp.allowed_tools_for_call(_settings(), principal=tp.PRINCIPAL_OWNER)
+    scope = tp.allowed_tools_for_call(
+        _settings(), kind="generic", direction="outbound", caller_class=tp.CALLER_USER, principal=tp.PRINCIPAL_OWNER
+    )
+    assert scope == guest
+    assert "google__create_event" not in scope and "google__update_event" not in scope
+    granted = tp.allowed_tools_for_call(
+        _settings(),
+        caller_class=tp.CALLER_USER,
+        principal=tp.PRINCIPAL_OWNER,
+        owner_grants=frozenset({"google__create_event"}),
+    )
+    assert granted == guest | {"google__create_event"}
+    # Off an owner call, a registered caller keeps the full R/W scope
     user = tp.allowed_tools_for_call(_settings(), caller_class=tp.CALLER_USER)
-    assert tp.allowed_tools_for_call(_settings(), caller_class=tp.CALLER_USER, principal=tp.PRINCIPAL_OWNER) == user
+    assert "google__create_event" in user and user > guest
+    # The owner answering their own phone (#299) keeps the full scope ...
+    own = tp.allowed_tools_for_call(
+        _settings(), caller_class=tp.CALLER_USER, principal=tp.PRINCIPAL_OWNER, remote_is_owner=True
+    )
+    assert own == user
+    # ... but only as a registered caller: the flag alone widens nothing
+    assert tp.allowed_tools_for_call(_settings(), principal=tp.PRINCIPAL_OWNER, remote_is_owner=True) == guest
 
 
 def test_validate_tool_grants():
     granted, rejected = tp.validate_tool_grants(["google__create_event", "google__update_event", "websearch__search"])
     assert granted == {"google__create_event", "google__update_event", "websearch__search"}
     assert rejected == []
-    granted, rejected = tp.validate_tool_grants(["google__*", "email_send", "shell_exec", "srv__tool", ""])
-    assert "google__create_event" in granted and "google__delete_event" not in granted
+    granted, rejected = tp.validate_tool_grants(["google__create_event", "email_send", "shell_exec", "srv__tool", ""])
+    assert granted == {"google__create_event"}
     assert rejected == ["email_send", "shell_exec", "srv__tool"]
     assert tp.validate_tool_grants("google__create_event, make_phone_call") == (
         frozenset({"google__create_event"}),
         ["make_phone_call"],
     )
     assert tp.validate_tool_grants(None) == (frozenset(), [])
+    assert tp.validate_tool_grants([]) == (frozenset(), [])
+
+
+@pytest.mark.parametrize("pattern", ["*", "google__*", "google__create_*", "websearch__?earch"])
+def test_validate_tool_grants_takes_exact_names_only(pattern):
+    """A pattern would grant a whole family at once; grants are exact names."""
+    assert tp.validate_tool_grants([pattern]) == (frozenset(), [pattern])
+
+
+@pytest.mark.parametrize("bad", [{"google__create_event": True}, True, 1, {"google__create_event"}])
+def test_validate_tool_grants_rejects_non_list_values(bad):
+    with pytest.raises(TypeError):
+        tp.validate_tool_grants(bad)
 
 
 def test_owner_grants_of_refilters_metadata():
@@ -619,6 +655,5 @@ def test_validate_tool_grants_against_registered_tools():
     granted, rejected = tp.validate_tool_grants(["google__create_event", "websearch__search"], available=registered)
     assert granted == {"websearch__search"}
     assert rejected == ["google__create_event"]
-    # A pattern is granted only for what is actually registered
-    granted, rejected = tp.validate_tool_grants(["google__*"], available={"google__list_events"})
+    granted, rejected = tp.validate_tool_grants(["google__list_events"], available={"google__list_events"})
     assert granted == {"google__list_events"} and rejected == []

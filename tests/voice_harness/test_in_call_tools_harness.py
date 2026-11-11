@@ -218,8 +218,12 @@ async def test_user_mode(language, answer, monkeypatch):
     channel, engine, agent, state = await _start(language, settings, {"google__create_event": "user"})
 
     async def _answer():
-        while not requests:
+        for _ in range(1000):  # bounded: a card that never comes fails, not hangs
+            if requests:
+                break
             await asyncio.sleep(0.005)
+        else:
+            raise AssertionError("no approval card was presented")
         await asyncio.sleep(0.05)
         if answer == "approve":
             approvals.resolve(requests[0].approval_id, True)

@@ -183,6 +183,12 @@ META_OWNER_USER = "owner_user_id"
 META_OWNER_CHANNEL = "owner_channel"
 META_OWNER_PINCER_ID = "owner_pincer_user_id"
 META_OWNER_SESSION = "owner_session_key"
+# The callee's identity on an outbound call (a confirmed phone), and whether
+# it is the identity that placed the call: the owner calling their own phone
+# keeps the full R/W scope; any other registered callee gets the owner's
+# default set + grants (#252).
+META_REMOTE_USER = "remote_pincer_user_id"
+META_REMOTE_IS_OWNER = "remote_is_owner"
 
 
 # Modes the inbound receptionist may pin onto google__create_event. "verbal"
@@ -264,28 +270,32 @@ def validate_tool_grants(
 ) -> tuple[frozenset[str], list[str]]:
     """Split owner-requested tool grants into (granted, rejected).
 
-    Each entry is an exact name or an fnmatch pattern; it is granted only
-    when it names at least one R/W tool of the tier table. Tier X, unknown
-    and MCP-only names are rejected — the caller reports them, never drops
-    them silently. With ``available`` (the registered tools), a grant must
-    also name a tool this deployment actually has: granting a calendar write
-    without the calendar connected would let the agent promise a booking it
-    cannot make.
+    Each entry must be an exact tool name (no patterns: ``*`` would grant
+    every R/W tool at once) that the tier table classes R or W. Tier X,
+    unknown and MCP-only names are rejected — the caller reports them, never
+    drops them silently. With ``available`` (the registered tools), a grant
+    must also name a tool this deployment actually has: granting a calendar
+    write without the calendar connected would let the agent promise a
+    booking it cannot make.
+
+    ``names`` is a list/tuple of names or a CSV string; ``None`` means no
+    grants. Any other type raises ``TypeError`` — a mapping or a bare ``True``
+    must never pass as "no grants" while the agent believes it granted one.
     """
-    if isinstance(names, str):
+    if names is None:
+        entries: list[str] = []
+    elif isinstance(names, str):
         entries = split_csv(names)
-    elif isinstance(names, (list, tuple, set, frozenset)):
+    elif isinstance(names, (list, tuple)):
         entries = [s for n in names if (s := str(n or "").strip())]
     else:
-        entries = []
+        raise TypeError(f"tool grants must be a list of tool names, not {type(names).__name__}")
     granted: set[str] = set()
     rejected: list[str] = []
     for entry in entries:
-        matched = _entry_matches(entry)
-        if available is not None:
-            matched &= frozenset(available)
-        if matched:
-            granted |= matched
+        grantable = TIERS.get(entry) in (TIER_R, TIER_W) and (available is None or entry in available)
+        if grantable:
+            granted.add(entry)
         else:
             rejected.append(entry)
     return frozenset(granted), rejected
@@ -327,6 +337,7 @@ def allowed_tools_for_call(
     caller_class: str = CALLER_GUEST,
     principal: str = PRINCIPAL_REMOTE,
     owner_grants: frozenset[str] | set[str] = frozenset(),
+    remote_is_owner: bool = False,
 ) -> frozenset[str]:
     """The call's tool scope, computed once at call creation.
 
@@ -337,21 +348,32 @@ def allowed_tools_for_call(
     set (without ``CALL_OPT_IN_TOOLS``), or — when ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` is set — exactly the
     R/W tools it matches, minus the inbound exclusions.
 
-    An outbound generic call the owner placed (``principal="owner"``) with a
-    guest on the line gets the default guest set plus ``owner_grants`` (R/W
-    only); ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` does not apply to it, and
-    the grants never apply to any other kind of call.
+    An outbound generic call the owner placed (``principal="owner"``) gets
+    the default guest set plus ``owner_grants`` (R/W only), whoever answers —
+    another registered user on the line does not widen it to every R/W tool.
+    Only when the callee is the owner themselves (``remote_is_owner``: a
+    registered callee whose identity placed the call) is it the full scope.
+    ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` does not apply to it, and the
+    grants never apply to any other kind of call.
     """
     if kind == "receptionist":
         # Fixed by spec; the guest list does NOT widen the public line.
         return frozenset(name for name in INBOUND_RECEPTIONIST_TOOLS if tier_of(name) != TIER_X)
     if kind == "appointment":
         scope = set(APPOINTMENT_CALL_TOOLS)
+    elif principal == PRINCIPAL_OWNER and not str(direction).lower().endswith("inbound"):
+        # Checked BEFORE the registered-caller branch: on a call the owner
+        # placed, another registered user answering must not widen the scope
+        # to every R/W tool — the tools act for the owner, so the owner's
+        # default set and grants are the whole scope. The owner answering
+        # their own phone (#299) is the one exception.
+        if caller_class == CALLER_USER and remote_is_owner:
+            scope = set(callable_tools())
+        else:
+            scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
+            scope |= {name for name in owner_grants if tier_of(name) in (TIER_R, TIER_W)}
     elif caller_class == CALLER_USER:
         scope = set(callable_tools())
-    elif principal == PRINCIPAL_OWNER and not str(direction).lower().endswith("inbound"):
-        scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
-        scope |= {name for name in owner_grants if tier_of(name) in (TIER_R, TIER_W)}
     else:
         # Only a real CSV string replaces the default set; anything else (an
         # unset field on a settings stand-in) must not empty the guest scope.
@@ -536,6 +558,8 @@ __all__ = [
     "META_OWNER_GRANTS",
     "META_OWNER_PINCER_ID",
     "META_OWNER_SESSION",
+    "META_REMOTE_IS_OWNER",
+    "META_REMOTE_USER",
     "META_OWNER_USER",
     "META_PRINCIPAL",
     "OWNER_SELF_TOOLS",

@@ -517,14 +517,15 @@ you:
 
 | | Behaviour on a call you placed |
 |---|---|
-| **Scope** | A registered callee: every Tier R/W tool, as above. A guest: all reads except web search, `send_owner_message` and `memory_note`, **plus the tools you granted for this call** (`allow_tools`, below). `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` does not apply. |
+| **Scope** | Whoever answers, registered user or guest: all reads except web search, `send_owner_message` and `memory_note`, **plus the tools you granted for this call** (`allow_tools`, below). Another registered user answering does not get the full R/W scope here, since the tools act for you, not for them; only when the agent calls your own confirmed phone (you answer) do you get the full scope. `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` does not apply. |
 | **Approval** | Never the callee. `send_owner_message` runs at once (it goes to you). Every other write follows your approval policy (`PINCER_APPROVAL_POLICY`): it runs directly when the policy allows it, and is disclosed in the post-call report; otherwise you get the in-call approval card. If you don't answer the card in time, the action is deferred to a follow-up. |
 | **Results** | Mid-call messages reach your channel and are also added, quoted and labelled as relayed, to the chat that asked for the call. Notes go into your memory under your identity (`call:`, `thread:` and `session:` tags), where your chat recall finds them. `call_memory_search` reads only your memory. |
 
 `make_phone_call(..., allow_tools=[...])` grants extra Tier R/W tools for that
 one call, for example `["google__create_event"]` to book the delivery slot in
-your calendar, or `["websearch__search"]`. Patterns like `google__*` expand to
-the R/W calendar tools only. A Tier X, unknown or MCP-only name is rejected
+your calendar, or `["websearch__search"]`. Grants are exact tool names:
+patterns such as `*` or `google__*` are rejected, as is a value that is not a
+list of names. A Tier X, unknown or MCP-only name is rejected
 with an error before anything is dialled, and so is a tool this setup does
 not have (granting `google__create_event` without Google Calendar connected),
 so the agent never believes a call can do something it cannot. Grants never apply to inbound calls, appointment

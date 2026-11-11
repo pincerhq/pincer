@@ -53,6 +53,16 @@ RECONCILE_TIMEOUT_S = 60.0
 DRAIN_TIMEOUT_S = 10.0
 _MAX_TRACKED = 200
 
+# How long a mid-call owner message waits for its chat session before the
+# append goes on in the background (the call turn must not stall on a chat lock).
+SESSION_APPEND_WAIT_S = 2.0
+
+# append_to_session outcomes
+APPEND_NONE = "none"  # nothing to link to: no owner, no chat session, no reporter
+APPEND_DONE = "done"  # the note is in the chat session
+APPEND_PENDING = "pending"  # still waiting for the chat's turn lock after the wait
+APPEND_FAILED = "failed"  # the session write raised
+
 
 @dataclass
 class _OutboundCallInfo:
@@ -368,18 +378,6 @@ async def _report_to_session(call_sid: str, info: _OutboundCallInfo, text: str) 
         await _session_reporter(info.pincer_user_id or info.user_id, info.channel, info.session_key, note)
     except Exception:
         logger.exception("Call report not added to its chat session [%s]", call_sid)
-
-
-# How long a mid-call owner message waits for its chat session before the
-# append goes on in the background (the call turn must not stall on a chat lock).
-SESSION_APPEND_WAIT_S = 2.0
-
-
-# append_to_session outcomes
-APPEND_NONE = "none"  # nothing to link to: no owner, no chat session, no reporter
-APPEND_DONE = "done"  # the note is in the chat session
-APPEND_PENDING = "pending"  # still waiting for the chat's turn lock after the wait
-APPEND_FAILED = "failed"  # the session write raised
 
 
 async def append_to_session(call_sid: str, text: str, *, wait_s: float | None = None) -> str:

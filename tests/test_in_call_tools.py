@@ -83,9 +83,12 @@ async def _start(
     tools=None,
     owner=True,
     grants=(),
+    owner_identity="",
 ):
     """``owner=False`` places the outbound call with no tracked initiating
-    user, so it stays on the remote party's authority (#252)."""
+    user, so it stays on the remote party's authority (#252).
+    ``owner_identity`` is the placing user's Pincer identity; with the
+    ``owner_phone`` fixture, ``"owner"`` makes the callee the owner themselves."""
     settings = settings or _settings()
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
@@ -100,7 +103,12 @@ async def _start(
     await channel.start(_blocking_handler)
     if owner:
         status_notify.register_outbound_call(
-            CALL, user_id="12345", channel="telegram", language=language, tool_grants=grants
+            CALL,
+            user_id="12345",
+            channel="telegram",
+            language=language,
+            tool_grants=grants,
+            pincer_user_id=owner_identity,
         )
     if appointment:
         scheduling.register_appointment(
@@ -294,6 +302,16 @@ class _Cards:
         self.requests: list = []
         self.finals: list[tuple[str, str]] = []
 
+    async def wait(self, timeout: float = 5.0) -> None:
+        """Until an approval card was presented — bounded, so a gate that
+        never asks fails the test instead of hanging the run."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not self.requests:
+            if loop.time() > deadline:
+                raise AssertionError("no approval card was presented")
+            await asyncio.sleep(0.01)
+
     async def presenter(self, req):
         self.requests.append(req)
         return self.present
@@ -311,8 +329,7 @@ async def test_user_mode_approve(monkeypatch):
     channel, engine, state = await _start(agent, settings=_user_mode_settings(), appointment=True, modes=USER)
 
     async def _approve_later():
-        while not cards.requests:
-            await asyncio.sleep(0.01)
+        await cards.wait()
         await asyncio.sleep(0.12)  # at least one reassurance line
         assert approvals.resolve(cards.requests[0].approval_id, True, by_user_id="12345")
 
@@ -345,8 +362,7 @@ async def test_user_mode_deny():
     channel, engine, state = await _start(agent, settings=_user_mode_settings(), appointment=True, modes=USER)
 
     async def _deny_later():
-        while not cards.requests:
-            await asyncio.sleep(0.01)
+        await cards.wait()
         assert approvals.resolve(cards.requests[0].approval_id, False)
 
     denier = asyncio.create_task(_deny_later())
@@ -394,8 +410,7 @@ async def test_user_mode_callee_hangup_cancels_card():
 
     engine.wait_for_turns = False
     await engine.on_speech_input(CALL, "Dienstag passt.")
-    while not cards.requests:
-        await asyncio.sleep(0.01)
+    await cards.wait()
     await engine.end_call(CALL)  # callee hangs up while the card is open
     await asyncio.wait_for(channel.wait_for_turn(CALL), timeout=2)
     assert cards.finals[-1][1] == "call_ended"
@@ -526,7 +541,7 @@ async def test_issue_299_registered_owner_creates_event_on_generic_call(owner_ph
             ]
         ]
     )
-    channel, engine, state = await _start(agent, tools=_Registry())
+    channel, engine, state = await _start(agent, tools=_Registry(), owner_identity="owner")
     assert state.metadata[tp.META_CALLER_CLASS] == "user"
     gate = channel.get_tool_gate(CALL)
     schemas = gate.filter_schemas([{"name": n} for n in ("google__create_event", "google__delete_event")])
@@ -667,11 +682,41 @@ async def test_guest_confirms_once_and_the_write_runs_once():
     await channel.stop()
 
 
+async def test_another_registered_user_answering_the_owners_call_gets_the_owners_scope(owner_phone):
+    """#252 review: user A calls registered user B with no grants. B's
+    registration does not widen A's call to every R/W tool."""
+    agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT)]])
+    channel, engine, state = await _start(agent, tools=_Registry(), owner_identity="someone-else")
+    assert state.metadata[tp.META_CALLER_CLASS] == "user"
+    assert state.metadata[tp.META_REMOTE_IS_OWNER] is False
+    allowed = state.metadata["allowed_tools"]
+    assert "google__create_event" not in allowed and "websearch__search" not in allowed
+    await engine.on_speech_input(CALL, "Trag mir den Termin bei dir ein.")
+    assert agent.executed == []
+    assert agent.gate_results[0].deny_reason == "not_in_call_scope"
+    await channel.stop()
+
+
+async def test_owner_answering_their_own_phone_keeps_the_full_scope(owner_phone):
+    channel, engine, state = await _start(ToolAgent([]), tools=_Registry(), owner_identity="owner")
+    assert state.metadata[tp.META_REMOTE_IS_OWNER] is True
+    assert "google__create_event" in state.metadata["allowed_tools"]
+    await channel.stop()
+
+
+async def test_owner_call_without_an_identity_never_matches_the_callee(owner_phone):
+    """No placing identity (an API call with no Pincer user) fails closed."""
+    channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
+    assert state.metadata[tp.META_REMOTE_IS_OWNER] is False
+    assert "google__create_event" not in state.metadata["allowed_tools"]
+    await channel.stop()
+
+
 async def test_repeated_create_is_idempotent_per_call(owner_phone):
     """A second create of the same appointment on the same call carries the same
     idempotency key, so the calendar answers 'already exists'."""
     settings = _settings(voice_max_writes_per_call=10)
-    channel, engine, state = await _start(ToolAgent([]), settings=settings, tools=_Registry())
+    channel, engine, state = await _start(ToolAgent([]), settings=settings, tools=_Registry(), owner_identity="owner")
     gate = channel.get_tool_gate(CALL)
     seen: list[str] = []
 
@@ -712,7 +757,15 @@ async def test_owner_approved_create_gets_the_call_key(owner_phone):
     cards = _Cards()
     approvals.set_presenter(cards.presenter)
     approvals.set_finalizer(cards.finalizer)
-    channel, engine, state = await _start(ToolAgent([]), settings=_user_mode_settings(), tools=_Registry(), modes=USER)
+    # The owner placed the call: the calendar write is in scope only as a
+    # grant, even with a registered callee on the line (#252).
+    channel, engine, state = await _start(
+        ToolAgent([]),
+        settings=_user_mode_settings(),
+        tools=_Registry(),
+        modes=USER,
+        grants=("google__create_event",),
+    )
     gate = channel.get_tool_gate(CALL)
     sent: list[str] = []
     arguments = {**CREATE_ARGS, "idempotency_key": "copied-from-history"}
@@ -722,8 +775,7 @@ async def test_owner_approved_create_gets_the_call_key(owner_phone):
         return CREATE_RESULT, False
 
     async def _approve():
-        while not cards.requests:
-            await asyncio.sleep(0.01)
+        await cards.wait()
         approvals.resolve(cards.requests[0].approval_id, True)
 
     approver = asyncio.create_task(_approve())
@@ -742,7 +794,7 @@ async def test_agent_passes_model_tool_calls_as_untrusted(owner_phone):
     from pincer.core.agent import Agent, _Turn
     from pincer.llm.base import ToolCall, ToolResult
 
-    channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
+    channel, engine, state = await _start(ToolAgent([]), tools=_Registry(), owner_identity="owner")
     gate = channel.get_tool_gate(CALL)
     agent = object.__new__(Agent)  # only _execute_call_tool is under test
     agent._settings = SimpleNamespace(voice_timezone="Europe/Berlin", timezone="Europe/Berlin")
@@ -848,7 +900,7 @@ async def test_websearch_on_the_guest_list_plays_the_filler_and_logs_r_auto():
 
 async def test_registered_caller_gets_websearch_without_any_setting(owner_phone):
     agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT)]])
-    channel, engine, state = await _start(agent, tools=_Registry())
+    channel, engine, state = await _start(agent, tools=_Registry(), owner_identity="owner")
     assert "websearch__search" in state.metadata["allowed_tools"]
     await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
     result = agent.gate_results[0]
@@ -1321,8 +1373,7 @@ async def test_owner_granted_calendar_write_goes_to_the_owner_card(monkeypatch):
     )
 
     async def _approve_later():
-        while not cards.requests:
-            await asyncio.sleep(0.01)
+        await cards.wait()
         assert approvals.resolve(cards.requests[0].approval_id, True, by_user_id="12345")
 
     approver = asyncio.create_task(_approve_later())

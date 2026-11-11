@@ -1172,6 +1172,13 @@ async def test_allow_tools_rejects_ungrantable_names_before_dialling(voice):
     assert voice.placed == []
 
 
+@pytest.mark.parametrize("bad", [{"google__create_event": True}, True, ["*"], ["google__*"]])
+async def test_allow_tools_rejects_patterns_and_non_lists_before_dialling(voice, bad):
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}, allow_tools=bad)
+    assert result.startswith("Error")
+    assert voice.placed == []
+
+
 async def test_allow_tools_ride_on_the_pending_state_and_the_tracking(voice):
     from pincer.voice import tool_policy as tp
 
@@ -1205,14 +1212,22 @@ async def test_no_allow_tools_means_no_grants(voice):
     assert info is not None and info.tool_grants == frozenset()
 
 
-async def test_allow_tools_rejects_tools_this_setup_does_not_have(voice, monkeypatch):
-    monkeypatch.setattr(outbound, "_registered_tools", lambda: ["websearch__search", "make_phone_call"])
+async def test_allow_tools_rejects_tools_this_setup_does_not_have(voice):
+    def registered():
+        return ["websearch__search", "make_phone_call"]
+
     result = await outbound.make_phone_call(
-        TARGET, TASK, context={"user_id": "u1"}, allow_tools=["google__create_event", "websearch__search"]
+        TARGET,
+        TASK,
+        context={"user_id": "u1"},
+        allow_tools=["google__create_event", "websearch__search"],
+        registered_tools=registered,
     )
     assert result.startswith("Error") and "google__create_event" in result and "not connected" in result
     assert voice.placed == []
-    ok = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}, allow_tools=["websearch__search"])
+    ok = await outbound.make_phone_call(
+        TARGET, TASK, context={"user_id": "u1"}, allow_tools=["websearch__search"], registered_tools=registered
+    )
     assert "Call SID: CA_1" in ok
     info = status_notify.get_call_info("CA_1")
     assert info is not None and info.tool_grants == {"websearch__search"}

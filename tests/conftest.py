@@ -82,18 +82,6 @@ def _reset_onboarding_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_registered_tools_provider() -> Iterator[None]:
-    """Issue #252: make_phone_call checks allow_tools against the registry the
-    CLI wiring installs process-wide; a test that wires the CLI must not leave
-    its registry behind for the next test's dial."""
-    from pincer.voice import outbound
-
-    outbound.set_registered_tools_provider(None)
-    yield
-    outbound.set_registered_tools_provider(None)
-
-
-@pytest.fixture(autouse=True)
 def _reset_thread_manager() -> None:
     """Sprint 13: the ThreadManager is a process-wide singleton keyed to one
     database. Without a reset between tests, the first tmp_path's DB would be
