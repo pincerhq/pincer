@@ -1130,3 +1130,40 @@ async def test_a_budget_stop_after_a_call_returns_the_turn_s_text_and_the_warnin
                 "budget_warning": _budget_text(_CALL_COST),
             },
         )
+
+
+class _RecordingSelector:
+    """A tool selector that records each selection: selecting may embed or rank with an LLM."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def applies(self, schemas: list[dict[str, Any]]) -> bool:
+        return True
+
+    async def select(self, schemas: list[dict[str, Any]], query: str, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append(query)
+        return schemas
+
+
+@pytest.mark.parametrize("budget", ["reached", "unreadable"])
+async def test_a_refused_scheduled_action_does_no_setup(  # type: ignore[no-untyped-def]
+    budget, tmp_path, budgeted, session_manager, tool_registry
+) -> None:
+    """Refused before tool selection, the turn's setup and the system prompt (PR #366 review)."""
+    settings, tracker = await budgeted(_CALL_COST if budget == "reached" else 1.0)
+    if budget == "reached":
+        await _seed(tmp_path, _CALL)
+    else:
+        await _drop_cost_table(tmp_path)
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+    selector = _RecordingSelector()
+    agent.tool_selector = selector  # type: ignore[assignment]
+
+    result = await agent.run_headless("hi", user_id="user", channel="scheduled")
+
+    expected = _headless_budget_text(_CALL_COST) if budget == "reached" else _HEADLESS_CHECK_FAILED_TEXT
+    assert result == expected  # precondition: refused
+    assert selector.calls == []
+    assert llm.complete.await_count == 0

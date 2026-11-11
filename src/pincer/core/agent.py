@@ -490,6 +490,13 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
     raise LLMOutputTruncatedError(response.output_tokens, max_tokens)
 
 
+def _headless_budget_text(stop: _BudgetStop, limit: float) -> str:
+    """What a scheduled action reports when the budget stops it."""
+    if stop.check_failed:
+        return _HEADLESS_BUDGET_CHECK_FAILED_TEXT
+    return _HEADLESS_BUDGET_REACHED_TEXT.format(limit=limit)
+
+
 def _step_separator(streamed: str) -> str:
     """What goes between the text a turn already streamed and a later step's first text: only
     the newlines still missing for a blank line. Nothing before the turn's first text."""
@@ -1200,6 +1207,9 @@ class Agent:
         even sees (enforced by omission, not by intercepting calls after the
         fact) — ``None`` means the full tool surface, same as live chat.
         """
+        # Before any setup: a refused run selects no tools and reads no memory (PR #366 review)
+        if (stop := await self._budget_stop()) is not None:
+            return _headless_budget_text(stop, self._settings.daily_budget_usd)
         messages: list[LLMMessage] = [LLMMessage(role=MessageRole.USER, content=prompt)]
 
         candidates = self._tools.get_schemas() if self._tools.has_tools else None
@@ -1219,11 +1229,9 @@ class Agent:
         iterations = max_iterations or self._settings.max_tool_iterations
 
         for _iteration in range(iterations):
-            # Before every request, the first included; a budget that cannot be read refuses too
-            if (stop := await self._budget_stop()) is not None:
-                if stop.check_failed:
-                    return _HEADLESS_BUDGET_CHECK_FAILED_TEXT
-                return _HEADLESS_BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+            # Checked again after every request (each later iteration follows one)
+            if _iteration and (stop := await self._budget_stop()) is not None:
+                return _headless_budget_text(stop, self._settings.daily_budget_usd)
             try:
                 response: LLMResponse = await self._llm.complete(
                     messages=messages,
@@ -1355,8 +1363,8 @@ class Agent:
             raise BudgetCheckFailedError(_BUDGET_CHECK_FAILED_TEXT) from e
 
     async def _budget_stop(self) -> _BudgetStop | None:
-        """Checked after each request of an admitted turn (before every request of a headless
-        run): None to go on, or why it stops.
+        """Checked after each request of an admitted turn (and before a headless run's setup):
+        None to go on, or why it stops.
 
         A budget that cannot be read stops the turn too, before another paid request
         (fails closed); a call it already placed is still reported (PR #366 review).
