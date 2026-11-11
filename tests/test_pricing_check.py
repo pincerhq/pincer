@@ -525,18 +525,42 @@ def test_a_sampling_model_is_not_checked_while_sampling_is_off(tmp_path: Path) -
     assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"), sampling_off)) is None
 
 
-def test_the_sampling_switch_alone_decides_whatever_the_server_switch_and_env_say(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A pure read of the toml (lead ruling R): neither `[mcp.server] enabled` nor the env hides the model."""
+def test_env_overrides_do_not_change_the_sampling_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check reads the toml only, so it is the same wherever it runs."""
+    monkeypatch.setenv("PINCER_MCP_ENABLED", "false")
     monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", "false")
-    server_off = _SAMPLING_ON.replace("[mcp.server]\nenabled = true", "[mcp.server]\nenabled = false")
-    assert server_off != _SAMPLING_ON
-    for name, toml in (("server-on", _SAMPLING_ON), ("server-off", server_off)):
-        (tmp_path / name).mkdir()
-        assert _first_line(
-            pricing_problems(_settings(), _with_sampling(_priced(tmp_path / name, "claude-a"), toml))
-        ) == ("No price for 1 model Pincer will call:\n  - claude-s: sampling on anthropic"), name
+    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
+        "No price for 1 model Pincer will call:\n  - claude-s: sampling on anthropic"
+    )
+
+
+@pytest.mark.parametrize(
+    "toml",
+    [
+        "[mcp]\nenabled = false\n" + _SAMPLING_ON,
+        _SAMPLING_ON.replace("[mcp.server]\nenabled = true", "[mcp.server]\nenabled = false"),
+        _SAMPLING_ON.replace("[mcp.server]\nenabled = true\n", ""),
+    ],
+    ids=["mcp-off", "server-off", "server-enabled-unset"],
+)
+def test_a_sampling_model_is_not_checked_when_the_runtime_would_never_sample(tmp_path: Path, toml: str) -> None:
+    """`pincer mcp serve` exits unless [mcp.server] is enabled (default off) and [mcp] is on (default on):
+    a leftover sampling table must not stop `pincer run` from starting."""
+    assert toml != _SAMPLING_ON
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"), toml)) is None
+
+
+@pytest.mark.parametrize(
+    "toml",
+    [
+        '[[mcp.servers]]\ntransport = "stdio"\n' + _SAMPLING_ON,  # KeyError: no name
+        '[mcp]\nserver = "x"\n',  # AttributeError: not a table
+    ],
+    ids=["server-entry-without-name", "server-not-a-table"],
+)
+def test_a_malformed_mcp_section_does_not_crash_the_check(tmp_path: Path, toml: str) -> None:
+    """The MCP config's own load reports it; the price check just has no sampling model."""
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"), toml)) is None
 
 
 def test_the_price_check_does_not_load_the_working_directorys_env_file(

@@ -52,29 +52,28 @@ class ModelUse:
 def models_to_price(settings: Settings, config_dir: Path | None = None) -> list[ModelUse]:
     """Every model Pincer will call that costs money: the chat model of every provider with
     credentials, the summary model, the voice turn model when voice is on, and the MCP
-    sampling model when `[mcp.server.sampling]` is enabled (read from `config_dir`, default
-    cwd). A free provider (a keyless compatible endpoint) is left out, and so is a claude-*
+    sampling model when the standalone MCP server would sample (read from `config_dir`,
+    default cwd). A free provider (a keyless compatible endpoint) is left out, and so is a claude-*
     id an OpenAI-wire provider would never send. `daily_budget_usd` plays no part."""
     uses = [use for use in _model_uses(settings) if not is_free_provider(settings, use.provider)]
     return uses + _sampling_uses(settings, config_dir)
 
 
 def _sampling_uses(settings: Settings, config_dir: Path | None) -> list[ModelUse]:
-    """The standalone MCP server's sampling model, which calls the Anthropic API directly.
-
-    `[mcp.server.sampling] enabled = true` alone decides, read from the toml files only (no .env,
-    no env vars), so the check is the same wherever it runs. An invalid MCP config is reported
-    by its own check, not here."""
-    from pincer.mcp.config import sampling_config
+    """The standalone MCP server's sampling model, which calls the Anthropic API directly, when
+    the toml says it would sample (`sampling_model`: no .env, no env vars, so the check is the
+    same wherever it runs). A malformed MCP section is reported by the MCP config's own load,
+    not here: this check must not crash startup over it."""
+    from pincer.mcp.config import sampling_model
     from pincer.mcp.sampling import SAMPLING_PROVIDER
 
     try:
-        sampling = sampling_config(config_dir)
-    except ValueError:
+        model = sampling_model(config_dir)
+    except (KeyError, AttributeError, TypeError, ValueError):
         return []
-    if not (sampling.enabled and has_credentials(settings, SAMPLING_PROVIDER)):
+    if model is None or not has_credentials(settings, SAMPLING_PROVIDER):
         return []
-    return [ModelUse(SAMPLING_PROVIDER, sampling.model, "sampling")]
+    return [ModelUse(SAMPLING_PROVIDER, model, "sampling")]
 
 
 def _model_uses(settings: Settings) -> list[ModelUse]:

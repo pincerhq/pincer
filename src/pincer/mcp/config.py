@@ -331,19 +331,29 @@ def _parse_sampling(samp_raw: dict[str, Any]) -> MCPSamplingConfig:
     )
 
 
-def sampling_config(config_dir: Path | None = None) -> MCPSamplingConfig:
-    """The [mcp.server.sampling] table of pincer.toml with pincer.local.toml merged on top, as
-    `load_mcp_config` merges it, from `config_dir` (default: cwd).
+def sampling_model(config_dir: Path | None = None) -> str | None:
+    """The model the standalone MCP server would sample with, per pincer.toml with
+    pincer.local.toml merged on top (as `load_mcp_config` merges them) in `config_dir`
+    (default: cwd); None when it would never sample.
+
+    It samples only when `[mcp] enabled` (default on), `[mcp.server] enabled` (default off;
+    `pincer mcp serve` exits without it) and `[mcp.server.sampling] enabled` (default off) are
+    all set, read with the runtime's defaults and truthiness.
 
     A pure read of the two files, for the startup price check: unlike `load_mcp_config` it never
-    loads .env into os.environ, and no environment variable changes the result.
+    loads .env into os.environ, and no environment variable changes the result. A malformed
+    section raises what reading it raises (KeyError, AttributeError, TypeError, ValueError).
     """
     base_dir = config_dir or Path.cwd()
     mcp_raw: dict[str, Any] = {}
     for name in ("pincer.toml", "pincer.local.toml"):
         raw = _read_toml_raw(base_dir / name) or {}
         mcp_raw = _merge_mcp_raw(mcp_raw, raw.get("mcp") or {})
-    return _parse_sampling(mcp_raw.get("server", {}).get("sampling", {}))
+    server = mcp_raw.get("server", {})
+    sampling = _parse_sampling(server.get("sampling", {}))
+    if not (mcp_raw.get("enabled", True) and server.get("enabled", False) and sampling.enabled):
+        return None
+    return sampling.model
 
 
 def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPConfig:
