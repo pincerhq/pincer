@@ -12,9 +12,11 @@ on:
   workflow_dispatch:
 
 # A new push to a PR cancels that PR's older run. Pushes to dev/main each run to
-# the end, so every merged commit gets a full result.
+# the end, so every merged commit gets a full result: they are grouped by
+# commit, because a group keeps only its newest pending run even without
+# cancel-in-progress.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -38,6 +40,9 @@ jobs:
         id: filter
         if: github.event_name != 'workflow_dispatch'
         with:
+          # A push compares with the branch's previous commit; without this a
+          # push to main would diff against the default branch (dev).
+          base: ${{ github.ref_name }}
           filters: |
             shared:
               - pyproject.toml
@@ -50,6 +55,7 @@ jobs:
               - tests/**
               - skills/**
               - main.py
+              - pincer.toml
             # What tests/db, the migration and the schema drift tests import.
             postgres:
               - src/pincer/db/**
@@ -59,7 +65,9 @@ jobs:
               - src/pincer/config/**
               - src/pincer/core/session.py
               - src/pincer/security/audit*
-              - src/pincer/voice/telemetry*
+              - src/pincer/voice/telemetry/**
+              - src/pincer/__init__.py
+              - src/pincer/voice/__init__.py
               - src/pincer/llm/base.py
               - tests/db/**
               - tests/test_db_migrations.py

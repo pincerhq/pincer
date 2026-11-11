@@ -71,7 +71,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-browser = ["playwright>=1.40.0"]
+browser = ["playwright>=1.49.0"]  # --only-shell (tools/builtin/browser.py)
 memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
 pdfgen = ["fpdf2>=2.7.0"]
