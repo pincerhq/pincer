@@ -229,10 +229,10 @@ def use_settings(monkeypatch):  # type: ignore[no-untyped-def]
     return use
 
 
-async def _sample(shell, model: str | None = None) -> str:  # type: ignore[no-untyped-def]
+async def _sample(shell, model: str | None = None, messages: list | None = None) -> str:  # type: ignore[no-untyped-def]
     backend = await shell._build_llm_backend()
     handler = SamplingHandler(llm_backend=backend, enabled=True)
-    return await handler.handle([{"role": "user", "content": "hi"}], model=model)
+    return await handler.handle(messages or [{"role": "user", "content": "hi"}], model=model)
 
 
 async def _stored(settings) -> list[tuple[str, float]]:  # type: ignore[no-untyped-def]
@@ -396,6 +396,77 @@ async def test_with_an_unpriced_configured_model_every_sampling_request_is_refus
         "MCP sampling: no [pricing] entry for the sampling model 'claude-unpriced'; "
         "every sampling request will be refused"
     ]
+
+
+# ── non-text sampling content (PR #366 review, round 3) ──────────────────────
+
+_PNG = "iVBORw0KGgo="  # base64; the bytes are never decoded on the way to the API
+
+
+async def test_an_image_in_a_sampling_message_is_sent_as_an_image(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    """MCP's {type, data, mimeType} becomes the API's base64 image block; images go before the
+    text, as the provider always sends them."""
+    use_settings(_settings(tmp_path))
+    content = [{"type": "text", "text": "what is this?"}, {"type": "image", "data": _PNG, "mimeType": "image/png"}]
+
+    reply = await _sample(_shell(), messages=[{"role": "user", "content": content}])
+
+    assert reply == "sampled"
+    assert [r["messages"] for r in anthropic_api.requests] == [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PNG}},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "reply"),
+    [
+        (
+            {"role": "user", "content": {"type": "audio", "data": "UklGRg==", "mimeType": "audio/wav"}},
+            "[Sampling: audio content is not supported, request not sent]",
+        ),
+        (
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]},
+            "[Sampling: tool_use content is not supported, request not sent]",
+        ),
+        (
+            {"role": "user", "content": [{"type": "tool_result", "toolUseId": "t1", "content": []}]},
+            "[Sampling: tool_result content is not supported, request not sent]",
+        ),
+        (
+            {"role": "assistant", "content": {"type": "image", "data": _PNG, "mimeType": "image/png"}},
+            "[Sampling: images are only supported in user messages, request not sent]",
+        ),
+    ],
+    ids=["audio", "tool_use", "tool_result", "assistant-image"],
+)
+async def test_content_the_provider_cannot_take_is_refused_before_sending(
+    tmp_path, anthropic_api, use_settings, caplog, message, reply
+):  # type: ignore[no-untyped-def]
+    """The Anthropic API takes no audio; sampling sends no tools; it takes images in user turns only."""
+    use_settings(_settings(tmp_path))
+
+    assert await _sample(_shell(), messages=[{"role": "user", "content": "hi"}, message]) == reply
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == []
+
+
+async def test_an_image_type_the_api_cannot_take_is_refused(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    use_settings(_settings(tmp_path))
+    message = {"role": "user", "content": {"type": "image", "data": "Qk0=", "mimeType": "image/bmp"}}
+
+    assert await _sample(_shell(), messages=[message]) == (
+        "[Sampling: image/bmp images are not supported (use image/jpeg, image/png, image/gif or image/webp), "
+        "request not sent]"
+    )
+    assert anthropic_api.requests == []
 
 
 def test_sampling_defaults_to_a_shipped_model() -> None:

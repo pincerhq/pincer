@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
 from pincer.exceptions import BudgetCheckFailedError, DailyBudgetReachedError
-from pincer.llm.base import LLMMessage, MessageRole
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 
 if TYPE_CHECKING:
     from pincer.config.pricing import PriceTable
@@ -38,8 +38,18 @@ logger = logging.getLogger("pincer.mcp.sampling")
 
 DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
 SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
+# The image types the Anthropic API takes (the SDK's Base64ImageSourceParam.media_type)
+_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 # When the spend can't be checked (or recorded): sampling fails closed, like an outbound dial
 SAMPLING_BUDGET_UNCHECKED = "[Sampling: could not check the daily budget, request not sent]"
+
+
+class SamplingRefusedError(Exception):
+    """A sampling request refused before anything was sent; `reply` is what the client gets."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        super().__init__(reply)
 
 
 # ── LLM backend abstraction ────────────────────────────────────────────────────
@@ -157,19 +167,34 @@ class MeteringUnavailableBackend(LLMBackend):
 
 
 def _to_llm_messages(messages: list[dict[str, Any]]) -> list[LLMMessage]:
-    """MCP sampling messages as Pincer's: text only, as a string, a text block or a list of them."""
-    return [LLMMessage(role=MessageRole(m["role"]), content=_text(m.get("content", ""))) for m in messages]
+    """MCP sampling messages as Pincer's. `content` is a string, one content block or a list of
+    them; text blocks become the message text and image blocks its images."""
+    return [_to_llm_message(m["role"], m.get("content", "")) for m in messages]
 
 
-def _text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict) and content.get("type") == "text":
-        return str(content.get("text", ""))
-    if isinstance(content, list):
-        return "".join(_text(block) for block in content)
-    kind = content.get("type") if isinstance(content, dict) else type(content).__name__
-    raise ValueError(f"unsupported sampling content: {kind}")
+def _to_llm_message(role: str, content: Any) -> LLMMessage:
+    blocks = content if isinstance(content, list) else [content]
+    texts: list[str] = []
+    images: list[ImageContent] = []
+    for block in blocks:
+        if isinstance(block, str):
+            texts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            texts.append(str(block.get("text", "")))
+        elif isinstance(block, dict) and block.get("type") == "image":
+            if role != MessageRole.USER:
+                raise SamplingRefusedError("[Sampling: images are only supported in user messages, request not sent]")
+            if block.get("mimeType") not in _IMAGE_TYPES:
+                raise SamplingRefusedError(
+                    f"[Sampling: {block.get('mimeType')} images are not supported "
+                    f"(use {', '.join(_IMAGE_TYPES[:-1])} or {_IMAGE_TYPES[-1]}), request not sent]"
+                )
+            images.append(ImageContent(data=str(block.get("data", "")), media_type=str(block.get("mimeType", ""))))
+        else:
+            # Audio has no Anthropic content block, and sampling sends no tools to use or answer
+            kind = block.get("type") if isinstance(block, dict) else type(block).__name__
+            raise SamplingRefusedError(f"[Sampling: {kind} content is not supported, request not sent]")
+    return LLMMessage(role=MessageRole(role), content="".join(texts), images=images)
 
 
 # ── Sampling handler ───────────────────────────────────────────────────────────
@@ -282,6 +307,9 @@ class SamplingHandler:
                 self._budget.remaining(),
             )
             return result
+        except SamplingRefusedError as e:
+            logger.info("Sampling request refused: %s", e.reply)
+            return e.reply
         except DailyBudgetReachedError:
             logger.info("Sampling request refused: the daily budget is reached")
             return "[Sampling: daily budget reached]"
