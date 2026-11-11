@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-import pytest
+import pytest_asyncio
 
 from pincer.db import ensure_schema_current
 from pincer.voice.telemetry import runtime
@@ -73,12 +73,14 @@ def _time_turns(tracer, *, turns: int) -> float:
     return (time.perf_counter() - started) / turns * 1_000_000
 
 
-@pytest.fixture
-def db(tmp_path):
+@pytest_asyncio.fixture
+async def db(tmp_path):
     path = tmp_path / "telephony.db"
     ensure_schema_current(path)
     yield path
-    asyncio.run(runtime.shutdown())
+    # On the test's loop, where the telemetry writes it drains are pending; a
+    # fresh loop (asyncio.run) shut the runtime down under them instead.
+    await runtime.shutdown()
     runtime.reset_for_tests()
 
 

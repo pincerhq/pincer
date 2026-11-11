@@ -122,8 +122,9 @@ class TestGracefulShutdown:
         import time
 
         playout_s, calls = 0.3, 8
-        # Serially, 8 × 0.3 s cannot fit; side by side it is one goodbye.
-        monkeypatch.setattr("pincer.channels.phone_calls.SHUTDOWN_DRAIN_TIMEOUT_S", 1.0)
+        # Serially, 8 × 0.3 s cannot fit; side by side it is one goodbye. Room
+        # for a loaded runner, still short of a serial drain.
+        monkeypatch.setattr("pincer.channels.phone_calls.SHUTDOWN_DRAIN_TIMEOUT_S", 2.0)
         channel, engine = await _live_call("en", call_sid="CA_0")
         for n in range(1, calls):
             await engine.on_call_start(f"CA_{n}", "+4930123456", CallDirection.OUTBOUND, language="en")

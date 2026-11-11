@@ -13,9 +13,11 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from queue import SimpleQueue
 from typing import Any
 from unittest.mock import AsyncMock
 
+import aiosqlite.core as aiosqlite_core
 import pytest
 import pytest_asyncio
 import suites
@@ -313,46 +315,74 @@ def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
     monkeypatch.setattr(engine, "command", _TemplateCommand(engine.command, template))
 
 
-# ── voice: let in-flight writes finish ───────────────────────────────
+# ── aiosqlite: let in-flight queries finish ──────────────────────────
+# Each aiosqlite connection runs its queries on a worker thread, which hands
+# the result back with `loop.call_soon_threadsafe`. A query still running when
+# pytest-asyncio closes the test's loop then raises "RuntimeError: Event loop
+# is closed" in that thread, and the next test fails on it. Such a query comes
+# from a fire-and-forget write (telemetry, call rows), from a task cancelled
+# mid-query (cancelling the task does not stop the thread), or from the cleanup
+# a task runs when pytest-asyncio cancels it just before closing the loop.
+#
+# So every queued query is counted, per loop, until its function has run; and
+# each async test ends with `_settle_aiosqlite` (added first by
+# pytest_collection_modifyitems, so it tears down last), which cancels the
+# leftover tasks itself and waits for the count to reach zero while the loop
+# can still take the results.
+
+_aiosqlite_in_flight: dict[asyncio.AbstractEventLoop, int] = {}
+_aiosqlite_lock = threading.Lock()
+_SETTLE_TIMEOUT_S = 2.0
+
+
+def _count_in_flight(loop: asyncio.AbstractEventLoop, delta: int) -> None:
+    with _aiosqlite_lock:
+        count = _aiosqlite_in_flight.get(loop, 0) + delta
+        if count:
+            _aiosqlite_in_flight[loop] = count
+        else:
+            _aiosqlite_in_flight.pop(loop, None)
+
+
+class _CountingTxQueue(SimpleQueue):  # type: ignore[type-arg]
+    """aiosqlite's per-connection work queue, counting work not yet done."""
+
+    def put_nowait(self, item: Any) -> None:
+        future, function = item
+        if future is None:  # the stop sentinel: nobody waits on it
+            super().put_nowait(item)
+            return
+        loop = future.get_loop()
+
+        def counted() -> Any:
+            try:
+                return function()
+            finally:
+                _count_in_flight(loop, -1)
+
+        _count_in_flight(loop, +1)
+        super().put_nowait((future, counted))
+
+
+aiosqlite_core.SimpleQueue = _CountingTxQueue  # type: ignore[misc]
 
 
 @pytest_asyncio.fixture
-async def quiesce_voice(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
-    """Let the voice channel's background writes finish before the loop closes.
-
-    Call-row writes, post-call reports and telemetry each run on their own
-    aiosqlite thread. One still in flight when pytest-asyncio closes the
-    test's loop calls back into the closed loop ("RuntimeError: Event loop is
-    closed" in a thread), which then fails whichever test runs next. Applied
-    to every async test of the voice suite (see pytest_collection_modifyitems).
-    """
-    from pincer.channels.phone_calls import VoiceChannel
+async def _settle_aiosqlite() -> AsyncIterator[None]:
+    yield
     from pincer.voice.telemetry.tracer import drain_pending
 
-    channels: list[VoiceChannel] = []
-    init = VoiceChannel.__init__
-
-    def tracking_init(self: VoiceChannel, *args: Any, **kwargs: Any) -> None:
-        init(self, *args, **kwargs)
-        channels.append(self)
-
-    monkeypatch.setattr(VoiceChannel, "__init__", tracking_init)
-    yield
+    await drain_pending()  # telemetry writes: let them finish rather than cancel them
     loop = asyncio.get_running_loop()
-    for channel in channels:
-        writes = [
-            task
-            for task in (*channel._call_row_tasks.values(), *channel._postcall_tasks.values())
-            if not task.done() and task.get_loop() is loop
-        ]
-        if writes:
-            await asyncio.wait(writes, timeout=5)
-        watchdog = channel._watchdog_task
-        if watchdog is not None and not watchdog.done() and watchdog.get_loop() is loop:
-            watchdog.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await watchdog
-    await drain_pending()
+    leftover = [task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and not task.done()]
+    for task in leftover:
+        task.cancel()
+    if leftover:
+        await asyncio.wait(leftover, timeout=_SETTLE_TIMEOUT_S)
+    deadline = time.monotonic() + _SETTLE_TIMEOUT_S
+    while _aiosqlite_in_flight.get(loop) and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0)  # the worker's call_soon_threadsafe follows its function
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -380,10 +410,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # fixture closures are computed by now; a usefixtures marker would be ignored
         if item.nodeid.startswith("tests/test_voice") and not item.get_closest_marker("allow_loop_stall"):
             item.fixturenames.insert(0, "_loop_stall_guard")
+        # first, so it tears down last: after every fixture that stops a channel
         if isinstance(item, pytest.Function) and inspect.iscoroutinefunction(item.function):
-            with contextlib.suppress(ValueError):  # outside tests/
-                if suites.suite_of(item.path) == "voice" and "quiesce_voice" not in item.fixturenames:
-                    item.fixturenames.insert(0, "quiesce_voice")
+            item.fixturenames.insert(0, "_settle_aiosqlite")
 
 
 @pytest_asyncio.fixture
