@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.mcp.sampling import (
     DEFAULT_SAMPLING_MODEL,
+    SAMPLING_MODEL_UNPRICED,
     SAMPLING_PROVIDER,
     MeteringUnavailableBackend,
     StandaloneLLMBackend,
@@ -85,10 +86,17 @@ class StandaloneMCPShell:
         Handles startup, serves clients, then shuts down cleanly on
         KeyboardInterrupt or asyncio.CancelledError.
         """
-        from pincer.mcp.core import MCPServiceCore
-
         approval = self._build_approval_backend()
         llm = await self._build_llm_backend()
+        try:
+            await self._serve(approval, llm)
+        finally:
+            # The sampling backend owns its client and cost log, whichever way run() ends
+            if llm is not None:
+                await llm.close()
+
+    async def _serve(self, approval: Any, llm: LLMBackend | None) -> None:
+        from pincer.mcp.core import MCPServiceCore
 
         self._core = MCPServiceCore(
             config=self._config,
@@ -183,7 +191,7 @@ class StandaloneMCPShell:
         from pincer.config import get_settings_relaxed
         from pincer.config.pricing import load_price_table
         from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-        from pincer.llm.cost_tracker import CostTracker, MeteredLLM
+        from pincer.llm.cost_tracker import CostTracker
 
         settings = get_settings_relaxed()
         if self._llm_api_key:
@@ -213,8 +221,9 @@ class StandaloneMCPShell:
                 model,
             )
             await provider.close()
-            return MeteringUnavailableBackend()
-        return StandaloneLLMBackend(MeteredLLM(provider, costs, SAMPLING_PROVIDER), default_model=model, prices=prices)
+            await costs.close()
+            return MeteringUnavailableBackend(SAMPLING_MODEL_UNPRICED.format(model=model))
+        return StandaloneLLMBackend(provider, costs, default_model=model, prices=prices)
 
     def _register_standalone_tools(self) -> None:
         """Register built-in Pincer tools that are safe without a full agent."""

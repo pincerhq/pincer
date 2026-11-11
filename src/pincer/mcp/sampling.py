@@ -32,7 +32,8 @@ from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 
 if TYPE_CHECKING:
     from pincer.config.pricing import PriceTable
-    from pincer.llm.cost_tracker import MeteredLLM
+    from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.cost_tracker import CostTracker
 
 logger = logging.getLogger("pincer.mcp.sampling")
 
@@ -42,6 +43,11 @@ SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API d
 _IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 # When the spend can't be checked (or recorded): sampling fails closed, like an outbound dial
 SAMPLING_BUDGET_UNCHECKED = "[Sampling: could not check the daily budget, request not sent]"
+# When the configured sampling model has no price: its spend could never be counted
+SAMPLING_MODEL_UNPRICED = (
+    "[Sampling: no [pricing] entry for the sampling model {model!r} in pincer.toml / pincer.local.toml, "
+    "request not sent]"
+)
 
 
 class SamplingRefusedError(Exception):
@@ -80,6 +86,10 @@ class LLMBackend(ABC):
         Returns:
             The assistant's reply text.
         """
+
+    async def close(self) -> None:
+        """Release what the backend holds (clients, the cost log); nothing by default."""
+        return None
 
 
 class AgentLLMBackend(LLMBackend):
@@ -120,15 +130,24 @@ class StandaloneLLMBackend(LLMBackend):
     entry would be billed but never counted, so the configured model is sent instead.
 
     Args:
-        llm:           The metered Anthropic provider.
+        provider:      The Anthropic provider; the backend owns it and closes it.
+        costs:         The initialized cost tracker; the backend owns it and closes it.
         default_model: Model to use when caller doesn't specify one, or asks for an unpriced one.
         prices:        The price table the cost log prices with.
     """
 
-    def __init__(self, llm: MeteredLLM, default_model: str, prices: PriceTable) -> None:
-        self._llm = llm
+    def __init__(self, provider: BaseLLMProvider, costs: CostTracker, default_model: str, prices: PriceTable) -> None:
+        from pincer.llm.cost_tracker import MeteredLLM
+
+        self._provider = provider
+        self._costs = costs
+        self._llm = MeteredLLM(provider, costs, SAMPLING_PROVIDER)
         self._default_model = default_model
         self._prices = prices
+
+    async def close(self) -> None:
+        await self._provider.close()
+        await self._costs.close()
 
     async def complete(
         self,
@@ -155,7 +174,11 @@ class StandaloneLLMBackend(LLMBackend):
 
 class MeteringUnavailableBackend(LLMBackend):
     """Stands in when sampling's metering could not be set up at startup (logged then, once):
-    every request is refused before anything is sent, since its spend could not be checked."""
+    every request is refused with `reply` before anything is sent, since its spend could not be
+    checked or priced."""
+
+    def __init__(self, reply: str = SAMPLING_BUDGET_UNCHECKED) -> None:
+        self._reply = reply
 
     async def complete(
         self,
@@ -163,7 +186,7 @@ class MeteringUnavailableBackend(LLMBackend):
         model: str | None = None,
         max_tokens: int = 1024,
     ) -> str:
-        raise BudgetCheckFailedError("the daily budget can't be checked: the sampling request was not sent")
+        raise SamplingRefusedError(self._reply)
 
 
 def _to_llm_messages(messages: list[dict[str, Any]]) -> list[LLMMessage]:

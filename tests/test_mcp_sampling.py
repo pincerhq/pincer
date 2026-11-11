@@ -193,14 +193,17 @@ class _Anthropic:
 
     def __init__(self) -> None:
         self.requests: list[dict] = []
+        self.clients: list = []
 
     def client(self, **kwargs):  # type: ignore[no-untyped-def]
         import httpx
         from anthropic import AsyncAnthropic
 
-        return AsyncAnthropic(
+        client = AsyncAnthropic(
             api_key=kwargs.get("api_key"), http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
         )
+        self.clients.append(client)
+        return client
 
     def _handle(self, request):  # type: ignore[no-untyped-def]
         import json
@@ -390,7 +393,11 @@ async def test_with_an_unpriced_configured_model_every_sampling_request_is_refus
 
     replies = await _sample_twice(_shell("claude-unpriced"))
 
-    assert replies == [_UNCHECKED, _UNCHECKED]
+    unpriced = (
+        "[Sampling: no [pricing] entry for the sampling model 'claude-unpriced' in pincer.toml / pincer.local.toml, "
+        "request not sent]"
+    )
+    assert replies == [unpriced, unpriced]
     assert anthropic_api.requests == []
     assert _errors(caplog) == [
         "MCP sampling: no [pricing] entry for the sampling model 'claude-unpriced'; "
@@ -467,6 +474,26 @@ async def test_an_image_type_the_api_cannot_take_is_refused(tmp_path, anthropic_
         "request not sent]"
     )
     assert anthropic_api.requests == []
+
+
+async def test_shutting_the_standalone_server_down_closes_the_sampling_client(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    """`run()` served and was stopped (the lifecycle pattern of test_mcp_standalone)."""
+    import asyncio
+    from unittest.mock import patch
+
+    use_settings(_settings(tmp_path))
+    shell = _shell()
+    stop = MagicMock(wait=AsyncMock(side_effect=asyncio.CancelledError))
+
+    with (
+        patch("pincer.mcp.core.PincerMCPServer", return_value=AsyncMock()),
+        patch("asyncio.Event", return_value=stop),
+        patch.object(shell, "_register_standalone_tools"),
+    ):
+        await shell.run()
+
+    assert len(anthropic_api.clients) == 1
+    assert anthropic_api.clients[0].is_closed()
 
 
 def test_sampling_defaults_to_a_shipped_model() -> None:
