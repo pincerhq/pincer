@@ -62,11 +62,21 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 
+# The browse/screenshot tools launch headless Chromium. Install it here, as
+# root, with the system libraries it links against (libglib, libnss3, libgbm,
+# ...): the lazy install in tools/builtin/browser.py runs as `pincer` and can
+# only download the browser, not apt packages. --only-shell is the headless
+# shell `launch(headless=True)` uses; the full browser is not needed.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
 COPY --chown=pincer:pincer --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --chown=pincer:pincer --from=builder /app/src /app/src
 COPY --chown=pincer:pincer --from=builder /app/.venv /app/.venv
 # DEPRCATED: skills are deprecated and will removed in 0.9.0 version
 #COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
+RUN /app/.venv/bin/playwright install --with-deps --only-shell chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
 COPY --chown=pincer:pincer --from=builder /app/pincer.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
