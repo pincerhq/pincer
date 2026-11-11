@@ -34,6 +34,7 @@ from pincer.llm.base import (
     ToolCall,
     rate_limit_attempts,
     rate_limit_backoff,
+    request_client,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
 
@@ -193,7 +194,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         for attempt in range(attempts):
             started = False
             try:
-                async with self._request_client().messages.stream(**kwargs) as stream:
+                async with request_client(self._client).messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
                         started = True
                         yield StreamTurnEvent(text=text)
@@ -221,13 +222,6 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
     # ── Internal ─────────────────────────────────────────
 
-    def _request_client(self) -> AsyncAnthropic:
-        """The client for one request: without the SDK's own retries when a 429 must fail over
-        at once (`rate_limit_retries(False)`). The copy shares the HTTP connection pool."""
-        if rate_limit_attempts() > 1:
-            return self._client
-        return self._client.with_options(max_retries=0)
-
     async def _call_with_retry(self, kwargs: dict[str, Any]) -> Message:
         """Call API with exponential backoff on rate limits.
 
@@ -239,7 +233,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                async with self._request_client().messages.stream(**kwargs) as stream:
+                async with request_client(self._client).messages.stream(**kwargs) as stream:
                     result: Message = await stream.get_final_message()
                 return result
             except anthropic.RateLimitError as e:

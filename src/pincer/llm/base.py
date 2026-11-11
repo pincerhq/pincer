@@ -8,12 +8,13 @@ never depends on Anthropic/OpenAI specifics.
 from __future__ import annotations
 
 import base64
+import weakref
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, TypedDict
 
 from pincer.config.pricing import TokenUsage
 
@@ -31,6 +32,9 @@ _RATE_LIMIT_MAX_WAIT_S = 60.0
 # False while the router sends a request that fails over on a 429 (Q23: fail over first): set by
 # the router around one provider call, read by the providers before their first request
 _rate_limit_retries: ContextVar[bool] = ContextVar("pincer_rate_limit_retries", default=True)
+# An SDK client → its copy without the SDK's own retries, made once; keyed on the client object,
+# so a replaced client gets its own copy and a dropped one takes its copy with it
+_no_retry_clients: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 # Where the requests of the current conversation get their prompt cache key (issue #357, Q21):
 # set by the agent around a turn, read by providers that route on it (OpenAI's prompt_cache_key)
 _prompt_cache_key_source: ContextVar[Callable[[], str] | None] = ContextVar("pincer_prompt_cache_key", default=None)
@@ -72,6 +76,24 @@ def rate_limit_attempts() -> int:
     """How many times a provider sends a rate-limited request: ``RATE_LIMIT_ATTEMPTS``, or 1
     inside ``rate_limit_retries(False)``."""
     return RATE_LIMIT_ATTEMPTS if _rate_limit_retries.get() else 1
+
+
+class _SDKClient(Protocol):
+    """What ``request_client`` needs of an SDK client (AsyncAnthropic, AsyncOpenAI)."""
+
+    def with_options(self, *, max_retries: int) -> Self: ...
+
+
+def request_client[C: _SDKClient](client: C) -> C:
+    """The client to send one request with: ``client``, or, inside ``rate_limit_retries(False)``,
+    its copy without the SDK's own retries, so a 429 fails over at once. The copy is made once
+    per client and shares the client's HTTP connection pool."""
+    if rate_limit_attempts() > 1:
+        return client
+    copy: C | None = _no_retry_clients.get(client)
+    if copy is None:
+        copy = _no_retry_clients[client] = client.with_options(max_retries=0)
+    return copy
 
 
 class MessageRole(StrEnum):

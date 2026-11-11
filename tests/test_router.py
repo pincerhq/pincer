@@ -21,6 +21,8 @@ from pincer.llm.base import (
     MessageRole,
     StreamTurnEvent,
     rate_limit_attempts,
+    rate_limit_retries,
+    request_client,
 )
 from pincer.llm.router import LLMRouter
 
@@ -697,3 +699,23 @@ async def test_when_the_primarys_retry_fails_too_its_last_error_is_raised(settin
     assert len(primary.requests) == 1 + 9  # the first try, then 3 attempts of 3 SDK tries
     assert len(fallback.requests) == 1
     assert [c.args for c in sleep.await_args_list] == [(0.0,), (0.0,)]
+
+
+async def test_one_no_retry_copy_per_sdk_client():
+    """Requests that fail over at once share one copy of their client without SDK retries; a
+    swapped-in client (as the scripted tests do) gets its own."""
+    from anthropic import AsyncAnthropic
+
+    client, other = AsyncAnthropic(api_key="sk-ant-test"), AsyncAnthropic(api_key="sk-ant-test")
+    try:
+        assert request_client(client) is client  # retries on: the client itself
+        with rate_limit_retries(False):
+            copy = request_client(client)
+            assert copy is not client
+            assert copy.max_retries == 0
+            assert request_client(client) is copy
+            assert request_client(other) is not copy
+            assert request_client(other).max_retries == 0
+    finally:
+        await client.close()
+        await other.close()

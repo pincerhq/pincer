@@ -28,6 +28,7 @@ from pincer.llm.base import (
     prompt_cache_key,
     rate_limit_attempts,
     rate_limit_backoff,
+    request_client,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
 
@@ -375,7 +376,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             model_name = ""
             usage: Any = None
             try:
-                stream = await self._request_client().chat.completions.create(**kwargs)
+                stream = await request_client(self._client).chat.completions.create(**kwargs)
                 async for chunk in stream:
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
@@ -436,18 +437,11 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     async def close(self) -> None:
         await self._client.close()
 
-    def _request_client(self) -> AsyncOpenAI:
-        """The client for one request: without the SDK's own retries when a 429 must fail over
-        at once (`rate_limit_retries(False)`). The copy shares the HTTP connection pool."""
-        if rate_limit_attempts() > 1:
-            return self._client
-        return self._client.with_options(max_retries=0)
-
     async def _call_with_retry(self, kwargs: dict[str, Any]) -> ChatCompletion:
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                result: ChatCompletion = await self._request_client().chat.completions.create(**kwargs)
+                result: ChatCompletion = await request_client(self._client).chat.completions.create(**kwargs)
                 return result
             except openai.RateLimitError as e:
                 if attempt == attempts - 1:
