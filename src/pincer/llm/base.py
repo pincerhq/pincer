@@ -251,6 +251,12 @@ class LLMResponse:
         return self.stop_reason == STOP_REASON_MAX_TOKENS
 
 
+def transient_status(status_code: int) -> bool:
+    """An HTTP status worth asking again (Q24a): a rate limit (429), an overload (529) or another
+    server error (5xx). A 4xx is the request's own fault and would fail the same way."""
+    return status_code == 429 or status_code >= 500
+
+
 def rate_limit_backoff(retry_after: float, attempt: int) -> float:
     """Seconds to wait after the `attempt`-th (0-based) 429: retry_after·2^attempt, at most 60 s."""
     return min(retry_after * 2.0**attempt, _RATE_LIMIT_MAX_WAIT_S)

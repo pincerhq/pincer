@@ -29,6 +29,7 @@ from pincer.llm.base import (
     rate_limit_attempts,
     rate_limit_backoff,
     request_client,
+    transient_status,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
 
@@ -327,7 +328,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         try:
             response = await self._call_with_retry(kwargs)
         except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} API error: {e.status_code} {e.message}") from e
+            message = f"{self._provider_name} API error: {e.status_code} {e.message}"
+            raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except openai.APIConnectionError as e:
             raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
@@ -408,7 +410,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
                 await asyncio.sleep(wait)
             except openai.APIStatusError as e:
-                raise LLMError(f"{self._provider_name} stream error: {e.status_code} {e.message}") from e
+                message = f"{self._provider_name} stream error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
             except openai.APIConnectionError as e:
                 raise LLMError(f"{self._provider_name} connection error: {e}") from e
 

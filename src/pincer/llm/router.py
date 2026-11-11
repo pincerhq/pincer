@@ -267,14 +267,15 @@ class LLMRouter(BaseLLMProvider):
         failovers = [pool[n] for n in self._settings.fallback_providers]
         return primary, failovers
 
-    def _tries(self) -> list[BaseLLMProvider]:
-        """The providers one request is sent to, in order, until one answers: the primary, the
-        failovers in random order, then the primary again (Q24). Only that last try retries a
-        429 (Q23: fail over first). Without failovers: the primary alone, with its retry."""
+    def _first_tries(self) -> tuple[BaseLLMProvider, list[BaseLLMProvider]]:
+        """The primary, and the providers one request is first sent to, once each and without
+        retries (Q23: fail over first): the primary, then the failovers in random order. None
+        without failovers. When they all fail, the primary is asked once more with its retry,
+        if its failure was transient (Q24, Q24a)."""
         primary, failovers = self._primary_and_failovers()
         if not failovers:
-            return [primary]
-        return [primary, *random.sample(failovers, len(failovers)), primary]
+            return primary, []
+        return primary, [primary, *random.sample(failovers, len(failovers))]
 
     # ── Accessors ────────────────────────────────────────
 
@@ -384,11 +385,12 @@ class LLMRouter(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        """Providers in the order of ``_tries`` until one answers, as in ``stream_turn``:
-        every try but the last raises a 429 at once; the last one (the primary again)
-        retries it, and its error is the one raised. An explicit ``model`` goes to the
-        primary only: failovers use their own model (see ``stream_turn``)."""
-        *first_tries, last_try = self._tries()
+        """Providers in the order of ``_first_tries`` until one answers, as in ``stream_turn``:
+        each raises a 429 at once. Then the primary again, with its retry, when its first
+        failure was transient; otherwise its error is raised. An explicit ``model`` goes to
+        the primary only: failovers use their own model (see ``stream_turn``)."""
+        primary, first_tries = self._first_tries()
+        primary_err: LLMError | None = None
         for index, provider in enumerate(first_tries):
             try:
                 with rate_limit_retries(False):
@@ -404,8 +406,12 @@ class LLMRouter(BaseLLMProvider):
                         pinned=pinned,
                     )
             except (LLMError, LLMRateLimitError) as err:
+                if index == 0:
+                    primary_err = err
                 logger.warning("complete provider %d failed: %s — trying next", index, err)
-        return await last_try.complete(
+        if primary_err is not None and not primary_err.retryable:
+            raise primary_err
+        return await primary.complete(
             messages,
             tools=tools,
             model=model,
@@ -428,16 +434,18 @@ class LLMRouter(BaseLLMProvider):
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
-        """Failover discipline: providers are tried in the order of ``_tries``
+        """Failover discipline: providers are tried in the order of ``_first_tries``
         until one produces its first event; a mid-stream failure propagates.
-        Every try but the last raises a 429 at once, so the next one takes over
-        without a wait; the last one (the primary again) retries it, and its
-        error is the one raised.
+        Each raises a 429 at once, so the next one takes over without a wait.
+        When all fail, the primary is asked again, with its retry, if its first
+        failure was transient (its error is then the one raised); otherwise its
+        first error is raised.
 
         An explicit ``model`` is the primary's id (e.g. a voice turn's
         ``azure:gpt-5-mini`` on an azure default): a failover leaf of another
         vendor would 404 on it, so failovers get ``None`` — their own model."""
-        *first_tries, last_try = self._tries()
+        primary, first_tries = self._first_tries()
+        primary_err: LLMError | None = None
         for index, provider in enumerate(first_tries):
             stream = provider.stream_turn(
                 messages,
@@ -455,6 +463,8 @@ class LLMRouter(BaseLLMProvider):
                 with rate_limit_retries(False):
                     first = await anext(stream, None)
             except (LLMError, LLMRateLimitError) as err:
+                if index == 0:
+                    primary_err = err
                 logger.warning("stream_turn provider %d failed before first event: %s — trying next", index, err)
                 continue
             if first is None:
@@ -463,7 +473,9 @@ class LLMRouter(BaseLLMProvider):
             async for event in stream:  # a mid-stream failure propagates — no mid-stream failover
                 yield event
             return
-        async for event in last_try.stream_turn(
+        if primary_err is not None and not primary_err.retryable:
+            raise primary_err
+        async for event in primary.stream_turn(
             messages,
             tools=tools,
             model=model,

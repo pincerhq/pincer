@@ -35,6 +35,7 @@ from pincer.llm.base import (
     rate_limit_attempts,
     rate_limit_backoff,
     request_client,
+    transient_status,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
 
@@ -162,7 +163,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         try:
             response: Message = await self._call_with_retry(kwargs)
         except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic API error: {e.status_code} {e.message}") from e
+            message = f"Anthropic API error: {e.status_code} {e.message}"
+            raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"Anthropic connection error: {e}") from e
 
@@ -208,7 +210,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
                 await asyncio.sleep(wait)
             except anthropic.APIStatusError as e:
-                raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
+                message = f"Anthropic stream error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
             except anthropic.APIConnectionError as e:
                 raise LLMError(f"Anthropic connection error: {e}") from e
 

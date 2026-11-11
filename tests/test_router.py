@@ -719,3 +719,98 @@ async def test_one_no_retry_copy_per_sdk_client():
     finally:
         await client.close()
         await other.close()
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_a_primary_that_failed_for_good_is_not_tried_again(settings, method):
+    """Q24a: a 401 is not transient, so when the fallback fails too the primary's own error is
+    raised at once; asking the primary again would only repeat it."""
+    async with (
+        sse.ScriptedAnthropic(settings, [401, ([sse.text("never sent")], "end_turn")]) as primary,
+        sse.ScriptedAnthropic(settings, [404]) as fallback,
+    ):
+        router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
+        with pytest.raises(LLMError, match="401"):
+            await _answer(router, method)
+
+    assert len(primary.requests) == 1
+    assert len(fallback.requests) == 1
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_a_primary_that_timed_out_is_not_tried_again(settings, method):
+    """Q24a: a timeout is not transient: on a call, asking again would only add dead air."""
+    replies = [httpx.ReadTimeout("scripted timeout"), ([sse.text("never sent")], "end_turn")]
+    async with (
+        sse.ScriptedAnthropic(settings, replies) as primary,
+        sse.ScriptedAnthropic(settings, [401]) as fallback,
+    ):
+        router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
+        with pytest.raises(LLMError, match="Anthropic connection error"):
+            await _answer(router, method)
+
+    assert len(primary.requests) == 1
+    assert len(fallback.requests) == 1
+
+
+async def _openai_answering(settings, statuses: list[int], text: str) -> tuple[BaseLLMProvider, list[httpx.Request]]:
+    """An OpenAI provider on the real SDK answering each status in `statuses` in turn, then `text`
+    (as a stream or a completion, whichever was asked), and the requests it sent."""
+    import json
+
+    from openai import AsyncOpenAI
+    from pydantic import SecretStr
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    pending = list(statuses)
+    sent: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        if pending:
+            return httpx.Response(pending.pop(0), json={"error": {"type": "server_error", "message": "scripted"}})
+        message = {"role": "assistant", "content": text}
+        if json.loads(request.content).get("stream"):
+            chunk = {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "gpt-5-mini",
+                "choices": [{"index": 0, "delta": message, "finish_reason": "stop"}],
+            }
+            body = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
+        completion = {
+            "id": "c1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-5-mini",
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        return httpx.Response(200, json=completion)
+
+    provider = OpenAICompatibleProvider(
+        settings.model_copy(update={"openai_api_key": SecretStr("sk-test"), "openai_model": "gpt-5-mini"}), "openai"
+    )
+    await provider.close()
+    provider._client = AsyncOpenAI(  # type: ignore[attr-defined]
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    return provider, sent
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_an_openai_primary_5xx_earns_its_last_try(settings, method):
+    """Q24a: a server error is transient, so with the fallback broken the primary is asked again."""
+    primary, sent = await _openai_answering(settings, [503], "from the primary's retry")
+    try:
+        async with sse.ScriptedAnthropic(settings, [401]) as fallback:
+            router = _router_with_pool("a", ["b"], {"a": primary, "b": fallback.provider})
+            answer = await _answer(router, method)
+    finally:
+        await primary.close()
+
+    assert answer.content == "from the primary's retry"
+    assert len(sent) == 2

@@ -10,7 +10,14 @@ class ConfigError(PincerError):
 
 
 class LLMError(PincerError):
-    """Error communicating with an LLM provider."""
+    """Error communicating with an LLM provider.
+
+    ``retryable``: the failure is transient (a rate limit, an overload, a server error), so the
+    same request may succeed when asked again; a 4xx or a connection failure is not."""
+
+    def __init__(self, message: str = "", *, retryable: bool = False) -> None:
+        self.retryable = retryable
+        super().__init__(message)
 
 
 class DailyBudgetReachedError(PincerError):
@@ -26,7 +33,9 @@ class LLMRateLimitError(LLMError):
 
     def __init__(self, retry_after: float | None = None):
         self.retry_after = retry_after
-        super().__init__(f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited.")
+        super().__init__(
+            f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited.", retryable=True
+        )
 
 
 class LLMOutputTruncatedError(LLMError):

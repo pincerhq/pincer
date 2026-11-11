@@ -69,10 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fallback at once, on web chat and phone calls alike, and any other error the
   SDK would retry (a timeout, a 5xx, an overload) also switches at once: the
   primary and each fallback get one attempt. If every fallback fails too, the
-  primary is tried once more, with its retry, before the error is returned. That
-  retry, and a primary with no fallback, retry a 429 that arrives before the
-  first token: three attempts, the wait doubling up to 60 s. Once text has
-  streamed, nothing is retried.
+  primary is tried once more, with its retry, after a rate limit, an overload or
+  a server error; any other failure (a 4xx, a timeout, a lost connection)
+  returns the primary's error at once. That retry, and a primary with no
+  fallback, retry a 429 that arrives before the first token: three attempts, the
+  wait doubling up to 60 s. Once text has streamed, nothing is retried.
 
 #### The system prompt stays the same for a whole conversation (#357)
 

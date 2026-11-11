@@ -17,8 +17,9 @@ from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 if TYPE_CHECKING:
     from pincer.config import Settings
 
-# One scripted response: streamed blocks + stop reason (+ usage), or an HTTP error status
-Scripted = tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, dict[str, Any]] | int
+# One scripted response: streamed blocks + stop reason (+ usage), an HTTP error status, or an
+# exception the transport raises (e.g. httpx.ReadTimeout)
+Scripted = tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, dict[str, Any]] | int | Exception
 
 
 def thinking(text: str, signature: str) -> dict[str, Any]:
@@ -95,7 +96,7 @@ def sse_body(
 class ScriptedAnthropic:
     """An Anthropic provider whose HTTP responses are scripted, one per request:
     `(blocks, stop_reason)` or `(blocks, stop_reason, usage)` streams a response, an int
-    returns that HTTP error."""
+    returns that HTTP error, an exception is raised by the transport."""
 
     def __init__(self, settings: Settings, responses: list[Scripted]) -> None:
         self._responses = list(responses)
@@ -119,6 +120,8 @@ class ScriptedAnthropic:
         if not self._responses:
             raise AssertionError(f"unscripted request #{len(self.requests)}")
         scripted = self._responses.pop(0)
+        if isinstance(scripted, Exception):
+            raise scripted
         if isinstance(scripted, int):  # an HTTP error status (4xx is not retried by the SDK, except 429)
             error = {"type": "error", "error": {"type": "invalid_request_error", "message": "scripted failure"}}
             # A 429 asks for no wait: the SDK's own retries take 1 ms, the provider's retry 0 s
