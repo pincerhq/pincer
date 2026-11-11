@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-# opencv-python (non-headless) needs libgl1/libglib2.0-0/libsm6/libxext6 on a slim
-# base; ffmpeg covers pypdfium2/opencv's optional codec paths; curl is for the
+# libgl1/libglib2.0-0/libsm6/libxext6 were for opencv-python (non-headless); the
+# project now installs opencv-python-headless, so they can likely go; ffmpeg covers pypdfium2/opencv's optional codec paths; curl is for the
 # healthcheck. Mirrors doctr's own reference api/Dockerfile's system deps, minus
 # make (not needed once installing python-doctr from a released PyPI wheel). git
 # stays: the `telemetry` extra is pincer-telemetry from GitHub, and uv must fetch

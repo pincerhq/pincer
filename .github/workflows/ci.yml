@@ -5,8 +5,9 @@
 # any test job failed, then runs format, lint, mypy and bandit on the whole
 # repo. `checks` and `dependency-audit` are the required status checks.
 #
-# Every job runs on the self-hosted runner. YAML anchors are not supported in
-# workflows, so the `runs-on` block is repeated in each job.
+# Every job but postgres runs on the self-hosted runner (non-root, no sudo, no
+# Docker). YAML anchors are not supported in workflows, so the `runs-on` block
+# is repeated in each job.
 name: CI
 on:
   push:
@@ -14,9 +15,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to a PR cancels that PR's older run. Pushes to dev/main each run to
+# the end, so every merged commit gets a full result.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -108,13 +111,12 @@ jobs:
   # The SQLModel layer must behave the same on Postgres as on SQLite. Every
   # test parametrised by the `db_url` fixture runs its Postgres variant here
   # (they skip elsewhere); the set grows as each domain moves onto the engine.
-  # The runner needs Docker for the service container.
+  # The service container needs Docker, which the self-hosted runner does not
+  # have, so this job stays on a GitHub-hosted runner.
   postgres:
     needs: changes
     if: needs.changes.outputs.postgres == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16

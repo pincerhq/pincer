@@ -28,6 +28,9 @@ dependencies = [
     # with python-doctr 1.0.1's own constraints.
     "torch>=2.0.0,<3.0.0",
     "torchvision>=0.15.0",
+    # python-doctr wants opencv-python (the GUI build, which needs libxcb/libGL);
+    # `override-dependencies` below drops it, and this headless build provides `cv2`.
+    "opencv-python-headless>=4.5.0,<5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -70,6 +73,13 @@ pythonpath = ["."]
 # the Dockerfile copies only `src/doctr-mcp/` as a standalone build context (this
 # server's own build, since its image is far heavier than the other bundled
 # servers'). Both copies must stay in sync if the index URL ever changes.
+
+# Duplicated in the workspace root pyproject.toml, for the same reason as the
+# `[[tool.uv.index]]` block below: uv reads overrides only from the resolution root. Without
+# it, both OpenCV builds would install here and fight over the `cv2` package.
+[tool.uv]
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "platform_system != 'Darwin'" }]
 torchvision = [{ index = "pytorch-cpu", marker = "platform_system != 'Darwin'" }]

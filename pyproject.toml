@@ -271,7 +271,14 @@ skips = ["B101", "B104", "B310", "B608"]
 # (PYSEC-2026-1448, PYSEC-2026-3002; fixed in 1.6.2). Upstream lifted the cap to
 # `>=1.6.0,<1.7` in Rapptz/discord.py@5d74ed3 as a metadata-only change, but it
 # isn't released yet. Drop this override once a discord.py release includes it.
-override-dependencies = ["pynacl>=1.6.2,<1.7"]
+#
+# python-doctr depends on opencv-python, the GUI build, which links libxcb/libGL;
+# a server never opens a window. Drop it; doctr-mcp depends on
+# opencv-python-headless instead, which provides the same `cv2`.
+override-dependencies = [
+    "pynacl>=1.6.2,<1.7",
+    "opencv-python; sys_platform == 'never'",
+]
 
 [tool.uv.workspace]
 members = [
