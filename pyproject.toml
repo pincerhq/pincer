@@ -37,7 +37,7 @@ dependencies = [
     # 0.4.x panics the whole process when an event marshals to an empty
     # protobuf (`index out of range [0] with length 0` in getBytesAndSize);
     # 0.5.0 added the empty-payload guard.
-    "neonize>=0.5.2",
+    "neonize>=0.10.0",
     # neonize 0.5+ ships protobuf gencode 7.34.1; an older protobuf runtime
     # raises `incompatible Protobuf Gencode/Runtime versions` on import.
     # Keep this floor aligned with neonize's gencode.

@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.14"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform != 'darwin'",
@@ -3364,7 +3364,7 @@ requires-dist = [
     { name = "microsoft-teams-apps", extras = ["graph"], marker = "extra == 'teams'", specifier = ">=2.0.13.4" },
     { name = "ms365-mcp", marker = "extra == 'mcp'", editable = "src/ms365-mcp" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.18.0" },
-    { name = "neonize", specifier = ">=0.5.2" },
+    { name = "neonize", specifier = ">=0.10.0" },
     { name = "oauthlib", specifier = ">=4.0.1" },
     { name = "openai", specifier = ">=1.60.0" },
     { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "tasks-redis", "postgres", "remote-skills"], marker = "extra == 'all'" },
