@@ -379,7 +379,7 @@ List extracted entities. Types: `person`, `place`, `project`, `organization`.
 
 ### `GET /api/skills`
 
-List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`skills_dir`: `~/.pincer/skills/` or an `s3://` / `az://` / `gs://` prefix), listed uniformly. There is no install/delete API; add a skill directory to the user root, then call `POST /api/skills/rebuild` (or `pincer skills rebuild`). See the [Skills Guide](../guides/skills-guide.md).
+List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`skills_dir`: `<storage root>/skills/` by default, or any local path or `s3://` / `az://` / `gs://` prefix), listed uniformly. There is no install/delete API; add a skill directory to the user root, then call `POST /api/skills/rebuild` (or `pincer skills rebuild`). See the [Skills Guide](../guides/skills-guide.md).
 
 ```json
 {
@@ -447,7 +447,7 @@ List the agent's built-in tools, configured Google Workspace / Slack integration
 
 ## Storage
 
-Browse and manage files under the **storage root**: `PINCER_STORAGE_ROOT` (a local path or an `s3://` / `az://` / `gs://` URI). When it is unset and `skills_dir` is a cloud URI, the root is that bucket or container; otherwise it is `<data_dir>/storage`. Cloud roots use the same `PINCER_STORAGE_*` credentials as remote skill roots. A local root that contains the data dir (`PINCER_STORAGE_ROOT=/app` with the data dir in `/app/data`) is refused with `503` on every route, since the data dir holds the JWT secret and the database; `pincer doctor` flags it too.
+Browse and manage files under the **storage root**: `PINCER_STORAGE_ROOT` (a local path or an `s3://` / `az://` / `gs://` URI). When it is unset and an explicit `skills_dir` is a cloud URI, the root is that bucket or container; otherwise it is `<data_dir>/storage`. Pincer keeps two folders under the root: `skills/` (the default `skills_dir`) and `workspace/` (what the agent reads and writes: `uploads/`, `downloads/`, `exec_output/`, `screenshots/`). Anything else belongs to other services. A file uploaded here under `workspace/` is visible to the agent's file tools; `workspace/` is not protected, so it can be managed from Documents. Cloud roots use the same `PINCER_STORAGE_*` credentials as remote skill roots. A local root that contains the data dir (`PINCER_STORAGE_ROOT=/app` with the data dir in `/app/data`) is refused with `503` on every route, since the data dir holds the JWT secret and the database; `pincer doctor` flags it too.
 
 Keys are POSIX paths relative to the root (`reports/q1.pdf`; `""` is the root). Absolute keys, `~`, `..` segments and scheme-qualified keys are refused with `400`.
 

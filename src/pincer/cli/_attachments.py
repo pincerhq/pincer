@@ -1,23 +1,33 @@
-"""Formatting helpers for file/image attachments forwarded to the LLM prompt."""
+"""File/image attachments of incoming messages: saved to the workspace's `uploads/`
+folder, and described for the LLM prompt."""
 
 from __future__ import annotations
 
+import logging
 import uuid
-from pathlib import Path
+from typing import TYPE_CHECKING
 
+from pincer.storage.workspace import safe_upload_path as _safe_upload_path
 
-def _safe_upload_path(uploads_dir: Path, filename: str) -> Path:
-    """Resolve `filename` under `uploads_dir`, rejecting traversal/absolute paths.
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
-    `filename` comes straight off attacker-controlled incoming-message metadata
-    (e.g. Telegram's doc.file_name, WhatsApp's fileName) — joining it onto
-    uploads_dir unchecked lets a sender write outside the uploads directory.
-    """
-    safe_name = Path(filename).name or f"file_{uuid.uuid4().hex[:8]}"
-    save_path = uploads_dir / safe_name
-    if uploads_dir.resolve() not in save_path.resolve().parents:
-        raise ValueError(f"unsafe attachment filename: {filename!r}")
-    return save_path
+    from pincer.storage.workspace import Workspace
+
+__all__ = ["_safe_upload_path", "describe_file_attachments", "describe_image_attachments"]
+
+logger = logging.getLogger(__name__)
+
+UPLOADS = "uploads"
+_TEXT_MIME_TYPES = ("application/json", "application/xml", "application/x-yaml")
+_TEXT_EXTENSIONS = frozenset(
+    {
+        ".txt", ".py", ".js", ".ts", ".json", ".csv", ".md", ".log", ".xml", ".html", ".css",
+        ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".bash", ".sql", ".rs", ".go", ".java",
+        ".c", ".cpp", ".h", ".rb", ".php", ".swift", ".kt", ".env", ".gitignore",
+    }
+)  # fmt: skip
+_MAX_TEXT_CHARS = 30_000
 
 
 def _format_pdf_attachment(pages: list[str], filename: str, abs_path: str, max_chars: int = 30_000) -> str:
@@ -73,3 +83,63 @@ def _format_image_attachment(filename: str, abs_path: str, size_bytes: int, medi
         "If the user wants text read/extracted from this image, call the OCR tool "
         f"with file_path='{abs_path}' — do not try to transcribe it yourself."
     )
+
+
+def describe_file_attachments(ws: Workspace, files: Iterable[tuple[bytes, str, str]]) -> list[str]:
+    """Save each `(raw bytes, mime type, filename)` to `uploads/` and describe it for the prompt.
+
+    Text files are inlined, PDFs have their text extracted, anything else is
+    named by its local path. An unsafe filename is rejected, never saved.
+    Blocking (a cloud root uploads each file).
+    """
+    parts: list[str] = []
+    for raw_bytes, mime, filename in files:
+        try:
+            save_path = ws.save(UPLOADS, filename, raw_bytes)
+        except ValueError:
+            logger.warning("Rejected unsafe attachment filename: %r", filename)
+            parts.append(f"[File: {filename}] rejected — unsafe filename")
+            continue
+        parts.append(_describe_file(raw_bytes, mime, filename, str(save_path)))
+    return parts
+
+
+def _describe_file(raw_bytes: bytes, mime: str, filename: str, abs_path: str) -> str:
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if mime.startswith("text/") or mime in _TEXT_MIME_TYPES or ext in _TEXT_EXTENSIONS:
+        content = raw_bytes.decode("utf-8", errors="replace")
+        if len(content) > _MAX_TEXT_CHARS:
+            content = content[:_MAX_TEXT_CHARS] + f"\n... [truncated, {len(raw_bytes)} bytes total]"
+        return f"[File: {filename}]\n```\n{content}\n```"
+    if ext == ".pdf":
+        try:
+            import pymupdf
+
+            doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
+            pages = [page.get_text() for page in doc]
+            doc.close()
+            return _format_pdf_attachment(pages, filename, abs_path)
+        except ImportError:
+            return (
+                f"[File: {filename}] saved to {abs_path} ({len(raw_bytes)} bytes, {mime}). "
+                f"PDF text extraction unavailable (install pymupdf)."
+            )
+        except Exception as exc:
+            return (
+                f"[File: {filename}] saved to {abs_path} ({len(raw_bytes)} bytes, {mime}). PDF extraction failed: {exc}"
+            )
+    return (
+        f"[File: {filename}] saved to {abs_path} ({len(raw_bytes)} bytes, {mime}). "
+        f"Use shell_exec to process it with the absolute path above."
+    )
+
+
+def describe_image_attachments(ws: Workspace, images: Iterable[tuple[bytes, str]]) -> list[str]:
+    """Save each `(raw bytes, media type)` to `uploads/` under a generated name and
+    describe it for the prompt. Blocking (a cloud root uploads each image)."""
+    parts: list[str] = []
+    for raw_bytes, media_type in images:
+        filename = f"image_{uuid.uuid4().hex[:8]}{_IMAGE_EXTENSIONS.get(media_type, '.bin')}"
+        save_path = ws.save(UPLOADS, filename, raw_bytes)
+        parts.append(_format_image_attachment(filename, str(save_path), len(raw_bytes), media_type))
+    return parts

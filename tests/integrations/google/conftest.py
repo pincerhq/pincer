@@ -18,6 +18,23 @@ from pincer.integrations.google.service_factory import GoogleServiceFactory
 from pincer.integrations.google.tools_calendar import register_calendar_tools
 from pincer.tools.registry import ToolRegistry
 
+# ── Workspace ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def workspace_dir(tmp_path_factory, monkeypatch):
+    """The Drive / Gmail tools keep files in a local workspace of their own
+    (never the developer's storage root, and outside tmp_path, which some tests
+    expect to stay empty); returns its directory."""
+    from pincer.storage.workspace import Workspace
+
+    root = tmp_path_factory.mktemp("storage") / "workspace"
+    ws = Workspace(root, root)
+    ws.ensure()
+    monkeypatch.setattr("pincer.integrations.google.workspace_files._workspace", lambda: ws)
+    return root
+
+
 # ── Auth & factory fixtures ───────────────────────────────────────────────────
 
 

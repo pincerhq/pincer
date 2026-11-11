@@ -88,7 +88,7 @@ Prefer pure-instruction skills (no scripts) when the model can already accomplis
 ## Where Skills Live
 
 - **Bundled skills:** shipped inside the installed package at `src/pincer/skills/` (fixed path, not configurable). Ships with `pip install pincer-agent` — no project checkout required.
-- **User skills:** `~/.pincer/skills/` (`skills_dir` config) — a local directory, or an S3 / Azure Blob / GCS prefix (see [Remote Skill Roots](#remote-skill-roots)).
+- **User skills:** `<storage root>/skills/` by default (`skills_dir` config; the storage root is `PINCER_STORAGE_ROOT`, else `<data_dir>/storage`) — a local directory, or an S3 / Azure Blob / GCS prefix (see [Remote Skill Roots](#remote-skill-roots)).
 
 A user skill with the same `name` as a bundled skill overrides it.
 
@@ -96,7 +96,7 @@ A user skill with the same `name` as a bundled skill overrides it.
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `skills_dir` | `~/.pincer/skills` | User skills root: a local path, or an `s3://`, `az://` or `gs://` URI |
+| `skills_dir` | `<storage root>/skills` | User skills root: a local path, or an `s3://`, `az://` or `gs://` URI |
 | `skills_max_loaded_per_root` | `100` | Hard cap on skills loaded per root — applied at discovery, before prompt construction |
 | `skills_max_prompt_tokens` | `None` (no limit) | Soft budget for the Available Skills prompt block; once exceeded, descriptions are truncated and then trailing entries are dropped with an "X more skills" note. Tune this down for small-context local models. |
 | `skill_sandbox_disabled` | `False` | Bypass sandboxing for `run_skill_script` (trusted/dev workflows only) |
@@ -167,7 +167,7 @@ The skill index itself is state, not a cache: one per process, shared by the age
 
 **Scripts.** `run_skill_script` on a remote skill first brings the skill's folder in cloudpathlib's cache up to date: changed files are downloaded again, and files deleted from the bucket are removed. It then runs the script from there, through the same approval gate and sandbox as a local script. There is no separate copy, so editing only a script takes effect on the next run. Object storage keeps no file modes, so non-Python scripts get the owner execute bit restored. If a script changed its own cached files, they are replaced from the bucket on the next run. Avoid `pincer skills rebuild` (or `POST /api/skills/rebuild`) while a remote skill script is running: clearing the cache removes the files that script runs from. Use `--keep-cache` / `?keep_cache=true` if you only need a rescan.
 
-**Browsing the bucket.** The dashboard's Documents view (`/api/storage`, see the [REST API reference](../reference/rest-api.md#storage)) serves the storage root. Set it with `PINCER_STORAGE_ROOT`. Left unset with a remote `skills_dir`, it is the whole bucket or container the skills live in (`s3://my-bucket/` for `s3://my-bucket/team-skills`). Whenever the skills dir is under the storage root, its prefix is **protected**: it, anything inside it and every folder above it cannot be deleted or moved from the browser, and nothing can be moved into it. Files inside it can still be uploaded and edited; run `pincer skills rebuild` (or `POST /api/skills/rebuild`) afterwards to pick up changed SKILL.md files.
+**Browsing the bucket.** The dashboard's Documents view (`/api/storage`, see the [REST API reference](../reference/rest-api.md#storage)) serves the storage root. Set it with `PINCER_STORAGE_ROOT`; with `PINCER_SKILLS_DIR` unset, the skills then live in `<storage root>/skills`, next to the agent's `workspace/`. Left unset with an explicit remote `skills_dir`, the root is the whole bucket or container the skills live in (`s3://my-bucket/` for `s3://my-bucket/team-skills`). Whenever the skills dir is under the storage root, its prefix is **protected**: it, anything inside it and every folder above it cannot be deleted or moved from the browser, and nothing can be moved into it. Files inside it can still be uploaded and edited; run `pincer skills rebuild` (or `POST /api/skills/rebuild`) afterwards to pick up changed SKILL.md files.
 
 ---
 

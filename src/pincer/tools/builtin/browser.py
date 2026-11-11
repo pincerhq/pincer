@@ -13,7 +13,6 @@ import logging
 import re
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -124,13 +123,14 @@ async def screenshot(url: str, context: dict[str, Any] | None = None) -> str:
 
         screenshot_bytes = await page.screenshot(full_page=False)
 
-        workspace = Path.home() / ".pincer" / "workspace"
-        workspace.mkdir(parents=True, exist_ok=True)
         import time
 
+        from pincer.config import get_settings
+        from pincer.storage.workspace import get_workspace
+
         filename = f"screenshot_{int(time.time())}.png"
-        filepath = workspace / filename
-        filepath.write_bytes(screenshot_bytes)
+        ws = get_workspace(get_settings())
+        filepath = await asyncio.to_thread(ws.save, "screenshots", filename, screenshot_bytes)
 
         b64 = base64.b64encode(screenshot_bytes).decode()
         return (

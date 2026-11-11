@@ -4,7 +4,7 @@ Sandboxed Python code execution tool.
 Runs user-provided Python code in an isolated subprocess with:
 - Configurable timeout (default 30s, max 120s)
 - Capped output (8000 chars)
-- Temporary working directory
+- The workspace's exec_output/ folder as working directory (new files are uploaded to it)
 - Matplotlib plot capture (auto-saves figures instead of showing)
 """
 
@@ -15,9 +15,14 @@ import logging
 import os
 import sys
 import tempfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pincer.tools.sandbox import scrubbed_env
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pincer.storage.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +70,49 @@ except (ImportError, NameError):
 """
 
 
+def _workspace() -> Workspace:
+    from pincer.config import get_settings
+    from pincer.storage.workspace import get_workspace
+
+    return get_workspace(get_settings())
+
+
 def _get_output_dir() -> Path:
-    """Return the persistent workspace output directory for generated files."""
-    output_dir = Path.home() / ".pincer" / "workspace" / "exec_output"
+    """Return the workspace's `exec_output/` folder (its local side) for generated files."""
+    output_dir = _workspace().local / "exec_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
+
+
+def _snapshot(output_dir: Path) -> dict[Path, float]:
+    """Every file under `output_dir` with its mtime."""
+    files: dict[Path, float] = {}
+    for dirpath, _dirnames, filenames in output_dir.walk():
+        for name in filenames:
+            path = dirpath / name
+            try:
+                if path.is_file() and not path.is_symlink():
+                    files[path] = path.stat().st_mtime
+            except OSError:
+                continue
+    return files
+
+
+def _publish_changes(output_dir: Path, before: dict[Path, float]) -> list[Path]:
+    """Upload the files the run created or changed under `output_dir`; return the new ones.
+
+    On a local storage root publishing is a no-op. A file that fails to upload
+    is logged and still reported: it exists locally.
+    """
+    after = _snapshot(output_dir)
+    changed = [path for path, mtime in after.items() if before.get(path) != mtime]
+    ws = _workspace()
+    for path in changed:
+        try:
+            ws.publish(path)
+        except Exception:
+            logger.warning("Could not upload %s to the workspace", path, exc_info=True)
+    return sorted(path for path in changed if path not in before)
 
 
 async def python_exec(code: str = "", timeout: int = 30) -> str:
@@ -85,7 +128,7 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
     timeout = min(max(timeout, 1), MAX_TIMEOUT)
 
     output_dir = _get_output_dir()
-    existing_files = set(output_dir.iterdir())
+    existing_files = _snapshot(output_dir)
 
     with tempfile.TemporaryDirectory(prefix="pincer_exec_") as tmpdir:
         plot_dir = str(output_dir)
@@ -127,11 +170,10 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
         if stderr.strip():
             output_parts.append(f"[stderr]\n{stderr.strip()}")
 
-        # Report all newly created files in the output directory
-        new_files = sorted(set(output_dir.iterdir()) - existing_files)
+        # Upload what the run created or changed; report the new files
+        new_files = await asyncio.to_thread(_publish_changes, output_dir, existing_files)
         for nf in new_files:
-            if nf.is_file():
-                output_parts.append(f"[File saved: {nf}]")
+            output_parts.append(f"[File saved: {nf}]")
 
         if proc.returncode != 0 and not stderr.strip():
             output_parts.append(f"[Process exited with code {proc.returncode}]")

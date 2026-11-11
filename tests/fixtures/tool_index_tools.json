@@ -37,7 +37,7 @@
   },
   {
     "name": "python_exec",
-    "description": "Execute Python code in an isolated subprocess and return the output. Use for calculations, data analysis, generating charts, or running scripts. Common libraries available: pandas, numpy, matplotlib, fpdf2. Generated files are saved to ~/.pincer/workspace/exec_output/ — use send_file to deliver them to the user."
+    "description": "Execute Python code in an isolated subprocess and return the output. Use for calculations, data analysis, generating charts, or running scripts. Common libraries available: pandas, numpy, matplotlib, fpdf2. Generated files are saved to the workspace's exec_output/ folder — use send_file to deliver them to the user."
   },
   {
     "name": "file_read",
@@ -53,7 +53,7 @@
   },
   {
     "name": "google__upload_file",
-    "description": "Upload a local file to Google Drive. Accepts paths relative to ~/.pincer/ (e.g., 'downloads/report.pdf'), bare filenames (e.g., 'report.pdf' — searched in downloads/ and workspace/), or absolute paths (e.g., '/Users/user/Documents/file.pdf'). Files from google__download_file are in ~/.pincer/downloads/. Files from file_write or python_exec are in ~/.pincer/workspace/. If you don't know the path, call google__list_local_files first. Optionally specify folder_id to upload into a specific Drive folder. MIME type is auto-detected from the file extension."
+    "description": "Upload a local file to Google Drive. Accepts paths relative to the workspace (e.g., 'downloads/report.pdf'), bare filenames (e.g., 'report.pdf' — searched across the workspace), or absolute paths (e.g., '/Users/user/Documents/file.pdf'). Files from google__download_file are in the workspace's downloads/ folder; files from python_exec are in exec_output/. If you don't know the path, call google__list_local_files first. Optionally specify folder_id to upload into a specific Drive folder. MIME type is auto-detected from the file extension."
   },
   {
     "name": "google__send_message",

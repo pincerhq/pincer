@@ -97,9 +97,6 @@ async def test_download_file(mock_factory, mock_drive_service, tmp_path, monkeyp
     }
     mock_drive_service.files().get_media().execute.return_value = test_content
 
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
-
     result = await google__download_file(mock_factory, file_id="f1")
 
     assert "report.pdf" in result
@@ -124,9 +121,6 @@ async def test_download_file_response_never_contains_binary(mock_factory, mock_d
         "size": str(len(big_content)),
     }
     mock_drive_service.files().get_media().execute.return_value = big_content
-
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
     result = await google__download_file(mock_factory, file_id="f1")
 
@@ -160,9 +154,6 @@ async def test_download_file_duplicate_filename(mock_factory, mock_drive_service
     }
     mock_drive_service.files().get_media().execute.return_value = test_content
 
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
-
     result1 = await google__download_file(mock_factory, file_id="f1")
     result2 = await google__download_file(mock_factory, file_id="f1")
 
@@ -181,9 +172,6 @@ async def test_export_google_doc(mock_factory, mock_drive_service, tmp_path, mon
         "mimeType": "application/vnd.google-apps.document",
     }
     mock_drive_service.files().export_media().execute.return_value = pdf_bytes
-
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
     result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
 
@@ -205,9 +193,6 @@ async def test_export_google_sheet_as_xlsx(mock_factory, mock_drive_service, tmp
         "mimeType": "application/vnd.google-apps.spreadsheet",
     }
     mock_drive_service.files().export_media().execute.return_value = xlsx_bytes
-
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
     result = await google__export_google_doc(mock_factory, file_id="sheet1", export_format="xlsx")
 
@@ -267,9 +252,6 @@ async def test_export_response_never_contains_binary(mock_factory, mock_drive_se
     }
     mock_drive_service.files().export_media().execute.return_value = big_bytes
 
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
-
     result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
 
     assert len(result) < 500
@@ -284,9 +266,6 @@ async def test_export_duplicate_filename(mock_factory, mock_drive_service, tmp_p
         "mimeType": "application/vnd.google-apps.document",
     }
     mock_drive_service.files().export_media().execute.return_value = pdf_bytes
-
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
     result1 = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
     result2 = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
@@ -382,18 +361,20 @@ async def test_upload_file_rename(mock_factory, mock_drive_service, tmp_path):
     assert "Final Report.pdf" in result
 
 
-async def test_upload_file_resolves_from_downloads(mock_factory, mock_drive_service, tmp_path, monkeypatch):
-    """Bare filename resolved to ~/.pincer/downloads/."""
+async def test_upload_file_resolves_from_downloads(
+    mock_factory, workspace_dir, mock_drive_service, tmp_path, monkeypatch
+):
+    """Bare filename resolved to the workspace's downloads/."""
     from unittest.mock import MagicMock, patch
 
-    pincer_dir = tmp_path / ".pincer"
-    downloads = pincer_dir / "downloads"
-    downloads.mkdir(parents=True)
+    ws = workspace_dir
+    downloads = ws / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
     (downloads / "report.pdf").write_bytes(b"%PDF")
 
     monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)).replace("~/Desktop", str(tmp_path / "Desktop")),
+        "pincer.integrations.google.workspace_files.os.path.expanduser",
+        lambda p: p.replace("~/Desktop", str(tmp_path / "Desktop")),
     )
 
     mock_drive_service.files().create().execute.return_value = {
@@ -408,18 +389,20 @@ async def test_upload_file_resolves_from_downloads(mock_factory, mock_drive_serv
     assert "uploaded" in result.lower()
 
 
-async def test_upload_file_resolves_from_workspace_exec_output(mock_factory, mock_drive_service, tmp_path, monkeypatch):
-    """Bare filename resolved to ~/.pincer/workspace/exec_output/ when only there."""
+async def test_upload_file_resolves_from_workspace_exec_output(
+    mock_factory, workspace_dir, mock_drive_service, tmp_path, monkeypatch
+):
+    """Bare filename resolved to the workspace's exec_output/ when only there."""
     from unittest.mock import MagicMock, patch
 
-    pincer_dir = tmp_path / ".pincer"
-    exec_dir = pincer_dir / "workspace" / "exec_output"
-    exec_dir.mkdir(parents=True)
+    ws = workspace_dir
+    exec_dir = ws / "exec_output"
+    exec_dir.mkdir(parents=True, exist_ok=True)
     (exec_dir / "chart.png").write_bytes(b"PNG")
 
     monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)).replace("~/Desktop", str(tmp_path / "Desktop")),
+        "pincer.integrations.google.workspace_files.os.path.expanduser",
+        lambda p: p.replace("~/Desktop", str(tmp_path / "Desktop")),
     )
 
     mock_drive_service.files().create().execute.return_value = {
@@ -449,16 +432,16 @@ def test_resolve_upload_path_none_for_missing():
     assert result is None
 
 
-def test_resolve_upload_path_deep_walk(tmp_path, monkeypatch):
+def test_resolve_upload_path_deep_walk(workspace_dir, tmp_path, monkeypatch):
     """Finds file via deep walk when not in top-level downloads."""
-    pincer_dir = tmp_path / ".pincer"
-    nested = pincer_dir / "downloads" / "subdir"
-    nested.mkdir(parents=True)
+    ws = workspace_dir
+    nested = ws / "downloads" / "subdir"
+    nested.mkdir(parents=True, exist_ok=True)
     (nested / "nested.csv").write_bytes(b"a,b")
 
     monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)).replace("~/Desktop", str(tmp_path / "Desktop")),
+        "pincer.integrations.google.workspace_files.os.path.expanduser",
+        lambda p: p.replace("~/Desktop", str(tmp_path / "Desktop")),
     )
 
     result = _resolve_upload_path("nested.csv")
@@ -469,29 +452,19 @@ def test_resolve_upload_path_deep_walk(tmp_path, monkeypatch):
 # ── google__list_local_files tests ────────────────────────────────────────────
 
 
-async def test_list_local_files_empty(mock_factory, tmp_path, monkeypatch):
+async def test_list_local_files_empty(mock_factory):
     """No files → helpful message."""
-    pincer_dir = tmp_path / ".pincer"
-    monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)),
-    )
     result = await google__list_local_files(mock_factory)
     assert "No files found" in result
 
 
-async def test_list_local_files_lists_both_dirs(mock_factory, tmp_path, monkeypatch):
+async def test_list_local_files_lists_both_dirs(mock_factory, workspace_dir, tmp_path, monkeypatch):
     """Lists files from downloads and workspace."""
-    pincer_dir = tmp_path / ".pincer"
-    (pincer_dir / "downloads").mkdir(parents=True)
-    (pincer_dir / "workspace").mkdir(parents=True)
-    (pincer_dir / "downloads" / "report.pdf").write_bytes(b"PDF")
-    (pincer_dir / "workspace" / "chart.png").write_bytes(b"PNG")
-
-    monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)),
-    )
+    ws = workspace_dir
+    (ws / "downloads").mkdir(parents=True, exist_ok=True)
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "downloads" / "report.pdf").write_bytes(b"PDF")
+    (ws / "chart.png").write_bytes(b"PNG")
 
     result = await google__list_local_files(mock_factory)
     assert "report.pdf" in result
@@ -499,33 +472,23 @@ async def test_list_local_files_lists_both_dirs(mock_factory, tmp_path, monkeypa
     assert "google__upload_file" in result
 
 
-async def test_list_local_files_pattern_filter(mock_factory, tmp_path, monkeypatch):
+async def test_list_local_files_pattern_filter(mock_factory, workspace_dir, tmp_path, monkeypatch):
     """Pattern filters results by filename."""
-    pincer_dir = tmp_path / ".pincer"
-    (pincer_dir / "downloads").mkdir(parents=True)
-    (pincer_dir / "downloads" / "report.pdf").write_bytes(b"PDF")
-    (pincer_dir / "downloads" / "photo.jpg").write_bytes(b"JPG")
-
-    monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)),
-    )
+    ws = workspace_dir
+    (ws / "downloads").mkdir(parents=True, exist_ok=True)
+    (ws / "downloads" / "report.pdf").write_bytes(b"PDF")
+    (ws / "downloads" / "photo.jpg").write_bytes(b"JPG")
 
     result = await google__list_local_files(mock_factory, pattern="report")
     assert "report.pdf" in result
     assert "photo.jpg" not in result
 
 
-async def test_list_local_files_pattern_no_match(mock_factory, tmp_path, monkeypatch):
+async def test_list_local_files_pattern_no_match(mock_factory, workspace_dir, tmp_path, monkeypatch):
     """Pattern with no match returns helpful message."""
-    pincer_dir = tmp_path / ".pincer"
-    (pincer_dir / "downloads").mkdir(parents=True)
-    (pincer_dir / "downloads" / "data.csv").write_bytes(b"a,b")
-
-    monkeypatch.setattr(
-        "pincer.integrations.google.tools_drive.os.path.expanduser",
-        lambda p: p.replace("~/.pincer", str(pincer_dir)),
-    )
+    ws = workspace_dir
+    (ws / "downloads").mkdir(parents=True, exist_ok=True)
+    (ws / "downloads" / "data.csv").write_bytes(b"a,b")
 
     result = await google__list_local_files(mock_factory, pattern="unicorn")
     assert "No files matching" in result

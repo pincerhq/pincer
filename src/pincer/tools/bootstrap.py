@@ -161,7 +161,7 @@ def _register_builtins(tools: ToolRegistry, settings: Settings, report: dict[str
             "Execute Python code in an isolated subprocess and return the output. "
             "Use for calculations, data analysis, generating charts, or running scripts. "
             "Common libraries available: pandas, numpy, matplotlib, fpdf2. "
-            "Generated files are saved to ~/.pincer/workspace/exec_output/ — "
+            "Generated files are saved to the workspace's exec_output/ folder — "
             "use send_file to deliver them to the user."
         ),
         handler=python_exec,

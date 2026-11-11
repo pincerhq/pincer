@@ -110,7 +110,8 @@ class SecurityDoctor:
     ) -> None:
         self.data_dir = data_dir or Path("data")
         self.config_dir = config_dir or Path(".")
-        self.skills_dir = skills_dir or Path.home() / ".pincer" / "skills"
+        # None = the configured skills dir (read when the check runs).
+        self.skills_dir = skills_dir
         # `pincer doctor --production` (Sprint 7, T7.3): extra deploy-gate
         # checks; the deploy script refuses to start on any CRITICAL.
         self.production = production
@@ -1547,9 +1548,10 @@ class SecurityDoctor:
     def _check_skills_dir_permissions(self, cfg: Settings | None = None) -> CheckResult:
         from pincer.storage.clients import is_remote_uri
 
-        if isinstance(self.skills_dir, str) and is_remote_uri(self.skills_dir):
-            return self._check_remote_skills_root(self.skills_dir, self._cfg(cfg))
-        skills_dir = Path(self.skills_dir)
+        configured = self.skills_dir if self.skills_dir is not None else self._cfg(cfg).skills_dir
+        if isinstance(configured, str) and is_remote_uri(configured):
+            return self._check_remote_skills_root(configured, self._cfg(cfg))
+        skills_dir = Path(configured)
         if not skills_dir.exists():
             return CheckResult(
                 "skills_dir_permissions",
@@ -1569,7 +1571,7 @@ class SecurityDoctor:
             "skills_dir_permissions",
             CheckStatus.WARNING,
             f"Skills dir permissions: {mode}",
-            fix_hint="chmod 750 ~/.pincer/skills/",
+            fix_hint=f"chmod 750 {skills_dir}/",
             category="filesystem",
         )
 

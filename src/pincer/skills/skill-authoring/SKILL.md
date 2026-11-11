@@ -67,7 +67,7 @@ an API with a fixed auth scheme) that's error-prone to improvise every time.
 ## Where skills live
 
 - Bundled skills: shipped inside the installed package at `src/pincer/skills/` (fixed path, not configurable).
-- User skills: `~/.pincer/skills/` (configurable via `skills_dir`).
+- User skills: `<storage root>/skills/` (configurable via `skills_dir`; the storage root is `storage_root`, by default `<data_dir>/storage`).
 
 A user skill with the same `name` as a bundled skill overrides it. Both
 roots are capped at `skills_max_loaded_per_root` (default 100) skills.

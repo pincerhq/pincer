@@ -11,6 +11,7 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING, Any
 
+from pincer.integrations.google import workspace_files
 from pincer.integrations.google.models import fmt_file, fmt_list
 from pincer.integrations.google.quota import with_backoff
 
@@ -171,54 +172,8 @@ def _format_size(size_bytes: int) -> str:
 
 
 def _resolve_upload_path(file_path: str) -> str | None:
-    """
-    Resolve a file path for upload. Search order:
-
-    1. Exact path (after ~ expansion)
-    2. ~/.pincer/downloads/{basename}
-    3. ~/.pincer/workspace/{basename}
-    4. ~/.pincer/workspace/exec_output/{basename}
-    5. ~/Desktop/{basename}
-    6. ~/.pincer/{file_path} (relative to pincer home)
-    7. Deep walk of ~/.pincer/downloads and ~/.pincer/workspace
-
-    Returns the resolved absolute path, or None if not found.
-    """
-    expanded = os.path.expanduser(file_path)
-
-    # 1. Exact path
-    if os.path.isfile(expanded):
-        return os.path.abspath(expanded)
-
-    basename = os.path.basename(file_path)
-    pincer_dir = os.path.expanduser("~/.pincer")
-
-    # 2–6. Check known locations
-    candidates = [
-        os.path.join(pincer_dir, "downloads", basename),
-        os.path.join(pincer_dir, "workspace", basename),
-        os.path.join(pincer_dir, "workspace", "exec_output", basename),
-        os.path.expanduser(f"~/Desktop/{basename}"),
-        os.path.join(pincer_dir, file_path),
-    ]
-
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
-
-    # 7. Deep walk of known directories
-    for search_dir in [
-        os.path.join(pincer_dir, "downloads"),
-        os.path.join(pincer_dir, "workspace"),
-    ]:
-        if not os.path.isdir(search_dir):
-            continue
-        for root, dirs, files in os.walk(search_dir):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            if basename in files:
-                return os.path.abspath(os.path.join(root, basename))
-
-    return None
+    """Resolve a file path for upload across the workspace (see `workspace_files.resolve_upload_path`)."""
+    return workspace_files.resolve_upload_path(file_path)
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -369,20 +324,8 @@ async def google__download_file(
     # 3. Download file bytes
     file_bytes = await with_backoff(lambda: svc.files().get_media(fileId=file_id).execute())
 
-    # 4. Save to disk
-    download_dir = os.path.expanduser("~/.pincer/downloads")
-    os.makedirs(download_dir, exist_ok=True)
-
-    save_path = os.path.join(download_dir, filename)
-    if os.path.exists(save_path):
-        name, ext = os.path.splitext(filename)
-        counter = 1
-        while os.path.exists(save_path):
-            save_path = os.path.join(download_dir, f"{name}_{counter}{ext}")
-            counter += 1
-
-    with open(save_path, "wb") as f:
-        f.write(file_bytes)
+    # 4. Save to the workspace's downloads/ folder
+    save_path = await asyncio.to_thread(workspace_files.save_download, filename, file_bytes)
 
     size_kb = len(file_bytes) / 1024
     size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
@@ -445,19 +388,8 @@ async def google__export_google_doc(
     base_name = os.path.splitext(original_name)[0]
     filename = f"{base_name}.{export_format}"
 
-    # 7. Save to disk
-    download_dir = os.path.expanduser("~/.pincer/downloads")
-    os.makedirs(download_dir, exist_ok=True)
-
-    save_path = os.path.join(download_dir, filename)
-    if os.path.exists(save_path):
-        counter = 1
-        while os.path.exists(save_path):
-            save_path = os.path.join(download_dir, f"{base_name}_{counter}.{export_format}")
-            counter += 1
-
-    with open(save_path, "wb") as f:
-        f.write(file_bytes)
+    # 7. Save to the workspace's downloads/ folder
+    save_path = await asyncio.to_thread(workspace_files.save_download, filename, file_bytes)
 
     size_kb = len(file_bytes) / 1024
     size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
@@ -540,44 +472,20 @@ async def google__list_local_files(
     factory: GoogleServiceFactory,
     pattern: str = "",
 ) -> str:
-    """List local files in Pincer's download and workspace directories available for upload."""
-    pincer_dir = os.path.expanduser("~/.pincer")
-    search_dirs = [
-        os.path.join(pincer_dir, "downloads"),
-        os.path.join(pincer_dir, "workspace"),
-    ]
-
-    found: list[str] = []
-
-    for dir_path in search_dirs:
-        if not os.path.isdir(dir_path):
-            continue
-        for root, dirs, files in os.walk(dir_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for f in sorted(files):
-                if f.startswith("."):
-                    continue
-                if pattern and pattern.lower() not in f.lower():
-                    continue
-                full_path = os.path.join(root, f)
-                try:
-                    size = os.path.getsize(full_path)
-                except OSError:
-                    size = 0
-                rel = os.path.relpath(full_path, pincer_dir)
-                found.append(f"  {f} ({_format_size(size)}) → ~/.pincer/{rel}")
-
-    if not found:
+    """List files in Pincer's workspace available for upload."""
+    files = await asyncio.to_thread(workspace_files.list_files, pattern)
+    if not files:
         if pattern:
             return (
-                f"No files matching '{pattern}' found in downloads or workspace.\n"
+                f"No files matching '{pattern}' found in the workspace.\n"
                 f"Ask the user for the exact file path, or use file_list to search the workspace."
             )
-        return "No files found in ~/.pincer/downloads/ or ~/.pincer/workspace/."
+        return "No files found in the workspace."
 
-    result = f"Found {len(found)} file(s):\n\n"
-    result += "\n".join(found)
-    result += '\n\nTo upload one of these, call:\ngoogle__upload_file(file_path="~/.pincer/<path from above>")'
+    lines = [f"  {rel.rsplit('/', 1)[-1]} ({_format_size(size)}) → {rel}" for rel, size in files]
+    result = f"Found {len(lines)} file(s) in the workspace:\n\n"
+    result += "\n".join(lines)
+    result += '\n\nTo upload one of these, call:\ngoogle__upload_file(file_path="<path from above>")'
     return result
 
 
@@ -590,8 +498,8 @@ async def google__upload_file(
     """Upload a local file to Google Drive with automatic path resolution."""
     from googleapiclient.http import MediaFileUpload
 
-    # 1. Resolve the file path across known Pincer directories
-    resolved = _resolve_upload_path(file_path)
+    # 1. Resolve the file path across the workspace
+    resolved = await asyncio.to_thread(_resolve_upload_path, file_path)
 
     if not resolved:
         basename = os.path.basename(file_path)
@@ -599,8 +507,8 @@ async def google__upload_file(
             f"File not found: '{file_path}'\n\n"
             f"Searched in:\n"
             f"  - Exact path: {file_path}\n"
-            f"  - Downloads: ~/.pincer/downloads/{basename}\n"
-            f"  - Workspace: ~/.pincer/workspace/{basename}\n\n"
+            f"  - Workspace downloads/: downloads/{basename}\n"
+            f"  - The rest of the workspace (exec_output/, uploads/, ...)\n\n"
             f"Use google__list_local_files() to see available files, "
             f"or ask the user for the correct path."
         )
@@ -940,10 +848,10 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__list_local_files",
         description=(
-            "List files available for upload from Pincer's local directories. "
-            "Searches ~/.pincer/downloads/ (files from google__download_file, "
-            "google__export_google_doc, google__get_attachment) and "
-            "~/.pincer/workspace/ (files from file_write or python_exec). "
+            "List files available for upload from Pincer's workspace. "
+            "Covers the workspace's downloads/ folder (files from google__download_file, "
+            "google__export_google_doc, google__get_attachment), exec_output/ (python_exec), "
+            "uploads/ (chat attachments) and files from file_write. "
             "Use this BEFORE google__upload_file when you don't know the file's exact path. "
             "Optionally filter by filename pattern."
         ),
@@ -964,11 +872,11 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
         name="google__upload_file",
         description=(
             "Upload a local file to Google Drive. "
-            "Accepts paths relative to ~/.pincer/ (e.g., 'downloads/report.pdf'), "
-            "bare filenames (e.g., 'report.pdf' — searched in downloads/ and workspace/), "
+            "Accepts paths relative to the workspace (e.g., 'downloads/report.pdf'), "
+            "bare filenames (e.g., 'report.pdf' — searched across the workspace), "
             "or absolute paths (e.g., '/Users/user/Documents/file.pdf'). "
-            "Files from google__download_file are in ~/.pincer/downloads/. "
-            "Files from file_write or python_exec are in ~/.pincer/workspace/. "
+            "Files from google__download_file are in the workspace's downloads/ folder; "
+            "files from python_exec are in exec_output/. "
             "If you don't know the path, call google__list_local_files first. "
             "Optionally specify folder_id to upload into a specific Drive folder. "
             "MIME type is auto-detected from the file extension."
@@ -981,7 +889,7 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
                     "type": "string",
                     "description": (
                         "Local file path. Accepts: bare filename ('report.pdf'), "
-                        "path relative to ~/.pincer/ ('downloads/report.pdf'), "
+                        "path relative to the workspace ('downloads/report.pdf'), "
                         "or absolute path ('/tmp/data.csv')"
                     ),
                 },

@@ -208,8 +208,8 @@ When searching for emails with attachments, include "has:attachment" in the quer
 When the user asks to upload a local file to Google Drive:
 1. If you know the exact path → google__upload_file(file_path="<path>", folder_id="...")
 2. If you don't know the path → google__list_local_files(pattern="<name>") to find it
-3. If the file was just downloaded → it's in ~/.pincer/downloads/ (use that path)
-4. If the file was created by python_exec or file_write → it's in ~/.pincer/workspace/
+3. If the file was just downloaded → it's in the workspace's downloads/ folder (use the path the download returned)
+4. If the file was created by python_exec → it's in the workspace's exec_output/; by file_write → in the workspace
 5. If still not found → ask the user for the exact file path
 
 To upload into a specific folder:

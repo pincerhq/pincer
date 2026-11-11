@@ -485,7 +485,7 @@ Total: 1,247 entries | Cost: $2.4510 | Failed: 3
 ### Skills
 
 Skills are discovered from their roots: `src/pincer/skills/` (bundled, shipped
-inside the package) and `skills_dir` (user — `~/.pincer/skills/` by default, or an
+inside the package) and `skills_dir` (user — `<storage root>/skills/` by default, or an
 `s3://` / `az://` / `gs://` prefix). There is no install step.
 
 | Command | What it does |

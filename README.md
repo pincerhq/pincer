@@ -199,7 +199,7 @@ Pincer ships **303 first-party tools** and plugs into **any MCP server** to reac
 | **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |
 | **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
-| Custom skills (drop a `SKILL.md` dir in `~/.pincer/skills/` or an S3/Azure/GCS prefix, sandboxed scripts) | unlimited | filesystem or `PINCER_SKILLS_DIR=s3://…` + `[remote-skills]` |
+| Custom skills (drop a `SKILL.md` dir in `<storage root>/skills/` or an S3/Azure/GCS prefix, sandboxed scripts) | unlimited | filesystem or `PINCER_SKILLS_DIR=s3://…` + `[remote-skills]` |
 
 **Approval model:** destructive tools (`shell_exec`, `python_exec`, `file_write`, `email_send`, `make_phone_call`, and every writing action on external APIs) ask in chat before executing. You reply ✅ or ❌.
 
@@ -304,7 +304,7 @@ Pincer also acts as an **OAuth 2.0 Authorization Server** for MCP clients. Any M
 
 Skills extend the agent with Anthropic's open [Agent Skills](https://www.anthropic.com/) format: a directory with a `SKILL.md` file, discovered purely from the filesystem — no install step, no CLI. Skills and MCP servers coexist.
 
-Drop one in `~/.pincer/skills/<name>/SKILL.md` and restart; the agent reads its name + description from the system prompt, then calls `load_skill(name)` to read the full instructions, `load_skill_reference(name, path)` for extra files, and `run_skill_script(name, script, args)` — sandboxed, approval-gated — if it ships a script.
+Drop one in `<storage root>/skills/<name>/SKILL.md` (default `~/.pincer/storage/skills/`) and restart; the agent reads its name + description from the system prompt, then calls `load_skill(name)` to read the full instructions, `load_skill_reference(name, path)` for extra files, and `run_skill_script(name, script, args)` — sandboxed, approval-gated — if it ships a script.
 
 5 bundled skills ship with Pincer, documenting its own capabilities: `skill-authoring`, `memory-recall`, `mcp-server-setup`, `scheduler-briefings`, `doctor-troubleshooting`.
 
@@ -437,7 +437,7 @@ $ pincer doctor
 ## What we intentionally didn't build
 
 - **No hosted cloud** — your data stays on your hardware. We're not a SaaS.
-- **No auto-installed skills** — skills are only loaded from directories you place under `~/.pincer/skills/` yourself; scripts they ship always require approval before executing.
+- **No auto-installed skills** — skills are only loaded from directories you place under your skills dir yourself; scripts they ship always require approval before executing.
 - **No team features** — Pincer is a single-user personal agent. Multi-user is planned, not promised.
 - **No telemetry** — zero analytics, zero crash reports, zero phone-home. Verify: `grep -r "telemetry\|analytics\|tracking" src/`.
 - **No framework dependency** — no LangChain, no CrewAI, no abstractions. Pure `asyncio` + provider SDKs.

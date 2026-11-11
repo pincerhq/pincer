@@ -164,7 +164,8 @@ class MCPToolBridge:
         self.audit_logger = audit_logger
         self.prefix = prefix
         self.security_gate = security_gate
-        # Pincer's own local attachment cache (settings.data_dir/workspace/uploads).
+        # The local side of the workspace's uploads/ folder, where chat attachments
+        # are saved (a cache of the bucket for a cloud storage root).
         # Used to inline file_path arguments as base64 for HTTP-transport
         # servers — see _inline_local_file_paths.
         self.local_upload_root = local_upload_root

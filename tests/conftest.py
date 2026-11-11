@@ -87,6 +87,16 @@ def _reset_skill_service() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_workspace() -> Iterator[None]:
+    """The workspace is cached per settings object; drop it between tests."""
+    from pincer.storage.workspace import reset_workspace
+
+    reset_workspace()
+    yield
+    reset_workspace()
+
+
+@pytest.fixture(autouse=True)
 def _reset_onboarding_cache() -> Iterator[None]:
     """The completed-onboarding cache is process-wide; a test must not see
     another test's users as onboarded (Postgres tests share one database)."""
