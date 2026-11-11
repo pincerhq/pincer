@@ -519,14 +519,45 @@ def test_a_priced_sampling_model_passes(tmp_path: Path) -> None:
     assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a", "claude-s"))) is None
 
 
-def test_a_sampling_model_is_not_checked_while_sampling_or_the_mcp_server_is_off(tmp_path: Path) -> None:
-    """Only the standalone MCP server samples, so both switches must be on."""
+def test_a_sampling_model_is_not_checked_while_sampling_is_off(tmp_path: Path) -> None:
     sampling_off = _SAMPLING_ON.replace("sampling]\nenabled = true", "sampling]\nenabled = false")
+    assert sampling_off != _SAMPLING_ON
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"), sampling_off)) is None
+
+
+def test_the_sampling_switch_alone_decides_whatever_the_server_switch_and_env_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pure read of the toml (lead ruling R): neither `[mcp.server] enabled` nor the env hides the model."""
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", "false")
     server_off = _SAMPLING_ON.replace("[mcp.server]\nenabled = true", "[mcp.server]\nenabled = false")
-    for name, toml in (("sampling-off", sampling_off), ("server-off", server_off)):
+    assert server_off != _SAMPLING_ON
+    for name, toml in (("server-on", _SAMPLING_ON), ("server-off", server_off)):
         (tmp_path / name).mkdir()
-        assert toml != _SAMPLING_ON
-        assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path / name, "claude-a"), toml)) is None, name
+        assert _first_line(
+            pricing_problems(_settings(), _with_sampling(_priced(tmp_path / name, "claude-a"), toml))
+        ) == ("No price for 1 model Pincer will call:\n  - claude-s: sampling on anthropic"), name
+
+
+def test_the_price_check_does_not_load_the_working_directorys_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    sentinel = "PINCER_TEST_DOTENV_SENTINEL"
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / ".env").write_text(f"{sentinel}=1\n", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv(sentinel, raising=False)
+    # conftest disarms every .env loader for all tests; re-arm the MCP one, as production has it
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", (".env", "../.env"))
+    try:
+        pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a", "claude-s")))
+        assert os.environ.get(sentinel) is None  # not `in os.environ`: its failure would print the whole env
+    finally:
+        os.environ.pop(sentinel, None)
 
 
 def test_a_sampling_model_is_not_checked_without_an_anthropic_key(tmp_path: Path) -> None:

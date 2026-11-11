@@ -52,7 +52,7 @@ class ModelUse:
 def models_to_price(settings: Settings, config_dir: Path | None = None) -> list[ModelUse]:
     """Every model Pincer will call that costs money: the chat model of every provider with
     credentials, the summary model, the voice turn model when voice is on, and the MCP
-    sampling model when the standalone MCP server samples (read from `config_dir`, default
+    sampling model when `[mcp.server.sampling]` is enabled (read from `config_dir`, default
     cwd). A free provider (a keyless compatible endpoint) is left out, and so is a claude-*
     id an OpenAI-wire provider would never send. `daily_budget_usd` plays no part."""
     uses = [use for use in _model_uses(settings) if not is_free_provider(settings, use.provider)]
@@ -61,17 +61,20 @@ def models_to_price(settings: Settings, config_dir: Path | None = None) -> list[
 
 def _sampling_uses(settings: Settings, config_dir: Path | None) -> list[ModelUse]:
     """The standalone MCP server's sampling model, which calls the Anthropic API directly.
-    An invalid MCP config is reported by its own check, not here."""
-    from pincer.mcp.config import load_mcp_config
+
+    `[mcp.server.sampling] enabled = true` alone decides, read from the toml files only (no .env,
+    no env vars), so the check is the same wherever it runs. An invalid MCP config is reported
+    by its own check, not here."""
+    from pincer.mcp.config import sampling_config
     from pincer.mcp.sampling import SAMPLING_PROVIDER
 
     try:
-        server = load_mcp_config(config_dir).server
+        sampling = sampling_config(config_dir)
     except ValueError:
         return []
-    if not (server.enabled and server.sampling.enabled and has_credentials(settings, SAMPLING_PROVIDER)):
+    if not (sampling.enabled and has_credentials(settings, SAMPLING_PROVIDER)):
         return []
-    return [ModelUse(SAMPLING_PROVIDER, server.sampling.model, "sampling")]
+    return [ModelUse(SAMPLING_PROVIDER, sampling.model, "sampling")]
 
 
 def _model_uses(settings: Settings) -> list[ModelUse]:

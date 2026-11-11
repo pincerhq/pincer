@@ -321,6 +321,31 @@ def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
     return merged
 
 
+def _parse_sampling(samp_raw: dict[str, Any]) -> MCPSamplingConfig:
+    """Parse a raw [mcp.server.sampling] table."""
+    return MCPSamplingConfig(
+        enabled=samp_raw.get("enabled", False),
+        model=samp_raw.get("model", "claude-sonnet-5-5"),
+        budget_per_day=float(samp_raw.get("budget_per_day", 5.00)),
+        max_tokens=int(samp_raw.get("max_tokens", 1024)),
+    )
+
+
+def sampling_config(config_dir: Path | None = None) -> MCPSamplingConfig:
+    """The [mcp.server.sampling] table of pincer.toml with pincer.local.toml merged on top, as
+    `load_mcp_config` merges it, from `config_dir` (default: cwd).
+
+    A pure read of the two files, for the startup price check: unlike `load_mcp_config` it never
+    loads .env into os.environ, and no environment variable changes the result.
+    """
+    base_dir = config_dir or Path.cwd()
+    mcp_raw: dict[str, Any] = {}
+    for name in ("pincer.toml", "pincer.local.toml"):
+        raw = _read_toml_raw(base_dir / name) or {}
+        mcp_raw = _merge_mcp_raw(mcp_raw, raw.get("mcp") or {})
+    return _parse_sampling(mcp_raw.get("server", {}).get("sampling", {}))
+
+
 def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPConfig:
     """Parse a raw [mcp] section dict into an MCPConfig."""
     servers = [_parse_server_from_toml(s, pincer_vars) for s in mcp_raw.get("servers", [])]
@@ -334,14 +359,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         unknown=ap_raw.get("unknown", "deny"),
         default=ap_raw.get("default", "deny"),
     )
-    # Parse sampling sub-table
-    samp_raw = srv_raw.get("sampling", {})
-    sampling = MCPSamplingConfig(
-        enabled=samp_raw.get("enabled", False),
-        model=samp_raw.get("model", "claude-sonnet-5-5"),
-        budget_per_day=float(samp_raw.get("budget_per_day", 5.00)),
-        max_tokens=int(samp_raw.get("max_tokens", 1024)),
-    )
+    sampling = _parse_sampling(srv_raw.get("sampling", {}))
     srv_export = MCPServerExportConfig(
         enabled=srv_raw.get("enabled", False),
         host=srv_raw.get("host", "127.0.0.1"),
