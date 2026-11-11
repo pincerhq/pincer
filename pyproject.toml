@@ -124,6 +124,7 @@ dev = [
     "types-qrcode>=8.0.0",
     "types-PyYAML>=6.0.0",
     "httpx>=0.27.0",
+    "pytest-xdist>=3.6.0",
 ]
 # Postgres runtime (asyncpg) and Alembic migrations (psycopg, sync).
 postgres = [
@@ -170,6 +171,13 @@ markers = [
     "perf: timing benchmark, runs only with PINCER_RUN_PERF=1",
     "embedding: runs the real tool-index embedding model (~240 MB download), only with PINCER_RUN_EMBEDDING=1",
     "allow_loop_stall: opt out of the event-loop stall guard on tests/test_voice*",
+    "real_migrations: run the real Alembic upgrade instead of copying the session's template database",
+]
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # A thread calling back into a test's closed event loop (see the
+    # drain_voice_telemetry fixture in tests/conftest.py) fails the test.
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
 ]
 
 [tool.coverage.run]

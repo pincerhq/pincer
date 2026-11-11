@@ -156,7 +156,9 @@ class TestGracefulShutdown:
         assert [sid for sid in sids if engine.spoken[sid][-1:] != [goodbye]] == []
         assert hung_up_before_playout == []
         assert sorted(engine.ended) == sorted(sids)
-        assert elapsed < 2 * playout_s, f"{elapsed:.2f}s for {calls} goodbyes"
+        # Serially it is 8 × 0.3 s = 2.4 s, two at a time 1.2 s; the slack over
+        # one goodbye is for a loaded runner (xdist workers share the CPU).
+        assert elapsed < 3 * playout_s, f"{elapsed:.2f}s for {calls} goodbyes"
 
     async def test_one_failing_drain_does_not_stop_the_others(self, caplog):
         channel, engine = await _live_call("en", call_sid="CA_ok")

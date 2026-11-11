@@ -125,11 +125,17 @@ async def _guard(coro: Any) -> None:
 
 
 async def drain_pending(timeout_s: float = 5.0) -> None:
-    """Wait for outstanding persistence tasks. Shutdown and tests only."""
-    if not _pending:
+    """Wait for outstanding persistence tasks. Shutdown and tests only.
+
+    Only this loop's: a task of another loop (a closed one, in tests) cannot
+    be awaited here, and `gather` refuses it.
+    """
+    loop = asyncio.get_running_loop()
+    tasks = [task for task in _pending if task.get_loop() is loop]
+    if not tasks:
         return
     with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
-        await asyncio.wait_for(asyncio.gather(*list(_pending), return_exceptions=True), timeout=timeout_s)
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout_s)
 
 
 @dataclass(slots=True)

@@ -244,6 +244,20 @@ def _clean():
     approvals._reset_for_tests()
 
 
+# The channels `_start` started in the current test; `_stop_channels` stops them.
+_started: list[VoiceChannel] = []
+
+
+@pytest.fixture(autouse=True)
+async def _stop_channels(drain_voice_telemetry):
+    """Stop what `_start` started, so its post-call and telemetry writes finish
+    before the test's loop closes. Depends on `drain_voice_telemetry`, which so
+    tears down after this, draining the writes `stop()` itself starts."""
+    yield
+    while _started:
+        await _started.pop().stop()
+
+
 class Harness:
     def __init__(self, channel, engine, agent, state, calendar, owner_msgs):
         self.channel, self.engine, self.agent, self.state, self.calendar, self.owner_msgs = (
@@ -306,6 +320,7 @@ async def _start(
         return "Fallback."
 
     await channel.start(_blocking)
+    _started.append(channel)
     from pincer.voice.postcall import PostCallProcessor
 
     channel.set_post_call_processor(PostCallProcessor(settings, llm=None, memory=None, db_path=str(settings.db_path)))

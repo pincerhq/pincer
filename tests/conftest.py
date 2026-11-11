@@ -1,9 +1,12 @@
 """Shared test fixtures."""
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
+import shutil
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -19,7 +22,8 @@ import suites
 # Set test env vars before importing config
 os.environ["PINCER_ANTHROPIC_API_KEY"] = "sk-ant-test-key"
 os.environ["PINCER_TELEGRAM_BOT_TOKEN"] = "123456:TEST"
-os.environ["PINCER_DATA_DIR"] = "/tmp/pincer-test"
+# One per xdist worker, so parallel workers never share files.
+os.environ["PINCER_DATA_DIR"] = f"/tmp/pincer-test-{os.environ.get('PYTEST_XDIST_WORKER', 'main')}"
 os.environ["PINCER_DAILY_BUDGET_USD"] = "100.0"
 # The API is default-deny. Tests that exercise a route rather than its auth run
 # with it switched off; the ones about auth use the `authed_app` fixture.
@@ -138,6 +142,21 @@ class _InMemoryAuditLogger(AuditLogger):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_voice_test_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give each test its own voice test database and data directory.
+
+    `apply_test_paths` and the harness runner default to one temp directory per
+    process; tests then saw each other's call rows (`VoiceChannel.start` closes
+    the open ones and logs it), depending on which tests ran first. Patched only
+    once imported, so other suites never load the voice channel for this; the
+    test that first imports one has no earlier test to share with.
+    """
+    for module, name in (("voice_harness.settings", "_TMP"), ("voice_harness.runner", "_HARNESS_TMP")):
+        if module in sys.modules:
+            monkeypatch.setattr(sys.modules[module], name, tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_audit_logger(tmp_path: Path) -> None:
     """Install the in-memory global audit logger for every test.
 
@@ -225,6 +244,89 @@ class _StallCapture(logging.Handler):
             for message, end, took in self.slow
             if took - heartbeat.frozen_within(end - took, end) >= LOOP_STALL_THRESHOLD_S
         ]
+
+
+# ── template database ────────────────────────────────────────────────
+# Every fresh test database used to run all Alembic migrations (~0.2 s each,
+# ~230 s a suite run). Instead, one database per session is migrated to head
+# and copied wherever a test asks for a new SQLite file at head. Upgrading an
+# existing file (a legacy schema, a partial one) still runs the real Alembic.
+# Tests about the migrations themselves opt out with `real_migrations`.
+
+
+class _TemplateCommand:
+    """Stands in for `alembic.command` inside `pincer.db.engine`."""
+
+    def __init__(self, real: Any, template: Path) -> None:
+        self._real = real
+        self._template = template
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def upgrade(self, config: Any, revision: str, *args: Any, **kwargs: Any) -> None:
+        from pincer.db.engine import _database_file
+
+        target = _database_file(config.get_main_option("sqlalchemy.url"))
+        if revision == "head" and not args and not kwargs and target is not None and not target.exists():
+            shutil.copyfile(self._template, target)
+            return
+        self._real.upgrade(config, revision, *args, **kwargs)
+
+
+def _head_revision() -> str:
+    from alembic.script import ScriptDirectory
+
+    from pincer.db.engine import build_config
+
+    head = ScriptDirectory.from_config(build_config(Path("unused.db"))).get_current_head()
+    assert head is not None
+    return head
+
+
+@pytest.fixture(scope="session")
+def _migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A SQLite database at head, migrated once per session (per xdist worker)."""
+    import sqlite3
+
+    from alembic import command
+
+    from pincer.db.engine import build_config
+
+    path = tmp_path_factory.mktemp("template") / "template.db"
+    # Directly by URL: PINCER_DATABASE_URL must not redirect the template.
+    command.upgrade(build_config(path, url=f"sqlite:///{path}"), "head")
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        (revision,) = conn.execute("SELECT version_num FROM pincer_alembic_version").fetchone()
+    assert revision == _head_revision(), "template database is not at head"
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.get_closest_marker("real_migrations"):
+        return
+    from pincer.db import engine
+
+    template = request.getfixturevalue("_migrated_template")
+    monkeypatch.setattr(engine, "command", _TemplateCommand(engine.command, template))
+
+
+# ── voice telemetry ──────────────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def drain_voice_telemetry() -> AsyncIterator[None]:
+    """Wait for voice telemetry's fire-and-forget writes before the loop closes.
+
+    Each write runs on its own aiosqlite thread; one still in flight when
+    pytest-asyncio closes the test's loop calls back into the closed loop
+    ("RuntimeError: Event loop is closed" in a thread).
+    """
+    yield
+    from pincer.voice.telemetry.tracer import drain_pending
+
+    await drain_pending()
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

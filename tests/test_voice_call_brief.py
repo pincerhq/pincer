@@ -14,6 +14,9 @@ from pincer.voice.engine import CallDirection
 from pincer.voice.prompts import de as de_pack
 from pincer.voice.prompts import en as en_pack
 
+# Voice telemetry writes must finish before the test loop closes.
+pytestmark = pytest.mark.usefixtures("drain_voice_telemetry")
+
 CALL = "CA_brief"
 PURPOSE = "Confirm Thursday's appointment, move it if 14:00 no longer works."
 INSTRUCTIONS = "Accept any slot between 9 and 12. Do not agree to Friday."

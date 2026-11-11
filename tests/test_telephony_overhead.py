@@ -26,6 +26,9 @@ from pincer.voice.telemetry.recorder import get_recorder
 from pincer.voice.telemetry.schema import EventName, SpanName
 from pincer.voice.telemetry.tracer import drain_pending
 
+# Voice telemetry writes must finish before the test loop closes.
+pytestmark = pytest.mark.usefixtures("drain_voice_telemetry")
+
 MS = 1_000_000
 
 #: A turn emits ~8 events and ~3 spans. Anything approaching a millisecond of

@@ -22,6 +22,9 @@ from alembic.script import ScriptDirectory
 from pincer.db import build_config, engine, ensure_schema_current
 from pincer.db.metadata import LEGACY_VERSION_TABLE, MIGRATION_ADVISORY_KEY, VERSION_TABLE
 
+# Runs the real Alembic upgrade rather than copying the template database.
+pytestmark = pytest.mark.real_migrations
+
 EXPECTED_TABLES = {
     "pincer_conversations",
     "pincer_memories",
