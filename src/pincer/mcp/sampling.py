@@ -146,8 +146,14 @@ class StandaloneLLMBackend(LLMBackend):
         self._prices = prices
 
     async def close(self) -> None:
-        await self._provider.close()
-        await self._costs.close()
+        """Close the client and the cost log. Never raises: it runs in `run()`'s finally,
+        where a raise would replace the error (or the CancelledError) that ended the server."""
+        try:
+            await self._provider.close()
+        except Exception:
+            logger.warning("MCP sampling: closing the Anthropic client failed", exc_info=True)
+        finally:
+            await self._costs.close()
 
     async def complete(
         self,

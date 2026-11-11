@@ -496,6 +496,33 @@ async def test_shutting_the_standalone_server_down_closes_the_sampling_client(tm
     assert anthropic_api.clients[0].is_closed()
 
 
+async def test_a_failing_client_close_still_closes_the_cost_tracker_and_does_not_raise(tmp_path, caplog):  # type: ignore[no-untyped-def]
+    """A raise here would replace the CancelledError (or the original error) in `run()`'s finally."""
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.cost_tracker import CostTracker
+    from pincer.mcp.sampling import StandaloneLLMBackend
+
+    class _TransportClosed(BaseLLMProvider):
+        async def complete(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def close(self) -> None:
+            raise RuntimeError("transport closed")
+
+    tracker = CostTracker(tmp_path / "test.db", prices=load_price_table())
+    await tracker.initialize()
+    backend = StandaloneLLMBackend(_TransportClosed(), tracker, "test-fixture-model", load_price_table())
+
+    await backend.close()
+
+    assert [(r.levelname, r.getMessage(), r.exc_info is not None) for r in caplog.records] == [
+        ("WARNING", "MCP sampling: closing the Anthropic client failed", True)
+    ]
+    with pytest.raises(RuntimeError, match="CostTracker not initialized"):
+        _ = tracker.service  # closed: the service is gone
+
+
 def test_sampling_defaults_to_a_shipped_model() -> None:
     """The retired claude-sonnet-4 default had no price, so its spend could never be recorded."""
     from pincer.config.pricing import load_price_table
