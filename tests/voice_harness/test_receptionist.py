@@ -249,13 +249,14 @@ _started: list[VoiceChannel] = []
 
 
 @pytest.fixture(autouse=True)
-async def _stop_channels(drain_voice_telemetry):
-    """Stop what `_start` started, so its post-call and telemetry writes finish
-    before the test's loop closes. Depends on `drain_voice_telemetry`, which so
-    tears down after this, draining the writes `stop()` itself starts."""
+async def _stop_channels(quiesce_voice):
+    """Stop what `_start` started. Depends on `quiesce_voice`, which so tears
+    down after this and waits for the writes `stop()` itself starts."""
     yield
-    while _started:
-        await _started.pop().stop()
+    channels = _started[:]
+    _started.clear()
+    for channel in channels:
+        await channel.stop()
 
 
 class Harness:

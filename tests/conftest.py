@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import re
@@ -312,20 +313,45 @@ def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
     monkeypatch.setattr(engine, "command", _TemplateCommand(engine.command, template))
 
 
-# ── voice telemetry ──────────────────────────────────────────────────
+# ── voice: let in-flight writes finish ───────────────────────────────
 
 
 @pytest_asyncio.fixture
-async def drain_voice_telemetry() -> AsyncIterator[None]:
-    """Wait for voice telemetry's fire-and-forget writes before the loop closes.
+async def quiesce_voice(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    """Let the voice channel's background writes finish before the loop closes.
 
-    Each write runs on its own aiosqlite thread; one still in flight when
-    pytest-asyncio closes the test's loop calls back into the closed loop
-    ("RuntimeError: Event loop is closed" in a thread).
+    Call-row writes, post-call reports and telemetry each run on their own
+    aiosqlite thread. One still in flight when pytest-asyncio closes the
+    test's loop calls back into the closed loop ("RuntimeError: Event loop is
+    closed" in a thread), which then fails whichever test runs next. Applied
+    to every async test of the voice suite (see pytest_collection_modifyitems).
     """
-    yield
+    from pincer.channels.phone_calls import VoiceChannel
     from pincer.voice.telemetry.tracer import drain_pending
 
+    channels: list[VoiceChannel] = []
+    init = VoiceChannel.__init__
+
+    def tracking_init(self: VoiceChannel, *args: Any, **kwargs: Any) -> None:
+        init(self, *args, **kwargs)
+        channels.append(self)
+
+    monkeypatch.setattr(VoiceChannel, "__init__", tracking_init)
+    yield
+    loop = asyncio.get_running_loop()
+    for channel in channels:
+        writes = [
+            task
+            for task in (*channel._call_row_tasks.values(), *channel._postcall_tasks.values())
+            if not task.done() and task.get_loop() is loop
+        ]
+        if writes:
+            await asyncio.wait(writes, timeout=5)
+        watchdog = channel._watchdog_task
+        if watchdog is not None and not watchdog.done() and watchdog.get_loop() is loop:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
     await drain_pending()
 
 
@@ -354,6 +380,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         # fixture closures are computed by now; a usefixtures marker would be ignored
         if item.nodeid.startswith("tests/test_voice") and not item.get_closest_marker("allow_loop_stall"):
             item.fixturenames.insert(0, "_loop_stall_guard")
+        if isinstance(item, pytest.Function) and inspect.iscoroutinefunction(item.function):
+            with contextlib.suppress(ValueError):  # outside tests/
+                if suites.suite_of(item.path) == "voice" and "quiesce_voice" not in item.fixturenames:
+                    item.fixturenames.insert(0, "quiesce_voice")
 
 
 @pytest_asyncio.fixture
