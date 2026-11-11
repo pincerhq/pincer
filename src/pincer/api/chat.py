@@ -172,9 +172,10 @@ async def post_message(
         # waiting for that call's report.
         raise HTTPException(503 if resp.budget_check_failed else 402, resp.text)
     if resp.budget_reached or resp.budget_check_failed:
-        # As the stream's `done`: the reply is the model's own text, the warning beside it
+        # As the stream's `done`: the reply is the model's own text, the warning beside it. A
+        # turn that wrote nothing (it only dialled) replies with the warning: never an empty bubble.
         return {
-            "reply": resp.turn_text,
+            "reply": resp.turn_text or resp.text,
             "budget_warning": resp.text,
             "cost_usd": resp.cost_usd,
             "model": resp.model,
@@ -233,7 +234,7 @@ async def post_stream(
                             elif chunk.budget_reached or chunk.budget_check_failed:
                                 # `text` stays what was streamed, so a client that shows it keeps
                                 # the turn's words; the warning comes beside it
-                                stopped = {"text": chunk.turn_text, "cost_usd": chunk.cost_usd}
+                                stopped = {"text": chunk.turn_text or chunk.content, "cost_usd": chunk.cost_usd}
                                 await queue.put(("done", {**stopped, "budget_warning": chunk.content}))
                             else:
                                 await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))

@@ -335,8 +335,12 @@ async def test_a_chat_message_that_placed_a_call_before_the_budget_stop_answers_
 
     assert response.status_code == 200
     body = response.json()
-    # The reply is the model's own text (none here); the warning has its own field (PR #366 review)
-    assert (body["reply"], body["budget_warning"], body["call_sids"]) == ("", _budget_text(0.01), ["CA9"])
+    # The model wrote nothing, so the reply falls back to the warning, which also has its own field
+    assert (body["reply"], body["budget_warning"], body["call_sids"]) == (
+        _budget_text(0.01),
+        _budget_text(0.01),
+        ["CA9"],
+    )
 
 
 async def test_a_web_chat_turn_with_spend_at_the_budget_makes_no_llm_call(  # type: ignore[no-untyped-def]
@@ -917,7 +921,14 @@ async def test_a_web_chat_turn_that_placed_a_call_before_the_budget_stop_ends_wi
     assert events == [
         ("tool", {"phase": "start", "name": "Using make_phone_call..."}),
         ("tool", {"phase": "done", "name": "make_phone_call", "call_sid": "CA9"}),
-        ("done", {"text": "", "cost_usd": pytest.approx(_CALL_COST), "budget_warning": _budget_text(_CALL_COST)}),
+        (
+            "done",
+            {
+                "text": _budget_text(_CALL_COST),  # nothing was streamed: the warning, not an empty message
+                "cost_usd": pytest.approx(_CALL_COST),
+                "budget_warning": _budget_text(_CALL_COST),
+            },
+        ),
     ]
     assert len(llm.streams) == 1
 
@@ -1002,7 +1013,10 @@ async def test_a_web_chat_turn_that_loses_the_budget_after_a_dial_ends_with_done
     assert events == [
         ("tool", {"phase": "start", "name": "Using make_phone_call..."}),
         ("tool", {"phase": "done", "name": "make_phone_call", "call_sid": "CA9"}),
-        ("done", {"text": "", "cost_usd": pytest.approx(_CALL_COST), "budget_warning": _CHECK_FAILED_TEXT}),
+        (
+            "done",
+            {"text": _CHECK_FAILED_TEXT, "cost_usd": pytest.approx(_CALL_COST), "budget_warning": _CHECK_FAILED_TEXT},
+        ),
     ]
     assert len(llm.streams) == 1
     messages = await _conversation_messages(session_manager, conversation)

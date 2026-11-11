@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Daily budget checked before each LLM call; web chat refusals are 402/503 (#357)
+
+- `PINCER_DAILY_BUDGET_USD` is checked **before** every LLM request, tool
+  rounds included, and every completed request is recorded at its full cost,
+  even the one that crosses the limit. Before, the check came after the call,
+  and that call was spent but never recorded. A budget of 0 never refuses.
+- A turn refused before its first request saves nothing, not even the user's
+  message. A turn stopped after its tool steps ends its history with a short
+  marker, so the model never sees a dangling tool result.
+- Web chat: `POST /api/chat/message` answers `402` when the budget is reached
+  and `503` when it can't be read; `/api/chat/stream` sends one `error` event.
+  A turn that already placed a call answers `200` / `done` with the warning in
+  the new `budget_warning` field. See
+  [the REST reference](docs/reference/rest-api.md#daily-budget-on-apichatmessage-and-apichatstream).
+- A budget that can't be read fails closed mid-turn (no further paid request).
+  Scheduled actions report "Could not check the daily budget" instead of a raw
+  database error.
+- A cost row the database won't take is logged at ERROR; the reply is kept.
+- Onboarding, call outcomes, thread summaries and MCP sampling are
+  budget-checked and recorded too.
+
 #### OpenAI requests carry one cache key per conversation; its tool list only grows (#357)
 
 - Every OpenAI request of a conversation (chat, web chat, voice) carries the
