@@ -589,7 +589,8 @@ _DIAL_REFUSAL = "Error: daily budget reached, call not placed."
 @pytest.fixture
 def dialling(monkeypatch: pytest.MonkeyPatch, fake_twilio_rest: Any) -> Callable[[Settings], Settings]:
     """`dialling(settings)`: outbound calling on, the process settings, and no engine in this process,
-    so a placed call reaches `fake_twilio_rest.creates`. The per-user daily counts start empty."""
+    so a placed call reaches `fake_twilio_rest.creates`. The per-user daily counts start empty, and
+    there are no quiet hours: the shipped 20:00-08:00 window would refuse the call on the wall clock."""
     from pydantic import SecretStr
 
     from pincer.voice import outbound
@@ -606,6 +607,7 @@ def dialling(monkeypatch: pytest.MonkeyPatch, fake_twilio_rest: Any) -> Callable
                 "twilio_account_sid": "AC123",
                 "twilio_auth_token": SecretStr("token"),
                 "twilio_phone_number": "+15550001111",
+                "voice_quiet_hours": "",  # as in test_voice_outbound_gate: these tests are not about time
             }
         )
         monkeypatch.setattr("pincer.config.get_settings", lambda: voice)
