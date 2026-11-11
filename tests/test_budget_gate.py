@@ -1041,3 +1041,38 @@ async def test_a_chat_turn_that_loses_the_budget_mid_way_is_no_payment_required_
         assert events[-1] == ("error", {"message": _CHECK_FAILED_TEXT, "cost_usd": pytest.approx(_CALL_COST)})
     messages = await _conversation_messages(session_manager, conversation)
     assert (messages[-1].role.value, messages[-1].content) == ("assistant", _CHECK_FAILED_MARKER)
+
+
+_HEADLESS_CHECK_FAILED_TEXT = "Warning: Could not check the daily budget. Could not complete this scheduled action."
+
+
+async def test_a_headless_run_whose_budget_cannot_be_read_makes_no_llm_call(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager, tool_registry, caplog
+) -> None:
+    """A scheduled action refuses like the chat paths, in its own words, instead of raising."""
+    settings, tracker = await budgeted(1.0)
+    await _drop_cost_table(tmp_path)
+    llm = _scripted_llm(_response())
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry)
+
+    with caplog.at_level("ERROR", logger="pincer.core.agent"):
+        result = await agent.run_headless("hi", user_id="user", channel="scheduled")
+
+    assert result == _HEADLESS_CHECK_FAILED_TEXT
+    assert llm.complete.await_count == 0
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+
+
+async def test_a_headless_run_that_loses_the_budget_mid_way_stops_before_its_next_request(  # type: ignore[no-untyped-def]
+    tmp_path, budgeted, session_manager
+) -> None:
+    settings, tracker = await budgeted(1.0)
+    llm = _scripted_llm(_response([ToolCall(id="tc1", name="lookup", arguments={})]), _response())
+    agent = Agent(settings, llm, session_manager, tracker, _lookup_registry(lambda: _drop_cost_table(tmp_path)))
+
+    result = await agent.run_headless("look it up", user_id="user", channel="scheduled")
+
+    assert result == _HEADLESS_CHECK_FAILED_TEXT
+    assert llm.complete.await_count == 1

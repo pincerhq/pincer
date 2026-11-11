@@ -95,6 +95,9 @@ _BUDGET_REACHED_TEXT = (
 _HEADLESS_BUDGET_REACHED_TEXT = (
     "Warning: Daily budget limit reached. Limit: ${limit:.2f}. Could not complete this scheduled action."
 )
+_HEADLESS_BUDGET_CHECK_FAILED_TEXT = (
+    "Warning: Could not check the daily budget. Could not complete this scheduled action."
+)
 # Closes the history of a turn the budget stopped after its tool rounds: the model next sees
 # its tool results answered, never a dangling one. Not the warning, which is no reply.
 _BUDGET_STOPPED_MARKER = "(Stopped before answering: the daily budget was reached.)"
@@ -1208,7 +1211,10 @@ class Agent:
         iterations = max_iterations or self._settings.max_tool_iterations
 
         for _iteration in range(iterations):
-            if await self._costs.budget_reached():
+            # Before every request, the first included; a budget that cannot be read refuses too
+            if (stop := await self._budget_stop()) is not None:
+                if stop.check_failed:
+                    return _HEADLESS_BUDGET_CHECK_FAILED_TEXT
                 return _HEADLESS_BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
             try:
                 response: LLMResponse = await self._llm.complete(
@@ -1341,7 +1347,8 @@ class Agent:
             raise BudgetCheckFailedError(_BUDGET_CHECK_FAILED_TEXT) from e
 
     async def _budget_stop(self) -> _BudgetStop | None:
-        """Checked after each request of an admitted turn: None to go on, or why it stops.
+        """Checked after each request of an admitted turn (before every request of a headless
+        run): None to go on, or why it stops.
 
         A budget that cannot be read stops the turn too, before another paid request
         (fails closed); a call it already placed is still reported (PR #366 review).
@@ -1350,7 +1357,7 @@ class Agent:
             if not await self._costs.budget_reached():
                 return None
         except Exception:
-            logger.error("Daily budget check failed mid-turn: stopping before the next request", exc_info=True)
+            logger.error("Daily budget check failed: stopping before the next request", exc_info=True)
             return _BudgetStop(_BUDGET_CHECK_FAILED_TEXT, _BUDGET_CHECK_FAILED_MARKER, check_failed=True)
         text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
         return _BudgetStop(text, _BUDGET_STOPPED_MARKER, check_failed=False)
