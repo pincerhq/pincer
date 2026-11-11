@@ -1133,7 +1133,8 @@ class Agent:
             reply = final_text
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
-        if onboarding.ingest:
+        # Not after a failed budget check: that turn fails closed, so no further paid request
+        if onboarding.ingest and not (budget_stop is not None and budget_stop.check_failed):
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
         # Store the final exchange as a memory for future retrieval
@@ -1600,7 +1601,8 @@ class Agent:
             await self._sessions.add_message(
                 session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
             )
-            if onboarding.ingest:
+            # A reached budget still reads the answer; a failed check sends no further request
+            if onboarding.ingest and not budget_stop.check_failed:
                 await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
             _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
             yield StreamChunk(

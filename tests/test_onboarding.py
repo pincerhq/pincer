@@ -1459,3 +1459,58 @@ async def test_a_web_chat_turn_stopped_by_the_budget_mid_way_still_reads_its_onb
     assert llm.complete.await_count == 3  # hi, the tool step, the extraction
     record = await _record(tmp_path, "user-10", "web")
     assert record is not None and record.completed_at is not None
+
+
+@_PATHS
+async def test_a_turn_that_loses_the_budget_mid_way_sends_no_extraction(  # type: ignore[no-untyped-def]
+    path, tmp_path, settings, session_manager, memory_store
+) -> None:
+    """Failed closed: no further paid request, the extraction included (PR #366 review)."""
+    from sqlalchemy import text
+
+    from pincer.config.pricing import load_price_table
+    from pincer.db.session import session_scope
+    from pincer.llm.base import ToolCall
+    from pincer.llm.cost_tracker import CostTracker
+    from pincer.tools.registry import ToolRegistry
+
+    async def lookup(context: dict | None = None) -> str:
+        async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+            await (await session.connection()).execute(text("DROP TABLE pincer_cost_logs"))
+        return "found"
+
+    registry = ToolRegistry()
+    registry.register(
+        name="lookup", description="Looks up", handler=lookup, parameters={"type": "object", "properties": {}}
+    )
+    look = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc1", name="lookup", arguments={})],
+        model="test-model",
+        input_tokens=10,
+        output_tokens=10,
+        stop_reason="tool_use",
+    )
+    llm = AsyncMock()
+    llm.complete.side_effect = [_llm_text("Hi!"), look, _llm_text(_CAROL)]
+    _streams_from_complete(llm)
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=1.0, prices=load_price_table())
+    await tracker.initialize()
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 1.0}),
+        llm,
+        session_manager,
+        tracker,
+        registry,
+        memory_store=memory_store,
+    )
+    try:
+        await _reply(agent, path, "user-11", "test", "hi")
+        await _reply(agent, path, "user-11", "test", "I'm Carol, look it up")
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 2  # hi, the tool step: no extraction
+    record = await _record(tmp_path, "user-11", "test")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (0, None)
