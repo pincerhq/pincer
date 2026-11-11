@@ -7,6 +7,7 @@ from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import SecretStr
 
 from pincer.channels.base import ChannelType
 
@@ -86,6 +87,8 @@ def wa_channel():
     settings.whatsapp_group_trigger_on_mention = False
     settings.whatsapp_group_trigger_on_reply = True
     settings.data_dir = "/tmp/test"
+    settings.whatsapp_session_db = SecretStr("")
+    settings.whatsapp_jid = ""
     settings.openai_api_key.get_secret_value.return_value = "test-key"
     yield WhatsAppChannel(settings)
 
@@ -710,3 +713,246 @@ class TestResolveInternalUserId:
 
         with pytest.raises(RuntimeError):
             await wa_channel.resolve_internal_user_id("+491622549781")
+
+
+# ── Session store + account selection ───────────────────────────────
+
+
+_PG_URL = "postgres://pincer_wa:hunter2secret@db:5432/pincer?sslmode=disable&search_path=whatsapp"
+
+
+def _make_device_db(path, jids):
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE whatsmeow_device (jid TEXT PRIMARY KEY)")
+    conn.executemany("INSERT INTO whatsmeow_device VALUES (?)", [(j,) for j in jids])
+    conn.commit()
+    conn.close()
+
+
+class TestStoredDeviceJid:
+    def test_hit_matches_user_part(self, tmp_path):
+        from pincer.channels.whatsapp import _stored_device_jid
+
+        db = tmp_path / "pincer-wa.db"
+        _make_device_db(db, ["491111111111:3@s.whatsapp.net", "492222222222:12@s.whatsapp.net"])
+        assert _stored_device_jid(str(db), "492222222222") == "492222222222:12@s.whatsapp.net"
+
+    def test_miss(self, tmp_path):
+        from pincer.channels.whatsapp import _stored_device_jid
+
+        db = tmp_path / "pincer-wa.db"
+        _make_device_db(db, ["491111111111:3@s.whatsapp.net"])
+        assert _stored_device_jid(str(db), "4922") is None
+
+    def test_missing_file_means_no_devices(self, tmp_path):
+        from pincer.channels.whatsapp import _stored_device_jid
+
+        db = tmp_path / "absent.db"
+        assert _stored_device_jid(str(db), "491111111111") is None
+        assert not db.exists()  # read-only: never created
+
+    def test_missing_table_means_no_devices(self, tmp_path):
+        import sqlite3
+
+        from pincer.channels.whatsapp import _stored_device_jid
+
+        db = tmp_path / "empty.db"
+        sqlite3.connect(db).close()
+        assert _stored_device_jid(str(db), "491111111111") is None
+
+    def test_split_search_path_and_describe(self):
+        from pincer.channels.whatsapp import _describe_store, _split_search_path
+
+        url, sp = _split_search_path(_PG_URL)
+        assert sp == "whatsapp"
+        assert "search_path" not in url
+        assert "sslmode=disable" in url
+        assert _describe_store(_PG_URL) == "postgres (schema=whatsapp)"
+        assert "hunter2secret" not in _describe_store(_PG_URL)
+        assert _describe_store("/data/pincer-wa.db") == "sqlite /data/pincer-wa.db"
+
+    def test_redact_store(self):
+        from pincer.channels.whatsapp import _redact_store
+
+        msg = f'parse "{_PG_URL}": invalid port; pq: password hunter2secret rejected'
+        out = _redact_store(msg, _PG_URL)
+        assert "hunter2secret" not in out
+        assert "<session db url>" in out
+
+
+def _fake_client_factory(connect_task_factory=None):
+    """A NewAClient stand-in that records its kwargs and returns a connect task."""
+    created: list[dict] = []
+
+    def factory(**kwargs):
+        client = MagicMock()
+        client.event = MagicMock()
+
+        async def connect():
+            if connect_task_factory is None:
+                return None
+            return asyncio.get_running_loop().create_task(connect_task_factory())
+
+        client.connect = connect
+        created.append(kwargs)
+        return client
+
+    return factory, created
+
+
+@pytest.fixture
+def wa_mod(monkeypatch):
+    """Patch a name in the globals the channel class actually runs with.
+
+    Other test files del+reimport `pincer.channels.whatsapp`, so the module in
+    sys.modules isn't necessarily the one WhatsAppChannel came from.
+    """
+    wa_globals = WhatsAppChannel.start.__globals__
+
+    def patch(name, value):
+        monkeypatch.setitem(wa_globals, name, value)
+
+    patch("neonize_log", MagicMock())
+    patch("_neonize_events", None)
+    for name in (
+        "ConnectedEv",
+        "PairStatusEv",
+        "MessageEv",
+        "ConnectFailureEv",
+        "ClientOutdatedEv",
+        "LoggedOutEv",
+        "StreamErrorEv",
+    ):
+        patch(name, type(name, (), {}))
+    patch("_WA_CONNECT_TIMEOUT", 0.5)
+    return patch
+
+
+class TestStartSessionStore:
+    @pytest.mark.asyncio
+    async def test_sqlite_default_name_and_uuid(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        factory, created = _fake_client_factory()
+        wa_mod("NewAClient", factory)
+        wa_channel._settings.data_dir = tmp_path
+        wa_channel._connected.set()
+
+        await wa_channel.start(AsyncMock())
+
+        assert created == [{"name": str(tmp_path / "pincer-wa.db"), "uuid": "pincer-wa"}]
+
+    @pytest.mark.asyncio
+    async def test_postgres_url_is_name_and_never_logged(self, wa_channel, wa_mod, monkeypatch, caplog):
+        factory, created = _fake_client_factory()
+        wa_mod("NewAClient", factory)
+        wa_channel._settings.whatsapp_session_db = SecretStr(_PG_URL)
+        wa_channel._connected.set()
+
+        with caplog.at_level(logging.DEBUG):
+            await wa_channel.start(AsyncMock())
+
+        assert created[0]["name"] == _PG_URL
+        assert created[0]["uuid"] == "pincer-wa"
+        assert "session store: postgres (schema=whatsapp)" in caplog.text
+        assert "hunter2secret" not in caplog.text
+        assert _PG_URL not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_jid_found_passes_jid(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        factory, created = _fake_client_factory()
+        wa_mod("NewAClient", factory)
+        wa_mod("build_jid", lambda user, server: MagicMock(User=user, Server=server))
+        _make_device_db(tmp_path / "pincer-wa.db", ["491111111111:3@s.whatsapp.net", "492222222222:12@s.whatsapp.net"])
+        wa_channel._settings.data_dir = tmp_path
+        wa_channel._settings.whatsapp_jid = "492222222222"
+        wa_channel._connected.set()
+
+        await wa_channel.start(AsyncMock())
+
+        jid = created[0]["jid"]
+        assert (jid.User, jid.Device, jid.Server) == ("492222222222", 12, "s.whatsapp.net")
+        assert "new_device" not in created[0]
+
+    @pytest.mark.asyncio
+    async def test_jid_missing_pairs_new_device(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        factory, created = _fake_client_factory()
+        wa_mod("NewAClient", factory)
+        _make_device_db(tmp_path / "pincer-wa.db", ["491111111111:3@s.whatsapp.net"])
+        wa_channel._settings.data_dir = tmp_path
+        wa_channel._settings.whatsapp_jid = "492222222222"
+        wa_channel._connected.set()
+
+        await wa_channel.start(AsyncMock())
+
+        assert created[0]["new_device"] is True
+        assert "jid" not in created[0]
+
+    @pytest.mark.asyncio
+    async def test_connect_task_error_fails_fast(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        async def boom():
+            raise RuntimeError(f'failed to open {_PG_URL}: pq: schema "whatsapp" does not exist')
+
+        factory, _ = _fake_client_factory(boom)
+        wa_mod("NewAClient", factory)
+        wa_mod("_WA_CONNECT_TIMEOUT", 30)
+        wa_channel._settings.whatsapp_session_db = SecretStr(_PG_URL)
+
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        with pytest.raises(RuntimeError, match="WhatsApp store/connect failed") as exc:
+            await wa_channel.start(AsyncMock())
+        assert loop.time() - t0 < 5
+        assert 'schema "whatsapp" does not exist' in str(exc.value)
+        assert "hunter2secret" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_timeout_still_asks_for_qr(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        async def forever():
+            await asyncio.sleep(3600)
+
+        factory, _ = _fake_client_factory(forever)
+        wa_mod("NewAClient", factory)
+        wa_channel._settings.data_dir = tmp_path
+
+        with pytest.raises(RuntimeError, match="Did you scan the QR code"):
+            await wa_channel.start(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_login_error_still_surfaces(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        async def forever():
+            await asyncio.sleep(3600)
+
+        factory, _ = _fake_client_factory(forever)
+        wa_mod("NewAClient", factory)
+        wa_channel._settings.data_dir = tmp_path
+        wa_channel._record_login_failure("logged_out", "re-pair")
+
+        with pytest.raises(RuntimeError, match="WhatsApp login failed: logged_out"):
+            await wa_channel.start(AsyncMock())
+
+
+class TestWrongPhoneCheck:
+    def _client(self, user):
+        me = MagicMock()
+        me.JID.User = user
+        me.HasField.return_value = False
+        client = MagicMock()
+        client.get_me = AsyncMock(return_value=me)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_wrong_phone_logs_error(self, wa_channel, caplog):
+        wa_channel._settings.whatsapp_jid = "492222222222"
+        with caplog.at_level(logging.ERROR, logger="pincer.channels.whatsapp"):
+            await wa_channel._on_connected(self._client("491111111111"), MagicMock())
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert errors and "491111111111" in errors[0].getMessage()
+        assert wa_channel._connected.is_set()
+
+    @pytest.mark.asyncio
+    async def test_matching_phone_is_quiet(self, wa_channel, caplog):
+        wa_channel._settings.whatsapp_jid = "492222222222"
+        with caplog.at_level(logging.ERROR, logger="pincer.channels.whatsapp"):
+            await wa_channel._on_connected(self._client("492222222222"), MagicMock())
+        assert not [r for r in caplog.records if r.levelno == logging.ERROR]

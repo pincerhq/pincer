@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### WhatsApp session in Postgres, and picking the account
+
+- `PINCER_WHATSAPP_SESSION_DB` stores the WhatsApp (whatsmeow) session in
+  Postgres instead of `<data_dir>/pincer-wa.db`, so it survives a recreated
+  volume. Add `search_path=<schema>` to the URL to use a separate schema. Any
+  other scheme is rejected at startup, and the URL is never logged. See
+  [deployment](docs/getting-started/deployment.md#whatsapp-session-in-postgres).
+- `PINCER_WHATSAPP_JID` picks which stored account to use by phone number.
+  A number that isn't stored shows a QR code to pair it. Pincer logs an
+  error if a different phone pairs.
+- A store or connect error (bad URL, missing schema, unwritable session file)
+  now fails startup with the real error. Before, the channel waited 120
+  seconds and then asked you to scan the QR code.
+- Alembic autogenerate ignores `whatsmeow_*` tables, so it never drops them.
+- `pincer doctor` warns when the SQLite session file's data dir isn't writable.
+
 ### Changed
 
 #### Daily budget checked before each LLM call; web chat refusals are 402/503 (#357)

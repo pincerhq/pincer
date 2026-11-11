@@ -108,6 +108,32 @@ WhatsApp requires a one-time QR pairing before it can receive messages. Unlike T
 
 The container uses `working_dir: /app/data` so the WhatsApp session is stored in the persistent volume and survives restarts. If WhatsApp stops working after a restart, re-run `whatsapp setup` to re-pair.
 
+`pincer doctor` warns (`whatsapp_session_store`) when the data dir is not writable by the user Pincer runs as. In that case neonize cannot create `pincer-wa.db`, and the channel used to time out after 120 seconds asking you to scan a QR code.
+
+#### WhatsApp session in Postgres
+
+To keep the session out of the volume, store it in Postgres:
+
+```env
+PINCER_WHATSAPP_SESSION_DB="postgres://pincer_wa:secret@db:5432/pincer?sslmode=disable&search_path=whatsapp"
+```
+
+- The value must be a `postgres://` or `postgresql://` URL. `search_path` picks the schema for the `whatsmeow_*` tables, and whatsmeow creates and migrates those tables itself. Pincer's Alembic migrations ignore any table named `whatsmeow_*`, so sharing Pincer's database (even its schema) is safe.
+- Create the schema once, and preferably a dedicated role that can only touch it:
+  ```sql
+  CREATE ROLE pincer_wa LOGIN PASSWORD 'secret';
+  CREATE SCHEMA whatsapp AUTHORIZATION pincer_wa;
+  ```
+  An existing role instead needs `GRANT USAGE, CREATE ON SCHEMA whatsapp TO <role>;`.
+- The URL holds a password, so Pincer never logs it. The startup log only says `session store: postgres (schema=whatsapp)`.
+- A bad URL, a missing schema or missing rights now fail at startup with the database error instead of the 120-second QR timeout.
+- Switching stores (SQLite → Postgres, or another schema) starts with an empty session, so pair again with `pincer whatsapp setup`.
+- Pincer reads the store with `psycopg` when `PINCER_WHATSAPP_JID` is set, so the image needs the `postgres` extra.
+
+#### Choosing the account
+
+A store can hold more than one paired account. `PINCER_WHATSAPP_JID=+491511234567` picks one by phone number. If that number isn't stored yet, Pincer shows a QR code to pair it rather than resuming another account. If a different phone scans the QR code, Pincer logs an error naming the number that actually paired. Unset, Pincer uses the first stored account, as before.
+
 ---
 
 ## Option 2: Docker (Manual)

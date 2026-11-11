@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
@@ -98,6 +99,23 @@ class ChannelSettings(BaseModel):
     whatsapp_show_progress: bool = Field(
         default=True,
         description="Edit an in-place status message while tools run (and show typing indicator).",
+    )
+    whatsapp_session_db: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Where the WhatsApp (whatsmeow) session is stored. Empty keeps the SQLite file "
+            "<data_dir>/pincer-wa.db. Otherwise a postgres:// or postgresql:// URL; add "
+            "`&search_path=<schema>` (or `?search_path=`) to keep the whatsmeow_* tables in "
+            "their own schema, which must already exist."
+        ),
+    )
+    whatsapp_jid: str = Field(
+        default="",
+        description=(
+            "Phone number (digits, `+` allowed) of the WhatsApp account to use when the session "
+            "store holds more than one. Empty uses the first stored account. A number not in "
+            "the store shows a QR code to pair it."
+        ),
     )
 
     # ── Slack ─────────────────────────────────────────────
@@ -560,6 +578,34 @@ class ChannelSettings(BaseModel):
         if isinstance(v, str):
             return split_csv(v)
         return v
+
+    @field_validator("whatsapp_session_db", mode="before")
+    @classmethod
+    def validate_whatsapp_session_db(cls, v: str | SecretStr | None) -> SecretStr:
+        """Empty (SQLite file) or a Postgres URL; anything else fails at startup."""
+        from pincer.exceptions import ConfigError
+
+        raw = v.get_secret_value() if isinstance(v, SecretStr) else str(v or "")
+        raw = raw.strip()
+        if raw and not raw.lower().startswith(("postgres://", "postgresql://")):
+            # Never echo the value: it may hold a password.
+            scheme = raw.split("://", 1)[0] if "://" in raw else "<none>"
+            raise ConfigError(
+                f"PINCER_WHATSAPP_SESSION_DB must be empty or a postgres:// / postgresql:// URL (got scheme {scheme!r})"
+            )
+        return SecretStr(raw)
+
+    @field_validator("whatsapp_jid", mode="before")
+    @classmethod
+    def normalise_whatsapp_jid(cls, v: str | None) -> str:
+        """`+49 151-234` → `49151234`. Rejects anything that isn't a phone number."""
+        from pincer.exceptions import ConfigError
+
+        raw = str(v or "").strip()
+        digits = re.sub(r"[\s()+\-.]", "", raw)
+        if digits and not digits.isdigit():
+            raise ConfigError(f"PINCER_WHATSAPP_JID={v!r} is not a phone number (digits, `+` allowed)")
+        return digits
 
     @field_validator("thread_inbound_context", mode="before")
     @classmethod

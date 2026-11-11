@@ -143,6 +143,7 @@ class SecurityDoctor:
         report.checks.append(self._check_telegram_access_control(settings))
         report.checks.append(self._check_whatsapp_access_control(settings))
         report.checks.append(self._check_whatsapp_neonize_version())
+        report.checks.append(self._check_whatsapp_session_store(settings))
         report.checks.append(self._check_discord_allowlist(settings))
         report.checks.append(self._check_dashboard_auth_token(settings))
         report.checks.append(self._check_stale_shared_tokens())
@@ -1367,6 +1368,39 @@ class SecurityDoctor:
             f"neonize {raw or 'unknown'} — WhatsApp may return err-client-outdated",
             fix_hint=f"uv pip install -U 'neonize>={min_str}'",
             category="access",
+        )
+
+    def _check_whatsapp_session_store(self, cfg: Settings | None = None) -> CheckResult:
+        """The SQLite session file needs a writable data dir; otherwise neonize
+        cannot create it and the channel only times out waiting for a QR scan."""
+        cfg = self._cfg(cfg)
+        name = "whatsapp_session_store"
+        if not cfg.whatsapp_enabled:
+            return CheckResult(name, CheckStatus.SKIPPED, "WhatsApp not configured", category="filesystem")
+        if cfg.whatsapp_session_db.get_secret_value():
+            return CheckResult(name, CheckStatus.PASS, "WhatsApp session stored in Postgres", category="filesystem")
+        data_dir = Path(cfg.data_dir)
+        session_file = data_dir / "pincer-wa.db"
+        if session_file.exists():
+            target, writable = session_file, os.access(session_file, os.W_OK) and os.access(data_dir, os.W_OK)
+        elif data_dir.is_dir():
+            target, writable = data_dir, os.access(data_dir, os.W_OK | os.X_OK)
+        else:
+            parent = next((p for p in data_dir.parents if p.exists()), data_dir.parent)
+            target, writable = data_dir, os.access(parent, os.W_OK | os.X_OK)
+        if writable:
+            return CheckResult(
+                name, CheckStatus.PASS, f"WhatsApp session file writable ({session_file})", category="filesystem"
+            )
+        return CheckResult(
+            name,
+            CheckStatus.WARNING,
+            f"{target} is not writable by the current user — WhatsApp cannot store its session",
+            fix_hint=(
+                "Make the data dir writable by the user Pincer runs as (e.g. chown the volume), "
+                "or keep the session in Postgres with PINCER_WHATSAPP_SESSION_DB"
+            ),
+            category="filesystem",
         )
 
     def _check_discord_allowlist(self, cfg: Settings | None = None) -> CheckResult:

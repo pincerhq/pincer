@@ -34,7 +34,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
-    assert len(report.checks) == 71
+    # + 1 WhatsApp session store
+    assert len(report.checks) == 72
 
     assert 0 <= report.score <= 100
 
@@ -2202,3 +2203,41 @@ def test_llm_compaction_warns_about_a_summary_threshold_still_set(update, status
     result = SecurityDoctor()._check_llm_compaction(_llm_cfg(**update))
 
     assert (result.status, result.message, result.category) == (status, message, "llm")
+
+
+# ── WhatsApp session store ──────────────────────────────────────────
+
+
+def _wa_store_cfg(tmp_path, *, enabled=True, session_db=""):
+    from pydantic import SecretStr
+
+    return SimpleNamespace(
+        whatsapp_enabled=enabled, whatsapp_session_db=SecretStr(session_db), data_dir=tmp_path / "data"
+    )
+
+
+def test_whatsapp_session_store_skipped_when_disabled(tmp_path):
+    result = SecurityDoctor()._check_whatsapp_session_store(_wa_store_cfg(tmp_path, enabled=False))
+    assert result.status == CheckStatus.SKIPPED
+
+
+def test_whatsapp_session_store_postgres_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path, session_db="postgres://u:p@h/db")
+    assert SecurityDoctor()._check_whatsapp_session_store(cfg).status == CheckStatus.PASS
+
+
+def test_whatsapp_session_store_writable_data_dir_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    assert SecurityDoctor()._check_whatsapp_session_store(cfg).status == CheckStatus.PASS
+
+
+def test_whatsapp_session_store_unwritable_data_dir_warns(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    monkeypatch.setattr(os, "access", lambda *a, **kw: False)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_WHATSAPP_SESSION_DB" in result.fix_hint
