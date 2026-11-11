@@ -72,9 +72,12 @@ COPY --chown=pincer:pincer --from=builder /app/pincer.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
     /app/dist /app/dashboard/dist
 
-RUN mkdir -p /app/data/logs
+# chown must run before VOLUME: Docker discards changes to a volume path made
+# after its declaration, so a fresh named volume would be seeded root-owned
+# and the non-root pincer user could not create files in it (e.g. the
+# WhatsApp session DB).
+RUN mkdir -p /app/data/logs && chown -R pincer:pincer /app/data
 VOLUME /app/data
-RUN chown -R pincer:pincer /app/data
 
 # npm cache goes inside the data volume so it persists and is writable by pincer user
 ENV PATH="/app/.venv/bin:/usr/local/bin:$PATH" \
