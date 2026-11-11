@@ -171,6 +171,15 @@ async def post_message(
         # read mid-turn. A turn that placed a call still answers 200, so the client keeps
         # waiting for that call's report.
         raise HTTPException(503 if resp.budget_check_failed else 402, resp.text)
+    if resp.budget_reached or resp.budget_check_failed:
+        # As the stream's `done`: the reply is the model's own text, the warning beside it
+        return {
+            "reply": resp.turn_text,
+            "budget_warning": resp.text,
+            "cost_usd": resp.cost_usd,
+            "model": resp.model,
+            "call_sids": resp.call_sids,
+        }
     return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model, "call_sids": resp.call_sids}
 
 
@@ -221,6 +230,11 @@ async def post_stream(
                                 # that placed a call ends with `done`, as `POST /message` answers
                                 # 200, so the client keeps waiting for that call's report.
                                 await queue.put(("error", {"message": chunk.content, "cost_usd": chunk.cost_usd}))
+                            elif chunk.budget_reached or chunk.budget_check_failed:
+                                # `text` stays what was streamed, so a client that shows it keeps
+                                # the turn's words; the warning comes beside it
+                                stopped = {"text": chunk.turn_text, "cost_usd": chunk.cost_usd}
+                                await queue.put(("done", {**stopped, "budget_warning": chunk.content}))
                             else:
                                 await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))
             except BudgetCheckFailedError as e:

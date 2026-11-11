@@ -333,6 +333,7 @@ class StreamChunk:
     cost_usd: float = 0.0  # on DONE: the sum of the turn's recorded LLM costs
     budget_reached: bool = False  # on DONE: the budget refused a request; `content` is the budget message
     budget_check_failed: bool = False  # on DONE: the budget could not be read mid-turn; `content` says so
+    turn_text: str = ""  # on a budget-stop DONE: everything the turn streamed before the stop
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +415,9 @@ class AgentResponse:
     # The budget could not be read mid-turn, so the turn stopped (fails closed): no budget was
     # reached, so this is not `budget_reached`; `text` says so, not a reply, and is not saved.
     budget_check_failed: bool = False
+    # On a budget stop: the model's own text this turn before it (its tool steps' text), the
+    # same text a streamed turn shows; `text` stays the warning for the channels.
+    turn_text: str = ""
 
 
 def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
@@ -955,6 +959,7 @@ class Agent:
         turn_usage = TokenUsage()
         turn_requests = 0
         tool_calls_count = 0
+        turn_text = ""  # the tool steps' text, joined as a streamed turn shows it
         call_sids: list[str] = []
         final_text = ""
         budget_stop: _BudgetStop | None = None
@@ -1024,6 +1029,8 @@ class Agent:
 
             # If the LLM wants to use tools
             if response.has_tool_calls:
+                if response.content.strip():
+                    turn_text += _step_separator(turn_text) + response.content
                 logger.info(
                     "LLM requested tools: %s",
                     [tc.name for tc in response.tool_calls],
@@ -1166,6 +1173,7 @@ class Agent:
             call_sids=call_sids,
             budget_reached=budget_stop is not None and not budget_stop.check_failed,
             budget_check_failed=budget_stop is not None and budget_stop.check_failed,
+            turn_text=turn_text if budget_stop is not None else "",
         )
 
     async def run_headless(
@@ -1618,6 +1626,7 @@ class Agent:
                 cost_usd=total_cost,
                 budget_reached=not budget_stop.check_failed,
                 budget_check_failed=budget_stop.check_failed,
+                turn_text=full_text,
             )
             return
 
