@@ -45,11 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and one tool round 3; now they are 1 and 2. Text written before a tool call
   now reaches the chat, followed by a blank line.
 - With a fallback provider configured, a rate limit (429) switches to the
-  fallback at once, on web chat and phone calls alike: the rate-limited provider
-  is not asked again, and any other error its SDK would retry (a timeout, a 5xx,
-  an overload) also switches at once. The last provider tried, or the only one,
-  retries a 429 that arrives before its first token: three attempts, the wait
-  doubling up to 60 s. Once text has streamed, nothing is retried.
+  fallback at once, on web chat and phone calls alike, and any other error the
+  SDK would retry (a timeout, a 5xx, an overload) also switches at once: the
+  primary and each fallback get one attempt. If every fallback fails too, the
+  primary is tried once more, with its retry, before the error is returned. That
+  retry, and a primary with no fallback, retry a 429 that arrives before the
+  first token: three attempts, the wait doubling up to 60 s. Once text has
+  streamed, nothing is retried.
 
 #### The system prompt stays the same for a whole conversation (#357)
 

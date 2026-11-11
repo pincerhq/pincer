@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic_sse as sse
@@ -494,12 +495,12 @@ _RATE_LIMITED_EVERY_TIME = [429] * 9  # more than 3 SDK tries × 3 provider atte
 _SLEEP = "pincer.llm.anthropic_common.asyncio.sleep"
 
 
-async def _answer(router: LLMRouter, method: str) -> LLMResponse:
+async def _answer(router: LLMRouter, method: str, **kwargs: Any) -> LLMResponse:
     """The router's answer to one `method` call; a stream's text must be its response's text."""
     messages = [LLMMessage(role=MessageRole.USER, content="hi")]
     if method == "complete":
-        return await router.complete(messages)
-    events = [e async for e in router.stream_turn(messages)]
+        return await router.complete(messages, **kwargs)
+    events = [e async for e in router.stream_turn(messages, **kwargs)]
     final = events[-1].response
     assert final is not None
     assert "".join(e.text for e in events[:-1]) == final.content
@@ -566,39 +567,32 @@ async def test_a_rate_limited_openai_primary_fails_over_at_once(settings, method
 
 
 @pytest.mark.parametrize("method", ["stream_turn", "complete"])
-@pytest.mark.parametrize("chain", ["alone", "after_a_failover"])
-async def test_the_last_provider_keeps_the_rate_limit_retry(settings, method, chain):
-    """With nothing left to fail over to, a 429 is retried as before: 3 attempts of 3 SDK tries,
-    two waits (retry-after 0 doubles to 0.0), then the rate limit is raised."""
+async def test_a_lone_primary_keeps_its_rate_limit_retry(settings, method):
+    """With no failover, the primary is tried once, with the retry it always had: 3 attempts of 3
+    SDK tries, two waits (retry-after 0 doubles to 0.0), then the rate limit is raised."""
     with patch(_SLEEP, new_callable=AsyncMock) as sleep:
-        async with (
-            sse.ScriptedAnthropic(settings, _RATE_LIMITED_EVERY_TIME) as primary,
-            sse.ScriptedAnthropic(settings, _RATE_LIMITED_EVERY_TIME) as last,
-        ):
-            if chain == "alone":
-                router = _router_with_pool("z", [], {"z": last.provider})
-            else:
-                router = _router_with_pool("a", ["z"], {"a": primary.provider, "z": last.provider})
+        async with sse.ScriptedAnthropic(settings, [*_RATE_LIMITED_EVERY_TIME, 429]) as primary:
+            router = _router_with_pool("a", [], {"a": primary.provider})
             with pytest.raises(LLMRateLimitError):
                 await _answer(router, method)
 
-    assert len(last.requests) == 9
+    assert len(primary.requests) == 9
     assert [c.args for c in sleep.await_args_list] == [(0.0,), (0.0,)]
-    assert len(primary.requests) == (0 if chain == "alone" else 1)
 
 
 class _RateLimitedRecorder(BaseLLMProvider):
-    """Raises a 429 on every call, after noting how many attempts it was allowed."""
+    """Raises a 429 on every call, after noting its name and how many attempts it was allowed."""
 
-    def __init__(self, seen: list[int]) -> None:
+    def __init__(self, name: str, seen: list[tuple[str, int]]) -> None:
+        self._name = name
         self._seen = seen
 
     async def complete(self, messages=None, **kwargs):  # type: ignore[override]
-        self._seen.append(rate_limit_attempts())
+        self._seen.append((self._name, rate_limit_attempts()))
         raise LLMRateLimitError(retry_after=1.0)
 
     async def stream_turn(self, messages=None, **kwargs):  # type: ignore[override]
-        self._seen.append(rate_limit_attempts())
+        self._seen.append((self._name, rate_limit_attempts()))
         raise LLMRateLimitError(retry_after=1.0)
         yield StreamTurnEvent()  # pragma: no cover - makes this an async generator
 
@@ -607,16 +601,17 @@ class _RateLimitedRecorder(BaseLLMProvider):
 
 
 @pytest.mark.parametrize("method", ["stream_turn", "complete"])
-async def test_only_the_last_provider_in_a_chain_retries(method):
-    """Primary and the first failover may not retry; whichever failover comes last may."""
-    seen: list[int] = []
-    pool = {name: _RateLimitedRecorder(seen) for name in ("a", "b", "c")}
+async def test_only_the_primarys_last_try_retries(method):
+    """Q24: the primary and each failover get one attempt; then the primary again, with its retry."""
+    seen: list[tuple[str, int]] = []
+    pool = {name: _RateLimitedRecorder(name, seen) for name in ("a", "b", "c")}
     router = _router_with_pool("a", ["b", "c"], pool)
 
     with pytest.raises(LLMRateLimitError):
         await _answer(router, method)
 
-    assert seen == [1, 1, RATE_LIMIT_ATTEMPTS]
+    assert [seen[0], seen[-1]] == [("a", 1), ("a", RATE_LIMIT_ATTEMPTS)]
+    assert sorted(seen[1:-1]) == [("b", 1), ("c", 1)]
 
 
 async def test_the_retry_setting_never_reaches_a_streams_consumer():
@@ -665,3 +660,40 @@ async def test_a_concurrent_turn_keeps_its_rate_limit_retry():
     assert seen_by_a == [1]  # the precondition: A's request really ran with retries off
     assert seen_by_b == RATE_LIMIT_ATTEMPTS
     assert tokens == ["from b"]
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_a_transient_primary_rate_limit_recovers_when_every_fallback_fails(settings, method):
+    """Q24: the primary's 429 fails over at once; the fallback is broken (401), so the primary is
+    asked again, with its retry, and answers. The call's model goes to the primary both times."""
+    replies = [429, ([sse.text("from the primary's retry")], "end_turn")]
+    with patch(_SLEEP, new_callable=AsyncMock) as sleep:
+        async with (
+            sse.ScriptedAnthropic(settings, replies) as primary,
+            sse.ScriptedAnthropic(settings, [401]) as fallback,
+        ):
+            router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
+            answer = await _answer(router, method, model="claude-explicit-1")
+
+    assert answer.content == "from the primary's retry"
+    assert [body["model"] for body in primary.requests] == ["claude-explicit-1"] * 2
+    assert [body["model"] for body in fallback.requests] == [settings.anthropic_model or settings.default_model]
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_when_the_primarys_retry_fails_too_its_last_error_is_raised(settings, method):
+    """The primary's first try is overloaded (529), the fallback is broken, and the primary's
+    retry stays rate limited: its rate limit is raised, not the first try's 529."""
+    with patch(_SLEEP, new_callable=AsyncMock) as sleep:
+        async with (
+            sse.ScriptedAnthropic(settings, [529, *_RATE_LIMITED_EVERY_TIME]) as primary,
+            sse.ScriptedAnthropic(settings, [401]) as fallback,
+        ):
+            router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
+            with pytest.raises(LLMRateLimitError):
+                await _answer(router, method)
+
+    assert len(primary.requests) == 1 + 9  # the first try, then 3 attempts of 3 SDK tries
+    assert len(fallback.requests) == 1
+    assert [c.args for c in sleep.await_args_list] == [(0.0,), (0.0,)]
