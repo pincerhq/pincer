@@ -13,32 +13,33 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db import ensure_schema_current
 from pincer.db.engine import get_database_url
-from pincer.services.costs import (
-    DEFAULT_PRICING,
-    PRICING,
-    CostService,
-    CostSummary,
-    calculate_cost,
-)
+from pincer.exceptions import BudgetCheckFailedError, DailyBudgetReachedError
+from pincer.llm.base import BaseLLMProvider
+from pincer.services.costs import CostService, CostSummary
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ["DEFAULT_PRICING", "PRICING", "CostSummary", "CostTracker", "calculate_cost", "get_cost_tracker"]
+    from pincer.config.llm import ReasoningEffort, ThinkingMode
+    from pincer.config.pricing import PriceTable, TokenUsage
+    from pincer.llm.base import LLMMessage, LLMResponse
+
+__all__ = ["CostSummary", "CostTracker", "MeteredLLM", "get_cost_tracker", "record_response"]
 
 
 class CostTracker:
-    """Cost tracker with budget enforcement, backed by `CostService`."""
+    """Cost tracker and the daily budget check, backed by `CostService`."""
 
-    def __init__(self, db_path: Path, daily_budget: float = 0.0) -> None:
+    def __init__(self, db_path: Path, daily_budget: float = 0.0, prices: PriceTable | None = None) -> None:
         self._db_path = db_path
         self._daily_budget = daily_budget
+        self._prices = prices
         self._service: CostService | None = None
 
     async def initialize(self) -> None:
         """Bring the database to head (see pincer.db.migrations) and attach the service."""
         await asyncio.to_thread(ensure_schema_current, self._db_path)
-        self._service = CostService(get_database_url(self._db_path), self._daily_budget)
+        self._service = CostService(get_database_url(self._db_path), self._daily_budget, self._prices)
 
     async def close(self) -> None:
         """Drop the service. The engine is shared, so the process disposes it
@@ -55,13 +56,16 @@ class CostTracker:
         self,
         provider: str,
         model: str,
-        input_tokens: int,
-        output_tokens: int,
+        usage: TokenUsage,
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
-        """Record a cost entry and return the cost. Raises BudgetExceededError if over limit."""
-        return await self.service.record(provider, model, input_tokens, output_tokens, session_id, is_free)
+        """Record a cost entry and return the cost.
+
+        An unpriced model or a failed write is logged and returns without raising
+        (see `CostService.record`); a tracker used before `initialize()` raises.
+        """
+        return await self.service.record(provider, model, usage, session_id, is_free)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
         await self.service.add_image_cost(cost_usd, provider, model)
@@ -71,6 +75,9 @@ class CostTracker:
 
     async def get_today_spend(self) -> float:
         return await self.service.get_today_spend()
+
+    async def budget_reached(self) -> bool:
+        return await self.service.budget_reached()
 
     async def get_summary(self, since_timestamp: float | None = None) -> CostSummary:
         return await self.service.get_summary(since_timestamp)
@@ -89,6 +96,82 @@ class CostTracker:
 
     async def get_budget_status(self) -> dict[str, Any]:
         return await self.service.get_budget_status()
+
+
+async def record_response(
+    costs: CostTracker,
+    llm: BaseLLMProvider,
+    response: LLMResponse,
+    default_provider: str,
+    session_id: str | None = None,
+) -> float:
+    """Record one completed request and return its cost.
+
+    It is attributed to the provider that actually served it (a failover may
+    differ from the configured primary), priced under the model name that was
+    sent, and free when the router says that provider is (a keyless local endpoint).
+    """
+    from pincer.llm.router import LLMRouter
+
+    provider = response.provider or default_provider
+    return await costs.record(
+        provider=provider,
+        model=response.request_model or response.model,
+        usage=response.usage,
+        session_id=session_id,
+        is_free=llm.is_free(provider) if isinstance(llm, LLMRouter) else False,
+    )
+
+
+class MeteredLLM(BaseLLMProvider):
+    """A provider whose every request goes through the daily budget check first and is
+    recorded after, for callers outside the agent's turn loops (a finished call's report).
+
+    A request refused by the budget raises `DailyBudgetReachedError` before anything is
+    sent, and one whose budget can't be read raises `BudgetCheckFailedError`; callers
+    already treat a failed request as "no answer" and take their fallback.
+    `stream_turn` is the base fallback over `complete`, so it is metered the same way.
+    """
+
+    def __init__(self, llm: BaseLLMProvider, costs: CostTracker, default_provider: str) -> None:
+        self._llm = llm
+        self._costs = costs
+        self._default_provider = default_provider
+
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
+    ) -> LLMResponse:
+        try:
+            reached = await self._costs.budget_reached()
+        except Exception as e:
+            raise BudgetCheckFailedError("the daily budget could not be read: the request was not sent") from e
+        if reached:
+            raise DailyBudgetReachedError("daily budget reached: the request was not sent")
+        response = await self._llm.complete(
+            messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+            pinned=pinned,
+        )
+        await record_response(self._costs, self._llm, response, self._default_provider)
+        return response
+
+    async def close(self) -> None:
+        """Nothing to close: the wrapped provider belongs to whoever built it."""
 
 
 _cost_tracker: CostTracker | None = None

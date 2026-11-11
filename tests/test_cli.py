@@ -7,6 +7,15 @@ from typer.testing import CliRunner
 
 from pincer.cli import app
 
+
+@pytest.fixture(autouse=True)
+def _no_price_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests run `run` / `chat` on MagicMock settings, which name no real model to price;
+    the price check has its own tests (test_pricing_entry_points)."""
+    monkeypatch.setattr("pincer.cli.run.refuse_unpriced_models", lambda settings: None)
+    monkeypatch.setattr("pincer.cli.chat.refuse_unpriced_models", lambda settings: None)
+
+
 runner = CliRunner()
 
 
@@ -222,12 +231,15 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     mock_settings.max_session_messages = 20
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
+    mock_settings.summary_threshold = None
+    mock_settings.summary_provider = ""
+    mock_settings.summary_model = "test-model"
 
     mock_session = AsyncMock()
     mock_cost = AsyncMock()
     mock_llm = AsyncMock()
     mock_llm.close = AsyncMock()
-    mock_agent = MagicMock()
+    mock_agent = MagicMock(cancel_compactions=AsyncMock())
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
     monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
@@ -254,11 +266,11 @@ async def test_chat_loop_degrades_mcp_memory_backend(
 
 
 @pytest.mark.asyncio
-async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
+async def test_chat_loop_builds_the_compactor_with_a_non_mcp_memory_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """_chat_loop creates Summarizer when memory_store is not an MCPMemoryBackend."""
+    """_chat_loop builds the history compactor with the memory store when it is not an MCPMemoryBackend."""
     from unittest.mock import AsyncMock, MagicMock
 
     from pincer.memory.sqlite import SQLiteMemoryBackend
@@ -277,15 +289,17 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
     mock_settings.summary_model = "test-model"
-    mock_settings.summary_threshold = 10
+    mock_settings.summary_threshold = None
+    mock_settings.summary_provider = ""
+    mock_settings.summary_model = "test-model"
 
     mock_llm = AsyncMock()
     mock_llm.close = AsyncMock()
 
     summarizer_calls: list[bool] = []
 
-    def _mock_summarizer(**_kwargs):  # type: ignore[no-untyped-def]
-        summarizer_calls.append(True)
+    def _mock_summarizer(*args, **_kwargs):  # type: ignore[no-untyped-def]
+        summarizer_calls.append(args[4])  # the memory store
         return MagicMock()
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
@@ -297,8 +311,8 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
-    monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _mock_summarizer)
-    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.core.compaction.Compactor", _mock_summarizer)
+    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock(cancel_compactions=AsyncMock())))
 
     import pincer.cli.chat as _cli_mod
 
@@ -308,11 +322,11 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
 
     await _chat_loop()
 
-    assert summarizer_calls, "Summarizer must be created for non-MCP memory backends"
+    assert summarizer_calls == [fake_memory], "the compactor saves summaries to the non-MCP memory store"
 
 
 @pytest.mark.asyncio
-async def test_chat_loop_gives_the_summarizer_the_summary_settings(
+async def test_chat_loop_gives_the_compactor_the_summary_settings(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -334,7 +348,9 @@ async def test_chat_loop_gives_the_summarizer_the_summary_settings(
     mock_settings.max_session_messages = 20
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
-    mock_settings.summary_threshold = 10
+    mock_settings.summary_threshold = None
+    mock_settings.summary_provider = ""
+    mock_settings.summary_model = "test-model"
     mock_settings.summary_reasoning_effort = "low"
     mock_settings.summary_thinking = ""
 
@@ -342,7 +358,7 @@ async def test_chat_loop_gives_the_summarizer_the_summary_settings(
     mock_llm.close = AsyncMock()
     built: list[dict] = []
 
-    def _capture_summarizer(**kwargs):  # type: ignore[no-untyped-def]
+    def _capture_summarizer(*_args, **kwargs):  # type: ignore[no-untyped-def]
         built.append(kwargs)
         return MagicMock()
 
@@ -354,8 +370,8 @@ async def test_chat_loop_gives_the_summarizer_the_summary_settings(
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
-    monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _capture_summarizer)
-    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.core.compaction.Compactor", _capture_summarizer)
+    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock(cancel_compactions=AsyncMock())))
 
     import pincer.cli.chat as _cli_mod
 
@@ -365,7 +381,7 @@ async def test_chat_loop_gives_the_summarizer_the_summary_settings(
 
     await _chat_loop()
 
-    assert len(built) == 1, "the Summarizer must be built (memory on)"
+    assert len(built) == 1, "the Compactor must be built"
     sent = {key: built[0].get(key, "<not passed>") for key in ("reasoning_effort", "thinking")}
     assert sent == {"reasoning_effort": "low", "thinking": None}
 
@@ -460,7 +476,52 @@ async def test_build_core_returns_core_components(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_build_core_gives_the_summarizer_the_summary_settings(
+async def test_build_core_meters_the_thread_manager_s_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The rolling thread summary is a request like any other: the thread manager `pincer run`
+    installs refuses it at the budget, before the provider is asked (issue #357)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _build_core
+    from pincer.exceptions import DailyBudgetReachedError
+    from pincer.llm.base import LLMMessage, MessageRole
+
+    settings = _mock_settings_for_build_core(tmp_path)
+    settings.voice_enabled = True
+    settings.voice_outbound_enabled = False
+    settings.twilio_account_sid = "AC_test"
+    settings.receptionist_enabled = False
+    settings.default_provider = "anthropic"
+
+    provider = AsyncMock()
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = provider
+    tracker = AsyncMock()
+    tracker.budget_reached.return_value = True
+    installed: list[object] = []
+
+    monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=tracker))
+    monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
+    monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
+    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(side_effect=RuntimeError("no config in test env")))
+    monkeypatch.setattr(
+        "pincer.voice.threads.init_thread_manager", lambda settings, llm=None, memory=None: installed.append(llm)
+    )
+    monkeypatch.setattr("pincer.voice.threads.register_thread_tools", MagicMock())
+    monkeypatch.setattr("pincer.voice.call_tools.register_call_tools", MagicMock())
+
+    await _build_core(settings)
+
+    [thread_llm] = installed  # precondition: the voice block ran and installed a thread manager
+    with pytest.raises(DailyBudgetReachedError):
+        await thread_llm.complete([LLMMessage(role=MessageRole.USER, content="merge")])  # type: ignore[attr-defined]
+    provider.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_core_gives_the_compactor_the_summary_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A set summary value is passed as is; an empty one as None, so the provider
@@ -471,7 +532,9 @@ async def test_build_core_gives_the_summarizer_the_summary_settings(
 
     settings = _mock_settings_for_build_core(tmp_path)
     settings.memory_enabled = True
-    settings.summary_threshold = 10
+    settings.summary_threshold = None
+    settings.summary_provider = ""
+    settings.summary_model = "test-model"
     settings.summary_reasoning_effort = "low"
     settings.summary_thinking = ""
 
@@ -480,7 +543,7 @@ async def test_build_core_gives_the_summarizer_the_summary_settings(
     mock_router.get_summarizer.return_value = (AsyncMock(), "test-model")
     built: list[dict] = []
 
-    def _capture_summarizer(**kwargs):  # type: ignore[no-untyped-def]
+    def _capture_summarizer(*_args, **kwargs):  # type: ignore[no-untyped-def]
         built.append(kwargs)
         return MagicMock()
 
@@ -489,14 +552,14 @@ async def test_build_core_gives_the_summarizer_the_summary_settings(
     monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
     monkeypatch.setattr("pincer.cli.run._create_memory_backend", lambda _s: AsyncMock())
-    monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _capture_summarizer)
+    monkeypatch.setattr("pincer.core.compaction.Compactor", _capture_summarizer)
     monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(side_effect=RuntimeError("no config in test env")))
 
     await _build_core(settings)
 
-    assert len(built) == 1, "the Summarizer must be built (memory on)"
+    assert len(built) == 1, "the Compactor must be built"
     sent = {key: built[0].get(key, "<not passed>") for key in ("reasoning_effort", "thinking")}
     assert sent == {"reasoning_effort": "low", "thinking": None}
 
@@ -512,7 +575,9 @@ async def test_build_core_passes_none_summary_settings_as_send_nothing(
 
     settings = _mock_settings_for_build_core(tmp_path)
     settings.memory_enabled = True
-    settings.summary_threshold = 10
+    settings.summary_threshold = None
+    settings.summary_provider = ""
+    settings.summary_model = "test-model"
     settings.summary_reasoning_effort = "default"
     settings.summary_thinking = "default"
 
@@ -521,7 +586,7 @@ async def test_build_core_passes_none_summary_settings_as_send_nothing(
     mock_router.get_summarizer.return_value = (AsyncMock(), "test-model")
     built: list[dict] = []
 
-    def _capture_summarizer(**kwargs):  # type: ignore[no-untyped-def]
+    def _capture_summarizer(*_args, **kwargs):  # type: ignore[no-untyped-def]
         built.append(kwargs)
         return MagicMock()
 
@@ -530,14 +595,14 @@ async def test_build_core_passes_none_summary_settings_as_send_nothing(
     monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
     monkeypatch.setattr("pincer.cli.run._create_memory_backend", lambda _s: AsyncMock())
-    monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _capture_summarizer)
+    monkeypatch.setattr("pincer.core.compaction.Compactor", _capture_summarizer)
     monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(side_effect=RuntimeError("no config in test env")))
 
     await _build_core(settings)
 
-    assert len(built) == 1, "the Summarizer must be built (memory on)"
+    assert len(built) == 1, "the Compactor must be built"
     sent = {key: built[0].get(key, "<not passed>") for key in ("reasoning_effort", "thinking")}
     assert sent == {"reasoning_effort": "", "thinking": ""}
 
@@ -740,7 +805,6 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         llm_router=MagicMock(),
         llm=AsyncMock(),
         memory_store=None,
-        summarizer=None,
         tools=mock_tools,
         skill_service=MagicMock(),
         mcp_manager=None,

@@ -447,3 +447,132 @@ async def test_an_answered_call_that_failed_is_stored_as_failed(tmp_path):
         assert row["report_outcome"] == "failed"
     finally:
         status_notify._reset_for_tests()
+
+
+# ── the daily budget (issue #357, PR #366 review) ─────────────────────────────
+
+
+async def _priced_tracker(tmp_path, budget: float):  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "pincer.db", daily_budget=budget, prices=load_price_table())
+    await tracker.initialize()
+    return tracker
+
+
+def _outcome_llm():  # type: ignore[no-untyped-def]
+    """The outcome extraction answers GOOD_JSON, priced: 1,000 input tokens of test-fixture-model, $0.007."""
+    from unittest.mock import AsyncMock
+
+    from pincer.llm.base import BaseLLMProvider, LLMResponse
+
+    llm = AsyncMock(spec=BaseLLMProvider)
+    llm.complete.return_value = LLMResponse(
+        content=GOOD_JSON, provider="anthropic", request_model="test-fixture-model", input_tokens=1_000
+    )
+    return llm
+
+
+async def _cost_rows(tracker) -> list[tuple[str, float]]:  # type: ignore[no-untyped-def]
+    summary = await tracker.get_costs_by_model("2000-01-01", "2100-01-01")
+    return [(row["model"], row["total"]) for row in summary]
+
+
+async def test_a_finished_call_s_outcome_extraction_is_recorded(tmp_path, notify_capture):  # type: ignore[no-untyped-def]
+    settings = _settings(tmp_path)
+    tracker = await _priced_tracker(tmp_path, budget=0.0)
+    llm = _outcome_llm()
+    processor = PostCallProcessor(settings, llm=llm, db_path=str(settings.db_path), cost_tracker=tracker)
+    try:
+        report = await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+        rows = await _cost_rows(tracker)
+    finally:
+        await tracker.close()
+
+    assert "Ergebnis: Der Zahnarzttermin" in report  # precondition: the extraction ran
+    assert llm.complete.await_count == 1
+    assert rows == [("test-fixture-model", pytest.approx(0.007))]
+
+
+async def test_with_the_budget_reached_a_finished_call_gets_the_basic_report_without_a_request(  # type: ignore[no-untyped-def]
+    tmp_path, notify_capture, caplog
+):
+    import logging
+
+    from pincer.config.pricing import TokenUsage
+
+    settings = _settings(tmp_path)
+    tracker = await _priced_tracker(tmp_path, budget=0.007)
+    await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000))  # today = the budget
+    llm = _outcome_llm()
+    processor = PostCallProcessor(settings, llm=llm, db_path=str(settings.db_path), cost_tracker=tracker)
+    try:
+        with caplog.at_level(logging.INFO):
+            report = await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+        rows = await _cost_rows(tracker)
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 0
+    assert "abgeschlossen" in report  # the basic (fallback) report
+    assert rows == [("test-fixture-model", pytest.approx(0.007))]  # only the seeded spend
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING and r.name.startswith("pincer.voice")] == []
+
+
+@pytest.mark.parametrize("budget_reached", [False, True])
+async def test_a_thread_summary_is_metered_and_falls_back_when_the_budget_is_reached(  # type: ignore[no-untyped-def]
+    tmp_path, caplog, budget_reached: bool
+):
+    import logging
+    from unittest.mock import AsyncMock
+
+    from pincer.config.pricing import TokenUsage
+    from pincer.llm.base import BaseLLMProvider, LLMResponse
+    from pincer.llm.cost_tracker import MeteredLLM
+    from pincer.voice.threads import merge_summary
+
+    tracker = await _priced_tracker(tmp_path, budget=0.007)
+    if budget_reached:
+        await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000))
+    llm = AsyncMock(spec=BaseLLMProvider)
+    llm.complete.return_value = LLMResponse(
+        content='{"summary": "Merged.", "satisfied_commitments": []}',
+        provider="anthropic",
+        request_model="test-fixture-model",
+        input_tokens=1_000,
+    )
+    try:
+        with caplog.at_level(logging.INFO, logger="pincer.voice.threads"):
+            summary, _, failed = await merge_summary(
+                MeteredLLM(llm, tracker, "anthropic"), "Earlier.", {"task_result": "completed"}, [], "en"
+            )
+        spent = await tracker.get_today_spend()
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == (0 if budget_reached else 1)
+    assert (summary == "Merged.", failed) == (not budget_reached, budget_reached)
+    assert spent == pytest.approx(0.007)  # the seed, or the one merge request
+    levels = [r.levelname for r in caplog.records if r.name == "pincer.voice.threads"]
+    assert levels == (["INFO"] if budget_reached else [])
+
+
+async def test_the_post_call_pipeline_pincer_run_installs_is_metered(tmp_path, notify_capture):  # type: ignore[no-untyped-def]
+    """`pincer run` builds the pipeline through `_post_call_processor`: at the budget its outcome
+    extraction is not requested and the call gets the basic report."""
+    from pincer.cli.run import _post_call_processor
+    from pincer.config.pricing import TokenUsage
+
+    settings = _settings(tmp_path)
+    tracker = await _priced_tracker(tmp_path, budget=0.007)
+    await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000))
+    llm = _outcome_llm()
+    processor = _post_call_processor(settings, llm, None, None, tracker)  # type: ignore[arg-type]
+    try:
+        report = await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 0
+    assert "abgeschlossen" in report

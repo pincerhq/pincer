@@ -91,38 +91,45 @@ class TestAgentPromptInjection:
             **kwargs,
         )
 
-    async def test_plain_prompt_carries_the_time(self):
+    @staticmethod
+    async def _context(agent, text: str = "hi") -> str:
+        """The turn's context as a turn builds it: the user's zone resolved once, then the context."""
+        turn = await agent._begin_turn("user1")
+        return await agent._turn_context("user1", text, memory=True, user_timezone=turn.timezone)
+
+    async def test_the_time_rides_on_the_user_message_not_the_system_prompt(self):
+        """The system prompt stays identical for a conversation (issue #357, Q14)."""
         agent = self._agent()
-        prompt = await agent._build_system_prompt("user1", "hello")
-        assert "[Current date and time]" in prompt
+        assert (await self._context(agent)).startswith("[Current date and time]")
+        assert "[Current date and time]" not in await agent._build_system_prompt("user1")
 
     async def test_memory_path_carries_the_time(self):
-        """The memory branch returns early — it must not skip the clock."""
         memory = MagicMock()
         memory.search_text = AsyncMock(return_value=[SimpleNamespace(content="likes tea")])
         agent = self._agent(memory_store=memory)
-        prompt = await agent._build_system_prompt("user1", "hello")
-        assert "likes tea" in prompt
-        assert "[Current date and time]" in prompt
+        context = await self._context(agent, "hello")
+        assert "likes tea" in context
+        assert "[Current date and time]" in context
 
-    async def test_extra_system_path_carries_the_time(self):
+    async def test_extra_system_stays_in_the_prompt_without_the_time(self):
         agent = self._agent()
-        prompt = await agent._build_system_prompt("user1", "hi", extra_system="EXTRA")
-        assert "EXTRA" in prompt
-        assert "[Current date and time]" in prompt
+        prompt = await agent._build_system_prompt("user1", extra_system="EXTRA")
+        assert prompt.endswith("EXTRA")
+        assert "[Current date and time]" not in prompt
 
     async def test_time_block_is_last(self):
-        """It should be the final thing the model reads before the messages."""
-        agent = self._agent()
-        prompt = await agent._build_system_prompt("user1", "hi", extra_system="EXTRA")
-        assert prompt.index("[Current date and time]") > prompt.index("EXTRA")
+        """It should be the final thing the model reads before the user's words."""
+        memory = MagicMock()
+        memory.search_text = AsyncMock(return_value=[SimpleNamespace(content="likes tea")])
+        agent = self._agent(memory_store=memory)
+        context = await self._context(agent)
+        assert context.index("[Current date and time]") > context.index("likes tea")
 
     async def test_uses_the_users_own_timezone(self):
         agent = self._agent(timezone="Europe/Berlin")
         agent.identity_resolver = MagicMock()
         agent.identity_resolver.get_timezone = AsyncMock(return_value="Asia/Tokyo")
-        prompt = await agent._build_system_prompt("user1", "hi")
-        assert "Asia/Tokyo" in prompt
+        assert "Asia/Tokyo" in await self._context(agent)
 
     async def test_identity_lookup_failure_falls_back_quietly(self):
         """A locked or missing identity DB must cost the user their timezone,
@@ -130,10 +137,8 @@ class TestAgentPromptInjection:
         agent = self._agent(timezone="Europe/Berlin")
         agent.identity_resolver = MagicMock()
         agent.identity_resolver.get_timezone = AsyncMock(side_effect=RuntimeError("db locked"))
-        prompt = await agent._build_system_prompt("user1", "hi")
-        assert "Europe/Berlin" in prompt
+        assert "Europe/Berlin" in await self._context(agent)
 
     async def test_no_resolver_uses_deployment_timezone(self):
         agent = self._agent(timezone="Asia/Tokyo")
-        prompt = await agent._build_system_prompt("user1", "hi")
-        assert "Asia/Tokyo" in prompt
+        assert "Asia/Tokyo" in await self._context(agent)

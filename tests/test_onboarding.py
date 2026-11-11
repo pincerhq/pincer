@@ -28,7 +28,6 @@ from pincer.core.session import (
     conversation_key,
 )
 from pincer.db.engine import get_database_url
-from pincer.exceptions import BudgetExceededError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
 from pincer.memory.store import MemoryStore
 from pincer.repositories.onboarding import OnboardingRepository
@@ -63,11 +62,24 @@ def _streams(llm: AsyncMock, text: str) -> None:
     llm.stream_turn = stream_turn
 
 
+def _streams_from_complete(llm: AsyncMock) -> None:
+    """Web chat streams each step (slice 13): answer it as complete() is scripted to, and record it
+    there, so complete()'s calls count every request on either path."""
+
+    async def stream_turn(**kwargs: object) -> AsyncIterator[StreamTurnEvent]:
+        response = await llm.complete(**kwargs)
+        if response.content:
+            yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
+
+    llm.stream_turn = stream_turn
+
+
 def _scripted_llm(*replies: str | Exception) -> AsyncMock:
-    """An LLM whose complete() answers in order; its stream replays nothing new."""
+    """An LLM whose requests answer in order, on either path."""
     llm = AsyncMock()
     llm.complete.side_effect = [r if isinstance(r, Exception) else _llm_text(r) for r in replies]
-    _streams(llm, "Streamed reply.")
+    _streams_from_complete(llm)
     return llm
 
 
@@ -431,7 +443,7 @@ async def test_a_failing_extractor_after_a_day_stops_being_called(
 
     async def extract(prompt: str) -> LLMResponse:
         extractions.append(prompt)
-        raise BudgetExceededError("over budget")
+        raise RuntimeError("extractor down")
 
     agent = Agent(
         settings, _extracting_llm(extract), session_manager, cost_tracker, tool_registry, memory_store=memory_store
@@ -841,7 +853,7 @@ async def test_existing_user_new_conversation_is_separate_and_not_prompted(
 ):
     """A web chat conversation is its own session, and a user with history in
     their main one is not asked who they are when they open "New chat"."""
-    _streams(mock_llm, "Hello! I'm Pincer.")
+    _streams_from_complete(mock_llm)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     await _store_history(session_manager, "user-t", "web", created_at=_long_ago())
     key = conversation_key("user-t", "web", "thread-1")
@@ -908,7 +920,7 @@ async def test_legacy_onboarded_session_is_not_asked(
     path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
     """Onboarded before the table existed: never asked again, nothing ingested."""
-    _streams(mock_llm, "Hello! I'm Pincer.")
+    _streams_from_complete(mock_llm)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     await _store_history(
         session_manager, "user-o", "web", **{ONBOARDING_PROMPT_SENT_KEY: "true", ONBOARDING_COMPLETE_KEY: "true"}
@@ -1222,14 +1234,14 @@ async def test_preexisting_session_never_prompts(
 async def test_an_extraction_error_leaves_the_gate_untouched(
     tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
-    """A failed extraction call (an outage, the budget) is no reply at all: no
+    """A failed extraction call (an outage) is no reply at all: no
     attempt is counted, and the answer after it is still taken."""
     llm = _scripted_llm(
         "Hi!",
         "Got it.",
         RuntimeError("LLM down"),
         "Still here.",
-        BudgetExceededError(spent=5.0, limit=5.0),
+        TimeoutError("LLM timed out"),
         "Nice to meet you, Carol.",
         '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
     )
@@ -1290,3 +1302,215 @@ async def test_clean_profile_value_normalizes():
     assert _clean_profile_value("null") is None
     assert _clean_profile_value("N/A") is None
     assert _clean_profile_value("") is None
+
+
+async def _rows(tmp_path: Path) -> int:
+    from pincer.db.session import session_scope
+    from pincer.repositories.costs import CostLogRepository
+
+    async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+        return len(await CostLogRepository(session).list())
+
+
+async def test_the_onboarding_extraction_is_recorded_like_any_request(  # type: ignore[no-untyped-def]
+    tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+) -> None:
+    llm = _scripted_llm(
+        "Hi!",
+        "Nice to meet you, Carol.",
+        '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await agent.handle_message("user-6", "test", "hi")
+    await agent.handle_message("user-6", "test", "I'm Carol")
+
+    assert llm.complete.await_count == 3  # precondition: two replies and the extraction
+    assert await _rows(tmp_path) == 3
+
+
+async def test_with_the_budget_reached_the_onboarding_extraction_is_not_requested(  # type: ignore[no-untyped-def]
+    tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """A turn the budget refused is no turn: no reply, no extraction, no attempt counted, the gate stays open."""
+    from pincer.config.pricing import TokenUsage, load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=1.0, prices=load_price_table())
+    await tracker.initialize()
+    llm = _scripted_llm("Hi!", "Nice to meet you, Carol.", '{"answers_question": true, "name": "Carol"}')
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 1.0}),
+        llm,
+        session_manager,
+        tracker,
+        tool_registry,
+        memory_store=memory_store,
+    )
+    try:
+        await agent.handle_message("user-7", "test", "hi")
+        await tracker.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000_000))  # $7 today
+        await agent.handle_message("user-7", "test", "I'm Carol")
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 1  # the first reply only
+    record = await _record(tmp_path, "user-7", "test")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (0, None)
+
+
+@_PATHS
+async def test_an_answer_turn_keeps_its_reply_when_its_costs_cannot_be_stored(  # type: ignore[no-untyped-def]
+    path, tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """A cost-DB error after the reply was saved (or streamed) never replaces it (PR #366 review)."""
+    from sqlalchemy import text
+
+    from pincer.config.pricing import load_price_table
+    from pincer.db.session import session_scope
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=0.0, prices=load_price_table())  # no reads
+    await tracker.initialize()
+    llm = _scripted_llm(
+        "Hi!",
+        "Nice to meet you, Carol.",
+        '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, tracker, tool_registry, memory_store=memory_store)
+    try:
+        await _reply(agent, path, "user-8", "test", "hi")
+        async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+            await (await session.connection()).execute(text("DROP TABLE pincer_cost_logs"))
+        reply = await _reply(agent, path, "user-8", "test", "I'm Carol")
+    finally:
+        await tracker.close()
+
+    assert reply == "Nice to meet you, Carol."
+    assert llm.complete.await_count == 3  # precondition: the extraction ran too
+    record = await _record(tmp_path, "user-8", "test")
+    assert record is not None and record.completed_at is not None
+
+
+# test-model costs $0.00003 a request here (10 in at $1/MTok, 10 out at $2/MTok): a budget of
+# $0.00005 admits the second turn, whose own first request then crosses it.
+_CROSSED_BY_THE_ANSWER_TURN = 0.00005
+_CAROL = '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}'
+
+
+async def _budgeted_agent(tmp_path, settings, session_manager, tool_registry, memory_store, llm):  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=_CROSSED_BY_THE_ANSWER_TURN, prices=load_price_table())
+    await tracker.initialize()
+    settings = settings.model_copy(update={"daily_budget_usd": _CROSSED_BY_THE_ANSWER_TURN})
+    return Agent(settings, llm, session_manager, tracker, tool_registry, memory_store=memory_store), tracker
+
+
+@_PATHS
+async def test_a_turn_whose_own_reply_crosses_the_budget_still_reads_its_onboarding_answer(  # type: ignore[no-untyped-def]
+    path, tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """The turn was admitted, so it runs to its end, extraction included, as a call in progress does."""
+    llm = _scripted_llm("Hi!", "Nice to meet you, Carol.", _CAROL)
+    agent, tracker = await _budgeted_agent(tmp_path, settings, session_manager, tool_registry, memory_store, llm)
+    try:
+        await _reply(agent, path, "user-9", "test", "hi")
+        reply = await _reply(agent, path, "user-9", "test", "I'm Carol")
+    finally:
+        await tracker.close()
+
+    assert reply == "Nice to meet you, Carol."
+    assert llm.complete.await_count == 3
+    assert await _rows(tmp_path) == 3  # the extraction is recorded too
+    record = await _record(tmp_path, "user-9", "test")
+    assert record is not None and record.completed_at is not None
+    profiles = await memory_store.list_memories(user_id="user-9", category="profile")
+    assert [("Carol" in p.content) for p in profiles] == [True]
+
+
+async def test_a_web_chat_turn_stopped_by_the_budget_mid_way_still_reads_its_onboarding_answer(  # type: ignore[no-untyped-def]
+    tmp_path, settings, session_manager, tool_registry, memory_store
+) -> None:
+    """Admitted, then stopped after its tool step: the budget is not checked again for the extraction."""
+    from pincer.llm.base import ToolCall
+
+    greet = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc1", name="greet", arguments={"name": "Carol"})],
+        model="test-model",
+        input_tokens=10,
+        output_tokens=10,
+        stop_reason="tool_use",
+    )
+    llm = AsyncMock()
+    llm.complete.side_effect = [_llm_text("Hi!"), greet, _llm_text(_CAROL)]
+    _streams_from_complete(llm)
+    agent, tracker = await _budgeted_agent(tmp_path, settings, session_manager, tool_registry, memory_store, llm)
+    try:
+        await _reply(agent, "stream", "user-10", "web", "hi")
+        chunks = [c async for c in agent.handle_message_stream("user-10", "web", "I'm Carol, greet me")]
+    finally:
+        await tracker.close()
+
+    assert chunks[-1].budget_reached  # precondition: stopped before the reply step
+    assert llm.complete.await_count == 3  # hi, the tool step, the extraction
+    record = await _record(tmp_path, "user-10", "web")
+    assert record is not None and record.completed_at is not None
+
+
+@_PATHS
+async def test_a_turn_that_loses_the_budget_mid_way_sends_no_extraction(  # type: ignore[no-untyped-def]
+    path, tmp_path, settings, session_manager, memory_store
+) -> None:
+    """Failed closed: no further paid request, the extraction included (PR #366 review)."""
+    from sqlalchemy import text
+
+    from pincer.config.pricing import load_price_table
+    from pincer.db.session import session_scope
+    from pincer.llm.base import ToolCall
+    from pincer.llm.cost_tracker import CostTracker
+    from pincer.tools.registry import ToolRegistry
+
+    async def lookup(context: dict | None = None) -> str:
+        async with session_scope(get_database_url(tmp_path / "test.db")) as session:
+            await (await session.connection()).execute(text("DROP TABLE pincer_cost_logs"))
+        return "found"
+
+    registry = ToolRegistry()
+    registry.register(
+        name="lookup", description="Looks up", handler=lookup, parameters={"type": "object", "properties": {}}
+    )
+    look = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc1", name="lookup", arguments={})],
+        model="test-model",
+        input_tokens=10,
+        output_tokens=10,
+        stop_reason="tool_use",
+    )
+    llm = AsyncMock()
+    llm.complete.side_effect = [_llm_text("Hi!"), look, _llm_text(_CAROL)]
+    _streams_from_complete(llm)
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=1.0, prices=load_price_table())
+    await tracker.initialize()
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 1.0}),
+        llm,
+        session_manager,
+        tracker,
+        registry,
+        memory_store=memory_store,
+    )
+    try:
+        await _reply(agent, path, "user-11", "test", "hi")
+        await _reply(agent, path, "user-11", "test", "I'm Carol, look it up")
+    finally:
+        await tracker.close()
+
+    assert llm.complete.await_count == 2  # hi, the tool step: no extraction
+    record = await _record(tmp_path, "user-11", "test")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (0, None)

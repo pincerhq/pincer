@@ -75,7 +75,7 @@ def test_agent_tool_registry_property():
 async def test_build_system_prompt_no_mcp_manager():
     """Without mcp_manager, prompt is unmodified."""
     agent = _make_agent()
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "[Connected MCP servers" not in prompt
 
 
@@ -84,7 +84,7 @@ async def test_build_system_prompt_with_mcp_manager_connected():
     agent = _make_agent()
     agent.mcp_manager = _make_mcp_manager(connected=True)
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "[Connected MCP servers" in prompt
     assert "github" in prompt
     assert "slack" in prompt
@@ -101,7 +101,7 @@ async def test_build_system_prompt_mcp_no_connected_servers():
     )
     agent.mcp_manager = manager
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "[Connected MCP servers" not in prompt
 
 
@@ -121,7 +121,7 @@ async def test_build_system_prompt_includes_server_instructions():
     )
     agent.mcp_manager = manager
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "doctr (6 tool(s))" in prompt
     assert "Use ocr_document_text for a quick plain-text read of an image or PDF." in prompt
 
@@ -131,7 +131,7 @@ async def test_build_system_prompt_missing_instructions_key_is_backward_compatib
     agent = _make_agent()
     agent.mcp_manager = _make_mcp_manager(connected=True)
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "github (5 tool(s))" in prompt
     assert "→" not in prompt
 
@@ -147,7 +147,7 @@ async def test_build_system_prompt_none_instructions_adds_no_line():
     )
     agent.mcp_manager = manager
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "quiet (1 tool(s))" in prompt
     assert "→" not in prompt
 
@@ -169,7 +169,7 @@ async def test_build_system_prompt_truncates_long_instructions():
     )
     agent.mcp_manager = manager
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "This is a very long" in prompt
     assert "…" in prompt
     assert "exceeds the configured cap" not in prompt
@@ -182,7 +182,7 @@ async def test_build_system_prompt_mcp_list_servers_error_is_silent():
     manager.list_servers = AsyncMock(side_effect=RuntimeError("boom"))
     agent.mcp_manager = manager
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert agent._settings.system_prompt in prompt
     assert "[Connected MCP servers" not in prompt
 
@@ -192,12 +192,13 @@ async def test_build_system_prompt_shows_tool_count():
     agent = _make_agent()
     agent.mcp_manager = _make_mcp_manager(connected=True)
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "5 tool(s)" in prompt or "tool" in prompt
 
 
-async def test_build_system_prompt_mcp_and_memory_both_present():
-    """MCP section and memory section co-exist in the prompt."""
+async def test_build_system_prompt_keeps_mcp_and_leaves_memories_to_the_user_message():
+    """The MCP section stays in the prompt; recalled memories travel with the user's message
+    (issue #357, Q14), so the prompt never searches memory."""
     from pincer.memory.store import MemoryStore
 
     agent = _make_agent()
@@ -211,6 +212,7 @@ async def test_build_system_prompt_mcp_and_memory_both_present():
     )
     agent._memory = mock_memory
 
-    prompt = await agent._build_system_prompt("user1", "hello")
+    prompt = await agent._build_system_prompt("user1")
     assert "[Connected MCP servers" in prompt
-    assert "User prefers brevity" in prompt
+    assert "User prefers brevity" not in prompt
+    mock_memory.search_text.assert_not_awaited()

@@ -20,7 +20,14 @@ from pincer.cli._attachments import (
     _format_pdf_attachment,
     _safe_upload_path,
 )
-from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
+from pincer.cli._shared import (
+    _create_memory_backend,
+    _port_in_use,
+    _print_voice_webhook_urls,
+    _setup_logging,
+    console,
+    refuse_unpriced_models,
+)
 from pincer.cli.daemon import (
     WAIT_TIMEOUT,
     attach_daemon,
@@ -43,11 +50,11 @@ if TYPE_CHECKING:
     from pincer.llm.router import LLMRouter
     from pincer.mcp import MCPClientManager
     from pincer.memory.base import BaseMemoryBackend
-    from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
     from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
+    from pincer.voice.postcall import PostCallProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +99,8 @@ async def run(
                 soft_wrap=True,
             )
             raise typer.Exit(1)
+        # In the foreground, before anything forks, so the refusal reaches the terminal
+        refuse_unpriced_models(settings)
         start_daemon(settings, wait_timeout)
         return
 
@@ -109,6 +118,9 @@ async def run(
         if running is not None:
             attach_daemon(settings, running)
             return
+
+    # Following a running daemon calls no model, so only a start is refused (issue #357)
+    refuse_unpriced_models(settings)
 
     _setup_logging(settings.log_level.value)
 
@@ -176,7 +188,6 @@ class CoreComponents:
     llm_router: LLMRouter
     llm: BaseLLMProvider
     memory_store: BaseMemoryBackend | None
-    summarizer: Summarizer | None
     tools: ToolRegistry
     skill_service: SkillService
     mcp_manager: MCPClientManager | None
@@ -203,11 +214,11 @@ def _refuse_legacy_identity_map() -> None:
 
 
 async def _build_core(settings: Settings) -> CoreComponents:
+    from pincer.config.pricing import load_price_table
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.db.engine import init_database
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
     from pincer.tools.bootstrap import register_default_tools
@@ -221,7 +232,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
     await session_mgr.initialize()
 
-    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
+    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()
 
     # Sprint 5: Security components
@@ -234,15 +245,12 @@ async def _build_core(settings: Settings) -> CoreComponents:
         messages_per_minute=settings.rate_messages_per_min,
         tool_calls_per_minute=settings.rate_tools_per_min,
         max_concurrent_llm=settings.max_concurrent_llm,
-        max_daily_spend_usd=settings.daily_budget_usd,
     )
 
     # Initialize memory system
     memory_store: BaseMemoryBackend | None = None
-    summarizer: Summarizer | None = None
 
     # Create LLM provider (primary + optional random failover)
-    from pincer.config.llm import call_effort, call_thinking
     from pincer.llm.router import LLMRouter
 
     llm_router = LLMRouter()
@@ -251,17 +259,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
-        summary_llm, summary_model = llm_router.get_summarizer()
-        summarizer = Summarizer(
-            llm=summary_llm,
-            memory_store=memory_store,
-            session_manager=session_mgr,
-            summary_model=summary_model,
-            threshold=settings.summary_threshold,
-            # Empty means the global setting (the provider reads None that way), `none` sends nothing
-            reasoning_effort=call_effort(settings.summary_reasoning_effort),
-            thinking=call_thinking(settings.summary_thinking),
-        )
         console.print("[green]Memory system enabled[/green]")
 
     # Register channel-independent tools (shell_exec, files, browser,
@@ -283,16 +280,17 @@ async def _build_core(settings: Settings) -> CoreComponents:
     # client) must not leave those first conversations without make_phone_call
     # ("Tool not found"). The voice channel/engine wiring stays in _run_agent.
     if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        # Sprint 13: exactly ONE ThreadManager per process (the Hotfix-3
+        # lesson — two instances would mean two truths about one thread). It
+        # owns the rolling-summary merge, so it gets the same LLM and memory
+        # store the post-call pipeline uses, metered like it (issue #357).
+        from pincer.llm.cost_tracker import MeteredLLM
         from pincer.tools.builtin.call_transcript import get_call_transcript
         from pincer.voice.call_tools import register_call_tools
         from pincer.voice.outbound import make_phone_call
         from pincer.voice.threads import init_thread_manager, register_thread_tools
 
-        # Sprint 13: exactly ONE ThreadManager per process (the Hotfix-3
-        # lesson — two instances would mean two truths about one thread). It
-        # owns the rolling-summary merge, so it gets the same LLM and memory
-        # store the post-call pipeline uses.
-        init_thread_manager(settings, llm=llm, memory=memory_store)
+        init_thread_manager(settings, llm=MeteredLLM(llm, cost_tracker, settings.default_provider), memory=memory_store)
         register_thread_tools(tools, settings)
 
         # Sprint 11: the Pincer-owned in-call tools (send_owner_message,
@@ -639,7 +637,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
             )
             await memory_store.close()
             memory_store = None
-            summarizer = None
 
     # After the MCP fallback above: a tool bound to a memory backend that was
     # just closed would fail every time the model calls it.
@@ -649,6 +646,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
         register_language_tools(tools, memory_store)
 
     # Create agent
+    from pincer.core.compaction import build_compactor
+
     agent = Agent(
         settings=settings,
         llm=llm,
@@ -656,7 +655,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         cost_tracker=cost_tracker,
         tool_registry=tools,
         memory_store=memory_store,
-        summarizer=summarizer,
+        compactor=build_compactor(settings, llm_router, cost_tracker, session_mgr, memory_store),
     )
     agent.skill_service = skill_service
     if mcp_manager:
@@ -679,11 +678,31 @@ async def _build_core(settings: Settings) -> CoreComponents:
         llm_router=llm_router,
         llm=llm,
         memory_store=memory_store,
-        summarizer=summarizer,
         tools=tools,
         skill_service=skill_service,
         mcp_manager=mcp_manager,
         agent=agent,
+    )
+
+
+def _post_call_processor(
+    settings: Settings,
+    llm: BaseLLMProvider,
+    memory_store: BaseMemoryBackend | None,
+    tools: ToolRegistry,
+    cost_tracker: CostTracker,
+) -> PostCallProcessor:
+    """The post-call pipeline `pincer run` installs on the voice channel. Its outcome and
+    thread-summary requests go through the daily budget check and are recorded (issue #357)."""
+    from pincer.voice.postcall import PostCallProcessor
+
+    return PostCallProcessor(
+        settings,
+        llm=llm,
+        memory=memory_store,
+        db_path=str(settings.db_path),
+        tool_registry=tools,  # Sprint 6: appointment calendar executor
+        cost_tracker=cost_tracker,
     )
 
 
@@ -994,6 +1013,9 @@ def _stop_core_on_shutdown(shutdown: _Shutdown, core: CoreComponents) -> None:
     shutdown.on_stop("browser", close_browser_if_installed)
     if core.mcp_manager:
         shutdown.on_stop("MCP clients", core.mcp_manager.stop)
+    # Registered last, so it runs first of these: a summary still running is cancelled before
+    # the LLM client and the sessions it would use close, and leaves its session as it was.
+    shutdown.on_stop("history compactions", core.agent.cancel_compactions)
 
 
 def _reserve_stop(shutdown: _Shutdown, name: str) -> Callable[[Callable[[], Awaitable[object]]], None]:
@@ -1520,14 +1542,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
                     )
         try:
             from pincer.channels.phone_calls import VoiceChannel
-            from pincer.llm.router import plan_voice_turn
+            from pincer.llm.pricing_check import voice_turn_unusable
             from pincer.voice.engine import get_voice_engine
 
             # Dashboard-set runtime overrides (voice turn model) survive restarts
             from pincer.voice.runtime_config import apply_overrides
             from pincer.voice.twiml_server import init_voice_routes
 
-            apply_overrides(settings, unusable_reason=lambda m: plan_voice_turn(settings, m).unusable)
+            apply_overrides(settings, unusable_reason=lambda m: voice_turn_unusable(settings, m))
 
             # Telephony telemetry: start the bounded exporter before the first
             # call can arrive. Failing to start it must never stop voice from
@@ -1646,17 +1668,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             # notes, and follow-up proposals after every call.
             # (make_phone_call / get_call_transcript are registered earlier,
             # before channel startup, so early-started channels have them.)
-            from pincer.voice.postcall import PostCallProcessor
-
-            vc.set_post_call_processor(
-                PostCallProcessor(
-                    settings,
-                    llm=llm,
-                    memory=memory_store,
-                    db_path=str(settings.db_path),
-                    tool_registry=tools,  # Sprint 6: appointment calendar executor
-                )
-            )
+            vc.set_post_call_processor(_post_call_processor(settings, llm, memory_store, tools, cost_tracker))
 
             console.print(f"[green]Voice calling enabled ({settings.voice_engine})[/green]")
         except Exception as e:

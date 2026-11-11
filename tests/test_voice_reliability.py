@@ -985,6 +985,7 @@ class TestUndeliveredTranscript:
 def _fake_outbound_dial(monkeypatch, tmp_path) -> dict:
     """Settings and a fake Twilio for `make_phone_call`; returns the dial kwargs once placed."""
     settings = MagicMock()
+    settings.daily_budget_usd = 0.0  # no LLM budget
     settings.voice_enabled = True
     settings.voice_outbound_enabled = True
     settings.voice_webhook_base_url = "https://example.com"

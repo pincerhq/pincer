@@ -113,3 +113,20 @@ def _create_memory_backend(settings: Settings):  # type: ignore[return]
     from pincer.memory.sqlite import SqlMemoryBackend
 
     return SqlMemoryBackend(settings.db_path)
+
+
+def refuse_unpriced_models(settings: Settings) -> None:
+    """Stop when a model Pincer will call has no valid `[pricing]` entry (issue #357):
+    a cost it shows is never a guess. `pincer run` calls it before `-d` forks, so the refusal reaches the terminal."""
+    import typer
+
+    from pincer.llm.pricing_check import pricing_problems
+
+    problems = pricing_problems(settings)
+    if problems is None:
+        return
+    from rich.text import Text
+
+    # Text, not markup: the paste block is full of `[pricing."<model>"]`.
+    console.print(Text("Configuration error:", style="red"), Text(problems.rstrip("\n")), soft_wrap=True)
+    raise typer.Exit(1)

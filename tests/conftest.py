@@ -25,6 +25,11 @@ os.environ["PINCER_DAILY_BUDGET_USD"] = "100.0"
 # The API is default-deny. Tests that exercise a route rather than its auth run
 # with it switched off; the ones about auth use the `authed_app` fixture.
 os.environ["PINCER_AUTH_DISABLED"] = "true"
+# Third-party packages load the developer's .env into os.environ when imported
+# (microsoft_teams.apps runs load_dotenv(find_dotenv(usecwd=True)) at import time),
+# leaking e.g. PINCER_ANTHROPIC_MODEL into every later test. python-dotenv honours
+# this switch; a test of Pincer's own .env loader turns it back off for itself.
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
 from pincer.config import Settings
 from pincer.config.database import DatabaseSettings
@@ -57,6 +62,17 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     # ...and stop it doing so in the first place: without this the MCP config
     # tests leave the developer's LLM provider settings behind for later ones.
     monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", ())
+
+
+#: Test prices: what every test prices LLM calls with, instead of the repository's pincer.toml.
+TEST_PRICING_DIR = Path(__file__).parent / "fixtures" / "pricing"
+
+
+@pytest.fixture(autouse=True)
+def _test_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests price from tests/fixtures/pricing, never from the repository's pincer.toml
+    or a developer's pincer.local.toml. A test about loading passes its own directory."""
+    monkeypatch.setattr("pincer.config.pricing._config_dir", lambda: TEST_PRICING_DIR)
 
 
 @pytest.fixture(autouse=True)
@@ -306,7 +322,9 @@ async def session_manager(tmp_path: Path) -> SessionManager:
 
 @pytest_asyncio.fixture
 async def cost_tracker(tmp_path: Path) -> CostTracker:
-    ct = CostTracker(tmp_path / "test.db", daily_budget=100.0)
+    from pincer.config.pricing import load_price_table
+
+    ct = CostTracker(tmp_path / "test.db", daily_budget=100.0, prices=load_price_table())
     await ct.initialize()
     yield ct  # type: ignore[misc]
     await ct.close()

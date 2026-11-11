@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 async def build_agent_from_settings() -> Agent:
     from pincer.config import get_settings_relaxed
+    from pincer.config.pricing import load_price_table
+    from pincer.core.compaction import build_compactor
     from pincer.llm.router import LLMRouter
 
     settings = get_settings_relaxed()
@@ -36,10 +38,11 @@ async def build_agent_from_settings() -> Agent:
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
     await session_mgr.initialize()
 
-    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
+    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()
 
-    llm = LLMRouter().get_llm()
+    router = LLMRouter()
+    llm = router.get_llm()
 
     tools = ToolRegistry()
     report = register_default_tools(tools, settings)
@@ -52,6 +55,7 @@ async def build_agent_from_settings() -> Agent:
         cost_tracker=cost_tracker,
         tool_registry=tools,
         approval_callback=request_web_approval,
+        compactor=build_compactor(settings, router, cost_tracker, session_mgr, None),
     )
     if settings.tool_selection_enabled:
         from pincer.tools.selection import ToolSelector

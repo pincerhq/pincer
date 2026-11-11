@@ -115,3 +115,29 @@ async def test_discord_thread_routing():
     assert data["status"] == "success"
     # Should pass thread_id kwarg
     discord_channel.send_photo.assert_called_once_with("u1", "https://cdn.fal.ai/img.jpg", "", thread_id="111222333")
+
+
+@pytest.mark.asyncio
+async def test_an_image_whose_cost_tracker_fails_is_still_sent_and_the_loss_is_a_warning(monkeypatch, caplog):
+    """A tracker that cannot start drops a paid generation's spend: say so above DEBUG (PR #366 review)."""
+    import pincer.llm.cost_tracker
+
+    async def broken_tracker(*args, **kwargs):
+        raise RuntimeError("cost database unavailable")
+
+    monkeypatch.setattr(pincer.llm.cost_tracker, "get_cost_tracker", broken_tracker)
+    channel = _make_channel()
+    result = ImageResult(
+        images=[GeneratedImage(url="https://cdn.fal.ai/img.jpg")], provider="fal", model="m", cost_usd=0.003
+    )
+    handler = make_generate_image_handler(_make_router(result))
+
+    with caplog.at_level("WARNING", logger="pincer.tools.builtin.image_gen"):
+        output = await handler(
+            prompt="a sunset", context={"user_id": "u", "channel": "telegram", "channel_map": {"telegram": channel}}
+        )
+
+    assert json.loads(output)["status"] == "success"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None

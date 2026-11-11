@@ -10,7 +10,22 @@ class ConfigError(PincerError):
 
 
 class LLMError(PincerError):
-    """Error communicating with an LLM provider."""
+    """Error communicating with an LLM provider.
+
+    ``retryable``: the failure is transient (a rate limit, an overload, a server error), so the
+    same request may succeed when asked again; a 4xx or a connection failure is not."""
+
+    def __init__(self, message: str = "", *, retryable: bool = False) -> None:
+        self.retryable = retryable
+        super().__init__(message)
+
+
+class DailyBudgetReachedError(PincerError):
+    """An LLM request was refused before it was sent: today's recorded spend is at the daily budget."""
+
+
+class BudgetCheckFailedError(PincerError):
+    """An LLM request was refused before it was sent: the daily budget could not be read."""
 
 
 class LLMRateLimitError(LLMError):
@@ -18,7 +33,9 @@ class LLMRateLimitError(LLMError):
 
     def __init__(self, retry_after: float | None = None):
         self.retry_after = retry_after
-        super().__init__(f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited.")
+        super().__init__(
+            f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited.", retryable=True
+        )
 
 
 class LLMOutputTruncatedError(LLMError):
@@ -28,15 +45,6 @@ class LLMOutputTruncatedError(LLMError):
         self.output_tokens = output_tokens
         self.max_tokens = max_tokens
         super().__init__(f"LLM output cut off at max_tokens ({output_tokens} of {max_tokens} tokens)")
-
-
-class BudgetExceededError(PincerError):
-    """Daily cost budget exceeded."""
-
-    def __init__(self, spent: float, limit: float):
-        self.spent = spent
-        self.limit = limit
-        super().__init__(f"Budget exceeded: ${spent:.4f} / ${limit:.2f}")
 
 
 class ToolError(PincerError):

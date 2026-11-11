@@ -394,7 +394,7 @@ async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, ca
     with patch.object(session_manager._store, "save", side_effect=failing_save), caplog.at_level(logging.WARNING):
         await session_manager.end_turn(session)
 
-    assert len(session.messages) == 20
+    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
     assert session._turn_open is False
     assert all(not m.thinking_blocks and not m.images for m in session.messages)
     warnings = [r for r in caplog.records if r.name == "pincer.core.session" and r.levelno == logging.WARNING]
@@ -427,7 +427,7 @@ async def test_a_turn_keeps_its_history_whole_and_ends_by_dropping_thinking_and_
         assert len(session.messages) == 25  # nothing is trimmed while the turn runs
         assert any(m.thinking_blocks for m in session.messages)
 
-    assert len(session.messages) == 20
+    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
     assert all(not m.thinking_blocks and not m.images for m in session.messages)
 
 
@@ -437,7 +437,7 @@ async def test_a_turn_that_fails_still_ends(session_manager):
             await _fill_past_the_cap(session_manager, session)
             raise RuntimeError("boom")
 
-    assert len(session.messages) == 20
+    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
     assert all(not m.thinking_blocks and not m.images for m in session.messages)
     assert session._turn_open is False
 
@@ -462,7 +462,7 @@ async def test_a_cancelled_turn_still_ends(session_manager):
         await task
 
     session = holder[0]
-    assert len(session.messages) == 20
+    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
     assert all(not m.thinking_blocks and not m.images for m in session.messages)
 
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic_sse as sse
 import pytest
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
+from pincer.config.pricing import TokenUsage
 from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ThinkingBlock, ToolCall
 
 MODULE = "pincer.llm.anthropic_common"
@@ -223,11 +225,13 @@ async def test_complete_passes_system_and_tools(anthropic_settings):
         )
 
     kwargs = mock_client.messages.stream.call_args.kwargs
-    assert kwargs["system"] == "be nice"
-    # tools pass through with the Sprint-5 cache breakpoint on the last one
+    # tools and system pass through with their 1-hour cache breakpoints (issue #357 slice 10)
+    assert kwargs["system"] == [
+        {"type": "text", "text": "be nice", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    ]
     sent = kwargs["tools"]
     assert [{k: v for k, v in t_.items() if k != "cache_control"} for t_ in sent] == tools
-    assert sent[-1]["cache_control"] == {"type": "ephemeral"}
+    assert sent[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 
 @pytest.mark.asyncio
@@ -377,27 +381,101 @@ async def test_complete_rate_limit_exhausted(anthropic_settings):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
 
-@pytest.mark.asyncio
-async def test_stream_turn_rate_limit_error(anthropic_settings):
+def _streaming(message: Message, *texts: str, then: Exception | None = None) -> MagicMock:
+    """A `messages.stream()` context manager that streams `texts`, then raises `then` or finishes on `message`."""
+
+    async def text_stream():
+        for text in texts:
+            yield text
+        if then is not None:
+            raise then
+
+    stream = MagicMock(text_stream=text_stream())
+    stream.get_final_message = AsyncMock(return_value=message)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=stream)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _rate_limit(retry_after: str):
     import anthropic
 
-    from pincer.exceptions import LLMRateLimitError
+    return anthropic.RateLimitError("slow down", response=MagicMock(headers={"retry-after": retry_after}), body={})
+
+
+async def _stream_into(
+    events: list[Any], mocks: dict[str, MagicMock], anthropic_settings: Any, *streams: MagicMock
+) -> None:
+    """One `stream_turn` over `streams`: its events are appended to `events` as they come, so a
+    test still sees them when it raises; `mocks` gets "create" (`messages.stream`) and "sleep"."""
     from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 
-    rate_err = anthropic.RateLimitError("slow down", response=MagicMock(headers={"retry-after": "1"}), body={})
-    stream_cm = MagicMock()
-    stream_cm.__aenter__ = AsyncMock(side_effect=rate_err)
-    stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-    with patch(f"{MODULE}.AsyncAnthropic") as mock_cls:
+    mocks["create"] = MagicMock(side_effect=list(streams))
+    with (
+        patch(f"{MODULE}.AsyncAnthropic") as mock_cls,
+        patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        mocks["sleep"] = sleep
         mock_client = MagicMock()
-        mock_client.messages.stream = MagicMock(return_value=stream_cm)
+        mock_client.messages.stream = mocks["create"]
         mock_cls.return_value = mock_client
-
         provider = AnthropicCompatibleProvider(anthropic_settings, "anthropic")
-        with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
-                pass
+        async for event in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
+            events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_retries_a_rate_limit_before_its_first_event(anthropic_settings):
+    """Nothing has streamed yet, so asking again is safe: the same policy as complete()."""
+    events: list[Any] = []
+    mocks: dict[str, MagicMock] = {}
+    await _stream_into(
+        events,
+        mocks,
+        anthropic_settings,
+        _failing_stream(_rate_limit("2")),
+        _streaming(_make_message("after retry"), "after retry"),
+    )
+
+    assert [e.text for e in events if e.response is None] == ["after retry"]
+    assert events[-1].response.content == "after retry"
+    assert mocks["create"].call_count == 2
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(2.0,)]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_never_retries_a_rate_limit_after_its_first_event(anthropic_settings):
+    """The caller already has "Hel": asking again would stream it twice."""
+    from pincer.exceptions import LLMRateLimitError
+
+    events: list[Any] = []
+    mocks: dict[str, MagicMock] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into(
+            events,
+            mocks,
+            anthropic_settings,
+            _streaming(_make_message("Hello"), "Hel", then=_rate_limit("0")),
+            _streaming(_make_message("Hello"), "Hello"),
+        )
+
+    assert [e.text for e in events] == ["Hel"]
+    assert mocks["create"].call_count == 1
+    mocks["sleep"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_rate_limit_error(anthropic_settings):
+    """Three attempts in all, waiting retry-after·2^attempt between them, as complete() does."""
+    from pincer.exceptions import LLMRateLimitError
+
+    mocks: dict[str, MagicMock] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into([], mocks, anthropic_settings, *(_failing_stream(_rate_limit("1")) for _ in range(3)))
+
+    assert mocks["create"].call_count == 3
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(1.0,), (2.0,)]
 
 
 @pytest.mark.asyncio
@@ -484,46 +562,6 @@ async def test_close(anthropic_settings):
         await provider.close()
 
     mock_client.close.assert_awaited_once()
-
-
-# ── Prompt caching on tool schemas (Sprint 5, T5.4) ──────────────────
-
-
-class TestToolPromptCaching:
-    def _provider(self, settings):
-        from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-
-        with patch(f"{MODULE}.AsyncAnthropic"):
-            return AnthropicCompatibleProvider(settings, "anthropic")
-
-    def test_last_tool_carries_cache_control(self, anthropic_settings):
-        provider = self._provider(anthropic_settings)
-        tools = [
-            {"name": "a", "description": "x", "input_schema": {}},
-            {"name": "b", "description": "y", "input_schema": {}},
-        ]
-        cached = provider._maybe_cache_tools(tools)
-        assert "cache_control" not in cached[0]
-        assert cached[-1]["cache_control"] == {"type": "ephemeral"}
-        # the caller's list and dicts are never mutated
-        assert "cache_control" not in tools[-1]
-
-    def test_disabled_via_setting(self, anthropic_settings):
-        anthropic_settings.prompt_cache_tools = False
-        provider = self._provider(anthropic_settings)
-        tools = [{"name": "a", "description": "x", "input_schema": {}}]
-        assert provider._maybe_cache_tools(tools) is tools
-
-    async def test_complete_sends_cached_tools(self, anthropic_settings):
-        provider = self._provider(anthropic_settings)
-        provider._client = MagicMock()
-        provider._client.messages.stream = MagicMock(return_value=_final_stream(_make_message()))
-        tools = [{"name": "a", "description": "x", "input_schema": {}}]
-
-        await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)
-
-        sent_tools = provider._client.messages.stream.call_args.kwargs["tools"]
-        assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}
 
 
 # ── Per-model request params: temperature only where the model accepts it ──
@@ -965,3 +1003,44 @@ async def test_merging_assistant_messages_never_moves_a_later_thinking_ahead_of_
         "role": "assistant",
         "content": [{"type": "text", "text": "One moment."}, *_THINKING_API, {"type": "text", "text": "Done."}],
     }
+
+
+# ── Usage: every token type (issue #357) ──────────────────────────
+
+_CACHED_USAGE = {
+    "input_tokens": 36,
+    "cache_creation_input_tokens": 27_659,
+    "cache_creation": {"ephemeral_5m_input_tokens": 27_559, "ephemeral_1h_input_tokens": 100},
+    "cache_read_input_tokens": 281_470,
+}
+
+
+async def _usage_of(settings, method: str, usage: dict) -> TokenUsage:
+    """The usage one scripted response carrying `usage` parses to, via `method`."""
+    async with sse.ScriptedAnthropic(settings, [([sse.text("ok")], "end_turn", usage)]) as llm:
+        if method == "complete":
+            response = await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+        else:
+            events = [e async for e in llm.provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")])]
+            response = events[-1].response
+    return response.usage
+
+
+@pytest.mark.parametrize("method", ["complete", "stream_turn"])
+async def test_both_paths_split_cache_writes_by_ttl(anthropic_settings, method):
+    expected = TokenUsage(
+        input_tokens=36,
+        cache_write_5m_tokens=27_559,
+        cache_write_1h_tokens=100,
+        cache_read_tokens=281_470,
+        output_tokens=5,  # the scripted stream's message_delta
+    )
+    assert await _usage_of(anthropic_settings, method, _CACHED_USAGE) == expected
+
+
+async def test_writes_without_a_ttl_breakdown_are_five_minute_writes(anthropic_settings):
+    """The default TTL: an endpoint that reports only the total wrote 5-minute entries."""
+    usage = {"input_tokens": 36, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 0}
+    assert await _usage_of(anthropic_settings, "complete", usage) == TokenUsage(
+        input_tokens=36, cache_write_5m_tokens=500, output_tokens=5
+    )

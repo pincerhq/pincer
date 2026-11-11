@@ -600,6 +600,18 @@ class TestVoiceConfig:
         r = client.put("/api/voice/config", json={"voice_turn_model": "azure:gpt-5-mini"})
         assert r.status_code == 422
 
+    def test_put_unpriced_model_is_422(self, client, monkeypatch, tmp_path):
+        """A turn model with no [pricing] entry would be called unpriced (#357): refused, nothing persisted."""
+        self._env(monkeypatch, openai_api_key="sk-test")
+        r = client.put("/api/voice/config", json={"voice_turn_model": "openai:gpt-unpriced"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == (
+            "Turn model 'openai:gpt-unpriced' can't be used here: no [pricing] entry for model 'gpt-unpriced'; "
+            'add [pricing."gpt-unpriced"] to pincer.local.toml'
+        )
+        assert not (tmp_path / "voice_runtime.json").exists()
+        assert client.put("/api/voice/config", json={"voice_turn_model": "openai:gpt-5-mini"}).status_code == 200
+
     def test_choices_are_provider_qualified_on_custom_default(self, client, monkeypatch):
         self._gemma_default(monkeypatch)
         choices = client.get("/api/voice/config").json()["choices"]
@@ -692,6 +704,33 @@ class TestApplyOverrides:
         (tmp_path / "voice_runtime.json").write_text('{"voice_turn_model": "openai:gpt-5-mini"}')
         apply_overrides(live, unusable_reason=lambda m: plan_voice_turn(live, m).unusable)
         assert live.voice_turn_model == ""
+
+    @pytest.mark.parametrize(
+        ("stored", "applied"), [("openai:gpt-unpriced", ""), ("openai:gpt-5-mini", "openai:gpt-5-mini")]
+    )
+    def test_with_the_pricing_check(self, tmp_path, caplog, stored, applied):
+        """An unpriced stored turn model is skipped like an unbuildable one (#357); a priced one applies."""
+        import json as _json
+        import logging
+
+        from pincer.config import Settings
+        from pincer.llm.pricing_check import voice_turn_unusable
+        from pincer.voice.runtime_config import apply_overrides
+
+        live = Settings(openai_api_key="sk-test", data_dir=tmp_path)  # type: ignore[arg-type]
+        (tmp_path / "voice_runtime.json").write_text(_json.dumps({"voice_turn_model": stored}))
+        caplog.set_level(logging.INFO, logger="pincer.voice.runtime_config")
+        apply_overrides(live, unusable_reason=lambda m: voice_turn_unusable(live, m))
+        assert live.voice_turn_model == applied
+        skipped = [r.getMessage() for r in caplog.records if "Ignoring stored voice turn model" in r.getMessage()]
+        assert skipped == (
+            []
+            if applied
+            else [
+                "Ignoring stored voice turn model 'openai:gpt-unpriced' (no [pricing] entry for model 'gpt-unpriced'; "
+                "add [pricing.\"gpt-unpriced\"] to pincer.local.toml) — using 'the default provider/model' instead"
+            ]
+        )
 
 
 # ── Sprint 12: receptionist messages ────────────────────────────────

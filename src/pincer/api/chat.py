@@ -37,7 +37,7 @@ from pincer.api.approvals import (
 from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
 from pincer.core.session import channel_session_key, conversation_key
-from pincer.exceptions import BudgetExceededError, LLMError
+from pincer.exceptions import BudgetCheckFailedError, LLMError
 from pincer.services.voice import CallsServiceDep
 
 if TYPE_CHECKING:
@@ -161,10 +161,26 @@ async def post_message(
             session_key=_conversation_session_key(user_id, body.conversation_id),
             memory=body.memory,
         )
-    except BudgetExceededError as e:
-        raise HTTPException(402, str(e)) from e
+    except BudgetCheckFailedError as e:
+        # The same 503 as a turn that loses the budget mid-way: nothing was sent or saved
+        raise HTTPException(503, str(e)) from e
     except LLMError as e:
         raise HTTPException(502, str(e)) from e
+    if (resp.budget_reached or resp.budget_check_failed) and not resp.call_sids:
+        # A refusal, not a reply: 402 when the budget is reached, 503 when it could not be
+        # read mid-turn. A turn that placed a call still answers 200, so the client keeps
+        # waiting for that call's report.
+        raise HTTPException(503 if resp.budget_check_failed else 402, resp.text)
+    if resp.budget_reached or resp.budget_check_failed:
+        # As the stream's `done`: the reply is the model's own text, the warning beside it. A
+        # turn that wrote nothing (it only dialled) replies with the warning: never an empty bubble.
+        return {
+            "reply": resp.turn_text or resp.text,
+            "budget_warning": resp.text,
+            "cost_usd": resp.cost_usd,
+            "model": resp.model,
+            "call_sids": resp.call_sids,
+        }
     return {"reply": resp.text, "cost_usd": resp.cost_usd, "model": resp.model, "call_sids": resp.call_sids}
 
 
@@ -186,6 +202,7 @@ async def post_stream(
         token = set_send_event(send_event)
 
         async def driver() -> None:
+            placed_call = False
             try:
                 async with contextlib.aclosing(
                     agent.handle_message_stream(
@@ -206,11 +223,24 @@ async def post_stream(
                             # A placed call: its report comes later from /call-reports.
                             if chunk.call_sid:
                                 done["call_sid"] = chunk.call_sid
+                                placed_call = True
                             await queue.put(("tool", done))
                         elif chunk.type == StreamEventType.DONE:
-                            await queue.put(("done", {"text": chunk.content}))
-            except BudgetExceededError as e:
-                await queue.put(("error", {"message": f"Warning: Daily budget — {e}"}))
+                            if (chunk.budget_reached or chunk.budget_check_failed) and not placed_call:
+                                # A refusal, not a reply: clients key on the error event. A turn
+                                # that placed a call ends with `done`, as `POST /message` answers
+                                # 200, so the client keeps waiting for that call's report.
+                                await queue.put(("error", {"message": chunk.content, "cost_usd": chunk.cost_usd}))
+                            elif chunk.budget_reached or chunk.budget_check_failed:
+                                # `text` stays what was streamed, so a client that shows it keeps
+                                # the turn's words; the warning comes beside it
+                                stopped = {"text": chunk.turn_text or chunk.content, "cost_usd": chunk.cost_usd}
+                                await queue.put(("done", {**stopped, "budget_warning": chunk.content}))
+                            else:
+                                await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))
+            except BudgetCheckFailedError as e:
+                # Refused before any request, in the shape of a budget refusal
+                await queue.put(("error", {"message": str(e), "cost_usd": 0.0}))
             except LLMError as e:
                 await queue.put(("error", {"message": f"LLM error: {e}"}))
             except Exception as e:  # noqa: BLE001

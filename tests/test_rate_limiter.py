@@ -50,15 +50,6 @@ async def test_tool_call_rate_limit():
 
 
 @pytest.mark.asyncio
-async def test_daily_spend_limit():
-    limiter = RateLimiter(max_daily_spend_usd=1.0)
-    await limiter.record_spend(0.90)
-    await limiter.check_daily_spend(0.05)
-    with pytest.raises(RateLimitExceeded):
-        await limiter.check_daily_spend(0.20)
-
-
-@pytest.mark.asyncio
 async def test_concurrent_llm_semaphore():
     limiter = RateLimiter(max_concurrent_llm=2)
     acquired = 0
@@ -70,14 +61,19 @@ async def test_concurrent_llm_semaphore():
 
 
 @pytest.mark.asyncio
-async def test_user_status():
-    limiter = RateLimiter(messages_per_minute=10, max_daily_spend_usd=5.0)
+async def test_user_status_reports_rates_but_no_spend():
+    """Spend is the cost service's alone (issue #357): the limiter keeps no second counter."""
+    limiter = RateLimiter(messages_per_minute=10)
     await limiter.check_message("u1")
-    await limiter.record_spend(1.50)
     status = await limiter.get_status("u1")
     assert status["messages_remaining"] == 9
-    assert status["daily_spend_usd"] == 1.50
-    assert status["daily_spend_pct"] == 30.0
+    assert set(status) == {
+        "messages_remaining",
+        "messages_limit",
+        "tool_calls_remaining",
+        "tool_calls_limit",
+        "concurrent_llm_available",
+    }
 
 
 @pytest.mark.asyncio
@@ -101,11 +97,3 @@ async def test_cleanup_user():
     limiter.cleanup_user("u1")
     # After cleanup, user gets fresh bucket
     await limiter.check_message("u1")
-
-
-@pytest.mark.asyncio
-async def test_update_daily_limit():
-    limiter = RateLimiter(max_daily_spend_usd=1.0)
-    await limiter.update_daily_limit(10.0)
-    await limiter.record_spend(5.0)
-    await limiter.check_daily_spend(4.0)  # Should pass now

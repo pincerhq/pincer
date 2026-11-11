@@ -386,10 +386,17 @@ sends only:
    setting it replaces the whole list),
 2. every tool of the memory server (`PINCER_MEMORY_MCP_SERVER`),
 3. tools already called in the conversation,
-4. the tools that best match the request, filling the remaining slots.
+4. the tools that best match the request, filling the slots up to
+   `PINCER_TOOL_SELECTION_MAX` minus `PINCER_TOOL_SELECTION_HEADROOM` (default
+   27, so 100 tools).
 
-The chosen tools go out in registry order, so the same set is always the same
-prompt prefix. Anthropic-only setups always get every tool: Anthropic has no
+A conversation's first selection goes out in registry order. Later turns keep
+that list and append, at the end, the tools they need that it lacks: the three
+kinds above that are missing, plus the top `PINCER_TOOL_SELECTION_HEADROOM`
+ranked matches. The tools already sent stay the same prompt prefix, so OpenAI's
+cache keeps hitting. The list is kept with the session, so it survives a
+restart. Only when appending would pass `PINCER_TOOL_SELECTION_MAX` is the list
+selected afresh, which costs one cache miss. Anthropic-only setups always get every tool: Anthropic has no
 cap, and it caches the whole tools block as a static prefix, which a per-turn
 selection would invalidate. Voice calls keep their own tool filter.
 

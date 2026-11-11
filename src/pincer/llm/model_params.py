@@ -37,6 +37,9 @@ class _OpenAIReasoningRule(NamedTuple):
     efforts: tuple[str, ...]  # reasoning_effort levels the model accepts
     disabled: str | None  # the level `disabled` sends; None: reasoning can't be turned off
     thinks_by_default: bool  # reasons when no reasoning_effort is sent
+    # Chat Completions takes function tools only at the off level: a tool request with no
+    # effort set sends `disabled`, and one that would send any other level is refused at startup
+    tools_need_off: bool = False
 
 
 # claude-<family>-<major>[-<minor>][-<date>], optionally behind a vendor prefix
@@ -121,6 +124,12 @@ _OPENAI_MAX_OUTPUT_TOKENS: dict[str, int] = {
     "gpt-5-nano": 128_000,
     "gpt-5.1": 128_000,
     "gpt-5.2": 128_000,
+    # gpt-6 family: "128,000 max output tokens" on each model page (fetched 2026-11-09)
+    "gpt-6.1-terra": 128_000,
+    "gpt-6-sol": 128_000,
+    "gpt-6-luna": 128_000,
+    "gpt-6.1-sol": 128_000,
+    "gpt-6-astra": 128_000,
 }
 
 # ── Effort on OpenAI (issue #345) ──
@@ -163,6 +172,25 @@ _OPENAI_GPT5_RULES: tuple[tuple[int, _OpenAIReasoningRule], ...] = (
     (1, _OpenAIReasoningRule(_EFFORT_TO_HIGH, disabled="none", thinks_by_default=False)),
     (2, _OpenAIReasoningRule(_EFFORT_TO_XHIGH, disabled="none", thinks_by_default=False)),
 )
+# gpt-6 family (issue #357), by exact name with an optional date suffix: a strict allow-list
+# like the one above. Model pages, fetched 2026-11-09
+# (https://developers.openai.com/api/docs/models/<name>): terra, sol and luna take
+# "none, low, medium (default), high, xhigh, and max"; astra and gpt-6.1-sol take
+# "low, medium, high, xhigh, and max" (no none). Chat Completions accepts function tools
+# only at none: gpt-6-sol / gpt-6-luna pages ("Chat Completions supports function calling
+# only with reasoning_effort set to none") and a live probe on Azure OpenAI (lead,
+# 2026-11-09: gpt-6.1-terra with one function tool, no effort or "low" -> 400, "none" -> 200).
+# So astra and gpt-6.1-sol can't take tools on Chat Completions at all (Responses API, #358).
+_GPT6_RE = re.compile(r"(?P<name>gpt-6(?:\.\d+)?-[a-z]+)(?:-\d{4}-\d{2}-\d{2})?$")
+_OPENAI_GPT6_RULE = _OpenAIReasoningRule(_EFFORT_ALL, disabled="none", thinks_by_default=True, tools_need_off=True)
+_OPENAI_GPT6_NO_OFF_RULE = _OPENAI_GPT6_RULE._replace(disabled=None)
+_OPENAI_GPT6_RULES: dict[str, _OpenAIReasoningRule] = {
+    "gpt-6.1-terra": _OPENAI_GPT6_RULE,
+    "gpt-6-sol": _OPENAI_GPT6_RULE,
+    "gpt-6-luna": _OPENAI_GPT6_RULE,
+    "gpt-6.1-sol": _OPENAI_GPT6_NO_OFF_RULE,
+    "gpt-6-astra": _OPENAI_GPT6_NO_OFF_RULE,
+}
 # The thinking fragments that turn extended thinking off. Sonnet 5.5's between_tools
 # counts: "the model does no extended thinking, and the short progress updates it
 # writes between tool calls come back as thinking blocks" (Claude API docs, Sonnet
@@ -242,15 +270,30 @@ def openai_accepts_reasoning_effort(model: str) -> bool:
     deployment name, so a deployment called e.g. ``voice-fast`` never gets it.
     A fine-tune ``ft:<base>:…`` or gateway ``vendor/`` prefix is stripped.
     """
-    return _openai_effort_match(model) is not None
+    return _openai_reasoning_rule(model) is not None
 
 
-def _openai_effort_match(model: str) -> re.Match[str] | None:
-    """The allow-list match for a model id, with any ``ft:`` / ``vendor/`` prefix stripped."""
+def openai_tools_need_off(model: str) -> bool:
+    """Whether this OpenAI-wire model takes function tools on Chat Completions only with
+    reasoning off (the gpt-6 family). The startup check refuses a chat or voice setting
+    that would send it tools at any other effort."""
+    rule = _openai_reasoning_rule(model)
+    return rule is not None and rule.tools_need_off
+
+
+def openai_tools_unusable(model: str) -> bool:
+    """Whether this OpenAI-wire model can't take function tools on Chat Completions at all:
+    it needs reasoning off for them and has no off level (gpt-6-astra, gpt-6.1-sol)."""
+    rule = _openai_reasoning_rule(model)
+    return rule is not None and rule.tools_need_off and rule.disabled is None
+
+
+def _bare_openai_name(model: str) -> str:
+    """The model id lower-cased, with any ``ft:`` / ``vendor/`` prefix stripped."""
     bare = model.lower().rsplit("/", 1)[-1]
     if bare.startswith("ft:"):
         bare = bare.removeprefix("ft:").split(":", 1)[0]
-    return _OPENAI_EFFORT_RE.match(bare)
+    return bare
 
 
 # ── Effort and thinking (issue #345) ──────────────────────────────────────────
@@ -284,19 +327,26 @@ class ReasoningParams:
 
 
 def resolve_reasoning(
-    wire: ReasoningWire, model: str, effort: ReasoningEffort, thinking: ThinkingMode
+    wire: ReasoningWire,
+    model: str,
+    effort: ReasoningEffort,
+    thinking: ThinkingMode,
+    *,
+    with_tools: bool = False,
 ) -> ReasoningParams:
     """Translate the effort/thinking settings into what `model` accepts.
 
     Unsupported effort levels step down to the nearest supported one. Anything
     the model would reject, or that can't be placed because the model isn't
     recognised, is dropped and listed in `dropped` with the reason; logging it
-    is the caller's job. Empty settings always resolve to nothing.
+    is the caller's job. Empty settings resolve to nothing, except on a request
+    `with_tools` to a model whose Chat Completions takes tools only with reasoning
+    off (gpt-6): that sends the off level, since sending nothing is a 400.
     """
+    if wire is ReasoningWire.OPENAI:
+        return _resolve_openai(model, effort, thinking, with_tools=with_tools)
     if not (effort or thinking):
         return ReasoningParams()
-    if wire is ReasoningWire.OPENAI:
-        return _resolve_openai(model, effort, thinking)
     version = _claude_version(model)
     rule = _claude_reasoning_rule(version) if version else None
     if version is None or rule is None:
@@ -337,6 +387,7 @@ def resolve_and_warn(
     thinking: ThinkingMode,
     *,
     pinned: bool = False,
+    with_tools: bool = False,
 ) -> ReasoningParams:
     """`resolve_reasoning`, plus one WARNING per wire, model and dropped value (repeats at DEBUG).
 
@@ -344,7 +395,7 @@ def resolve_and_warn(
     is not the operator's setting, so a dropped value is logged at DEBUG only and a model that
     can't take it doesn't warn every deployment. An operator's setting always warns.
     """
-    params = resolve_reasoning(wire, model, effort, thinking)
+    params = resolve_reasoning(wire, model, effort, thinking, with_tools=with_tools)
     for dropped in params.dropped:
         if pinned:
             logger.debug("Not sending %s=%s to %s: %s", dropped.setting, dropped.value, model, dropped.reason)
@@ -380,12 +431,19 @@ def model_thinks(wire: ReasoningWire, model: str, params: ReasoningParams) -> bo
     return sent not in _CLAUDE_THINKING_OFF_TYPES
 
 
-def _resolve_openai(model: str, effort: ReasoningEffort, thinking: ThinkingMode) -> ReasoningParams:
+def _resolve_openai(
+    model: str, effort: ReasoningEffort, thinking: ThinkingMode, *, with_tools: bool = False
+) -> ReasoningParams:
     """The OpenAI-wire half of `resolve_reasoning`: one `reasoning_effort` knob.
 
     `adaptive` has no OpenAI form and is ignored. `disabled` sends the row's
     off level, which replaces any effort; it is dropped at effort xhigh/max.
     """
+    if not (effort or thinking):
+        rule = _openai_reasoning_rule(model) if with_tools else None
+        if rule is not None and rule.tools_need_off and rule.disabled is not None:
+            return ReasoningParams(fragment={"reasoning_effort": rule.disabled})
+        return ReasoningParams()
     if thinking == "adaptive":
         logger.debug("Thinking adaptive ignored for %s: OpenAI models have no such setting", model)
     off = "disabled" if thinking == "disabled" else ""
@@ -416,7 +474,11 @@ def _resolve_openai(model: str, effort: ReasoningEffort, thinking: ThinkingMode)
 
 def _openai_reasoning_rule(model: str) -> _OpenAIReasoningRule | None:
     """The table row for an allow-listed model; None off the allow-list."""
-    match = _openai_effort_match(model)
+    bare = _bare_openai_name(model)
+    gpt6 = _GPT6_RE.match(bare)
+    if gpt6 is not None:
+        return _OPENAI_GPT6_RULES.get(gpt6.group("name"))
+    match = _OPENAI_EFFORT_RE.match(bare)
     if match is None:
         return None
     if match.group("gpt5") is None:

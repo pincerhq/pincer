@@ -57,6 +57,7 @@ class FakeEngine:
 
 def _settings(**overrides: Any) -> MagicMock:
     settings = MagicMock()
+    settings.daily_budget_usd = 0.0  # no LLM budget: a new call checks it first
     settings.twilio_auth_token.get_secret_value.return_value = AUTH_TOKEN
     settings.voice_webhook_validate = True
     settings.voice_ws_auth_required = True

@@ -300,6 +300,7 @@ class TestGermanOutboundTwiml:
         settings.voice_outbound_enabled = True
         settings.voice_webhook_base_url = "https://example.com"
         settings.voice_outbound_max_daily = 10
+        settings.daily_budget_usd = 0.0  # no LLM budget
         settings.voice_max_call_duration = 600
         settings.voice_engine = "conversation_relay"
         settings.voice_language = "en-US"

@@ -33,7 +33,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
-    assert len(report.checks) == 69
+    # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
+    assert len(report.checks) == 71
 
     assert 0 <= report.score <= 100
 
@@ -2080,8 +2081,13 @@ def test_llm_reasoning_summary_on_an_openai_provider_uses_its_own_model():
             {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-5"},
             CheckStatus.WARNING,
         ),
+        # gpt-6 thinks by default, but voice turns carry tools, so they send none (issue #357)
+        (
+            {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-6.1-terra"},
+            CheckStatus.PASS,
+        ),
     ],
-    ids=["thinks-150", "thinks-600", "disabled-150", "between-tools-150", "gpt-5.1-150", "gpt-5-150"],
+    ids=["thinks-150", "thinks-600", "disabled-150", "between-tools-150", "gpt-5.1-150", "gpt-5-150", "gpt-6-150"],
 )
 def test_voice_thinking_token_limit(update, status):
     result = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(**update))
@@ -2160,3 +2166,39 @@ def test_llm_reasoning_voice_is_skipped_when_voice_is_off():
     result = SecurityDoctor()._check_llm_reasoning_voice(_llm_cfg(voice_enabled=False, voice_outbound_enabled=False))
 
     assert result.status == CheckStatus.SKIPPED
+
+
+def test_llm_reasoning_shows_none_sent_with_tools_to_gpt_6_and_not_for_summaries():
+    """Chat and voice turns carry tools, so gpt-6 gets none even with nothing set; summaries carry none."""
+    cfg = _llm_cfg(
+        openai_api_key="sk-test",
+        default_provider="openai",
+        openai_model="gpt-6.1-terra",
+        summary_provider="openai",
+        summary_model="gpt-6.1-terra",
+    )
+    sent = "openai gpt-6.1-terra: nothing set; sends reasoning_effort none with tools (gpt-6 on Chat Completions)"
+
+    assert SecurityDoctor()._check_llm_reasoning_default(cfg).message == sent
+    assert SecurityDoctor()._check_llm_reasoning_voice(cfg).message == sent
+    assert (
+        SecurityDoctor()._check_llm_reasoning_summary(cfg).message == "openai gpt-6.1-terra: nothing set; model default"
+    )
+
+
+@pytest.mark.parametrize(
+    ("update", "status", "message"),
+    [
+        ({}, CheckStatus.PASS, "History compacted past 80,000 prompt tokens, to about 50,000"),
+        (
+            {"summary_threshold": 20},
+            CheckStatus.WARNING,
+            "PINCER_SUMMARY_THRESHOLD no longer has an effect: history is compacted by prompt tokens "
+            "(PINCER_COMPACT_AT_TOKENS / PINCER_COMPACT_TO_TOKENS)",
+        ),
+    ],
+)
+def test_llm_compaction_warns_about_a_summary_threshold_still_set(update, status, message):
+    result = SecurityDoctor()._check_llm_compaction(_llm_cfg(**update))
+
+    assert (result.status, result.message, result.category) == (status, message, "llm")

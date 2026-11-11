@@ -148,6 +148,27 @@ On `/api/chat/*` the user depends on the credential:
   optional: without it the key's own identity is used.
 - **Auth disabled** — `X-Pincer-User` is required.
 
+### Daily budget on `/api/chat/message` and `/api/chat/stream`
+
+With `PINCER_DAILY_BUDGET_USD` above 0, the budget is checked before every LLM
+request of a turn. A refused turn is not a reply: nothing from it is saved,
+its user message included.
+
+| Case | `POST /api/chat/message` | `POST /api/chat/stream` |
+|---|---|---|
+| Normal turn | `200 {reply, cost_usd, model, call_sids}` | `chunk`… then `done {text, cost_usd}` |
+| Budget reached | `402`, `detail` = the warning | one `error {message, cost_usd}` |
+| Budget can't be read, before or during the turn | `503`, `detail` = the warning | one `error {message, cost_usd}` |
+| Stopped by either, after the turn placed a call | `200 {reply, budget_warning, cost_usd, model, call_sids}` | `done {text, cost_usd, budget_warning}` |
+
+- `cost_usd` is the turn's recorded LLM spend, in dollars.
+- A turn that placed a call still answers `200` / `done`, so the client keeps
+  waiting for the call's report. In that case:
+  - `reply` / `text` is what the model wrote in that turn, or the warning when
+    it wrote nothing;
+  - `budget_warning` always holds the warning.
+- `budget_warning` is absent on a normal turn.
+
 ---
 
 ## Health
@@ -189,7 +210,7 @@ Today's spending breakdown.
   "date": "2026-02-26",
   "total_usd": 1.58,
   "by_model": {
-    "claude-sonnet-4-20250514": 1.20,
+    "claude-sonnet-5-5": 1.20,
     "claude-haiku-4-5-20251001": 0.38
   },
   "by_tool": {

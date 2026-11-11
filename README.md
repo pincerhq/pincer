@@ -507,7 +507,7 @@ PINCER_OPENAI_COMPATIBLE_MODEL=grok-3
 PINCER_ANTHROPIC_COMPATIBLE_PROVIDER=my-claude
 PINCER_ANTHROPIC_COMPATIBLE_BASE_URL=https://your-proxy/v1
 PINCER_ANTHROPIC_COMPATIBLE_API_KEY=...
-PINCER_ANTHROPIC_COMPATIBLE_MODEL=claude-3-7-sonnet
+PINCER_ANTHROPIC_COMPATIBLE_MODEL=claude-sonnet-5-5
 ```
 
 One OpenAI-wire + one Anthropic-wire compatible endpoint can run side by side (one `*_COMPATIBLE_*` set each), so the maximum distinct pool is `anthropic` + `openai` + one OpenAI-compatible + one Anthropic-compatible.
@@ -607,10 +607,10 @@ No frameworks. No abstractions. `async/await` + the Anthropic SDK.
 ```
 pincer/
 ├── src/pincer/
-│   ├── core/         agent.py, session.py, config.py, soul.py, identity.py
+│   ├── core/         agent.py, session.py, compaction.py, config.py, soul.py, identity.py
 │   ├── llm/          anthropic, openai, grok, ollama, router, cost_tracker
 │   ├── channels/     telegram, whatsapp, discord, slack, email, voice, signal, web
-│   ├── memory/       store (SQLite+FTS5), embeddings, entities, summarizer
+│   ├── memory/       store (SQLite+FTS5), embeddings, entities
 │   ├── tools/        registry, sandbox, approval, builtin/ (24 core tools)
 │   ├── skills/       loader, scanner (AST), signer
 │   ├── image/        router, provider_fal, provider_gemini, types

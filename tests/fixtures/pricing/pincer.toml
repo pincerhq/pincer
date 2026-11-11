@@ -1,0 +1,18 @@
+# Test prices (USD per million tokens), loaded instead of the repository's pincer.toml
+# by the autouse `_test_pricing` fixture in tests/conftest.py. The figures are made up on
+# purpose: a test that sees a shipped list price has read production config.
+[pricing]
+"test-fixture-model" = { input = 7.0, cache_write = 7.0, cache_write_1h = 7.0, cache_read = 7.0, output = 7.0, source = "tests/fixtures/pricing" }
+"claude-haiku-4-5-20251001" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"gpt-4o" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"gpt-4o-mini" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"test" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"test-model" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"gpt-5-mini" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"claude-haiku-4-5" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"claude-a" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"claude-b" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"claude-opus-4-7" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"m" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"claude-haiku-5-5" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }
+"scripted" = { input = 1.0, cache_write = 1.0, cache_write_1h = 1.0, cache_read = 1.0, output = 2.0, source = "tests/fixtures/pricing" }

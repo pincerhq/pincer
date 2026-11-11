@@ -59,7 +59,8 @@ def resolve_timezone(settings: Any, override: str = "") -> ZoneInfo:
 
 
 def current_time_block(settings: Any, override: str = "", now: datetime | None = None) -> str:
-    """The system-prompt block carrying the current date and time.
+    """The block carrying the current date and time: in a turn's context on the
+    user message (a headless run's own system prompt).
 
     `now` is injectable so tests don't depend on the wall clock.
     """

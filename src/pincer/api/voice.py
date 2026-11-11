@@ -1412,6 +1412,10 @@ async def contacts(contacts_service: ContactsServiceDep) -> list[Contact]:
 # map the known ones to meaningful HTTP status codes for the app.
 _ERROR_STATUS: list[tuple[str, int]] = [
     ("not enabled", 403),
+    # The daily LLM budget (outbound.BUDGET_REFUSAL): a spend limit, not a rate limit
+    ("daily budget reached", 402),
+    # outbound.BUDGET_CHECK_FAILED: the cost database is down, not Twilio
+    ("could not check the daily budget", 503),
     ("disabled", 403),
     ("Invalid phone number", 422),
     ("Daily outbound call limit", 429),
@@ -1562,10 +1566,10 @@ async def update_voice_config(body: VoiceConfigUpdate, request: Request) -> Voic
     model = body.voice_turn_model.strip()
     if not TURN_MODEL_RE.match(model):
         raise HTTPException(status_code=422, detail=f"Invalid turn model format: {model!r}")
-    from pincer.llm.router import plan_voice_turn
+    from pincer.llm.pricing_check import voice_turn_unusable
 
-    plan = await asyncio.to_thread(plan_voice_turn, get_settings_relaxed(), model)
-    reason = plan.unusable
+    # Unbuildable or unpriced (#357): a runtime switch never bypasses the startup check.
+    reason = await asyncio.to_thread(voice_turn_unusable, get_settings_relaxed(), model)
     if reason is not None:
         raise HTTPException(status_code=422, detail=f"Turn model {model!r} can't be used here: {reason}")
 

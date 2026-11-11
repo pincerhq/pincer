@@ -88,8 +88,9 @@ def make_generate_image_handler(router: ImageProviderRouter):
         try:
             tracker = await get_cost_tracker()
             await tracker.add_image_cost(result.cost_usd, result.provider, result.model)
-        except Exception as e:
-            logger.debug("Cost tracking failed for image: %s", e)
+        except Exception:
+            # The generation is paid: a lost cost is worth more than a DEBUG line
+            logger.warning("Cost tracking failed for image: its spend is not recorded", exc_info=True)
 
         if sent == 0:
             return json.dumps({"error": "Failed to send any images to the user"})

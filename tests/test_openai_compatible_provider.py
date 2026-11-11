@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import openai as _openai
 import pytest
 
+from pincer.config.pricing import TokenUsage
 from pincer.llm.base import LLMMessage, MessageRole
 
 MODULE = "pincer.llm.openai_common"
@@ -389,24 +391,87 @@ async def test_stream_turn_with_tools(openai_settings):
     assert [e.text for e in events if e.response is None] == ["ok"]
 
 
-@pytest.mark.asyncio
-async def test_stream_turn_rate_limit_error(openai_settings):
-    from pincer.exceptions import LLMRateLimitError
+def _rate_limited() -> _openai.RateLimitError:
+    return _openai.RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+
+
+async def _stream_into(events: list[Any], mocks: dict[str, Any], openai_settings: Any, *steps: Any) -> None:
+    """One `stream_turn` whose n-th request is the n-th step: an exception `create` raises, or
+    `(texts, then)`: chunks streaming `texts`, then raising `then` (None: the stream ends). Events
+    are appended to `events` as they come; `mocks` gets "requests" (a count) and "sleep"."""
     from pincer.llm.openai_common import OpenAICompatibleProvider
 
-    async def _raise(**kwargs):
-        raise _openai.RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+    pending = list(steps)
+    mocks["requests"] = 0
 
-    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+    async def _create(**kwargs):
+        mocks["requests"] += 1
+        step = pending.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        texts, then = step
+
+        async def _gen():
+            for text in texts:
+                yield _make_stream_chunk(text)
+            if then is not None:
+                raise then
+
+        return _gen()
+
+    with (
+        patch(f"{MODULE}.AsyncOpenAI") as mock_cls,
+        patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        mocks["sleep"] = sleep
         mock_client = MagicMock()
-        mock_client.chat.completions.create = _raise
+        mock_client.chat.completions.create = _create
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
-
         provider = OpenAICompatibleProvider(openai_settings, "openai")
-        with pytest.raises(LLMRateLimitError):
-            async for _ in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
-                pass
+        async for event in provider.stream_turn([LLMMessage(role=MessageRole.USER, content="hi")]):
+            events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_retries_a_rate_limit_before_its_first_event(openai_settings):
+    """Nothing has streamed yet, so asking again is safe: the same policy as complete()."""
+    events: list[Any] = []
+    mocks: dict[str, Any] = {}
+    await _stream_into(events, mocks, openai_settings, _rate_limited(), (["after retry"], None))
+
+    assert [e.text for e in events if e.response is None] == ["after retry"]
+    assert events[-1].response.content == "after retry"
+    assert mocks["requests"] == 2
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(5.0,)]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_never_retries_a_rate_limit_after_its_first_event(openai_settings):
+    """The caller already has "Hel": asking again would stream it twice."""
+    from pincer.exceptions import LLMRateLimitError
+
+    events: list[Any] = []
+    mocks: dict[str, Any] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into(events, mocks, openai_settings, (["Hel"], _rate_limited()), (["Hello"], None))
+
+    assert [e.text for e in events] == ["Hel"]
+    assert mocks["requests"] == 1
+    mocks["sleep"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_rate_limit_error(openai_settings):
+    """Three attempts in all, waiting 5 s then 10 s between them, as complete() does."""
+    from pincer.exceptions import LLMRateLimitError
+
+    mocks: dict[str, Any] = {}
+    with pytest.raises(LLMRateLimitError):
+        await _stream_into([], mocks, openai_settings, *(_rate_limited() for _ in range(3)))
+
+    assert mocks["requests"] == 3
+    assert [c.args for c in mocks["sleep"].await_args_list] == [(5.0,), (10.0,)]
 
 
 @pytest.mark.asyncio
@@ -747,3 +812,189 @@ class TestReasoningSettings:
         assert body["model"] == "deploy-benign-345"
         assert "reasoning_effort" not in body
         assert not [r for r in caplog.records if "Not sending" in r.getMessage()]
+
+
+# ── Usage: every token type (issue #357) ──────────────────────────
+
+
+async def _usage_of(method: str, usage: dict) -> TokenUsage:
+    """The usage a real response carrying `usage` (OpenAI's JSON) parses to."""
+    import json
+
+    import httpx
+    from openai import AsyncOpenAI
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("stream"):
+            last = {**_CHUNK, "choices": [], "usage": usage}
+            sse = f"data: {json.dumps(_CHUNK)}\n\ndata: {json.dumps(last)}\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
+        return httpx.Response(200, json={**_COMPLETION, "usage": usage})
+
+    provider = OpenAICompatibleProvider(_reasoning_settings("gpt-5.4-mini"), "openai")
+    await provider._client.close()
+    provider._client = AsyncOpenAI(
+        api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    )
+    try:
+        if method == "complete":
+            response = await provider.complete(_HI)
+        else:
+            response = [e async for e in provider.stream_turn(_HI)][-1].response
+    finally:
+        await provider.close()
+    return response.usage
+
+
+@pytest.mark.parametrize("method", ["complete", "stream_turn"])
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        # cached input is read from the cache, not uncached input
+        ({"cached_tokens": 800}, TokenUsage(input_tokens=200, cache_read_tokens=800, output_tokens=50)),
+        # Azure reports writes (gpt-6) beside the cached count; they are stored as 5-minute writes
+        (
+            {"cached_tokens": 600, "cache_write_tokens": 300},
+            TokenUsage(input_tokens=100, cache_write_5m_tokens=300, cache_read_tokens=600, output_tokens=50),
+        ),
+        # no details at all: the whole prompt is uncached
+        (None, TokenUsage(input_tokens=1_000, output_tokens=50)),
+    ],
+)
+async def test_the_prompt_is_split_into_uncached_input_and_cache_tokens(method, details, expected):
+    usage = {"prompt_tokens": 1_000, "completion_tokens": 50, "total_tokens": 1_050}
+    if details is not None:
+        usage["prompt_tokens_details"] = details
+    assert await _usage_of(method, usage) == expected
+
+
+# One function tool: gpt-6 on Chat Completions takes it only at reasoning_effort "none"
+# (live probe on Azure OpenAI, 2026-11-09: no effort or "low" -> 400, "none" -> 200).
+_WEATHER_TOOL = [
+    {
+        "name": "get_weather",
+        "description": "Weather for a city",
+        "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    }
+]
+
+
+class TestGpt6Family:
+    @pytest.mark.parametrize("method", ["complete", "stream_turn"])
+    async def test_a_tool_turn_with_no_effort_sends_none(self, method):
+        body = await _sent_body(_reasoning_settings("gpt-6.1-terra"), method, tools=_WEATHER_TOOL)
+
+        assert body["model"] == "gpt-6.1-terra"
+        assert body["reasoning_effort"] == "none"
+        assert body["max_completion_tokens"] == 8192
+        assert "temperature" not in body
+        assert "max_tokens" not in body
+
+    async def test_a_turn_without_tools_and_no_effort_sends_nothing(self):
+        """The summary call: no tools, so the model reasons at its own default."""
+        body = await _sent_body(_reasoning_settings("gpt-6.1-terra"), "complete")
+
+        assert "reasoning_effort" not in body
+
+    async def test_a_gpt_5_tool_turn_with_no_effort_still_sends_nothing(self):
+        body = await _sent_body(_reasoning_settings("gpt-5.4-mini"), "complete", tools=_WEATHER_TOOL)
+
+        assert "reasoning_effort" not in body
+
+    async def test_a_per_call_default_on_a_tool_turn_sends_none(self):
+        """Voice's `default` override arrives as "" (send nothing): with tools that is a 400, so none."""
+        settings = _reasoning_settings("gpt-6.1-terra", reasoning_effort="high")
+
+        body = await _sent_body(settings, "stream_turn", tools=_WEATHER_TOOL, reasoning_effort="", thinking="")
+
+        assert body["reasoning_effort"] == "none"
+
+    async def test_an_explicit_effort_is_sent_as_set(self):
+        """The startup check refuses this for chat and voice; the leaf itself never rewrites it."""
+        body = await _sent_body(_reasoning_settings("gpt-6.1-terra", reasoning_effort="high"), "complete")
+
+        assert body["reasoning_effort"] == "high"
+
+    async def test_thinking_disabled_sends_none_over_an_effort(self):
+        settings = _reasoning_settings("gpt-6.1-terra", reasoning_effort="high", thinking="disabled")
+
+        body = await _sent_body(settings, "complete", tools=_WEATHER_TOOL)
+
+        assert body["reasoning_effort"] == "none"
+
+    async def test_astra_has_no_off_level_so_a_tool_turn_sends_nothing(self):
+        """No none to send; the startup check refuses astra for chat and voice."""
+        body = await _sent_body(_reasoning_settings("gpt-6-astra"), "complete", tools=_WEATHER_TOOL)
+
+        assert "reasoning_effort" not in body
+
+    async def test_a_gpt_6_summary_model_sends_its_configured_effort(self, tmp_path):
+        """A compaction summary sends no tools, so PINCER_SUMMARY_REASONING_EFFORT=high reaches the request,
+        and the startup check lets it start (ruling Q13)."""
+        import json
+
+        import httpx
+        from openai import AsyncOpenAI
+        from pydantic import SecretStr
+
+        from pincer.config.llm import call_effort, call_thinking
+        from pincer.core.compaction import Compactor, LastRequest
+        from pincer.core.session import Session
+        from pincer.llm.openai_common import OpenAICompatibleProvider
+        from pincer.llm.pricing_check import pricing_problems
+
+        settings = _reasoning_settings(
+            "gpt-5-mini",
+            summary_model="gpt-6.1-terra",
+            summary_reasoning_effort="high",
+            anthropic_api_key=SecretStr(""),  # the chat check covers openai only
+            voice_enabled=False,
+            voice_outbound_enabled=False,
+        )
+        rates = "input = 1.0\ncache_write = 1.0\ncache_write_1h = 1.0\ncache_read = 1.0\noutput = 1.0\n"
+        (tmp_path / "pincer.toml").write_text(
+            "".join(f'[pricing."{m}"]\n{rates}' for m in ("gpt-5-mini", "gpt-6.1-terra")), encoding="utf-8"
+        )
+        assert pricing_problems(settings, tmp_path) is None
+
+        bodies: list[dict] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json=_COMPLETION)
+
+        provider = OpenAICompatibleProvider(settings, "openai")
+        await provider._client.close()
+        provider._client = AsyncOpenAI(
+            api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        )
+        costs = AsyncMock()
+        costs.budget_reached.return_value = False
+        compactor = Compactor(
+            provider,
+            "gpt-6.1-terra",
+            costs,
+            AsyncMock(),
+            AsyncMock(),
+            provider="openai",
+            is_free=False,
+            at_tokens=80_000,
+            to_tokens=50_000,
+            reasoning_effort=call_effort(settings.summary_reasoning_effort),
+            thinking=call_thinking(settings.summary_thinking),
+        )
+        session = Session(
+            "s1", "u1", "test", messages=[LLMMessage(role=MessageRole.USER, content=f"m{i}") for i in range(6)]
+        )
+        try:
+            last = LastRequest.measure(100_000, session.messages, overhead_chars=0)
+            assert await compactor.compact(session, last) is True
+        finally:
+            await provider.close()
+
+        [body] = bodies
+        assert body["model"] == "gpt-6.1-terra"
+        assert body["reasoning_effort"] == "high"
+        assert "tools" not in body

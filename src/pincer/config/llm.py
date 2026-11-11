@@ -90,7 +90,7 @@ class LLMSettings(BaseModel):
     summary_provider: str | None = Field(
         default=None,
         description=(
-            "Provider used by the Summarizer; defaults to the primary. Built on demand from its "
+            "Provider that writes history compaction summaries; defaults to the primary. Built on demand from its "
             "credentials when it is not in the failover pool"
         ),
     )
@@ -118,6 +118,11 @@ class LLMSettings(BaseModel):
     openai_compatible_model: str = Field(
         default="", description="Model for the OpenAI-wire compatible endpoint (defaults to default_model)"
     )
+    prompt_cache_key_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["openai", "azure", "azure-openai"],
+        description="OpenAI-wire providers sent a prompt_cache_key (comma-separated names); other endpoints may "
+        "reject the unknown field. A keyless endpoint never gets one",
+    )
     anthropic_compatible_provider: str = Field(
         default="", description="Name for the Anthropic-wire compatible endpoint"
     )
@@ -129,7 +134,7 @@ class LLMSettings(BaseModel):
         default="", description="Model for the Anthropic-wire compatible endpoint (defaults to default_model)"
     )
 
-    @field_validator("fallback_providers", mode="before")
+    @field_validator("fallback_providers", "prompt_cache_key_providers", mode="before")
     @classmethod
     def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
@@ -142,8 +147,8 @@ class LLMSettings(BaseModel):
     )
     prompt_cache_tools: bool = Field(
         default=True,
-        description="Anthropic prompt caching on the (static) tool schemas — the largest prompt prefix. "
-        "Major TTFT/cost win on multi-turn conversations, especially voice (Sprint 5 T5.4).",
+        description="Anthropic prompt caching on requests with tools: the tools and the system prompt for "
+        "1 hour, the conversation automatically for 5 minutes (issue #357). False sends no cache breakpoint.",
     )
     max_tokens: int = Field(default=8192, ge=1, le=128000)
     temperature: float = Field(default=0.5, ge=0.0, le=2.0)
@@ -187,5 +192,5 @@ class LLMSettings(BaseModel):
         default=50,
         ge=10,
         le=500,
-        description="Max messages in session before trimming",
+        description="Past this many messages a session is cut to the newest 3/5 of them (50 -> 30)",
     )

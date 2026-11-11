@@ -344,11 +344,13 @@ def test_cache_reads_reported_for_two_turns_before_and_after_the_strip(smoke, ca
     out = capsys.readouterr().out
     assert code == 0
     assert "PASS  cache-reads: cache_read_tokens turn 1: 0, 1401; turn 2: 1402 unstripped, 1403 after the strip" in out
+    assert "tokens; reads also cover the conversation)" in out  # automatic caching reads past the tools
     requests = build.requests()
     assert len(requests) == 4
     for body in requests:
         assert len(body["tools"]) == 2
-        assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}  # production's breakpoint
+        assert body["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}  # production's breakpoints
+        assert body["cache_control"] == {"type": "ephemeral"}
 
     def thinking_count(body: dict[str, Any]) -> int:
         return sum(
@@ -391,6 +393,8 @@ _OPENAI_NAMES = ["openai-effort-low", "openai-disabled", "openai-xhigh", "openai
 _OPENAI_CHECKS = [arg for name in _OPENAI_NAMES for arg in ("--check", name)]
 _MINI = "azure-openai:gpt-5.4-mini"
 _TERRA = "azure-openai:gpt-6.1-terra"
+# An Azure deployment name: off the resolver's allow-list (gpt-6.1-terra joined it in issue #357)
+_UNRECOGNISED = "azure-openai:voice-fast"
 
 
 def _foundry_openai(**overrides: Any) -> dict[str, Any]:
@@ -431,15 +435,17 @@ def test_a_recognised_openai_model_gets_low_none_xhigh_and_minimal(smoke, capsys
 
 
 def test_an_unrecognised_openai_model_is_sent_without_reasoning_effort(smoke, capsys):
-    code, build = _run(smoke, [*_OPENAI_CHECKS, "--openai-model", _TERRA], {_TERRA: ["ok"]}, **_foundry_openai())
+    code, build = _run(
+        smoke, [*_OPENAI_CHECKS, "--openai-model", _UNRECOGNISED], {_UNRECOGNISED: ["ok"]}, **_foundry_openai()
+    )
 
     out = capsys.readouterr().out
     assert code == 0
     assert "PASS  openai-unrecognised: effort low dropped (unrecognised model), sent without it: 'pong'" in out
     for name in _OPENAI_NAMES[:4]:
-        assert f"SKIP  {name}: gpt-6.1-terra is not recognised; see openai-unrecognised" in out
-    [body] = build.fakes[_TERRA].requests
-    assert body["model"] == "gpt-6.1-terra"
+        assert f"SKIP  {name}: voice-fast is not recognised; see openai-unrecognised" in out
+    [body] = build.fakes[_UNRECOGNISED].requests
+    assert body["model"] == "voice-fast"
     assert "reasoning_effort" not in body
 
 
@@ -537,13 +543,13 @@ async def test_dry_run_plan_is_exactly_what_a_live_run_sends(smoke, capsys):
         + [_STEP1, _ANSWER, _ANSWER, _ANSWER, cut],
         switch: [_ANSWER],
         _MINI: ["ok", "ok", "ok", 400],
-        _TERRA: ["ok"],
+        _UNRECOGNISED: ["ok"],
     }
     settings = _settings(**_foundry_openai())
     kwargs: dict[str, Any] = {
         "voice": ("anthropic", "claude-haiku-5-5"),
         "switch": ("anthropic", "claude-sonnet-5-5"),
-        "openai": [("azure-openai", "gpt-5.4-mini"), ("azure-openai", "gpt-6.1-terra")],
+        "openai": [("azure-openai", "gpt-5.4-mini"), ("azure-openai", "voice-fast")],
     }
     build = FakeBuild(scripts)
 
@@ -559,7 +565,7 @@ async def test_dry_run_plan_is_exactly_what_a_live_run_sends(smoke, capsys):
     assert [(p.model, p.max_tokens, sent(p.effort), sent(p.thinking), p.replays_thinking) for p in planned] == [
         _as_planned(body) for body in build.order
     ]
-    assert [p.effort for p in planned if p.model == "gpt-6.1-terra"] == ["dropped(unrecognised model)"]
+    assert [p.effort for p in planned if p.model == "voice-fast"] == ["dropped(unrecognised model)"]
 
 
 def _many_models(n: int) -> list[str]:
@@ -675,8 +681,14 @@ def test_dry_run_of_the_live_gate_command(smoke, capsys):
     assert sum(line.startswith(f"{_AZURE} check=") for line in lines) == 4 + 16
     assert sum(line.startswith("azure:claude-sonnet-5-5 check=model-switch") for line in lines) == 1
     assert sum(line.startswith(f"{_MINI} check=openai-") for line in lines) == 4
-    assert f"{_TERRA} check=openai-unrecognised max_tokens=512 effort=dropped(unrecognised model)" in out
-    assert "26 requests, largest max_tokens 1024" in out
+    # gpt-6.1-terra is recognised (issue #357): the four table checks, no unrecognised one
+    assert [line.split(" thinking=")[0] for line in lines if line.startswith(f"{_TERRA} check=")] == [
+        f"{_TERRA} check=openai-effort-low max_tokens=512 effort=low",
+        f"{_TERRA} check=openai-disabled max_tokens=512 effort=none",
+        f"{_TERRA} check=openai-xhigh max_tokens=512 effort=xhigh",
+        f"{_TERRA} check=openai-minimal max_tokens=512 effort=minimal",
+    ]
+    assert "29 requests, largest max_tokens 1024" in out
 
 
 def test_openai_disabled_skips_a_model_that_cannot_turn_reasoning_off(smoke, capsys):

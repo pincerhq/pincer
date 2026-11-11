@@ -160,3 +160,376 @@ async def test_agent_llm_backend_fallback_to_chat():
     backend = AgentLLMBackend(llm_router=FakeRouter())
     result = await backend.complete([])
     assert result == "chat response"
+
+
+# ── the daily budget and the cost log (issue #357, PR #366 review) ───────────
+
+
+def _settings(tmp_path, budget: float = 0.0, **overrides):  # type: ignore[no-untyped-def]
+    """Explicit settings (no developer .env): one Anthropic key, the cost log in tmp_path."""
+    from pincer.config import Settings
+
+    base = {
+        "telegram_bot_token": "123456:TEST",
+        "anthropic_api_key": "sk-ant-test",
+        "data_dir": tmp_path,
+        "daily_budget_usd": budget,
+    }
+    base.update(overrides)
+    return Settings(_env_file=None, **base)  # type: ignore[call-arg]
+
+
+def _shell(model: str = "test-fixture-model"):  # type: ignore[no-untyped-def]
+    from pincer.mcp.config import MCPConfig, MCPSamplingConfig, MCPServerExportConfig
+    from pincer.mcp.standalone import StandaloneMCPShell
+
+    sampling = MCPSamplingConfig(enabled=True, model=model)
+    return StandaloneMCPShell(mcp_config=MCPConfig(server=MCPServerExportConfig(enabled=True, sampling=sampling)))
+
+
+class _Anthropic:
+    """The Anthropic API as the real SDK sees it: every request recorded, each answered
+    with one streamed text reply of 1,000 input tokens."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+        self.clients: list = []
+
+    def client(self, **kwargs):  # type: ignore[no-untyped-def]
+        import httpx
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(
+            api_key=kwargs.get("api_key"), http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+        )
+        self.clients.append(client)
+        return client
+
+    def _handle(self, request):  # type: ignore[no-untyped-def]
+        import json
+
+        import httpx
+        from anthropic_sse import sse_body, text
+
+        self.requests.append(json.loads(request.content))
+        body = sse_body([text("sampled")], "end_turn", usage={"input_tokens": 1_000})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+
+@pytest.fixture
+def anthropic_api(monkeypatch):  # type: ignore[no-untyped-def]
+    api = _Anthropic()
+    monkeypatch.setattr("pincer.llm.anthropic_common.AsyncAnthropic", api.client)
+    return api
+
+
+@pytest.fixture
+def use_settings(monkeypatch):  # type: ignore[no-untyped-def]
+    def use(settings):  # type: ignore[no-untyped-def]
+        monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+        return settings
+
+    return use
+
+
+async def _sample(shell, model: str | None = None, messages: list | None = None) -> str:  # type: ignore[no-untyped-def]
+    backend = await shell._build_llm_backend()
+    handler = SamplingHandler(llm_backend=backend, enabled=True)
+    return await handler.handle(messages or [{"role": "user", "content": "hi"}], model=model)
+
+
+async def _stored(settings) -> list[tuple[str, float]]:  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    tracker = CostTracker(settings.db_path, prices=load_price_table())
+    await tracker.initialize()
+    rows = await tracker.get_costs_by_model("2000-01-01", "2100-01-01")
+    return [(r["model"], r["total"]) for r in rows]
+
+
+async def test_a_standalone_sampling_request_is_recorded(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    """Through the shell's own backend: the provider's usage, priced and stored (5 output tokens from
+    the stream). Sent with the pinned effort and thinking of an internal call, not the operator's."""
+    settings = use_settings(_settings(tmp_path, reasoning_effort="high", thinking="adaptive"))
+
+    reply = await _sample(_shell("claude-opus-4-7"))
+
+    assert reply == "sampled"
+    assert [(r["model"], r.get("output_config"), r.get("thinking")) for r in anthropic_api.requests] == [
+        ("claude-opus-4-7", {"effort": "low"}, None)
+    ]
+    assert await _stored(settings) == [("claude-opus-4-7", pytest.approx((1_000 * 1 + 5 * 2) / 1_000_000))]
+
+
+async def test_with_the_budget_reached_standalone_sampling_sends_nothing(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    from pincer.config.pricing import TokenUsage, load_price_table
+    from pincer.llm.cost_tracker import CostTracker
+
+    settings = use_settings(_settings(tmp_path, budget=0.007))
+    seed = CostTracker(settings.db_path, prices=load_price_table())
+    await seed.initialize()
+    await seed.record("anthropic", "test-fixture-model", TokenUsage(input_tokens=1_000))
+
+    reply = await _sample(_shell())
+
+    assert reply == "[Sampling: daily budget reached]"
+    assert anthropic_api.requests == []
+
+
+async def test_without_an_anthropic_key_sampling_has_no_backend(tmp_path, anthropic_api, use_settings, caplog):  # type: ignore[no-untyped-def]
+    from pincer.config.main import _RelaxedSettings
+
+    use_settings(_RelaxedSettings(_env_file=None, data_dir=tmp_path, anthropic_api_key=""))  # type: ignore[call-arg]
+
+    reply = await _sample(_shell())
+
+    assert reply == "[Sampling: no LLM backend configured]"
+    assert anthropic_api.requests == []
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "MCP sampling is enabled but has no Anthropic API key (PINCER_ANTHROPIC_API_KEY)"
+    ]
+
+
+_UNCHECKED = "[Sampling: could not check the daily budget, request not sent]"
+_SETUP_FAILED = "MCP sampling: the daily budget can't be checked; every sampling request will be refused"
+
+
+async def _sample_twice(shell) -> list[str]:  # type: ignore[no-untyped-def]
+    """Two requests to one backend, built once as `run()` builds it."""
+    handler = SamplingHandler(llm_backend=await shell._build_llm_backend(), enabled=True)
+    return [await handler.handle([{"role": "user", "content": "hi"}]) for _ in range(2)]
+
+
+def _errors(caplog) -> list[str]:  # type: ignore[no-untyped-def]
+    return [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+
+
+async def test_when_the_cost_log_cannot_be_opened_every_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, caplog
+):  # type: ignore[no-untyped-def]
+    """Startup survives, the setup is not retried per request (one ERROR), nothing is sent."""
+    (tmp_path / "not-a-dir").write_text("", encoding="utf-8")
+    use_settings(_settings(tmp_path / "not-a-dir" / "data"))
+
+    replies = await _sample_twice(_shell())
+
+    assert replies == [_UNCHECKED, _UNCHECKED]
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == [_SETUP_FAILED]
+
+
+async def test_with_an_invalid_price_table_every_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, caplog, monkeypatch
+):  # type: ignore[no-untyped-def]
+    """A PricingError no longer escapes `_build_llm_backend`, which would stop the whole server."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "pincer.toml").write_text('[pricing."test-fixture-model"]\ninput = 1.0\n', encoding="utf-8")
+    monkeypatch.setattr("pincer.config.pricing._config_dir", lambda: config)
+    use_settings(_settings(tmp_path))
+
+    replies = await _sample_twice(_shell())
+
+    assert replies == [_UNCHECKED, _UNCHECKED]
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == [_SETUP_FAILED]
+
+
+async def test_when_the_budget_cannot_be_read_a_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, monkeypatch
+):  # type: ignore[no-untyped-def]
+    """The cost database fails after a good startup: refused cleanly, nothing sent."""
+    from sqlalchemy.exc import OperationalError
+
+    async def unreadable(self):  # type: ignore[no-untyped-def]
+        raise OperationalError("SELECT", {}, Exception("database is locked"))
+
+    use_settings(_settings(tmp_path, budget=1.0))
+    shell = _shell()
+    backend = await shell._build_llm_backend()
+    monkeypatch.setattr("pincer.services.costs.CostService.budget_reached", unreadable)
+
+    reply = await SamplingHandler(llm_backend=backend, enabled=True).handle([{"role": "user", "content": "hi"}])
+
+    assert reply == _UNCHECKED
+    assert anthropic_api.requests == []
+
+
+async def test_a_client_asking_for_an_unpriced_model_gets_the_configured_one(
+    tmp_path, anthropic_api, use_settings, caplog
+):  # type: ignore[no-untyped-def]
+    """An unpriced call would be billed but never counted against the daily budget."""
+    import logging
+
+    settings = use_settings(_settings(tmp_path))
+
+    with caplog.at_level(logging.INFO, logger="pincer.mcp.sampling"):
+        reply = await _sample(_shell("test-fixture-model"), model="claude-unpriced")
+
+    assert reply == "sampled"
+    assert [r["model"] for r in anthropic_api.requests] == ["test-fixture-model"]
+    assert [model for model, _ in await _stored(settings)] == ["test-fixture-model"]
+    assert (
+        "MCP sampling: no [pricing] entry for the requested model 'claude-unpriced'; using 'test-fixture-model'"
+        in caplog.messages
+    )
+
+
+async def test_a_client_asking_for_a_priced_model_gets_it(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    settings = use_settings(_settings(tmp_path))
+
+    reply = await _sample(_shell("test-fixture-model"), model="claude-opus-4-7")
+
+    assert reply == "sampled"
+    assert [r["model"] for r in anthropic_api.requests] == ["claude-opus-4-7"]
+    assert [model for model, _ in await _stored(settings)] == ["claude-opus-4-7"]
+
+
+async def test_with_an_unpriced_configured_model_every_sampling_request_is_refused(
+    tmp_path, anthropic_api, use_settings, caplog
+):  # type: ignore[no-untyped-def]
+    use_settings(_settings(tmp_path))
+
+    replies = await _sample_twice(_shell("claude-unpriced"))
+
+    unpriced = (
+        "[Sampling: no [pricing] entry for the sampling model 'claude-unpriced' in pincer.toml / pincer.local.toml, "
+        "request not sent]"
+    )
+    assert replies == [unpriced, unpriced]
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == [
+        "MCP sampling: no [pricing] entry for the sampling model 'claude-unpriced'; "
+        "every sampling request will be refused"
+    ]
+
+
+# ── non-text sampling content (PR #366 review, round 3) ──────────────────────
+
+_PNG = "iVBORw0KGgo="  # base64; the bytes are never decoded on the way to the API
+
+
+async def test_an_image_in_a_sampling_message_is_sent_as_an_image(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    """MCP's {type, data, mimeType} becomes the API's base64 image block; images go before the
+    text, as the provider always sends them."""
+    use_settings(_settings(tmp_path))
+    content = [{"type": "text", "text": "what is this?"}, {"type": "image", "data": _PNG, "mimeType": "image/png"}]
+
+    reply = await _sample(_shell(), messages=[{"role": "user", "content": content}])
+
+    assert reply == "sampled"
+    assert [r["messages"] for r in anthropic_api.requests] == [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PNG}},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "reply"),
+    [
+        (
+            {"role": "user", "content": {"type": "audio", "data": "UklGRg==", "mimeType": "audio/wav"}},
+            "[Sampling: audio content is not supported, request not sent]",
+        ),
+        (
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]},
+            "[Sampling: tool_use content is not supported, request not sent]",
+        ),
+        (
+            {"role": "user", "content": [{"type": "tool_result", "toolUseId": "t1", "content": []}]},
+            "[Sampling: tool_result content is not supported, request not sent]",
+        ),
+        (
+            {"role": "assistant", "content": {"type": "image", "data": _PNG, "mimeType": "image/png"}},
+            "[Sampling: images are only supported in user messages, request not sent]",
+        ),
+    ],
+    ids=["audio", "tool_use", "tool_result", "assistant-image"],
+)
+async def test_content_the_provider_cannot_take_is_refused_before_sending(
+    tmp_path, anthropic_api, use_settings, caplog, message, reply
+):  # type: ignore[no-untyped-def]
+    """The Anthropic API takes no audio; sampling sends no tools; it takes images in user turns only."""
+    use_settings(_settings(tmp_path))
+
+    assert await _sample(_shell(), messages=[{"role": "user", "content": "hi"}, message]) == reply
+    assert anthropic_api.requests == []
+    assert _errors(caplog) == []
+
+
+async def test_an_image_type_the_api_cannot_take_is_refused(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    use_settings(_settings(tmp_path))
+    message = {"role": "user", "content": {"type": "image", "data": "Qk0=", "mimeType": "image/bmp"}}
+
+    assert await _sample(_shell(), messages=[message]) == (
+        "[Sampling: image/bmp images are not supported (use image/jpeg, image/png, image/gif or image/webp), "
+        "request not sent]"
+    )
+    assert anthropic_api.requests == []
+
+
+async def test_shutting_the_standalone_server_down_closes_the_sampling_client(tmp_path, anthropic_api, use_settings):  # type: ignore[no-untyped-def]
+    """`run()` served and was stopped (the lifecycle pattern of test_mcp_standalone)."""
+    import asyncio
+    from unittest.mock import patch
+
+    use_settings(_settings(tmp_path))
+    shell = _shell()
+    stop = MagicMock(wait=AsyncMock(side_effect=asyncio.CancelledError))
+
+    with (
+        patch("pincer.mcp.core.PincerMCPServer", return_value=AsyncMock()),
+        patch("asyncio.Event", return_value=stop),
+        patch.object(shell, "_register_standalone_tools"),
+    ):
+        await shell.run()
+
+    assert len(anthropic_api.clients) == 1
+    assert anthropic_api.clients[0].is_closed()
+
+
+async def test_a_failing_client_close_still_closes_the_cost_tracker_and_does_not_raise(tmp_path, caplog):  # type: ignore[no-untyped-def]
+    """A raise here would replace the CancelledError (or the original error) in `run()`'s finally."""
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.cost_tracker import CostTracker
+    from pincer.mcp.sampling import StandaloneLLMBackend
+
+    class _TransportClosed(BaseLLMProvider):
+        async def complete(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise NotImplementedError
+
+        async def close(self) -> None:
+            raise RuntimeError("transport closed")
+
+    tracker = CostTracker(tmp_path / "test.db", prices=load_price_table())
+    await tracker.initialize()
+    backend = StandaloneLLMBackend(_TransportClosed(), tracker, "test-fixture-model", load_price_table())
+
+    await backend.close()
+
+    assert [(r.levelname, r.getMessage(), r.exc_info is not None) for r in caplog.records] == [
+        ("WARNING", "MCP sampling: closing the Anthropic client failed", True)
+    ]
+    with pytest.raises(RuntimeError, match="CostTracker not initialized"):
+        _ = tracker.service  # closed: the service is gone
+
+
+def test_sampling_defaults_to_a_shipped_model() -> None:
+    """The retired claude-sonnet-4 default had no price, so its spend could never be recorded."""
+    from pincer.config.pricing import load_price_table
+    from pincer.mcp.config import MCPSamplingConfig
+    from pincer.mcp.sampling import DEFAULT_SAMPLING_MODEL
+
+    assert MCPSamplingConfig().model == "claude-sonnet-5-5"
+    assert DEFAULT_SAMPLING_MODEL == "claude-sonnet-5-5"
+    repo_root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    assert "claude-sonnet-5-5" in load_price_table(repo_root)

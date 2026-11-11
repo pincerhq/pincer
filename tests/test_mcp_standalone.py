@@ -83,23 +83,26 @@ def test_default_approval_mode_is_policy():
 # ── LLM backend ────────────────────────────────────────────────────────────────
 
 
-def test_build_llm_backend_sampling_disabled():
+async def test_build_llm_backend_sampling_disabled():
     cfg = _make_config()
     shell = StandaloneMCPShell(mcp_config=cfg)
-    llm = shell._build_llm_backend()
+    llm = await shell._build_llm_backend()
     assert llm is None
 
 
-def test_build_llm_backend_sampling_enabled():
+async def test_build_llm_backend_sampling_enabled():
     cfg = _make_config()
     cfg.server.sampling.enabled = True
     cfg.server.sampling.model = "claude-haiku-4-5-20251001"
 
     shell = StandaloneMCPShell(mcp_config=cfg, llm_api_key="sk-test")
 
-    with patch("pincer.mcp.standalone.StandaloneLLMBackend") as mock_backend:  # noqa: N806
+    with (
+        patch("pincer.mcp.standalone.StandaloneLLMBackend") as mock_backend,  # noqa: N806
+        patch("pincer.llm.cost_tracker.CostTracker", return_value=AsyncMock()),
+    ):
         mock_backend.return_value = MagicMock()
-        llm = shell._build_llm_backend()
+        llm = await shell._build_llm_backend()
         mock_backend.assert_called_once()
         assert llm is not None
 

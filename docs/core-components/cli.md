@@ -108,7 +108,7 @@ $ pincer init
 
 ? LLM Provider: Anthropic
 ? API Key: sk-ant-***
-✓ Connection successful (claude-3-5-sonnet-20241022)
+✓ Connection successful (claude-sonnet-5-5)
 
 ? Enable Telegram? Yes
 ? Bot Token: 123456:ABC***
@@ -152,7 +152,7 @@ pincer run tasks
 **Output:**
 ```
 🦜 Pincer Agent v0.5.0
-  Provider:  anthropic (claude-3-5-sonnet-20241022)
+  Provider:  anthropic (claude-sonnet-5-5)
   Channels:  telegram ✓  whatsapp ✗  discord ✓
   Budget:    $0.00 / $5.00
   API:       http://127.0.0.1:8080
@@ -215,7 +215,7 @@ pincer config
 🦜 Pincer Configuration
 
   Provider:     anthropic
-  Model:        claude-3-5-sonnet-20241022
+  Model:        claude-sonnet-5-5
   Anthropic:    ✓ set
   OpenAI:       ✗ not set
   Telegram:     ✓ set
@@ -266,8 +266,8 @@ pincer cost --days 30 --export costs_feb.json
   Budget:    $0.42 / $5.00 (8.5%)
 
   By Model:
-    claude-3-5-sonnet   $0.3800  (42 requests)
-    claude-3-5-haiku    $0.0431  (5 requests)
+    claude-sonnet-5-5   $0.3800  (42 requests)
+    claude-haiku-5-5    $0.0431  (5 requests)
 ```
 
 ---
@@ -732,11 +732,12 @@ All variables use `PINCER_` prefix.
 | `PINCER_OPENAI_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |
 | `PINCER_OPENAI_COMPATIBLE_API_KEY` | | Optional key for that endpoint |
 | `PINCER_OPENAI_COMPATIBLE_MODEL` | | Model for that endpoint (e.g. `grok-3`, `llama3.2`) |
+| `PINCER_PROMPT_CACHE_KEY_PROVIDERS` | `openai,azure,azure-openai` | Comma-separated OpenAI-wire providers sent a per-conversation `prompt_cache_key`; other endpoints may reject the unknown field. A keyless endpoint never gets one |
 | `PINCER_ANTHROPIC_COMPATIBLE_PROVIDER` | | Name for an Anthropic-wire endpoint |
 | `PINCER_ANTHROPIC_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |
 | `PINCER_ANTHROPIC_COMPATIBLE_API_KEY` | | Optional key for that endpoint |
 | `PINCER_ANTHROPIC_COMPATIBLE_MODEL` | | Model for that endpoint |
-| `PINCER_SUMMARY_PROVIDER` | primary | Pool provider used by the Summarizer |
+| `PINCER_SUMMARY_PROVIDER` | primary | Pool provider that writes history compaction summaries |
 
 ### Channels
 | Variable | Default | Description |

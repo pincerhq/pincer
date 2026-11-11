@@ -13,7 +13,7 @@ from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.session import SessionManager
-from pincer.exceptions import BudgetExceededError, LLMError
+from pincer.exceptions import LLMError
 from pincer.llm.base import (
     BaseLLMProvider,
     LLMMessage,
@@ -141,34 +141,32 @@ def _sent_thinking(messages: list[LLMMessage]) -> list[ThinkingBlock]:
     return [block for m in messages for block in m.thinking_blocks]
 
 
-async def test_streaming_chat_final_stream_gets_no_thinking(
-    settings, mock_llm, session_manager, cost_tracker, tools, caplog
-):
-    """The final stream() sends no tools, a change under the turn's thinking (Q2c): the
-    turn's complete() requests carry the blocks, the final stream() request carries none."""
-    responses = [_thinking_tool_response(), _DONE]
-    completed_with: list[list[ThinkingBlock]] = []
-    streamed_with: list[list[ThinkingBlock]] = []
-
-    async def complete(messages, **kwargs):
-        completed_with.append(_sent_thinking(messages))
-        return responses.pop(0)
+def _streamed(responses: list[LLMResponse], sent: list[list[ThinkingBlock]]):
+    """A `stream_turn` answering each request with the next response, recording the thinking it carried."""
 
     async def stream_turn(messages, **kwargs):
-        streamed_with.append(_sent_thinking(messages))
-        yield StreamTurnEvent(text="Booked.")
-        yield StreamTurnEvent(response=_DONE)
+        sent.append(_sent_thinking(messages))
+        response = responses.pop(0)
+        if response.content:
+            yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
 
-    mock_llm.complete.side_effect = complete
-    mock_llm.stream_turn = stream_turn
+    return stream_turn
+
+
+async def test_streaming_chat_follow_up_request_gets_the_turns_thinking(
+    settings, mock_llm, session_manager, cost_tracker, tools, caplog
+):
+    """Every step sends the turn's tools, so nothing edits the history under its thinking (Q2c, slice 13)."""
+    streamed_with: list[list[ThinkingBlock]] = []
+    mock_llm.stream_turn = _streamed([_thinking_tool_response(), _DONE], streamed_with)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
 
     with caplog.at_level(logging.DEBUG, logger="pincer"):
         chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
 
     assert tools.runs == ["Dentist"]
-    assert completed_with == [[], _THINKING]
-    assert streamed_with == [[]]
+    assert streamed_with == [[], _THINKING]
     session = await session_manager.get_or_create("user1", "web")
     assert _sent_thinking(session.messages) == []
     for chunk in chunks:
@@ -328,15 +326,29 @@ async def test_chat_turn_strips_thinking_when_it_fails(settings, mock_llm, sessi
     assert _sent_thinking(session.messages) == []
 
 
-async def test_streaming_chat_strips_thinking_on_a_budget_stop(
-    settings, mock_llm, session_manager, cost_tracker, tools
-):
-    mock_llm.complete.side_effect = [_thinking_tool_response(), BudgetExceededError(100.0, 100.0), _DONE]
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
+async def test_streaming_chat_strips_thinking_on_a_budget_stop(settings, mock_llm, session_manager, tools, tmp_path):
+    """The thinking request crosses the budget ($7/MTok x 1,000 = the whole $0.007); the next one is refused."""
+    from pincer.config.pricing import load_price_table
+    from pincer.llm.cost_tracker import CostTracker
 
-    chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
+    crossing = _thinking_tool_response()
+    crossing.request_model, crossing.input_tokens, crossing.output_tokens = "test-fixture-model", 1_000, 0
+    streamed_with: list[list[ThinkingBlock]] = []
+    mock_llm.stream_turn = _streamed([crossing, _DONE], streamed_with)
+    tracker = CostTracker(tmp_path / "test.db", daily_budget=0.007, prices=load_price_table())
+    await tracker.initialize()
+    agent = Agent(
+        settings.model_copy(update={"daily_budget_usd": 0.007}), mock_llm, session_manager, tracker, tools.registry
+    )
 
-    assert chunks[-1].content == "Daily budget limit reached."  # precondition: the budget stop's early return
+    try:
+        chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
+    finally:
+        await tracker.close()
+
+    # precondition: the budget stop
+    assert chunks[-1].content.startswith("Warning: Daily budget limit reached.")
+    assert len(streamed_with) == 1
     session = await session_manager.get_or_create("user1", "web")
     assert any(m.tool_calls for m in session.messages)
     assert _sent_thinking(session.messages) == []
@@ -485,16 +497,13 @@ async def test_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_
 
 async def test_streaming_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
     await _fill_to_cap(session_manager, "user1", "web")
-    script = [*_TOOL_THEN_TEXT, ([text("Erledigt.")], "end_turn")]  # the last one is the final stream()
-    async with ScriptedAnthropic(settings, script) as llm:
+    async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
 
     assert chunks[-1].content == "Erledigt."
-    assert len(llm.requests) == 3
+    assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
-    # The final stream() resends the history, minus the thinking (it sends no tools)
-    assert llm.requests[2]["messages"] == _without_thinking(llm.requests[1]["messages"])
     session = await session_manager.get_or_create("user1", "web")
     assert len(session.messages) <= _CAP
     assert await _stored_length(session_manager, "web:user1", "user1", "web") <= _CAP
@@ -526,16 +535,14 @@ async def test_chat_turn_keeps_its_images_on_every_request(settings, session_man
 
 
 async def test_streaming_chat_turn_keeps_its_images_on_every_request(settings, session_manager, cost_tracker, tools):
-    script = [*_TOOL_THEN_TEXT, ([text("Erledigt.")], "end_turn")]
-    async with ScriptedAnthropic(settings, script) as llm:
+    async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         stream = agent.handle_message_stream("user1", "web", "Book what's on this card", images=[_IMAGE], memory=False)
         _chunks = [c async for c in stream]
 
-    assert len(llm.requests) == 3
+    assert len(llm.requests) == 2
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     _assert_extends(llm.requests[0], llm.requests[1])
-    assert llm.requests[2]["messages"] == _without_thinking(llm.requests[1]["messages"])
     session = await session_manager.get_or_create("user1", "web")
     assert all(not m.images for m in session.messages)
 
@@ -560,11 +567,10 @@ async def test_chat_turn_without_thinking_keeps_its_image_through_a_tool_call(
     assert all(not m.images for m in session.messages)  # end_turn dropped it
 
 
-async def test_streaming_chat_turn_without_thinking_keeps_its_image_for_the_final_stream(
+async def test_streaming_chat_turn_without_thinking_keeps_its_image_through_a_tool_call(
     settings, session_manager, cost_tracker, tools
 ):
-    script = [*_TOOL_THEN_TEXT_NO_THINKING, ([text("Erledigt.")], "end_turn")]
-    async with ScriptedAnthropic(settings, script) as llm:
+    async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT_NO_THINKING) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         _chunks = [
             c
@@ -573,17 +579,17 @@ async def test_streaming_chat_turn_without_thinking_keeps_its_image_for_the_fina
             )
         ]
 
-    assert len(llm.requests) == 3
-    assert [len(_image_blocks(r)) for r in llm.requests] == [1, 1, 1]  # the final stream request included
+    assert len(llm.requests) == 2
+    assert [len(_image_blocks(r)) for r in llm.requests] == [1, 1]  # the step after the tool call still sees it
     session = await session_manager.get_or_create("user1", "web")
     assert all(not m.images for m in session.messages)
 
 
-async def test_streaming_chat_turn_with_a_text_only_first_reply_keeps_its_image_for_the_final_stream(
+async def test_streaming_chat_turn_with_a_text_only_reply_sends_its_image(
     settings, session_manager, cost_tracker, tools
 ):
-    """The reviewer's case: complete() answers at once, and the streamed reply is the one the user sees."""
-    script = [([text("A card.")], "end_turn"), ([text("A card.")], "end_turn")]
+    """The reviewer's case: the model answers at once, in the one request the user sees streamed."""
+    script = [([text("A card.")], "end_turn")]
     async with ScriptedAnthropic(settings, script) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         _chunks = [
@@ -593,8 +599,8 @@ async def test_streaming_chat_turn_with_a_text_only_first_reply_keeps_its_image_
             )
         ]
 
-    assert len(llm.requests) == 2
-    assert [len(_image_blocks(r)) for r in llm.requests] == [1, 1]
+    assert len(llm.requests) == 1
+    assert [len(_image_blocks(r)) for r in llm.requests] == [1]
 
 
 class _Selector(ToolSelector):
@@ -633,16 +639,6 @@ _SKILL_THEN_TEXT = [
 _FIRST_PICK = {"load_skill", "create_event"}
 
 
-def _without_thinking(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The messages with their thinking blocks taken out (what a strip leaves)."""
-    return [
-        {**m, "content": [b for b in m["content"] if b["type"] not in ("thinking", "redacted_thinking")]}
-        if isinstance(m["content"], list)
-        else m
-        for m in messages
-    ]
-
-
 def _tool_names(request: dict[str, Any]) -> list[str]:
     return [t["name"] for t in request.get("tools", [])]
 
@@ -674,13 +670,12 @@ async def test_same_tools_after_reselection_keep_the_thinking(settings, session_
 
 
 async def test_streaming_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    script = [*_SKILL_THEN_TEXT, ([text("Done.")], "end_turn")]
-    async with ScriptedAnthropic(settings, script) as llm:
+    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         _chunks = [c async for c in agent.handle_message_stream("user1", "web", "Check my budget", memory=False)]
 
-    assert len(llm.requests) == 3
+    assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
     for request, raw in zip(llm.requests[1:], llm.raw_requests[1:], strict=True):
         assert "thinking" not in _block_types(request)
@@ -823,11 +818,12 @@ async def test_chat_turn_replays_an_interleaved_response_in_its_own_order(
 async def test_streaming_chat_turn_replays_an_interleaved_response_in_its_own_order(
     settings, session_manager, cost_tracker, tools
 ):
-    script = [_INTERLEAVED, ([text("Erledigt.")], "end_turn"), ([text("Erledigt.")], "end_turn")]
+    script = [_INTERLEAVED, ([text("Erledigt.")], "end_turn")]
     async with ScriptedAnthropic(settings, script) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         _chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
 
+    assert len(llm.requests) == 2
     replayed = [m for m in llm.requests[1]["messages"] if m["role"] == "assistant"][-1]
     assert [b["type"] for b in replayed["content"]] == ["thinking", "text", "thinking", "tool_use"]
 

@@ -9,17 +9,92 @@ from __future__ import annotations
 
 import base64
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, TypedDict
+
+from pincer.config.pricing import TokenUsage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 # The stop reason every provider reports when the output hit max_tokens
 STOP_REASON_MAX_TOKENS = "max_tokens"
+# A rate-limited (429) request is sent this many times in all, by complete() and by stream_turn()
+# before its first event; the wait doubles each time, up to the cap
+RATE_LIMIT_ATTEMPTS = 3
+_RATE_LIMIT_MAX_WAIT_S = 60.0
+# False while the router sends a request that fails over on a 429 (Q23: fail over first): set by
+# the router around one provider call, read by the providers before their first request
+_rate_limit_retries: ContextVar[bool] = ContextVar("pincer_rate_limit_retries", default=True)
+# Where the requests of the current conversation get their prompt cache key (issue #357, Q21):
+# set by the agent around a turn, read by providers that route on it (OpenAI's prompt_cache_key)
+_prompt_cache_key_source: ContextVar[Callable[[], str] | None] = ContextVar("pincer_prompt_cache_key", default=None)
+
+
+@contextmanager
+def prompt_cache_session(key: Callable[[], str]) -> Iterator[None]:
+    """Requests made inside get the conversation's cache key from ``key``, called only when a
+    provider asks for it (so a key is minted only for a provider that sends one)."""
+    token = _prompt_cache_key_source.set(key)
+    try:
+        yield
+    finally:
+        try:
+            _prompt_cache_key_source.reset(token)
+        except ValueError:  # an async generator closed from another context: just clear it there
+            _prompt_cache_key_source.set(None)
+
+
+def prompt_cache_key() -> str:
+    """The current conversation's prompt cache key; "" outside a conversation."""
+    source = _prompt_cache_key_source.get()
+    return source() if source is not None else ""
+
+
+@contextmanager
+def rate_limit_retries(enabled: bool) -> Iterator[None]:
+    """Requests made inside retry a 429 (``enabled``) or raise it at once, SDK retries included,
+    so the router can fail over without waiting. Never hold it across a yield: the consumer of
+    a stream would run with it set."""
+    token = _rate_limit_retries.set(enabled)
+    try:
+        yield
+    finally:
+        _rate_limit_retries.reset(token)
+
+
+def rate_limit_attempts() -> int:
+    """How many times a provider sends a rate-limited request: ``RATE_LIMIT_ATTEMPTS``, or 1
+    inside ``rate_limit_retries(False)``."""
+    return RATE_LIMIT_ATTEMPTS if _rate_limit_retries.get() else 1
+
+
+class _SDKClient(Protocol):
+    """What ``RequestClients`` needs of an SDK client (AsyncAnthropic, AsyncOpenAI)."""
+
+    def with_options(self, *, max_retries: int) -> Self: ...
+
+
+class RequestClients[C: _SDKClient]:
+    """A provider's client for one request: its client, or, inside ``rate_limit_retries(False)``,
+    a copy without the SDK's own retries, so a 429 fails over at once. The copy shares the
+    client's HTTP connection pool; it is made once, and again when the provider's client is
+    replaced (tests swap it after construction)."""
+
+    def __init__(self) -> None:
+        self._pair: tuple[C, C] | None = None  # (client, its no-retry copy)
+
+    def pick(self, client: C) -> C:
+        if rate_limit_attempts() > 1:
+            return client
+        if self._pair is None or self._pair[0] is not client:
+            self._pair = (client, client.with_options(max_retries=0))
+        return self._pair[1]
 
 
 class MessageRole(StrEnum):
@@ -70,6 +145,11 @@ class LLMMessage:
     # interleaved). Set only when the response had thinking, so the next request can replay it
     # as it was; never in to_dict.
     content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # Pincer's per-turn context for a user message (recalled memories, the current time), kept out
+    # of the system prompt so that stays identical for the whole conversation. Sent as its own text
+    # block before the user's words, saved with the session and replayed as it was; never shown
+    # to people as history (the user's words are `content`).
+    context: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal dict for session storage (JSON-serializable)."""
@@ -78,6 +158,8 @@ class LLMMessage:
             d["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
             d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
+        if self.context:
+            d["context"] = self.context
         return d
 
     @classmethod
@@ -88,6 +170,7 @@ class LLMMessage:
             content=d.get("content", ""),
             tool_call_id=d.get("tool_call_id"),
             tool_calls=tool_calls,
+            context=d.get("context", ""),
         )
 
 
@@ -116,6 +199,16 @@ class ToolResult:
     is_error: bool = False
 
 
+class TokenCounts(TypedDict):
+    """A provider's usage as `LLMResponse` keyword arguments (each leaf parses its own)."""
+
+    input_tokens: int  # uncached
+    cache_write_5m_tokens: int
+    cache_write_1h_tokens: int
+    cache_read_tokens: int
+    output_tokens: int
+
+
 @dataclass(slots=True)
 class LLMResponse:
     """Unified response from any LLM provider."""
@@ -124,12 +217,16 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
     provider: str = ""  # name of the provider that actually served this response
-    input_tokens: int = 0
+    # The model name Pincer sent, which prices the call; `model` is what the API reports
+    # back (a dated snapshot, or the model behind an Azure deployment name)
+    request_model: str = ""
+    input_tokens: int = 0  # uncached input only; the cache counts below are the rest of the prompt
     output_tokens: int = 0
     stop_reason: str = ""
-    # Prompt-cache usage (Sprint 5, T5.4) — 0 when the provider doesn't report it
+    # Prompt-cache usage: 0 when the provider doesn't report it
     cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    cache_write_5m_tokens: int = 0
+    cache_write_1h_tokens: int = 0
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
     # Every content block in the order the API sent them; filled only when there is thinking
     content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
@@ -139,9 +236,31 @@ class LLMResponse:
         return len(self.tool_calls) > 0
 
     @property
+    def usage(self) -> TokenUsage:
+        """Every token type of this call, as it is priced and recorded."""
+        return TokenUsage(
+            input_tokens=self.input_tokens,
+            cache_write_5m_tokens=self.cache_write_5m_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens,
+            cache_read_tokens=self.cache_read_tokens,
+            output_tokens=self.output_tokens,
+        )
+
+    @property
     def truncated(self) -> bool:
         """The output stopped on max_tokens: its last block may be incomplete."""
         return self.stop_reason == STOP_REASON_MAX_TOKENS
+
+
+def transient_status(status_code: int) -> bool:
+    """An HTTP status worth asking again (Q24a): a rate limit (429), an overload (529) or another
+    server error (5xx). A 4xx is the request's own fault and would fail the same way."""
+    return status_code == 429 or status_code >= 500
+
+
+def rate_limit_backoff(retry_after: float, attempt: int) -> float:
+    """Seconds to wait after the `attempt`-th (0-based) 429: retry_after·2^attempt, at most 60 s."""
+    return min(retry_after * 2.0**attempt, _RATE_LIMIT_MAX_WAIT_S)
 
 
 def strip_thinking(messages: list[LLMMessage]) -> None:

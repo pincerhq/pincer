@@ -9,6 +9,9 @@ from fastapi import APIRouter, Query
 
 from pincer.services.costs import CostServiceDep
 
+# Token counts added beside the existing fields (issue #357); `total_tokens` stays uncached input + output
+_CACHE_COUNTS = ("cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens")
+
 router = APIRouter(prefix="/api/costs", tags=["costs"])
 
 
@@ -23,6 +26,7 @@ async def get_today_costs(service: CostServiceDep) -> dict[str, Any]:
         "by_model": costs["by_model"],
         "by_tool": costs["by_tool"],
         "request_count": costs["request_count"],
+        **{key: costs[key] for key in _CACHE_COUNTS},
         "budget": {
             "daily_limit": budget["daily_limit"],
             "spent_today": budget["spent_today"],
@@ -109,6 +113,7 @@ async def get_costs_by_model(
                 "request_count": e["requests"],
                 "total_tokens": e["tokens"],
                 "avg_cost_per_request": round(e["total"] / max(e["requests"], 1), 6),
+                **{key: e[key] for key in _CACHE_COUNTS},
             }
             for e in breakdown
         ],

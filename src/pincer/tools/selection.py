@@ -12,11 +12,17 @@ holds more than ``tool_selection_max`` tools, a turn gets, without duplicates:
 4. the tools that best match the request, ranked by the tool index on the
    memory server (``tool_index_sync``/``tool_index_search``).
 
-The chosen tools are sent in registry order, so the same set is always the
-same prefix. The index syncs in the background, so a cold start (model
-download, first embedding of every tool) never blocks a turn: until it is
-ready, and whenever ranking is unavailable, 1-3 are followed by the rest in
-registry order. Each fallback cause is logged once, then at debug.
+A fresh selection fills ``tool_selection_max - tool_selection_headroom`` slots
+and is sent in registry order, so the same set is always the same prefix. A
+conversation keeps its list: later turns append the tools they need at the
+end (the head tools above that are missing, then the top ``headroom`` ranked
+matches), so the tools already sent stay a cached prefix. Only a list that
+would pass the max is selected afresh (issue #357, Q21).
+
+The index syncs in the background, so a cold start (model download, first
+embedding of every tool) never blocks a turn: until it is ready, and whenever
+ranking is unavailable, 1-3 are followed by the rest in registry order. Each
+fallback cause is logged once, then at debug.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 from pincer.mcp.results import raise_on_error, result_json
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from pincer.config import Settings
     from pincer.mcp.manager import MCPClientManager
@@ -75,6 +81,19 @@ def _has_tool_cap(settings: Settings) -> bool:
     return any(is_openai_wire(settings, name) for name in (settings.default_provider, *settings.fallback_providers))
 
 
+def _grown(
+    kept: Sequence[str], head: list[str], ranked: list[str], registered: set[str], limit: int, headroom: int
+) -> list[str] | None:
+    """`kept` (minus tools no longer registered) with the turn's new tools appended, or None when
+    there is no list yet or it would pass `limit` (the caller then selects fresh)."""
+    live = [n for n in kept if n in registered]
+    if not live:
+        return None
+    present = set(live)
+    new = [n for n in dict.fromkeys([*head, *ranked[:headroom]]) if n not in present]
+    return live + new if len(live) + len(new) <= limit else None
+
+
 class ToolSelector:
     """Picks at most ``tool_selection_max`` tool schemas for a chat turn."""
 
@@ -92,6 +111,10 @@ class ToolSelector:
 
     # ── Public API ────────────────────────────────────────
 
+    def applies(self, schemas: list[dict[str, Any]]) -> bool:
+        """Whether `select` trims these schemas (an OpenAI-wire provider and more than the cap)."""
+        return self._applies and len(schemas) > self._settings.tool_selection_max
+
     def start_sync(self, schemas: list[dict[str, Any]]) -> None:
         """Warm the index up in the background (no-op when selection doesn't apply or without a server)."""
         if self._applies and self._mcp_manager is not None and len(schemas) > self._settings.tool_selection_max:
@@ -102,9 +125,14 @@ class ToolSelector:
         schemas: list[dict[str, Any]],
         query: str,
         recent_tool_names: Iterable[str] = (),
+        kept: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
+        """The turn's tools. `kept` is the conversation's list so far: the turn's new tools (missing
+        head tools, then the top `tool_selection_headroom` ranked ones) are appended after it, so the
+        tools already sent stay a cached prefix. Past `tool_selection_max`, or with no list yet, the
+        tools are selected fresh, filling to max - headroom in registry order (issue #357, Q21)."""
         limit = self._settings.tool_selection_max
-        if not self._applies or len(schemas) <= limit:
+        if not self.applies(schemas):
             return schemas
 
         registered = {s["name"] for s in schemas}
@@ -135,10 +163,18 @@ class ToolSelector:
             except Exception as e:
                 fallback = _Unranked(f"{type(e).__name__}: {e}", logging.WARNING)
 
-        # Whatever the ranking leaves free (all of it, without ranking) is filled in registry order.
-        names = list(dict.fromkeys(head + [n for n in ranked if n in registered] + [s["name"] for s in schemas]))
-        chosen = set(names[:limit])
-        selected = [s for s in schemas if s["name"] in chosen]
+        ranked = [n for n in ranked if n in registered]
+        grown = _grown(kept, head, ranked, registered, limit, self._settings.tool_selection_headroom)
+        if grown is not None:
+            by_name = {s["name"]: s for s in schemas}
+            selected = [by_name[n] for n in grown]
+        else:
+            # Whatever the ranking leaves free (all of it, without ranking) is filled in registry order,
+            # up to the headroom later turns of the conversation append into.
+            names = list(dict.fromkeys(head + ranked + [s["name"] for s in schemas]))
+            fill = set(names[: max(limit - self._settings.tool_selection_headroom, len(head))])
+            selected = [s for s in schemas if s["name"] in fill]
+        chosen = {s["name"] for s in selected}
 
         if fallback is None:
             self._last_fallback = None

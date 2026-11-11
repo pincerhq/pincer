@@ -22,7 +22,9 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
+from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
+from pincer.core.compaction import LastRequest
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -33,7 +35,7 @@ from pincer.core.onboarding import (
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.db.ids import new_id
-from pincer.exceptions import BudgetExceededError, LLMError, LLMOutputTruncatedError, ToolNotFoundError
+from pincer.exceptions import BudgetCheckFailedError, LLMError, LLMOutputTruncatedError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -42,8 +44,10 @@ from pincer.llm.base import (
     MessageRole,
     ToolCall,
     ToolResult,
+    prompt_cache_session,
     strip_thinking,
 )
+from pincer.llm.cost_tracker import record_response
 from pincer.llm.model_params import model_max_output_tokens
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
@@ -70,12 +74,12 @@ if TYPE_CHECKING:
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
+    from pincer.core.compaction import Compactor
     from pincer.core.session import Session, SessionManager
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
     from pincer.memory.base import BaseMemoryBackend
-    from pincer.memory.summarizer import Summarizer
     from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
     from pincer.tools.selection import ToolSelector
@@ -85,6 +89,25 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _HEADLESS_LLM_ERROR_TEXT = "Sorry, I couldn't complete this scheduled action due to an LLM error."
+_BUDGET_REACHED_TEXT = (
+    "Warning: Daily budget limit reached. Limit: ${limit:.2f}. I'll be back tomorrow, or you can increase the limit."
+)
+_HEADLESS_BUDGET_REACHED_TEXT = (
+    "Warning: Daily budget limit reached. Limit: ${limit:.2f}. Could not complete this scheduled action."
+)
+_HEADLESS_BUDGET_CHECK_FAILED_TEXT = (
+    "Warning: Could not check the daily budget. Could not complete this scheduled action."
+)
+# Closes the history of a turn the budget stopped after its tool rounds: the model next sees
+# its tool results answered, never a dangling one. Not the warning, which is no reply.
+_BUDGET_STOPPED_MARKER = "(Stopped before answering: the daily budget was reached.)"
+# The daily budget could not be read (PR #366 review): before a turn it is refused with
+# `BudgetCheckFailedError`; mid-turn it stops like a budget stop (fails closed) with its own
+# marker. The client gets this text either way (the web API's 503 or stream `error`).
+_BUDGET_CHECK_FAILED_TEXT = (
+    "Warning: Could not check the daily budget, so I stopped before answering. Please try again."
+)
+_BUDGET_CHECK_FAILED_MARKER = "(Stopped before answering: the daily budget could not be checked.)"
 # A call turn whose model repeats this many tool calls it already made ends
 # with TOOL_NO_PROGRESS instead of another round (issue #300).
 _MAX_DUPLICATE_TOOL_CALLS = 2
@@ -96,6 +119,18 @@ _LOAD_SKILL_TOOL = "load_skill"
 _CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
+# How a web chat turn ends when no request answers its last tools
+_MAX_ITERATIONS_TEXT = "Max iterations reached."
+_TOOL_FAILURES_TEXT = "I'm having repeated tool failures. Let me respond with what I have."
+# Session metadata: the conversation's prompt cache key, a UUIDv7 minted on its first request
+# that sends one (issue #357, Q21: never derived from the session id, which names the user)
+PROMPT_CACHE_KEY = "prompt_cache_key"
+# Session metadata: the names of the tools the conversation sends, in order (a JSON list)
+TOOL_LIST_KEY = "tool_list"
+# One line per chat turn: its requests' tokens by type, so caching can be watched per turn (issue #357)
+_TURN_LOG = (
+    "Chat turn: session=%s requests=%d input=%d cache_read=%d cache_write_5m=%d cache_write_1h=%d output=%d cost=$%.6f"
+)
 _CALL_PLACED_THEN_FAILED_TEXT = (
     "I placed the call, but then hit an error and could not finish my reply. "
     "The call's result will follow when it ends."
@@ -295,6 +330,19 @@ class StreamChunk:
     type: StreamEventType
     content: str
     call_sid: str = ""
+    cost_usd: float = 0.0  # on DONE: the sum of the turn's recorded LLM costs
+    budget_reached: bool = False  # on DONE: the budget refused a request; `content` is the budget message
+    budget_check_failed: bool = False  # on DONE: the budget could not be read mid-turn; `content` says so
+    turn_text: str = ""  # on a budget-stop DONE: everything the turn streamed before the stop
+
+
+@dataclass(frozen=True, slots=True)
+class _BudgetStop:
+    """Why an admitted turn stops before its next request."""
+
+    text: str  # what the client gets, never saved
+    marker: str  # closes the turn's history after its tool results
+    check_failed: bool  # the budget could not be read, rather than reached
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +356,28 @@ class _Onboarding:
 
 
 _NO_ONBOARDING = _Onboarding(prompt=False, ingest=False)
+
+
+def _cache_key(session: Session) -> str:
+    """The session's prompt cache key, minted and kept in its metadata on first use."""
+    key = session.metadata.get(PROMPT_CACHE_KEY)
+    if not key:
+        key = session.metadata[PROMPT_CACHE_KEY] = new_id()
+    return key
+
+
+def _log_turn(session_id: str, requests: int, usage: TokenUsage, cost: float) -> None:
+    logger.info(
+        _TURN_LOG,
+        session_id,
+        requests,
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
+        usage.output_tokens,
+        cost,
+    )
 
 
 def _reading_onboarding(session: Session, *, last_chance: bool = False) -> _Onboarding:
@@ -340,6 +410,14 @@ class AgentResponse:
     model: str = ""
     # Calls this turn placed, each of which reports back later.
     call_sids: list[str] = field(default_factory=list)
+    # The budget refused a request: `text` is the budget message, not a reply, and is not saved.
+    budget_reached: bool = False
+    # The budget could not be read mid-turn, so the turn stopped (fails closed): no budget was
+    # reached, so this is not `budget_reached`; `text` says so, not a reply, and is not saved.
+    budget_check_failed: bool = False
+    # On a budget stop: the model's own text this turn before it (its tool steps' text), the
+    # same text a streamed turn shows; `text` stays the warning for the channels.
+    turn_text: str = ""
 
 
 def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
@@ -383,15 +461,14 @@ def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
 
 
-def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_text_ok: bool = False) -> None:
+def _refuse_truncated_output(response: LLMResponse, max_tokens: int) -> None:
     """Raise instead of using a response cut off by max_tokens that cannot be used.
 
     Two cuts are unusable. A cut-off tool call may have incomplete input, so none of the
     calls run and the assistant turn is not saved. A cut with no text at all means the
     whole budget went on thinking: delivering it would send the user an empty reply.
     Text that was cut off mid-sentence is still delivered. The log names the tools, never
-    their arguments. `blank_text_ok` lets a blank cut through: the streaming chat's tool
-    loop uses it, because its reply is the final stream, which is checked on its own.
+    their arguments.
     """
     if not response.truncated:
         return
@@ -402,7 +479,7 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_te
             max_tokens,
             [tc.name for tc in response.tool_calls],
         )
-    elif not response.content.strip() and not blank_text_ok:
+    elif not response.content.strip():
         logger.warning(
             "LLM output cut off at max_tokens (%d of %d tokens) before any text: no reply to deliver",
             response.output_tokens,
@@ -413,27 +490,20 @@ def _refuse_truncated_output(response: LLMResponse, max_tokens: int, *, blank_te
     raise LLMOutputTruncatedError(response.output_tokens, max_tokens)
 
 
-def _tool_loop_fallback(response: LLMResponse | None, max_tokens: int, why: str) -> str:
-    """The text to reply with when the final stream gave none: the tool loop's last response.
+def _headless_budget_text(stop: _BudgetStop, limit: float) -> str:
+    """What a scheduled action reports when the budget stops it."""
+    if stop.check_failed:
+        return _HEADLESS_BUDGET_CHECK_FAILED_TEXT
+    return _HEADLESS_BUDGET_REACHED_TEXT.format(limit=limit)
 
-    That response (it has no tool call: the loop ended on it) is often a complete answer. It
-    is used unless it was cut off (`_refuse_truncated_output`, no `blank_text_ok`) or is blank;
-    then this raises, and the caller's handler maps that to the placed-call reply if a call
-    was placed. `why` names the stream's ending in the log.
-    """
-    if response is None:
-        logger.warning("No usable fallback after the final stream %s: no tool-loop response", why)
-        raise LLMError(f"the final stream {why} and there is no tool-loop response")
-    try:
-        _refuse_truncated_output(response, max_tokens)
-    except LLMError:
-        logger.warning("No usable fallback after the final stream %s: tool-loop cut off", why)
-        raise
-    if not response.content.strip():
-        logger.warning("No usable fallback after the final stream %s: tool-loop has no text", why)
-        raise LLMError(f"the final stream {why} and the tool-loop response has no text")
-    logger.warning("Using the tool-loop response as the reply: the final stream %s", why)
-    return response.content
+
+def _step_separator(streamed: str) -> str:
+    """What goes between the text a turn already streamed and a later step's first text: only
+    the newlines still missing for a blank line. Nothing before the turn's first text."""
+    if not streamed.strip():
+        return ""
+    trailing = len(streamed) - len(streamed.rstrip("\n"))
+    return "\n" * max(0, 2 - trailing)
 
 
 class _RepeatedCallGuard:
@@ -613,7 +683,7 @@ class Agent:
         cost_tracker: CostTracker,
         tool_registry: ToolRegistry,
         memory_store: BaseMemoryBackend | None = None,
-        summarizer: Summarizer | None = None,
+        compactor: Compactor | None = None,
         approval_callback: ApprovalCallback | None = None,
         tool_event_callback: ToolEventCallback | None = None,
     ) -> None:
@@ -623,7 +693,9 @@ class Agent:
         self._costs = cost_tracker
         self._tools = tool_registry
         self._memory = memory_store
-        self._summarizer = summarizer
+        self._compactor = compactor
+        # The compaction running per session id, after its turn (see `_schedule_compaction`)
+        self._compactions: dict[str, asyncio.Task[None]] = {}
         self._approval_callback = approval_callback
         self._tool_event_callback = tool_event_callback
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
@@ -703,14 +775,48 @@ class Agent:
             logger.exception("ask_user callback failed")
             return f"[Error contacting user: {e}]"
 
-    async def _maybe_summarize(self, session: Session) -> None:
-        # Memory is degradable: a failing memory server must not cost the user their reply.
-        if not self._summarizer:
+    @staticmethod
+    def _note_request(
+        session: Session, response: LLMResponse, system: str | None, tools: list[dict[str, Any]] | None
+    ) -> None:
+        """Remember what the request `response` answers sent: the turn's last one decides compaction."""
+        overhead = len(system or "") + (len(json.dumps(tools)) if tools else 0)
+        session.last_request = LastRequest.measure(response.usage.prompt_tokens, session.messages, overhead)
+
+    def _schedule_compaction(self, session: Session) -> None:
+        """After a turn: compact the session in the background when its prompt went over the limit."""
+        last, session.last_request = session.last_request, None
+        if self._compactor is None or last is None or not self._compactor.due(last):
             return
+        running = self._compactions.get(session.session_id)
+        if running is not None and not running.done():
+            return
+        task = asyncio.create_task(self._compact(self._compactor, session, last))
+        self._compactions[session.session_id] = task
+        task.add_done_callback(lambda done: self._compaction_done(session.session_id, done))
+
+    def _compaction_done(self, key: str, task: asyncio.Task[None]) -> None:
+        if self._compactions.get(key) is task:
+            del self._compactions[key]
+
+    @staticmethod
+    async def _compact(compactor: Compactor, session: Session, last: LastRequest) -> None:
         try:
-            await self._summarizer.maybe_summarize(session)
+            await compactor.compact(session, last)
         except Exception:
-            logger.warning("Session summarization failed", exc_info=True)
+            logger.warning("Compacting session %s failed", session.session_id, exc_info=True)
+
+    async def wait_compactions(self) -> None:
+        """Wait for every compaction still running."""
+        while pending := [task for task in self._compactions.values() if not task.done()]:
+            await asyncio.gather(*pending)
+
+    async def cancel_compactions(self) -> None:
+        """Stop every compaction still running (shutdown): a cancelled one leaves its session as it was."""
+        tasks = list(self._compactions.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle_message(
         self,
@@ -732,17 +838,20 @@ class Agent:
         ``_onboarding_for_turn``.
         """
         async with self._sessions.turn(user_id, channel, session_key) as session:
-            return await self._handle_message(
-                user_id,
-                channel,
-                text,
-                images,
-                channel_user_id,
-                channel_name,
-                extra_system,
-                memory,
-                session=session,
-            )
+            with prompt_cache_session(lambda: _cache_key(session)):
+                result = await self._handle_message(
+                    user_id,
+                    channel,
+                    text,
+                    images,
+                    channel_user_id,
+                    channel_name,
+                    extra_system,
+                    memory,
+                    session=session,
+                )
+        self._schedule_compaction(session)
+        return result
 
     async def _handle_message(
         self,
@@ -791,6 +900,12 @@ class Agent:
                 not count toward the user being known to onboarding.
         """
         self._last_active = (user_id, channel_name or channel)
+        # A refused turn is no turn: nothing is persisted, its user message included (PR #366 review)
+        if not await self._turn_admitted():
+            _log_turn(session.session_id, 0, TokenUsage(), 0.0)
+            return AgentResponse(
+                text=_BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd), budget_reached=True
+            )
         memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
@@ -804,19 +919,18 @@ class Agent:
             for raw, media_type in images:
                 img_contents.append(ImageContent.from_bytes(raw, media_type))
 
-        user_msg = LLMMessage(
-            role=MessageRole.USER,
-            content=text,
-            images=img_contents,
+        turn = await self._begin_turn(user_id, session_key=session.session_id)
+        read_language = memory and (channel_name or channel) != "voice"
+        # Both are memory round trips: run them together (the language goes in the system prompt)
+        context, language = await asyncio.gather(
+            self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
+            self._preferred_language(user_id, read=read_language),
         )
+        user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
         await self._sessions.add_message(session, user_msg)
 
-        # Summarize if conversation is getting long (the summary is a memory)
-        if memory:
-            await self._maybe_summarize(session)
-
-        # Build system prompt with relevant memories — inject the onboarding
-        # followup instruction only on the turn that handles the user's reply.
+        # Inject the onboarding followup instruction only on the turn that
+        # handles the user's reply.
         extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
         if extra_system:
             extra_parts.append(extra_system)
@@ -831,35 +945,31 @@ class Agent:
         elif call_gate is not None:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
-            tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session.messages)
+            tool_schemas = await self._turn_tools(session, self._tools.get_schemas(), text)
         logger.debug(
             "Tools available (%d): %s",
             len(tool_schemas or []),
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        turn = await self._begin_turn(user_id, session_key=session.session_id)
-
-        async def build_prompt(tool_names: list[str] | None) -> str:
+        async def build_prompt(tool_names: list[str] | None, language: str | None) -> str:
             return await self._build_system_prompt(
-                user_id,
-                text,
-                extra_system="\n\n".join(extra_parts) or None,
-                skip_memory=not memory,
-                tool_names=tool_names,
-                user_timezone=turn.timezone,
-                preferred_language=(channel_name or channel) != "voice",
+                user_id, extra_system="\n\n".join(extra_parts) or None, tool_names=tool_names, language=language
             )
 
         # The hints follow the tools this turn sends, in a call too: a prompt
         # that advertises a tool the model was not given gets the nearest
         # offered tool called in its place (issue #300).
-        system_prompt = await build_prompt(_schema_names(tool_schemas))
+        system_prompt = await build_prompt(_schema_names(tool_schemas), language)
 
         total_cost = 0.0
+        turn_usage = TokenUsage()
+        turn_requests = 0
         tool_calls_count = 0
+        turn_text = ""  # the tool steps' text, joined as a streamed turn shows it
         call_sids: list[str] = []
         final_text = ""
+        budget_stop: _BudgetStop | None = None
         last_response: LLMResponse | None = None
         consecutive_errors = 0
         sanitize_attempts = 0
@@ -867,6 +977,12 @@ class Agent:
 
         # ── ReAct Loop ───────────────────────────────────
         for _iteration in range(self._settings.max_tool_iterations):
+            # Checked again after every request, tool rounds included: the call that
+            # crossed the limit was recorded, the next one is never made.
+            if turn_requests and (budget_stop := await self._budget_stop()) is not None:
+                final_text = budget_stop.text
+                break
+
             # Proactive sanitization: fix orphaned pairs before they reach the API
             await self._repair_tool_pairs(session)
 
@@ -877,16 +993,10 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
+                self._note_request(session, response, system_prompt, tool_schemas)
                 # The image stays on every request of the turn: dropping it
                 # would change the history under the turn's thinking blocks.
                 # end_turn drops it (images are never persisted).
-            except BudgetExceededError:
-                final_text = (
-                    "Warning: Daily budget limit reached. "
-                    f"Limit: ${self._settings.daily_budget_usd:.2f}. "
-                    "I'll be back tomorrow, or you can increase the limit."
-                )
-                break
             except LLMError as e:
                 recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
                 if recovery is _PairRecovery.RETRY:
@@ -910,24 +1020,9 @@ class Agent:
                 final_text = _CALL_PLACED_THEN_FAILED_TEXT
                 break
 
-            # Track cost
-            try:
-                # Attribute cost to the provider that actually served (may be a
-                # failover), not the configured primary.
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                cost = await self._costs.record(
-                    provider=provider,
-                    model=response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    session_id=session.session_id,
-                    is_free=is_free,
-                )
-                total_cost += cost
-            except BudgetExceededError as e:
-                final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
-                break
+            total_cost += await self._record_cost(response, session.session_id)
+            turn_usage += response.usage
+            turn_requests += 1
 
             try:
                 _refuse_truncated_output(response, self._settings.max_tokens)
@@ -941,6 +1036,8 @@ class Agent:
 
             # If the LLM wants to use tools
             if response.has_tool_calls:
+                if response.content.strip():
+                    turn_text += _step_separator(turn_text) + response.content
                 logger.info(
                     "LLM requested tools: %s",
                     [tc.name for tc in response.tool_calls],
@@ -1003,13 +1100,15 @@ class Agent:
 
                 if skills_loaded and call_gate is None:
                     reselected = await self._reselect_after_skills(
-                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                        self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
                         # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
                         strip_thinking(session.messages)
                         tool_schemas = reselected
-                        system_prompt = await build_prompt(_schema_names(tool_schemas))
+                        # Read again: the turn may have changed it (set_preferred_language)
+                        language = await self._preferred_language(user_id, read=read_language)
+                        system_prompt = await build_prompt(_schema_names(tool_schemas), language)
 
                 if iteration_had_error:
                     consecutive_errors += 1
@@ -1039,14 +1138,24 @@ class Agent:
             )
 
         # ── Save the reply, with the warm question on a fresh session ──────
-        final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
+        # A budget stop is no reply: it is neither saved, remembered, nor asked after; only the
+        # marker closes the history after the turn's tool results (PR #366 review)
+        reply = ""
+        if budget_stop is not None:
+            await self._sessions.add_message(
+                session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
+            )
+        else:
+            final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
+            reply = final_text
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
-        if onboarding.ingest:
+        # Not after a failed budget check: that turn fails closed, so no further paid request
+        if onboarding.ingest and not (budget_stop is not None and budget_stop.check_failed):
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
         # Store the final exchange as a memory for future retrieval
-        if self._memory and memory and final_text:
+        if self._memory and memory and reply:
             try:
                 tag_channel = channel_name or channel
                 extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
@@ -1062,12 +1171,16 @@ class Agent:
             except Exception:
                 logger.debug("Failed to store exchange memory", exc_info=True)
 
+        _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
         return AgentResponse(
             text=final_text,
             cost_usd=total_cost,
             tool_calls_made=tool_calls_count,
             model=last_response.model if last_response else "",
             call_sids=call_sids,
+            budget_reached=budget_stop is not None and not budget_stop.check_failed,
+            budget_check_failed=budget_stop is not None and budget_stop.check_failed,
+            turn_text=turn_text if budget_stop is not None else "",
         )
 
     async def run_headless(
@@ -1094,6 +1207,9 @@ class Agent:
         even sees (enforced by omission, not by intercepting calls after the
         fact) — ``None`` means the full tool surface, same as live chat.
         """
+        # Before any setup: a refused run selects no tools and reads no memory (PR #366 review)
+        if (stop := await self._budget_stop()) is not None:
+            return _headless_budget_text(stop, self._settings.daily_budget_usd)
         messages: list[LLMMessage] = [LLMMessage(role=MessageRole.USER, content=prompt)]
 
         candidates = self._tools.get_schemas() if self._tools.has_tools else None
@@ -1101,8 +1217,10 @@ class Agent:
             candidates = [s for s in candidates if s.get("name") in allowed_tools] or None
         tool_schemas = await self._select_tools(candidates, prompt) if candidates is not None else None
         turn = await self._begin_turn(user_id)
+        # No session, so no cache to keep: the time stays in this run's own prompt
+        time_block = current_time_block(self._settings, turn.timezone)
         system_prompt = await self._build_system_prompt(
-            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas), user_timezone=turn.timezone
+            user_id, extra_system=time_block, tool_names=_schema_names(tool_schemas)
         )
 
         final_text = ""
@@ -1111,6 +1229,9 @@ class Agent:
         iterations = max_iterations or self._settings.max_tool_iterations
 
         for _iteration in range(iterations):
+            # Checked again after every request (each later iteration follows one)
+            if _iteration and (stop := await self._budget_stop()) is not None:
+                return _headless_budget_text(stop, self._settings.daily_budget_usd)
             try:
                 response: LLMResponse = await self._llm.complete(
                     messages=messages,
@@ -1118,29 +1239,11 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
-            except BudgetExceededError:
-                return (
-                    "Warning: Daily budget limit reached. "
-                    f"Limit: ${self._settings.daily_budget_usd:.2f}. "
-                    "Could not complete this scheduled action."
-                )
             except LLMError:
                 logger.exception("run_headless: LLM call failed")
                 return _HEADLESS_LLM_ERROR_TEXT
 
-            try:
-                provider = response.provider or self._settings.default_provider
-                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                await self._costs.record(
-                    provider=provider,
-                    model=response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    session_id=None,
-                    is_free=is_free,
-                )
-            except BudgetExceededError as e:
-                return f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
+            await self._record_cost(response, None)
 
             try:
                 _refuse_truncated_output(response, self._settings.max_tokens)
@@ -1186,10 +1289,8 @@ class Agent:
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
                             user_id,
-                            prompt,
-                            skip_memory=True,
+                            extra_system=time_block,
                             tool_names=_schema_names(tool_schemas),
-                            user_timezone=turn.timezone,
                         )
 
                 if iteration_had_error:
@@ -1231,14 +1332,55 @@ class Agent:
     ) -> AsyncGenerator[StreamChunk]:
         from contextlib import aclosing
 
-        async with (
-            self._sessions.turn(user_id, channel, session_key) as session,
-            aclosing(
-                self._handle_message_stream(user_id, channel, text, images, channel_user_id, memory, session=session)
-            ) as stream,
-        ):
-            async for chunk in stream:
-                yield chunk
+        session: Session | None = None
+        try:
+            async with (
+                self._sessions.turn(user_id, channel, session_key) as session,
+                aclosing(
+                    self._handle_message_stream(
+                        user_id, channel, text, images, channel_user_id, memory, session=session
+                    )
+                ) as stream,
+            ):
+                with prompt_cache_session(lambda: _cache_key(session)):
+                    async for chunk in stream:
+                        yield chunk
+        finally:
+            # Also when the client stops reading after DONE
+            if session is not None:
+                self._schedule_compaction(session)
+
+    async def _turn_admitted(self) -> bool:
+        """False when the daily budget refuses the turn before its first request.
+
+        A budget that cannot be read refuses it too, as a `BudgetCheckFailedError` (the web
+        API's 503 or stream `error`): no request is sent and nothing is persisted (PR #366 review).
+        """
+        try:
+            return not await self._costs.budget_reached()
+        except Exception as e:
+            logger.error("Daily budget check failed: the turn is refused before any request", exc_info=True)
+            raise BudgetCheckFailedError(_BUDGET_CHECK_FAILED_TEXT) from e
+
+    async def _budget_stop(self) -> _BudgetStop | None:
+        """Checked after each request of an admitted turn (and before a headless run's setup):
+        None to go on, or why it stops.
+
+        A budget that cannot be read stops the turn too, before another paid request
+        (fails closed); a call it already placed is still reported (PR #366 review).
+        """
+        try:
+            if not await self._costs.budget_reached():
+                return None
+        except Exception:
+            logger.error("Daily budget check failed: stopping before the next request", exc_info=True)
+            return _BudgetStop(_BUDGET_CHECK_FAILED_TEXT, _BUDGET_CHECK_FAILED_MARKER, check_failed=True)
+        text = _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd)
+        return _BudgetStop(text, _BUDGET_STOPPED_MARKER, check_failed=False)
+
+    async def _record_cost(self, response: LLMResponse, session_id: str | None) -> float:
+        """Record one completed request (see `record_response`) and return its cost."""
+        return await record_response(self._costs, self._llm, response, self._settings.default_provider, session_id)
 
     async def _handle_message_stream(
         self,
@@ -1254,8 +1396,11 @@ class Agent:
         """
         Process a user message, yielding StreamChunks as the response is generated.
 
-        Tool-call iterations use complete() (non-streaming). Only the final
-        text response is streamed token-by-token.
+        Every step is one streamed request with the turn's tools and system prompt
+        (issue #357): its text reaches the client as it is generated, its tool calls
+        run, and the step without tool calls is the reply. Text a later step streams
+        follows earlier text after a blank line. DONE carries everything streamed; the
+        saved reply is the last step's text, since earlier text is saved with its calls.
 
         ``channel_user_id``, when given, is the channel-native ID and is
         passed to tool execution so channel-bound tools (``send_file``,
@@ -1264,6 +1409,15 @@ class Agent:
         ``memory``.
         """
         self._last_active = (user_id, channel)
+        # A refused turn is no turn: nothing is persisted, its user message included (PR #366 review)
+        if not await self._turn_admitted():
+            _log_turn(session.session_id, 0, TokenUsage(), 0.0)
+            yield StreamChunk(
+                StreamEventType.DONE,
+                _BUDGET_REACHED_TEXT.format(limit=self._settings.daily_budget_usd),
+                budget_reached=True,
+            )
+            return
         memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
@@ -1274,21 +1428,18 @@ class Agent:
             for raw, media_type in images:
                 img_contents.append(ImageContent.from_bytes(raw, media_type))
 
-        user_msg = LLMMessage(
-            role=MessageRole.USER,
-            content=text,
-            images=img_contents,
+        turn = await self._begin_turn(user_id, session_key=session.session_id)
+        # Both are memory round trips: run them together (the language goes in the system prompt)
+        context, language = await asyncio.gather(
+            self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
+            self._preferred_language(user_id, read=memory),
         )
+        user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
         await self._sessions.add_message(session, user_msg)
-
-        if memory:
-            await self._maybe_summarize(session)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
         tool_schemas = (
-            await self._select_tools(self._tools.get_schemas(), text, session.messages)
-            if self._tools.has_tools
-            else None
+            await self._turn_tools(session, self._tools.get_schemas(), text) if self._tools.has_tools else None
         )
         logger.debug(
             "Tools available (%d): %s",
@@ -1296,55 +1447,88 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        turn = await self._begin_turn(user_id, session_key=session.session_id)
-
-        async def build_prompt(tool_names: list[str]) -> str:
+        async def build_prompt(tool_names: list[str], language: str | None) -> str:
             return await self._build_system_prompt(
-                user_id,
-                text,
-                extra_system=extra_system,
-                skip_memory=not memory,
-                tool_names=tool_names,
-                user_timezone=turn.timezone,
+                user_id, extra_system=extra_system, tool_names=tool_names, language=language
             )
 
-        system_prompt = await build_prompt(_schema_names(tool_schemas))
+        system_prompt = await build_prompt(_schema_names(tool_schemas), language)
         consecutive_errors = 0
         circuit_broken = False
         sanitize_attempts = 0
         response: LLMResponse | None = None
         call_sids: list[str] = []
+        total_cost = 0.0
+        turn_usage = TokenUsage()
+        turn_requests = 0
 
-        full_text = ""
+        full_text = ""  # everything the client received this turn
+        reply = ""  # the reply: saved as the turn's final assistant message
+        step_text = ""  # what the current step streamed
+        ending: str | None = None  # no request answers the turn's last tools
+        budget_stop: _BudgetStop | None = None
         try:
-            # Tool-call iterations (non-streaming)
+            # One streamed request per step, each with the turn's tools and system prompt
             for _iteration in range(self._settings.max_tool_iterations):
+                # Checked again after every request, as on the non-stream path
+                if turn_requests and (budget_stop := await self._budget_stop()) is not None:
+                    break
+
                 # Proactive sanitization: fix orphaned pairs before they reach the API
                 await self._repair_tool_pairs(session)
 
+                step_text = ""
+                separator = _step_separator(full_text)
+                step: LLMResponse | None = None
                 try:
-                    response = await self._llm.complete(
-                        messages=session.messages,
-                        tools=tool_schemas,
-                        system=system_prompt,
-                    )
-                except BudgetExceededError:
-                    yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
-                    return
-                except LLMError as e:
-                    recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
-                    if recovery is _PairRecovery.RETRY:
-                        sanitize_attempts += 1
-                        continue
-                    if recovery is _PairRecovery.CLEARED:
-                        yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
-                        return
-                    raise
-
-                # A blank cut-off here is fine: the final stream below is the reply, and is checked
-                _refuse_truncated_output(response, self._settings.max_tokens, blank_text_ok=True)
+                    async for event in self._llm.stream_turn(
+                        messages=session.messages, tools=tool_schemas, system=system_prompt
+                    ):
+                        if event.response is not None:
+                            step = event.response
+                        elif event.text:
+                            if separator and not step_text:
+                                full_text += separator
+                                yield StreamChunk(StreamEventType.TEXT, separator)
+                            step_text += event.text
+                            full_text += event.text
+                            yield StreamChunk(StreamEventType.TEXT, event.text)
+                except Exception as e:
+                    if isinstance(e, LLMError) and not step_text:
+                        recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                        if recovery is _PairRecovery.RETRY:
+                            sanitize_attempts += 1
+                            continue
+                        if recovery is _PairRecovery.CLEARED:
+                            yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
+                            return
+                    logger.exception("Stream failed after %d chars", len(step_text))
+                    if not step_text.strip():
+                        raise
+                    # The user already saw these chunks, so they are the reply
+                    logger.warning("Keeping the %d streamed chars as the reply", len(step_text))
+                    reply = step_text
+                    break
+                if step is None:
+                    if not step_text.strip():
+                        raise LLMError("stream_turn ended without a final response")
+                    # The user already saw these chunks, so they are the reply
+                    logger.warning("stream_turn ended without a final response; replying with the streamed text")
+                    reply = step_text
+                    break
+                response = step
+                self._note_request(session, response, system_prompt, tool_schemas)
+                total_cost += await self._record_cost(response, session.session_id)
+                turn_usage += response.usage
+                turn_requests += 1
+                _refuse_truncated_output(response, self._settings.max_tokens)
 
                 if not response.has_tool_calls:
+                    if not step_text.strip():
+                        # An empty reply is never sent: the outer handler turns this into
+                        # the placed-call text when a call is ringing
+                        raise LLMError("the reply step completed with no text")
+                    reply = step_text
                     break
 
                 logger.info(
@@ -1359,6 +1543,7 @@ class Agent:
                     content_blocks=list(response.content_blocks),
                 )
                 await self._sessions.add_message(session, assistant_msg)
+                step_text = ""  # saved with its tool calls
 
                 iteration_had_error = False
                 skills_loaded: list[str] = []
@@ -1383,13 +1568,15 @@ class Agent:
                         skills_loaded.append(skill)
                 if skills_loaded:
                     reselected = await self._reselect_after_skills(
-                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                        self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
                         # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
                         strip_thinking(session.messages)
                         tool_schemas = reselected
-                        system_prompt = await build_prompt(_schema_names(tool_schemas))
+                        # Read again: the turn may have changed it (set_preferred_language)
+                        language = await self._preferred_language(user_id, read=memory)
+                        system_prompt = await build_prompt(_schema_names(tool_schemas), language)
 
                 if iteration_had_error:
                     consecutive_errors += 1
@@ -1400,61 +1587,24 @@ class Agent:
                 else:
                     consecutive_errors = 0
             else:
-                fallback_content = response.content if response and response.content else "Max iterations reached."
-                yield StreamChunk(StreamEventType.DONE, fallback_content)
-                return
-
+                ending = _MAX_ITERATIONS_TEXT  # not saved, as before
             if circuit_broken:
-                fallback = (
-                    response.content
-                    if response and response.content
-                    else "I'm having repeated tool failures. Let me respond with what I have."
-                )
-                if fallback:
-                    final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
-                    await self._sessions.add_message(session, final_msg)
-                yield StreamChunk(StreamEventType.DONE, fallback)
-                return
+                ending = _TOOL_FAILURES_TEXT
 
-            # Stream the final response. It sends no tools, unlike the turn's earlier
-            # requests: that is a history edit for preserved thinking, so the turn's
-            # thinking is dropped before it (Q2c).
-            strip_thinking(session.messages)
-            streamed: LLMResponse | None = None
-            try:
-                async for event in self._llm.stream_turn(
-                    messages=session.messages,
-                    system=system_prompt,
-                ):
-                    if event.response is not None:
-                        streamed = event.response
-                    elif event.text:
-                        full_text += event.text
-                        yield StreamChunk(StreamEventType.TEXT, event.text)
-            except Exception:
-                logger.exception("Final stream failed after %d chars", len(full_text))
-                if full_text.strip():
-                    logger.warning("Keeping the %d streamed chars as the reply", len(full_text))
+            if ending is not None:
+                # No request answers the last tools: the reply is the last step's text, already
+                # streamed, or a canned line sent now
+                if response is not None and response.content.strip():
+                    ending = response.content
                 else:
-                    # The tool loop let a blank cut-off through because this stream was the reply;
-                    # it must not become the reply now that the stream failed.
-                    fallback = _tool_loop_fallback(response, self._settings.max_tokens, "failed")
-                    full_text += fallback
-                    yield StreamChunk(StreamEventType.TEXT, fallback)
-            else:
-                # The reply is the stream, so its stop reason decides: a budget spent on thinking
-                # leaves no text, which must not be sent as an empty reply
-                if streamed is not None:
-                    _refuse_truncated_output(streamed, self._settings.max_tokens)
-                if full_text.strip():
-                    if streamed is None:
-                        # The user already saw these chunks, so they are the reply
-                        logger.warning("stream_turn ended without a final response; replying with the streamed text")
-                else:
-                    why = "completed with no text" if streamed is not None else "closed without a final response"
-                    fallback = _tool_loop_fallback(response, self._settings.max_tokens, why)
-                    full_text += fallback
-                    yield StreamChunk(StreamEventType.TEXT, fallback)
+                    if separator := _step_separator(full_text):
+                        yield StreamChunk(StreamEventType.TEXT, separator)
+                    full_text += separator + ending
+                    yield StreamChunk(StreamEventType.TEXT, ending)
+                if circuit_broken:
+                    await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=ending))
+                yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
+                return
         except Exception:
             if not call_sids:
                 raise
@@ -1465,20 +1615,45 @@ class Agent:
             tail = ("\n\n" if full_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
             full_text += tail
             yield StreamChunk(StreamEventType.TEXT, tail)
+            # The failed step's text is in no saved message: it goes with the notice
+            reply = step_text + ("\n\n" if step_text.strip() else "") + _CALL_PLACED_THEN_FAILED_TEXT
+
+        if budget_stop is not None:
+            # A refusal, not a reply (PR #366 review): no streamed text, no onboarding question,
+            # and only the marker saved; the client gets it as the turn's end, flagged
+            await self._sessions.add_message(
+                session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
+            )
+            # A reached budget still reads the answer; a failed check sends no further request
+            if onboarding.ingest and not budget_stop.check_failed:
+                await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
+            _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
+            yield StreamChunk(
+                StreamEventType.DONE,
+                budget_stop.text,
+                cost_usd=total_cost,
+                budget_reached=not budget_stop.check_failed,
+                budget_check_failed=budget_stop.check_failed,
+                turn_text=full_text,
+            )
+            return
 
         # ── Save the reply, with the warm question on a fresh session ──────
         # Saved and recorded before the client sees the question: a disconnect
-        # while it streams still leaves the user asked.
-        saved = await self._save_reply(session, onboarding, user_id, channel, full_text, streamed=True)
-        if saved != full_text:
-            yield StreamChunk(StreamEventType.TEXT, saved[len(full_text) :])
-            full_text = saved
+        # while it streams still leaves the user asked. The reply only: text
+        # streamed before a tool call is saved with that call.
+        saved = await self._save_reply(session, onboarding, user_id, channel, reply, streamed=True)
+        if saved != reply:
+            tail = saved[len(reply) :]
+            full_text += tail
+            yield StreamChunk(StreamEventType.TEXT, tail)
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
-        yield StreamChunk(StreamEventType.DONE, full_text)
+        _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
+        yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
 
     async def end_voice_session(self, session_key: str) -> None:
         """Drop a finished call's session from the cache (see ``stream_voice_turn``)."""
@@ -1498,23 +1673,30 @@ class Agent:
     ) -> AsyncGenerator[StreamChunk]:
         from contextlib import aclosing
 
-        async with (
-            self._sessions.turn(user_id, channel, session_key) as session,
-            aclosing(
-                self._stream_voice_turn(
-                    user_id,
-                    channel,
-                    text,
-                    extra_system=extra_system,
-                    channel_user_id=channel_user_id,
-                    timings=timings,
-                    session_key=session_key,
-                    session=session,
-                )
-            ) as stream,
-        ):
-            async for chunk in stream:
-                yield chunk
+        session: Session | None = None
+        try:
+            async with (
+                self._sessions.turn(user_id, channel, session_key) as session,
+                aclosing(
+                    self._stream_voice_turn(
+                        user_id,
+                        channel,
+                        text,
+                        extra_system=extra_system,
+                        channel_user_id=channel_user_id,
+                        timings=timings,
+                        session_key=session_key,
+                        session=session,
+                    )
+                ) as stream,
+            ):
+                with prompt_cache_session(lambda: _cache_key(session)):
+                    async for chunk in stream:
+                        yield chunk
+        finally:
+            # After the caller heard the reply, off the call's critical path
+            if session is not None:
+                self._schedule_compaction(session)
 
     async def _stream_voice_turn(
         self,
@@ -1556,16 +1738,17 @@ class Agent:
 
         turn_started = time.monotonic()
         self._last_active = (user_id, channel)
-        user_msg = LLMMessage(role=MessageRole.USER, content=text)
+        turn = await self._begin_turn(user_id)
+        # Each utterance carries its own memories and time, so the call's system
+        # prompt stays the same while its extra_system does (Q15).
+        context = await self._turn_context(user_id, text, memory=True, user_timezone=turn.timezone)
+        user_msg = LLMMessage(role=MessageRole.USER, content=text, context=context)
         await self._sessions.add_message(session, user_msg)
-        # NOTE: no summarizer here — it is an LLM call on the voice critical
-        # path (seconds of dead air when it triggers mid-conversation).
         # add_message does not trim while the turn is open: SessionManager.turn()
         # trims to max_session_messages when the turn ends. Growth within one turn
-        # is bounded by max_tool_iterations; text channels keep the richer
-        # summarize-then-trim flow.
+        # is bounded by max_tool_iterations. Compaction runs after the turn, off the
+        # call's critical path (see stream_voice_turn).
 
-        turn = await self._begin_turn(user_id)
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
         # when no gate is bound (legacy callers, tests).
@@ -1582,11 +1765,8 @@ class Agent:
         # sends (issue #300).
         system_prompt = await self._build_system_prompt(
             user_id,
-            text,
             extra_system=extra_system,
             tool_names=_schema_names(tool_schemas),
-            user_timezone=turn.timezone,
-            preferred_language=False,
         )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 1024) or 1024)
         # Thinking shares that budget. Read once per turn, so every request of
@@ -1682,12 +1862,6 @@ class Agent:
                             full_text += event.text
                             request_text += event.text
                             yield StreamChunk(StreamEventType.TEXT, event.text)
-                except BudgetExceededError:
-                    if llm_span is not None:
-                        llm_span.close(_SpanStatus.DENIED, reason="budget")
-                    budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
-                    yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
-                    return
                 except LLMError as e:
                     if llm_span is not None:
                         llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
@@ -1708,30 +1882,22 @@ class Agent:
                     )
                 if response is None:  # provider stream ended without a final event
                     raise LLMError("stream_turn ended without a final response")
+                self._note_request(session, response, system_prompt, tool_schemas)
 
                 if timings is not None:
                     # Cache visibility: did the tools-prefix prompt cache hit?
                     timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
-                    timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
+                    timings.setdefault(
+                        "cache_write_tokens", float(response.cache_write_5m_tokens + response.cache_write_1h_tokens)
+                    )
                     timings.setdefault("input_tokens", float(response.input_tokens))
                     # Which model actually served the turn (A/B attribution in the
                     # latency log — the runtime override can change mid-session).
                     if response.model:
                         timings.setdefault("turn_model", response.model)
 
-                try:
-                    provider = response.provider or self._settings.default_provider
-                    is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
-                    await self._costs.record(
-                        provider=provider,
-                        model=response.model,
-                        input_tokens=response.input_tokens,
-                        output_tokens=response.output_tokens,
-                        session_id=session.session_id,
-                        is_free=is_free,
-                    )
-                except BudgetExceededError:
-                    pass  # this turn already ran; the next turn hits the budget gate
+                # A call in progress is never gated (Q11): this utterance ran, so it is recorded
+                await self._record_cost(response, session.session_id)
 
                 if not response.truncated:
                     break
@@ -1882,6 +2048,7 @@ class Agent:
         history: list[LLMMessage] | None = None,
         *,
         query: str | None = None,
+        kept: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Trim a chat turn's tools to tool_selection_max via the tool selector (see tools/selection.py).
 
@@ -1894,7 +2061,21 @@ class Agent:
         recent = [tc.name for msg in (history or [])[-_RECENT_TOOL_MESSAGES:] for tc in msg.tool_calls]
         if query is None:
             query = _selection_query(text, history)
-        return await self.tool_selector.select(schemas, query, reversed(recent))
+        if kept is None:
+            return await self.tool_selector.select(schemas, query, reversed(recent))
+        return await self.tool_selector.select(schemas, query, reversed(recent), kept=kept)
+
+    async def _turn_tools(
+        self, session: Session, schemas: list[dict[str, Any]], text: str, *, query: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The tools a conversation's turn sends: with selection on, its kept list (session metadata)
+        with this turn's new tools appended, so the tools sent before stay a cached prefix (#357, Q21)."""
+        if self.tool_selector is None or not self.tool_selector.applies(schemas):
+            return await self._select_tools(schemas, text, session.messages, query=query)
+        kept = json.loads(session.metadata.get(TOOL_LIST_KEY, "[]"))
+        selected = await self._select_tools(schemas, text, session.messages, query=query, kept=kept)
+        session.metadata[TOOL_LIST_KEY] = json.dumps(_schema_names(selected))
+        return selected
 
     async def _reselect_after_skills(
         self,
@@ -1902,6 +2083,7 @@ class Agent:
         text: str,
         history: list[LLMMessage],
         skills: list[str],
+        session: Session | None = None,
     ) -> list[dict[str, Any]]:
         """Select a turn's tools again from ``candidates`` once skills loaded mid-turn, ranking on their text first.
 
@@ -1911,6 +2093,8 @@ class Agent:
         hints keep following the tools sent.
         """
         query = "\n".join([*(s[:_SELECTION_EXTRA_CHARS] for s in skills), text])
+        if session is not None:  # a conversation's: appended to its tool list
+            return await self._turn_tools(session, candidates, text, query=query)
         return await self._select_tools(candidates, text, history, query=query)
 
     async def _user_timezone(self, user_id: str) -> str:
@@ -1935,23 +2119,21 @@ class Agent:
     async def _build_system_prompt(
         self,
         user_id: str,
-        user_text: str,
         *,
         extra_system: str | None = None,
-        skip_memory: bool = False,
         tool_names: Collection[str] | None = None,
-        user_timezone: str | None = None,
-        preferred_language: bool = True,
+        language: str | None = None,
     ) -> str:
-        """Build system prompt, injecting relevant memories if available.
+        """Build the system prompt: only parts that stay the same for a whole
+        conversation until one of them changes (issue #357, Q14). Recalled
+        memories and the current time change every turn, so they travel on the
+        user message instead (``_turn_context``).
 
         ``tool_names`` are the tools sent with this turn (the tool hints and
         the MCP server block follow them); ``None`` means the whole registry.
-        ``user_timezone`` is the turn's already-resolved identity zone
-        (``None`` = look it up).
-        ``preferred_language`` False leaves out the user's stored language:
-        a voice call speaks the one language pinned on the call (its
-        LANGUAGE_POLICY), and an outbound call's other party is not the user.
+        ``language`` is the user's stored language, read by the caller
+        (``_preferred_language``) alongside the turn's memory search; None
+        leaves it out. Nothing here reads memory.
         """
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
         offered = None if tool_names is None else set(tool_names)
@@ -2028,55 +2210,53 @@ class Agent:
             except Exception:
                 self._mcp_list_outage.log("Failed to fetch MCP server list for prompt", exc_info=True)
 
-        # The model has no clock and will invent today's date if nothing states
-        # it (see core/clock.py). Appended on every return path below, and last
-        # so it is the most recent thing the model reads before the messages.
-        if user_timezone is None:
-            user_timezone = await self._user_timezone(user_id)
-        time_block = current_time_block(self._settings, user_timezone)
+        if language:
+            base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
+        if extra_system:
+            base_prompt += "\n\n" + extra_system
+        return base_prompt
 
-        def _with_extra(prompt: str) -> str:
-            parts = [prompt]
-            if extra_system:
-                parts.append(extra_system)
-            parts.append(time_block)
-            return "\n\n".join(parts)
+    async def _preferred_language(self, user_id: str, *, read: bool) -> str | None:
+        """The user's stored language for the system prompt, or None.
 
-        if not self._memory or skip_memory:
-            return _with_extra(base_prompt)
+        ``read`` False skips it: a memory-free turn reads nothing from memory,
+        a voice call speaks the one language pinned on the call (its
+        LANGUAGE_POLICY), and an outbound call's other party is not the user.
+        Read directly, not through the memory search: a message that shares no
+        word with the profile must still get its language. A failed read costs
+        only the language.
+        """
+        if not (read and self._memory):
+            return None
+        try:
+            return await get_preferred_language(self._memory, user_id)
+        except Exception:
+            logger.warning("Failed to read the preferred language for prompt", exc_info=True)
+            return None
 
-        store = self._memory
+    async def _turn_context(self, user_id: str, text: str, *, memory: bool, user_timezone: str) -> str:
+        """The context sent with the user's message: memories recalled for
+        ``text`` (with ``memory``), then the current time.
 
-        async def search() -> str | None:
-            """The memories block ("" for none), or None when the search fails."""
+        Computed once per turn and kept on the message, so every later request
+        replays it unchanged and the system prompt stays identical (Q15). The
+        model has no clock and will invent today's date if nothing states it
+        (see core/clock.py). A failed search costs only the memories.
+        """
+        parts: list[str] = []
+        if self._memory and memory:
             try:
-                memories = await store.search_text(user_text, user_id=user_id, limit=3)
+                memories = await self._memory.search_text(text, user_id=user_id, limit=3)
                 block = "\n".join(f"- {m.content}" for m in memories)
             except Exception:
                 # Inside the handler, so the outage warning carries the traceback.
                 self._memory_outage.log("Failed to fetch memories for prompt", exc_info=True)
-                return None
-            self._memory_outage.clear()
-            return block
-
-        async def read_language() -> str | None:
-            # Read directly, not through the search: a message that shares no
-            # word with the profile must still get its language. Either read
-            # failing costs only its own block.
-            if not preferred_language:
-                return None
-            try:
-                return await get_preferred_language(store, user_id)
-            except Exception:
-                logger.warning("Failed to read the preferred language for prompt", exc_info=True)
-                return None
-
-        memory_block, language = await asyncio.gather(search(), read_language())
-        if memory_block:
-            base_prompt += f"\n\n{MEMORY_BLOCK_HEADER}\n{memory_block}"
-        if language:
-            base_prompt += f"\n\n[User preferred language: {language}]\n{PREFERRED_LANGUAGE_NOTE}"
-        return _with_extra(base_prompt)
+            else:
+                self._memory_outage.clear()
+                if block:
+                    parts.append(f"{MEMORY_BLOCK_HEADER}\n{block}")
+        parts.append(current_time_block(self._settings, user_timezone))
+        return "\n\n".join(parts)
 
     @staticmethod
     def _memory_for_turn(session: Session, memory: bool) -> bool:
@@ -2276,6 +2456,11 @@ class Agent:
         `_ONBOARDING_MAX_EMPTY_REPLIES`: a failing extractor costs a user a
         bounded number of extra calls, and a transient outage still drops no
         answer while the next message is read again.
+
+        The extraction belongs to its turn and is not budget-checked again: a
+        turn admitted under the daily budget reads its message even when its own
+        requests crossed the limit, as a call in progress is never cut. A turn
+        the budget refused never gets here (PR #366 review).
         """
         name: str | None = None
         use_case: str | None = None
@@ -2309,6 +2494,7 @@ class Agent:
                 return
             logger.warning("Onboarding extraction failed; the gate is left as it was: %s", e)
             return
+        await self._record_cost(response, None)
         data = _safe_json_loads(response.content or "")
         if isinstance(data, dict) and data.get("answers_question") is True:
             name = _clean_profile_value(data.get("name"))

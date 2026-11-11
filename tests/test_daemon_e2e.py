@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from daemon_support import alive, free_port, scratch_env, signal_channel_env, wait_for_output
+from daemon_support import alive, free_port, scratch_env, signal_channel_env, wait_for_output, write_test_pricing
 
 from pincer import __version__, daemon
 
@@ -68,6 +68,7 @@ def scratch(tmp_path: Path, signal_stub: str) -> Iterator[_Scratch]:
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
+    write_test_pricing(cwd)
     port = free_port()
     env = scratch_env(
         home,

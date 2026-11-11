@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from pincer.core.compaction import LastRequest
+
 logger = logging.getLogger(__name__)
 
 # Sessions held in memory at once; past it the least recently used is
@@ -33,6 +35,9 @@ _DEFAULT_MAX_CACHED_SESSIONS = 1024
 # Eviction tries this many sessions beyond the overflow per request, so a few
 # that cannot be saved are stepped over without one request retrying them all.
 _EVICTION_SPARE_ATTEMPTS = 2
+# Past the message cap a session is cut to this share of it (50 -> 30) in one go, so its
+# history stays the same between cuts (owner ruling Q20: the backstop to token compaction).
+_TRIM_KEEP_NUMERATOR, _TRIM_KEEP_DENOMINATOR = 3, 5
 
 
 def _session_key(user_id: str, channel: str) -> str:
@@ -84,6 +89,8 @@ class Session:
     # Set while an agent turn runs on the session: its history must not change
     # under the turn's thinking blocks, so add_message does not trim until the turn ends.
     _turn_open: bool = field(default=False, init=False, repr=False, compare=False)
+    # What the latest LLM request of the session's turn sent, for compaction; never saved
+    last_request: LastRequest | None = field(default=None, init=False, repr=False, compare=False)
 
     # ── Onboarding (legacy flags, see ONBOARDING_COMPLETE_KEY) ──────────
 
@@ -112,6 +119,7 @@ class SessionManager:
     def __init__(self, db_path: Path, max_messages: int = 50, max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS) -> None:
         self._db_path = db_path
         self._max_messages = max_messages
+        self._keep_messages = max_messages * _TRIM_KEEP_NUMERATOR // _TRIM_KEEP_DENOMINATOR
         self._max_cached = max_cached
         self._service: SessionService | None = None
         self._onboarding: OnboardingService | None = None
@@ -126,23 +134,47 @@ class SessionManager:
         active or queued, and yield it. The turn opens on entry and ends on exit (see
         `begin_turn` / `end_turn`), so an entry point cannot forget either."""
         key = _resolve_session_key(user_id, channel, pincer_user_id, session_key)
+        async with self._locked(key):
+            session = await self.get_or_create(user_id, channel, pincer_user_id, session_key)
+            self.begin_turn(session)
+            try:
+                yield session
+            finally:
+                # However the turn ended: drop its thinking and images, trim, save
+                await self.end_turn(session)
+
+    @asynccontextmanager
+    async def _locked(self, key: str) -> AsyncIterator[None]:
+        """Hold the session's turn lock, pinning it in the cache while held or awaited."""
         lock, users = self._turn_locks.get(key, (asyncio.Lock(), 0))
         self._turn_locks[key] = (lock, users + 1)
         try:
             async with lock:
-                session = await self.get_or_create(user_id, channel, pincer_user_id, session_key)
-                self.begin_turn(session)
-                try:
-                    yield session
-                finally:
-                    # However the turn ended: drop its thinking and images, trim, save
-                    await self.end_turn(session)
+                yield
         finally:
             current_lock, users = self._turn_locks[key]
             if users == 1:
                 del self._turn_locks[key]
             else:
                 self._turn_locks[key] = (current_lock, users - 1)
+
+    async def compact(self, session: Session, prefix: list[LLMMessage], replacement: LLMMessage) -> bool:
+        """Replace the session's oldest messages `prefix` by `replacement`, between turns.
+
+        Applies only while `prefix` is still the start of the cached session's history (the
+        same message objects), so a turn, repair, clear or trim since it was chosen wins.
+        True if the history changed.
+        """
+        async with self._locked(session.session_id):
+            if self._cache.get(session.session_id) is not session:
+                return False
+            head = session.messages[: len(prefix)]
+            if len(head) != len(prefix) or any(a is not b for a, b in zip(head, prefix, strict=True)):
+                return False
+            session.messages = [replacement, *session.messages[len(prefix) :]]
+            session.updated_at = time.time()
+            await self._persist(session)
+            return True
 
     async def initialize(self) -> None:
         """Bring the database to head and attach the store.
@@ -271,12 +303,14 @@ class SessionManager:
             logger.warning("Could not save session %s after trimming it at the end of a turn", session.session_id)
 
     def _trim(self, session: Session) -> bool:
-        """Cut the oldest messages past the cap, keeping tool pairs whole. True if anything was cut."""
+        """Past the cap, cut to the newest 3/5 of it, keeping tool pairs whole. True if anything was cut."""
         if len(session.messages) <= self._max_messages:
             return False
+        before = len(session.messages)
         system_msgs = [m for m in session.messages if m.role == MessageRole.SYSTEM]
         other_msgs = [m for m in session.messages if m.role != MessageRole.SYSTEM]
-        start = len(other_msgs) - (self._max_messages - len(system_msgs))
+        # Never past the end: old sessions may hold more summaries than the share kept
+        start = min(len(other_msgs), len(other_msgs) - (self._keep_messages - len(system_msgs)))
         # Never start on a tool_result — it would be orphaned without its tool_use
         while start < len(other_msgs) and other_msgs[start].role == MessageRole.TOOL_RESULT:
             start += 1
@@ -285,11 +319,7 @@ class SessionManager:
             start -= 1
         trimmed = other_msgs[start:]
         session.messages = system_msgs + trimmed
-        logger.debug(
-            "Session %s trimmed to %d messages",
-            session.session_id,
-            len(session.messages),
-        )
+        logger.info("Session %s trimmed from %d to %d messages", session.session_id, before, len(session.messages))
         return True
 
     async def save(self, session: Session) -> None:

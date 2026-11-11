@@ -22,8 +22,14 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
+    RequestClients,
     StreamTurnEvent,
+    TokenCounts,
     ToolCall,
+    prompt_cache_key,
+    rate_limit_attempts,
+    rate_limit_backoff,
+    transient_status,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
 
@@ -47,6 +53,8 @@ logger = logging.getLogger(__name__)
 OPENAI_MAX_TOOLS = 128
 # OpenAI's finish_reason when the output hit the token limit
 _FINISH_REASON_LENGTH = "length"
+# The first wait after a 429, which the SDK's error carries no retry-after for here; it doubles per retry
+_RATE_LIMIT_WAIT_S = 5.0
 
 
 def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -115,8 +123,11 @@ def convert_messages_to_openai(
                     "tool_calls": tool_calls_api,
                 }
             )
-        elif msg.images:
+        elif msg.images or msg.context:
+            # Pincer's context block first, then the images, then the user's words
             content_parts: list[dict[str, Any]] = []
+            if msg.context:
+                content_parts.append({"type": "text", "text": msg.context})
             for img in msg.images:
                 content_parts.append(
                     {
@@ -143,6 +154,31 @@ def _normalize_finish_reason(finish_reason: str | None) -> str:
     return finish_reason or ""
 
 
+def _token_count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _usage_counts(usage: Any) -> TokenCounts:
+    """The token counts of an OpenAI `usage` (None when the API sent none).
+
+    `prompt_tokens` is the whole prompt: the cached part (`cached_tokens`) and, where the
+    API reports it (Azure, gpt-6), the part written to the cache (`cache_write_tokens`,
+    stored as 5-minute writes) come out of it, leaving uncached input.
+    """
+    prompt = _token_count(getattr(usage, "prompt_tokens", 0))
+    details = getattr(usage, "prompt_tokens_details", None)
+    read = _token_count(getattr(details, "cached_tokens", 0))
+    # Not in the SDK's model: read from the response's extra fields
+    written = _token_count(getattr(details, "cache_write_tokens", 0))
+    return TokenCounts(
+        input_tokens=max(0, prompt - read - written),
+        cache_write_5m_tokens=written,
+        cache_write_1h_tokens=0,
+        cache_read_tokens=read,
+        output_tokens=_token_count(getattr(usage, "completion_tokens", 0)),
+    )
+
+
 def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     """Parse OpenAI ChatCompletion into unified LLMResponse."""
     choice = response.choices[0]
@@ -163,9 +199,8 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
         content=message.content or "",
         tool_calls=tool_calls,
         model=response.model,
-        input_tokens=response.usage.prompt_tokens if response.usage else 0,
-        output_tokens=response.usage.completion_tokens if response.usage else 0,
         stop_reason=_normalize_finish_reason(choice.finish_reason),
+        **_usage_counts(response.usage),
     )
 
 
@@ -204,7 +239,15 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 f"endpoint will reject. Set {env} to a model this endpoint supports."
             )
 
+        from pincer.llm.router import is_free_provider  # the router imports this module
+
+        # Strict endpoints reject the unknown field (a 400 on every request), and a keyless local
+        # endpoint has no paid cache to key: only the providers listed as accepting it get a key
+        self._sends_cache_key = provider in settings.prompt_cache_key_providers and not is_free_provider(
+            settings, provider
+        )
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
+        self._request_clients = RequestClients[AsyncOpenAI]()
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
@@ -244,6 +287,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         }
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
+        if self._sends_cache_key and (cache_key := prompt_cache_key()):
+            # One key per conversation routes its requests to the same cache (issue #357, Q21)
+            kwargs["prompt_cache_key"] = cache_key
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
         reasoning = resolve_and_warn(
             ReasoningWire.OPENAI,
@@ -251,6 +297,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
             pinned=pinned,
+            with_tools=bool(tools),
         )
         kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)
@@ -282,12 +329,14 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         try:
             response = await self._call_with_retry(kwargs)
         except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} API error: {e.status_code} {e.message}") from e
+            message = f"{self._provider_name} API error: {e.status_code} {e.message}"
+            raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except openai.APIConnectionError as e:
             raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
         result = parse_openai_response(response)
         result.provider = self._provider_name
+        result.request_model = kwargs["model"]
         return result
 
     async def stream_turn(
@@ -304,7 +353,10 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         """True single-generation streaming (Sprint 5): content deltas are
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
-        Anthropic implementation, so the voice pipeline can run either."""
+        Anthropic implementation, so the voice pipeline can run either.
+
+        A 429 before the first event is retried as `complete()` retries it; once
+        text has been yielded nothing is retried, since the caller already has it."""
         kwargs = self._build_kwargs(
             messages,
             tools,
@@ -318,42 +370,51 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 
-        text_parts: list[str] = []
-        tool_accum: dict[int, dict[str, str]] = {}
-        finish_reason = ""
-        model_name = ""
-        usage: Any = None
-
-        try:
-            stream = await self._client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                if getattr(chunk, "usage", None):
-                    usage = chunk.usage
-                model_name = getattr(chunk, "model", "") or model_name
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                delta = choice.delta
-                if delta and delta.content:
-                    text_parts.append(delta.content)
-                    yield StreamTurnEvent(text=delta.content)
-                if delta and delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        slot = tool_accum.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                        if tc.id:
-                            slot["id"] = tc.id
-                        if tc.function and tc.function.name:
-                            slot["name"] += tc.function.name
-                        if tc.function and tc.function.arguments:
-                            slot["args"] += tc.function.arguments
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-        except openai.RateLimitError as e:
-            raise LLMRateLimitError(retry_after=5.0) from e
-        except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} stream error: {e.status_code} {e.message}") from e
-        except openai.APIConnectionError as e:
-            raise LLMError(f"{self._provider_name} connection error: {e}") from e
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
+            started = False
+            text_parts: list[str] = []
+            tool_accum: dict[int, dict[str, str]] = {}
+            finish_reason = ""
+            model_name = ""
+            usage: Any = None
+            try:
+                stream = await self._request_clients.pick(self._client).chat.completions.create(**kwargs)
+                async for chunk in stream:
+                    if getattr(chunk, "usage", None):
+                        usage = chunk.usage
+                    model_name = getattr(chunk, "model", "") or model_name
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    if delta and delta.content:
+                        text_parts.append(delta.content)
+                        started = True
+                        yield StreamTurnEvent(text=delta.content)
+                    if delta and delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            slot = tool_accum.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                            if tc.id:
+                                slot["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                slot["name"] += tc.function.name
+                            if tc.function and tc.function.arguments:
+                                slot["args"] += tc.function.arguments
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+                break
+            except openai.RateLimitError as e:
+                if started or attempt == attempts - 1:
+                    raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e
+                wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
+                logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
+                await asyncio.sleep(wait)
+            except openai.APIStatusError as e:
+                message = f"{self._provider_name} stream error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+            except openai.APIConnectionError as e:
+                raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
         tool_calls: list[ToolCall] = []
         for index in sorted(tool_accum):
@@ -371,28 +432,27 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 tool_calls=tool_calls,
                 model=model_name,
                 provider=self._provider_name,
-                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                request_model=kwargs["model"],
                 stop_reason=_normalize_finish_reason(finish_reason),
+                **_usage_counts(usage),
             )
         )
 
     async def close(self) -> None:
         await self._client.close()
 
-    async def _call_with_retry(
-        self,
-        kwargs: dict[str, Any],
-        max_retries: int = 3,
-    ) -> ChatCompletion:
-        for attempt in range(max_retries):
+    async def _call_with_retry(self, kwargs: dict[str, Any]) -> ChatCompletion:
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
             try:
-                result: ChatCompletion = await self._client.chat.completions.create(**kwargs)
+                result: ChatCompletion = await self._request_clients.pick(self._client).chat.completions.create(
+                    **kwargs
+                )
                 return result
             except openai.RateLimitError as e:
-                if attempt == max_retries - 1:
-                    raise LLMRateLimitError(retry_after=5.0) from e
-                wait = min(5.0 * (2**attempt), 60)
+                if attempt == attempts - 1:
+                    raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e
+                wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
                 logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
                 await asyncio.sleep(wait)
         raise LLMError("Exhausted retries")

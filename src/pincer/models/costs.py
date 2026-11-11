@@ -1,6 +1,6 @@
 """LLM and image-generation spend."""
 
-from sqlalchemy import Column, Index, Integer, Text
+from sqlalchemy import Column, Index, Integer, Text, text
 from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
@@ -17,6 +17,10 @@ class CostLog(SQLModel, table=True):
     model: str = Field(sa_column=Column(Text(), nullable=False))
     input_tokens: int = Field(sa_column=Column(Integer(), nullable=False))
     output_tokens: int = Field(sa_column=Column(Integer(), nullable=False))
+    # `input_tokens` is uncached input; 0 in these on rows from before 0029 (not recorded)
+    cache_read_tokens: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=text("0")))
+    cache_write_5m_tokens: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=text("0")))
+    cache_write_1h_tokens: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=text("0")))
     cost_usd: float = Field(sa_column=Column(Real(), nullable=False))
     session_id: str | None = Field(default=None, sa_column=Column(Text()))
 

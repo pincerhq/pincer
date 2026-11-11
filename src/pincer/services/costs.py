@@ -15,51 +15,44 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends
 
+from pincer.config.pricing import UnpricedModelError
 from pincer.db.engine import ensure_schema_current, get_database_url
 from pincer.db.session import session_scope
-from pincer.exceptions import BudgetExceededError
 from pincer.models.costs import CostLog, ImageCostLog
 from pincer.repositories.costs import CostLogRepository, ImageCostLogRepository
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+    from pincer.config.pricing import PriceTable, TokenUsage
 
 logger = logging.getLogger(__name__)
 
-# ── Pricing per 1M tokens (input, output) in USD ────────
-PRICING: dict[str, tuple[float, float]] = {
-    # Anthropic
-    "claude-opus-4-6": (15.0, 75.0),
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "claude-sonnet-4-5-20250929": (3.0, 15.0),
-    "claude-sonnet-4-20250514": (3.0, 15.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
-    # OpenAI
-    "gpt-4o": (2.50, 10.0),
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4-turbo": (10.0, 30.0),
-    "o1": (15.0, 60.0),
-    "o1-mini": (1.10, 4.40),
-    "o3-mini": (1.10, 4.40),
-}
-
-DEFAULT_PRICING = (3.0, 15.0)
-
 _DAY_S = 86400
-
-
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Calculate cost in USD for a single API call."""
-    input_rate, output_rate = PRICING.get(model, DEFAULT_PRICING)
-    return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
 
 
 @dataclass
 class CostSummary:
     total_usd: float
     total_calls: int
-    total_input_tokens: int
+    total_input_tokens: int  # uncached input
     total_output_tokens: int
+    total_cache_read_tokens: int = 0
+    total_cache_write_5m_tokens: int = 0
+    total_cache_write_1h_tokens: int = 0
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        return cache_hit_rate(
+            self.total_input_tokens,
+            self.total_cache_write_5m_tokens + self.total_cache_write_1h_tokens,
+            self.total_cache_read_tokens,
+        )
+
+
+def cache_hit_rate(uncached: int, written: int, read: int) -> float | None:
+    """The share of all input read from the cache; None when there was no input."""
+    total = uncached + written + read
+    return read / total if total else None
 
 
 def _utc_today_start() -> float:
@@ -71,13 +64,15 @@ def _day_start(date_str: str) -> float:
 
 
 class CostService:
-    def __init__(self, url: str | None = None, daily_budget: float = 0.0) -> None:
+    def __init__(self, url: str | None = None, daily_budget: float = 0.0, prices: PriceTable | None = None) -> None:
         self._url = url
         self.daily_budget = daily_budget
+        self._prices = prices
 
     @classmethod
     async def from_settings(cls, settings: Settings | None = None) -> CostService:
-        """The configured database (brought to head) and daily budget."""
+        """The configured database (brought to head) and daily budget, for reading:
+        it has no price table, so it cannot record an LLM call."""
         if settings is None:
             from pincer.config import get_settings
 
@@ -91,41 +86,55 @@ class CostService:
         self,
         provider: str,
         model: str,
-        input_tokens: int,
-        output_tokens: int,
+        usage: TokenUsage,
         session_id: str | None = None,
         is_free: bool = False,
     ) -> float:
         """Record an LLM call and return its cost.
 
-        Raises `BudgetExceededError`, recording nothing, when the call would
-        take today's spend over the daily budget. `is_free` (e.g. a keyless
-        local endpoint) forces zero cost.
+        Every completed call is stored, even one that takes today's spend over
+        the daily budget: the budget is checked before a call (`budget_reached`),
+        never here. The provider has billed the call already, so recording
+        never fails the turn or cuts a phone call:
+        - a `model` with no `[pricing]` entry is logged at ERROR, not stored,
+          and its cost is 0.0;
+        - a row the database will not take (locked, unreachable) is logged at
+          ERROR, and its computed cost is still returned.
+        `is_free` (e.g. a keyless local endpoint) forces zero cost.
         """
-        cost = 0.0 if is_free else calculate_cost(model, input_tokens, output_tokens)
-        # The check reads in its own transaction, deliberately, rather than
-        # sharing one with the insert below: a SQLite transaction that reads
-        # first and writes after fails outright with SQLITE_BUSY_SNAPSHOT if
-        # another process committed in between, and `busy_timeout` does not
-        # retry that one. The budget is advisory to a hair's breadth either
-        # way; failing an LLM turn over it is not.
-        if cost > 0 and self.daily_budget > 0:
-            today_spent = await self.get_today_spend()
-            if today_spent + cost > self.daily_budget:
-                raise BudgetExceededError(spent=today_spent + cost, limit=self.daily_budget)
-
-        async with session_scope(self._url) as session:
-            await CostLogRepository(session).add(
-                CostLog(
-                    timestamp=time.time(),
-                    provider=provider,
-                    model=model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost,
-                    session_id=session_id,
-                ),
-                refresh=False,
+        try:
+            cost = 0.0 if is_free else self._price(provider, model, usage)
+        except UnpricedModelError:
+            # The startup check prices every model Pincer will call, so this is a model it
+            # was never told about: loud, and never stored at an invented $0 (issue #357).
+            logger.error("No [pricing] entry for model %r (provider %s): the call is not recorded", model, provider)
+            return 0.0
+        try:
+            async with session_scope(self._url) as session:
+                await CostLogRepository(session).add(
+                    CostLog(
+                        timestamp=time.time(),
+                        provider=provider,
+                        model=model,
+                        input_tokens=usage.input_tokens,
+                        cache_write_5m_tokens=usage.cache_write_5m_tokens,
+                        cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        output_tokens=usage.output_tokens,
+                        cost_usd=cost,
+                        session_id=session_id,
+                    ),
+                    refresh=False,
+                )
+        except Exception:
+            # The call is billed and its reply in hand: a database that is locked or
+            # unreachable must not turn it into a failed turn (PR #366 review).
+            logger.error(
+                "Could not store the cost of a call to %r (provider %s, $%.6f): the call is not recorded",
+                model,
+                provider,
+                cost,
+                exc_info=True,
             )
 
         # Sprint 9 (T9.1): attribute this spend to the voice call currently
@@ -135,23 +144,52 @@ class CostService:
         try:
             from pincer.observability.call_costs import attribute_llm_cost
 
-            attribute_llm_cost(input_tokens, output_tokens, cost)
+            attribute_llm_cost(usage.input_tokens, usage.output_tokens, cost)
         except Exception:  # pragma: no cover — accounting must never break a turn
             logger.debug("Per-call LLM cost attribution failed", exc_info=True)
 
         logger.debug(
-            "Cost: $%.6f (%din/%dout) model=%s session=%s", cost, input_tokens, output_tokens, model, session_id
+            "Cost: $%.6f (%din/%dout) model=%s session=%s",
+            cost,
+            usage.input_tokens,
+            usage.output_tokens,
+            model,
+            session_id,
         )
         return cost
 
+    def _price(self, provider: str, model: str, usage: TokenUsage) -> float:
+        if self._prices is None:
+            raise RuntimeError("CostService has no price table: pass prices= to record LLM calls")
+        return self._prices.cost(provider, model, usage)
+
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
-        async with session_scope(self._url) as session:
-            await ImageCostLogRepository(session).add(
-                ImageCostLog(timestamp=time.time(), provider=provider, model=model, cost_usd=cost_usd),
-                refresh=False,
+        """Record an image generation's cost. Like `record`, never raises: the generation
+        is paid already, so a row the database will not take is logged at ERROR."""
+        try:
+            async with session_scope(self._url) as session:
+                await ImageCostLogRepository(session).add(
+                    ImageCostLog(timestamp=time.time(), provider=provider, model=model, cost_usd=cost_usd),
+                    refresh=False,
+                )
+        except Exception:
+            logger.error(
+                "Could not store the cost of an image from %s (%r, $%.6f): the generation is not recorded",
+                provider,
+                model,
+                cost_usd,
+                exc_info=True,
             )
 
     # ── reads ────────────────────────────────────────────────────────
+
+    async def budget_reached(self) -> bool:
+        """True when a daily budget is set and today's recorded spend is at or over it.
+
+        Checked before each LLM call: a call is refused once this is True, and
+        every call that was made is recorded, even the one that crossed the limit.
+        """
+        return self.daily_budget > 0 and await self.get_today_spend() >= self.daily_budget
 
     async def get_image_count_today(self) -> int:
         """Image generations today (UTC)."""
@@ -166,9 +204,17 @@ class CostService:
     async def get_summary(self, since_timestamp: float | None = None) -> CostSummary:
         async with session_scope(self._url) as session:
             # A falsy `since_timestamp` (None or 0) means all time, as before.
-            spend, calls, tokens_in, tokens_out = await CostLogRepository(session).totals(since_timestamp or None)
+            spend, calls, tokens_in, tokens_out, read, write_5m, write_1h = await CostLogRepository(session).totals(
+                since_timestamp or None
+            )
         return CostSummary(
-            total_usd=spend, total_calls=calls, total_input_tokens=tokens_in, total_output_tokens=tokens_out
+            total_usd=spend,
+            total_calls=calls,
+            total_input_tokens=tokens_in,
+            total_output_tokens=tokens_out,
+            total_cache_read_tokens=read,
+            total_cache_write_5m_tokens=write_5m,
+            total_cache_write_1h_tokens=write_1h,
         )
 
     async def get_daily_costs(self, date_str: str) -> dict[str, Any]:
@@ -181,8 +227,11 @@ class CostService:
         return {
             "total": round(total, 6),
             "request_count": count,
-            "by_model": {model: round(spend, 6) for model, spend, _, _ in by_model},
+            "by_model": {row.model: round(row.spend, 6) for row in by_model},
             "by_tool": {},
+            "cache_read_tokens": sum(row.cache_read_tokens for row in by_model),
+            "cache_write_5m_tokens": sum(row.cache_write_5m_tokens for row in by_model),
+            "cache_write_1h_tokens": sum(row.cache_write_1h_tokens for row in by_model),
         }
 
     async def get_daily_history(self, start: str, end: str) -> list[dict[str, Any]]:
@@ -196,8 +245,17 @@ class CostService:
         async with session_scope(self._url) as session:
             rows = await CostLogRepository(session).by_model(_day_start(start), _day_start(end) + _DAY_S)
         return [
-            {"model": model, "total": round(spend, 6), "requests": calls, "tokens": tokens}
-            for model, spend, calls, tokens in rows
+            {
+                "model": row.model,
+                "total": round(row.spend, 6),
+                "requests": row.calls,
+                "tokens": row.input_tokens + row.output_tokens,  # uncached input + output, as before
+                "input_tokens": row.input_tokens,
+                "cache_read_tokens": row.cache_read_tokens,
+                "cache_write_5m_tokens": row.cache_write_5m_tokens,
+                "cache_write_1h_tokens": row.cache_write_1h_tokens,
+            }
+            for row in rows
         ]
 
     async def get_costs_by_tool(self, start: str, end: str) -> list[dict[str, Any]]:
@@ -221,6 +279,12 @@ class CostService:
         return await CostLogRepository(session).spend_since(start) + await ImageCostLogRepository(session).spend_since(
             start
         )
+
+
+async def daily_budget_reached(settings: Settings) -> bool:
+    """The budget check for a phone call about to start (inbound webhook, outbound dial),
+    on the configured database and daily budget. A call in progress is never checked."""
+    return await CostService(get_database_url(settings.db_path), settings.daily_budget_usd).budget_reached()
 
 
 async def get_cost_service() -> CostService:

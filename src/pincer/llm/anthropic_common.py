@@ -17,6 +17,7 @@ from anthropic.types import (
     Message,
     TextBlock,
     ToolUseBlock,
+    Usage,
 )
 from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
 from anthropic.types import ThinkingBlock as SDKThinkingBlock
@@ -27,9 +28,14 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
+    RequestClients,
     StreamTurnEvent,
     ThinkingBlock,
+    TokenCounts,
     ToolCall,
+    rate_limit_attempts,
+    rate_limit_backoff,
+    transient_status,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
 
@@ -43,6 +49,10 @@ logger = logging.getLogger(__name__)
 
 # Content block types that carry a response's thinking
 _THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
+# Prompt cache breakpoints (owner ruling Q17): tools and system live for an hour, so messages
+# minutes apart reuse them; the conversation uses top-level automatic caching (5 minutes)
+_ONE_HOUR: dict[str, str] = {"type": "ephemeral", "ttl": "1h"}
+_AUTOMATIC: dict[str, str] = {"type": "ephemeral"}
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -69,6 +79,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             model = settings.anthropic_compatible_model or settings.default_model
 
         self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, max_retries=2)
+        self._request_clients = RequestClients[AsyncAnthropic]()
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
@@ -77,18 +88,25 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         self._reasoning_effort = settings.reasoning_effort
         self._thinking = settings.thinking
 
-    def _maybe_cache_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Prompt caching (Sprint 5, T5.4): the tool schemas are the largest
-        and fully static prefix of every request — a cache_control breakpoint
-        on the last tool caches the whole tools block across turns, cutting
-        time-to-first-token dramatically on multi-turn conversations. The
-        varying parts (system with per-turn phase/memories, messages) come
-        after the breakpoint and don't invalidate it."""
-        if not getattr(self._settings, "prompt_cache_tools", True):
-            return tools
-        cached = list(tools)
-        cached[-1] = {**cached[-1], "cache_control": {"type": "ephemeral"}}
-        return cached
+    def _cached(self, tools: list[dict[str, Any]] | None, system: str | None) -> dict[str, Any]:
+        """The ``tools``, ``system`` and ``cache_control`` kwargs, with the cache breakpoints.
+
+        Only a request with tools is cached: it is an agent loop (chat, voice, headless) whose
+        prefix is sent again on every request. One-shot calls (summaries, extractions) send no
+        tools, and caching their prompt would only pay the write premium for nothing read back.
+        Three breakpoints, in TTL order: the last tool and the end of the system prompt for an
+        hour, then the conversation through top-level automatic caching (5 minutes). Messages
+        are never marked, so stored history is sent unchanged.
+        """
+        kwargs: dict[str, Any] = {}
+        cache = bool(tools) and getattr(self._settings, "prompt_cache_tools", True)
+        if tools:
+            kwargs["tools"] = [*tools[:-1], {**tools[-1], "cache_control": dict(_ONE_HOUR)}] if cache else tools
+        if system:
+            kwargs["system"] = [{"type": "text", "text": system, "cache_control": dict(_ONE_HOUR)}] if cache else system
+        if cache:
+            kwargs["cache_control"] = dict(_AUTOMATIC)
+        return kwargs
 
     def _build_kwargs(
         self,
@@ -123,10 +141,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             logger.debug("Dropping temperature: %s does not accept it with thinking on", model)
         else:
             kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
-        if system:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs.update(self._cached(tools, system))
         kwargs.update(reasoning.fragment)
         return kwargs
 
@@ -149,12 +164,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         try:
             response: Message = await self._call_with_retry(kwargs)
         except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic API error: {e.status_code} {e.message}") from e
+            message = f"Anthropic API error: {e.status_code} {e.message}"
+            raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"Anthropic connection error: {e}") from e
 
         result = self._parse_response(response)
         result.provider = self._provider_name
+        result.request_model = kwargs["model"]
         return result
 
     async def stream_turn(
@@ -170,24 +187,38 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
     ) -> AsyncIterator[StreamTurnEvent]:
         """True single-generation streaming (Sprint 5): text deltas arrive as
         the model writes; the final message (tool calls + usage) comes from the
-        same stream — tools are never lost, nothing is generated twice."""
+        same stream — tools are never lost, nothing is generated twice.
+
+        A 429 before the first event is retried as `complete()` retries it; once
+        text has been yielded nothing is retried, since the caller already has it."""
         kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
 
-        try:
-            async with self._client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    yield StreamTurnEvent(text=text)
-                final: Message = await stream.get_final_message()
-        except anthropic.RateLimitError as e:
-            retry_after = float(e.response.headers.get("retry-after", "5"))
-            raise LLMRateLimitError(retry_after=retry_after) from e
-        except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
-        except anthropic.APIConnectionError as e:
-            raise LLMError(f"Anthropic connection error: {e}") from e
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
+            started = False
+            try:
+                async with self._request_clients.pick(self._client).messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        started = True
+                        yield StreamTurnEvent(text=text)
+                    final: Message = await stream.get_final_message()
+                break
+            except anthropic.RateLimitError as e:
+                retry_after = float(e.response.headers.get("retry-after", "5"))
+                if started or attempt == attempts - 1:
+                    raise LLMRateLimitError(retry_after=retry_after) from e
+                wait = rate_limit_backoff(retry_after, attempt)
+                logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
+                await asyncio.sleep(wait)
+            except anthropic.APIStatusError as e:
+                message = f"Anthropic stream error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+            except anthropic.APIConnectionError as e:
+                raise LLMError(f"Anthropic connection error: {e}") from e
 
         result = self._parse_response(final)
         result.provider = self._provider_name
+        result.request_model = kwargs["model"]
         yield StreamTurnEvent(response=result)
 
     async def close(self) -> None:
@@ -195,11 +226,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
     # ── Internal ─────────────────────────────────────────
 
-    async def _call_with_retry(
-        self,
-        kwargs: dict[str, Any],
-        max_retries: int = 3,
-    ) -> Message:
+    async def _call_with_retry(self, kwargs: dict[str, Any]) -> Message:
         """Call API with exponential backoff on rate limits.
 
         The request is streamed although only the final message is used: the
@@ -207,16 +234,17 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         running past its 10-minute timeout (anything above ~21k tokens, less
         for some models), and a streamed one has no such limit.
         """
-        for attempt in range(max_retries):
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
             try:
-                async with self._client.messages.stream(**kwargs) as stream:
+                async with self._request_clients.pick(self._client).messages.stream(**kwargs) as stream:
                     result: Message = await stream.get_final_message()
                 return result
             except anthropic.RateLimitError as e:
                 retry_after = float(e.response.headers.get("retry-after", "5"))
-                if attempt == max_retries - 1:
+                if attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=retry_after) from e
-                wait = min(retry_after * (2**attempt), 60)
+                wait = rate_limit_backoff(retry_after, attempt)
                 logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
                 await asyncio.sleep(wait)
         raise LLMError("Exhausted retries")  # unreachable but satisfies type checker
@@ -226,7 +254,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result: list[dict[str, Any]] = []
         for msg in messages:
             if msg.role == MessageRole.SYSTEM:
-                continue  # system handled separately
+                # A history summary (the system prompt is the `system` parameter): sent as a
+                # user text block of its own, merged with the next user turn below
+                result.append({"role": "user", "content": [{"type": "text", "text": msg.content}]})
+                continue
 
             if msg.role == MessageRole.TOOL_RESULT:
                 result.append(
@@ -274,9 +305,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 result.append({"role": "assistant", "content": replayed})
                 continue
 
-            # Standard text or text+image
-            if msg.images:
+            # Standard text or text+image, after Pincer's context block when there is one
+            if msg.images or msg.context:
                 content_parts: list[dict[str, Any]] = []
+                if msg.context:
+                    content_parts.append({"type": "text", "text": msg.context})
                 for img in msg.images:
                     content_parts.append(
                         {
@@ -446,16 +479,27 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             content="\n".join(text_parts),
             tool_calls=tool_calls,
             model=response.model,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
             stop_reason=response.stop_reason or "",
-            # Cache visibility (Sprint 5): whether the tools-prefix cache hit
-            cache_read_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
-            cache_write_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
+            **_usage_counts(response.usage),
             thinking_blocks=thinking_blocks,
             # The order matters only to the thinking the next request returns
             content_blocks=ordered if thinking_blocks else [],
         )
+
+
+def _usage_counts(usage: Usage) -> TokenCounts:
+    """The token counts of an Anthropic `usage`: `input_tokens` is already
+    uncached input. Cache writes are split by TTL; an endpoint that reports only their
+    total (no `cache_creation`) wrote at the default TTL, 5 minutes."""
+    written = usage.cache_creation_input_tokens or 0
+    by_ttl = usage.cache_creation
+    return TokenCounts(
+        input_tokens=usage.input_tokens,
+        cache_write_5m_tokens=by_ttl.ephemeral_5m_input_tokens if by_ttl is not None else written,
+        cache_write_1h_tokens=by_ttl.ephemeral_1h_input_tokens if by_ttl is not None else 0,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        output_tokens=usage.output_tokens,
+    )
 
 
 def _is_thinking(block: Any) -> bool:

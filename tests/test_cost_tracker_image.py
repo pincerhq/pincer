@@ -9,12 +9,13 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+from pincer.config.pricing import TokenUsage, load_price_table
 from pincer.llm.cost_tracker import CostTracker
 
 
 @pytest.fixture
 async def tracker(tmp_path: Path):
-    ct = CostTracker(tmp_path / "test.db", daily_budget=10.0)
+    ct = CostTracker(tmp_path / "test.db", daily_budget=10.0, prices=load_price_table())
     await ct.initialize()
     yield ct
     await ct.close()
@@ -36,7 +37,7 @@ async def test_image_cost_included_in_today_spend(tracker: CostTracker):
 
 @pytest.mark.asyncio
 async def test_combined_llm_and_image_spend(tracker: CostTracker):
-    await tracker.record("anthropic", "claude-haiku-4-5-20251001", 1000, 500)
+    await tracker.record("anthropic", "claude-haiku-4-5-20251001", TokenUsage(input_tokens=1000, output_tokens=500))
     await tracker.add_image_cost(0.003, "fal")
     spend = await tracker.get_today_spend()
     assert spend > 0.003

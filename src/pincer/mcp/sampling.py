@@ -9,7 +9,7 @@ Sampling is disabled by default. Enable in pincer.toml::
 
     [mcp.server.sampling]
     enabled = true
-    model = "claude-sonnet-4-20250514"
+    model = "claude-sonnet-5-5"
     budget_per_day = 5.00
 
 The SamplingHandler wraps a LLMBackend and enforces:
@@ -24,9 +24,38 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING
+from pincer.exceptions import BudgetCheckFailedError, DailyBudgetReachedError
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole
+
+if TYPE_CHECKING:
+    from pincer.config.pricing import PriceTable
+    from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.cost_tracker import CostTracker
 
 logger = logging.getLogger("pincer.mcp.sampling")
+
+DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
+SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
+# The image types the Anthropic API takes (the SDK's Base64ImageSourceParam.media_type)
+_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+# When the spend can't be checked (or recorded): sampling fails closed, like an outbound dial
+SAMPLING_BUDGET_UNCHECKED = "[Sampling: could not check the daily budget, request not sent]"
+# When the configured sampling model has no price: its spend could never be counted
+SAMPLING_MODEL_UNPRICED = (
+    "[Sampling: no [pricing] entry for the sampling model {model!r} in pincer.toml / pincer.local.toml, "
+    "request not sent]"
+)
+
+
+class SamplingRefusedError(Exception):
+    """A sampling request refused before anything was sent; `reply` is what the client gets."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        super().__init__(reply)
 
 
 # ── LLM backend abstraction ────────────────────────────────────────────────────
@@ -57,6 +86,10 @@ class LLMBackend(ABC):
         Returns:
             The assistant's reply text.
         """
+
+    async def close(self) -> None:
+        """Release what the backend holds (clients, the cost log); nothing by default."""
+        return None
 
 
 class AgentLLMBackend(LLMBackend):
@@ -89,23 +122,38 @@ class StandaloneLLMBackend(LLMBackend):
     """
     LLM backend that calls the Anthropic API directly (no agent required).
 
-    Used in standalone mode. Requires PINCER_LLM_API_KEY or ANTHROPIC_API_KEY
-    in the environment, or an explicit api_key argument.
+    Used in standalone mode. Every request goes through the daily budget check first
+    and is recorded in the cost log after (`MeteredLLM`, issue #357); like the agent's
+    other internal calls it pins its own effort and thinking, not the operator's.
+
+    Only priced models are sent: a model the caller asks for that has no `[pricing]`
+    entry would be billed but never counted, so the configured model is sent instead.
 
     Args:
-        api_key:       Anthropic API key. Falls back to env vars if None.
-        default_model: Model to use when caller doesn't specify one.
+        provider:      The Anthropic provider; the backend owns it and closes it.
+        costs:         The initialized cost tracker; the backend owns it and closes it.
+        default_model: Model to use when caller doesn't specify one, or asks for an unpriced one.
+        prices:        The price table the cost log prices with.
     """
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        default_model: str = "claude-sonnet-4-20250514",
-    ) -> None:
-        from pincer.config import get_settings_relaxed
+    def __init__(self, provider: BaseLLMProvider, costs: CostTracker, default_model: str, prices: PriceTable) -> None:
+        from pincer.llm.cost_tracker import MeteredLLM
 
-        self._api_key = api_key or get_settings_relaxed().anthropic_api_key.get_secret_value() or ""
+        self._provider = provider
+        self._costs = costs
+        self._llm = MeteredLLM(provider, costs, SAMPLING_PROVIDER)
         self._default_model = default_model
+        self._prices = prices
+
+    async def close(self) -> None:
+        """Close the client and the cost log. Never raises: it runs in `run()`'s finally,
+        where a raise would replace the error (or the CancelledError) that ended the server."""
+        try:
+            await self._provider.close()
+        except Exception:
+            logger.warning("MCP sampling: closing the Anthropic client failed", exc_info=True)
+        finally:
+            await self._costs.close()
 
     async def complete(
         self,
@@ -113,23 +161,69 @@ class StandaloneLLMBackend(LLMBackend):
         model: str | None = None,
         max_tokens: int = 1024,
     ) -> str:
-        try:
-            import anthropic
-        except ImportError as e:
-            raise RuntimeError("anthropic package required for standalone sampling: uv pip install anthropic") from e
-
-        from typing import cast
-
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
-        resp = await client.messages.create(
-            model=model or self._default_model,
-            messages=cast("Any", messages),
+        sent = model or self._default_model
+        if sent not in self._prices:
+            logger.info(
+                "MCP sampling: no [pricing] entry for the requested model %r; using %r", sent, self._default_model
+            )
+            sent = self._default_model
+        response = await self._llm.complete(
+            _to_llm_messages(messages),
+            model=sent,
             max_tokens=max_tokens,
+            reasoning_effort=STRUCTURED_CALL_EFFORT,
+            thinking=STRUCTURED_CALL_THINKING,
+            pinned=True,
         )
-        content = resp.content
-        if content and hasattr(content[0], "text"):
-            return content[0].text
-        return str(content)
+        return response.content
+
+
+class MeteringUnavailableBackend(LLMBackend):
+    """Stands in when sampling's metering could not be set up at startup (logged then, once):
+    every request is refused with `reply` before anything is sent, since its spend could not be
+    checked or priced."""
+
+    def __init__(self, reply: str = SAMPLING_BUDGET_UNCHECKED) -> None:
+        self._reply = reply
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        max_tokens: int = 1024,
+    ) -> str:
+        raise SamplingRefusedError(self._reply)
+
+
+def _to_llm_messages(messages: list[dict[str, Any]]) -> list[LLMMessage]:
+    """MCP sampling messages as Pincer's. `content` is a string, one content block or a list of
+    them; text blocks become the message text and image blocks its images."""
+    return [_to_llm_message(m["role"], m.get("content", "")) for m in messages]
+
+
+def _to_llm_message(role: str, content: Any) -> LLMMessage:
+    blocks = content if isinstance(content, list) else [content]
+    texts: list[str] = []
+    images: list[ImageContent] = []
+    for block in blocks:
+        if isinstance(block, str):
+            texts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            texts.append(str(block.get("text", "")))
+        elif isinstance(block, dict) and block.get("type") == "image":
+            if role != MessageRole.USER:
+                raise SamplingRefusedError("[Sampling: images are only supported in user messages, request not sent]")
+            if block.get("mimeType") not in _IMAGE_TYPES:
+                raise SamplingRefusedError(
+                    f"[Sampling: {block.get('mimeType')} images are not supported "
+                    f"(use {', '.join(_IMAGE_TYPES[:-1])} or {_IMAGE_TYPES[-1]}), request not sent]"
+                )
+            images.append(ImageContent(data=str(block.get("data", "")), media_type=str(block.get("mimeType", ""))))
+        else:
+            # Audio has no Anthropic content block, and sampling sends no tools to use or answer
+            kind = block.get("type") if isinstance(block, dict) else type(block).__name__
+            raise SamplingRefusedError(f"[Sampling: {kind} content is not supported, request not sent]")
+    return LLMMessage(role=MessageRole(role), content="".join(texts), images=images)
 
 
 # ── Sampling handler ───────────────────────────────────────────────────────────
@@ -242,6 +336,15 @@ class SamplingHandler:
                 self._budget.remaining(),
             )
             return result
+        except SamplingRefusedError as e:
+            logger.info("Sampling request refused: %s", e.reply)
+            return e.reply
+        except DailyBudgetReachedError:
+            logger.info("Sampling request refused: the daily budget is reached")
+            return "[Sampling: daily budget reached]"
+        except BudgetCheckFailedError:
+            logger.warning("Sampling request refused: the daily budget can't be checked", exc_info=True)
+            return SAMPLING_BUDGET_UNCHECKED
         except Exception as e:
             logger.exception("Sampling request failed: %s", e)
             return f"[Sampling error: {type(e).__name__}: {e}]"

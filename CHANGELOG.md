@@ -9,6 +9,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Daily budget checked before each LLM call; web chat refusals are 402/503 (#357)
+
+- `PINCER_DAILY_BUDGET_USD` is checked **before** every LLM request, tool
+  rounds included, and every completed request is recorded at its full cost,
+  even the one that crosses the limit. Before, the check came after the call,
+  and that call was spent but never recorded. A budget of 0 never refuses.
+- A turn refused before its first request saves nothing, not even the user's
+  message. A turn stopped after its tool steps ends its history with a short
+  marker, so the model never sees a dangling tool result.
+- Web chat: `POST /api/chat/message` answers `402` when the budget is reached
+  and `503` when it can't be read; `/api/chat/stream` sends one `error` event.
+  A turn that already placed a call answers `200` / `done` with the warning in
+  the new `budget_warning` field. See
+  [the REST reference](docs/reference/rest-api.md#daily-budget-on-apichatmessage-and-apichatstream).
+- A budget that can't be read fails closed mid-turn (no further paid request).
+  Scheduled actions report "Could not check the daily budget" instead of a raw
+  database error.
+- A cost row the database won't take is logged at ERROR; the reply is kept.
+- Onboarding, call outcomes, thread summaries and MCP sampling are
+  budget-checked and recorded too.
+
+#### OpenAI requests carry one cache key per conversation; its tool list only grows (#357)
+
+- Every OpenAI request of a conversation (chat, web chat, voice) carries the
+  same `prompt_cache_key`, so its requests reach the same prompt cache. The key
+  is a random UUIDv7 minted on the conversation's first such request and kept
+  with the session, so it survives a restart. It is never derived from the
+  session or user id. Only providers named in
+  `PINCER_PROMPT_CACHE_KEY_PROVIDERS` get it (default `openai`, `azure`,
+  `azure-openai`): other endpoints, such as Groq or a vLLM proxy, may reject
+  the unknown field. A keyless endpoint never gets one. Summaries and scheduled
+  runs send none.
+- With tool selection on (an OpenAI-wire provider and more than
+  `PINCER_TOOL_SELECTION_MAX` tools), a conversation keeps the list of tools it
+  sends, also across a restart. Each later turn, and a skill loaded mid-turn,
+  appends the tools it needs at the end, so the tools already sent stay a cached
+  prefix. A first selection now fills `PINCER_TOOL_SELECTION_MAX` minus the new
+  `PINCER_TOOL_SELECTION_HEADROOM` (default 27, so 100 tools, not 127). Only
+  when appending would pass the max is the list selected afresh.
+
+#### Claude caches tools and system prompt for an hour, the conversation for five minutes (#357)
+
+- Anthropic requests with tools now mark the last tool and the end of the
+  system prompt with a 1-hour cache breakpoint, and turn on automatic caching
+  (5 minutes) for the conversation, so every tool-loop request and every next
+  turn reads the earlier prompt from the cache. Before, only the tools were
+  cached, for 5 minutes. Requests without tools (summaries, extractions) send
+  no breakpoint. `prompt_cache_tools = false` turns all three off.
+- 1-hour writes are priced at the model's `cache_write_1h` rate.
+- Each chat and web chat turn logs one INFO line with its requests' uncached
+  input, cache reads, 5-minute and 1-hour cache writes, output and cost.
+- Web chat sends one streamed request per step, each with the turn's tools and
+  system prompt, so every request reads the cache. Before, it asked once more
+  without tools and threw the earlier answer away: a plain turn was 2 requests
+  and one tool round 3; now they are 1 and 2. Text written before a tool call
+  now reaches the chat, followed by a blank line.
+- With a fallback provider configured, a rate limit (429) switches to the
+  fallback at once, on web chat and phone calls alike, and any other error the
+  SDK would retry (a timeout, a 5xx, an overload) also switches at once: the
+  primary and each fallback get one attempt. If every fallback fails too, the
+  primary is tried once more, with its retry, after a rate limit, an overload or
+  a server error; any other failure (a 4xx, a timeout, a lost connection)
+  returns the primary's error at once. That retry, and a primary with no
+  fallback, retry a 429 that arrives before the first token: three attempts, the
+  wait doubling up to 60 s. Once text has streamed, nothing is retried.
+
+#### The system prompt stays the same for a whole conversation (#357)
+
+- Recalled memories and the current date and time are no longer part of the
+  system prompt. They are sent with the user's message, as a separate text
+  block before the user's words, so the system prompt only changes when one of
+  its stable parts does (skills, MCP servers, tools offered, preferred
+  language, channel instructions). Chat, web chat and voice all do it; each
+  voice utterance carries its own block. Scheduled (headless) runs keep the
+  time in their own prompt.
+- The block is saved with the session and sent again unchanged on every later
+  request, also after a restart. Sessions saved before this change load as
+  they are. History shown to people (web chat history, memory export and
+  search) holds only the user's words, and compaction summarizes only them.
+- OpenAI-compatible endpoints receive such a user message as a list of text
+  parts. Ollama splits the parts into consecutive user messages; LM Studio is
+  untested with text-only parts.
+
+#### History compacted by prompt tokens; summaries reach Claude (#357)
+
+- After a turn whose last LLM request's whole prompt (uncached input, cache
+  writes and cache reads) was over `PINCER_COMPACT_AT_TOKENS` (default
+  80,000), the oldest messages are replaced by one summary, so the prompt comes
+  down to about `PINCER_COMPACT_TO_TOKENS` (default 50,000; it must be below
+  the limit). Tool calls stay with their results and the latest exchange is
+  kept word for word. Chat, web chat and voice all do it, after the reply is
+  delivered; a turn arriving meanwhile is not held up.
+- The summary is sent to the model as a message of its own on both providers.
+  Claude never received the old `[Previous conversation summary]` messages; it
+  does now. A session saved by the old summarizer may hold several of them:
+  Claude receives them all until its first compaction folds them into one.
+- The summary call's cost is recorded like any other LLM call. It is saved as
+  a memory only when memory is on, never for a memory-free conversation. When
+  no summary can be had (the call fails or the daily budget is spent), the
+  history is kept and compaction is tried again after a later turn.
+- The every-20-messages summary is gone, and with it
+  `PINCER_SUMMARY_THRESHOLD`: when it is still set, Pincer logs a warning at
+  startup and `pincer doctor` reports it; it has no effect.
+- Past `PINCER_MAX_SESSION_MESSAGES` (default 50) a session is now cut to the
+  newest three fifths of it (30) in one go, instead of by one message every
+  turn.
+
 #### Onboarding: no database read per turn for existing users (#271)
 
 Users who were onboarded before the `pincer_onboarding` table existed, and

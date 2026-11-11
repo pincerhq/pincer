@@ -21,7 +21,7 @@ from pincer.config import get_settings
 from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, StreamTurnEvent
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, StreamTurnEvent, rate_limit_retries
 from pincer.llm.openai_common import OpenAICompatibleProvider
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ def _build_leaf(settings: Settings, name: str) -> BaseLLMProvider:
     )
 
 
-def _known_provider_names(settings: Settings) -> set[str]:
+def known_provider_names(settings: Settings) -> set[str]:
     names = {*WELL_KNOWN_PROVIDERS, settings.openai_compatible_provider, settings.anthropic_compatible_provider}
     names.discard("")
     return names
@@ -81,7 +81,7 @@ def summary_target(settings: Settings) -> tuple[str, str]:
     provider = settings.summary_provider or ""
     model = settings.summary_model
     prefix, sep, rest = model.partition(":")
-    if sep and prefix.strip() in _known_provider_names(settings):
+    if sep and prefix.strip() in known_provider_names(settings):
         provider, model = prefix.strip(), rest.strip()
     return provider or settings.default_provider, model
 
@@ -117,6 +117,31 @@ def provider_default_model(settings: Settings, name: str) -> str:
     if name and name == settings.anthropic_compatible_provider:
         return settings.anthropic_compatible_model or settings.default_model
     return settings.default_model
+
+
+def is_free_provider(settings: Settings, name: str) -> bool:
+    """A provider is free when it is a compatible endpoint with no API key (e.g. a local Ollama)."""
+    if name in WELL_KNOWN_PROVIDERS:
+        return False
+    if name and name == settings.openai_compatible_provider:
+        return settings.openai_compatible_api_key.get_secret_value() == ""
+    if name and name == settings.anthropic_compatible_provider:
+        return settings.anthropic_compatible_api_key.get_secret_value() == ""
+    return False
+
+
+def has_credentials(settings: Settings, name: str) -> bool:
+    """True when `name` can be built from the configured credentials: a key for a
+    well-known provider, a base URL for a compatible endpoint (its key is optional)."""
+    if name == "anthropic":
+        return settings.anthropic_api_key.get_secret_value() != ""
+    if name == "openai":
+        return settings.openai_api_key.get_secret_value() != ""
+    if name and name == settings.openai_compatible_provider:
+        return settings.openai_compatible_base_url != ""
+    if name and name == settings.anthropic_compatible_provider:
+        return settings.anthropic_compatible_base_url != ""
+    return False
 
 
 def wire_safe_model(settings: Settings, name: str, model: str) -> str:
@@ -242,6 +267,16 @@ class LLMRouter(BaseLLMProvider):
         failovers = [pool[n] for n in self._settings.fallback_providers]
         return primary, failovers
 
+    def _first_tries(self) -> tuple[BaseLLMProvider, list[BaseLLMProvider]]:
+        """The primary, and the providers one request is first sent to, once each and without
+        retries (Q23: fail over first): the primary, then the failovers in random order. None
+        without failovers. When they all fail, the primary is asked once more with its retry,
+        if its failure was transient (Q24, Q24a)."""
+        primary, failovers = self._primary_and_failovers()
+        if not failovers:
+            return primary, []
+        return primary, [primary, *random.sample(failovers, len(failovers))]
+
     # ── Accessors ────────────────────────────────────────
 
     def get_llm(self) -> BaseLLMProvider:
@@ -249,7 +284,7 @@ class LLMRouter(BaseLLMProvider):
         return self
 
     def get_summarizer(self) -> tuple[BaseLLMProvider, str | None]:
-        """Provider and model for the Summarizer (see `summary_target`).
+        """Provider and model for compaction summaries (see `summary_target`).
 
         A provider outside the pool is built on demand. ``None`` as the model
         means "the provider's own default model".
@@ -334,14 +369,7 @@ class LLMRouter(BaseLLMProvider):
 
     def is_free(self, provider: str) -> bool:
         """A provider is free when it has no API key (e.g. a local Ollama endpoint)."""
-        s = self._settings
-        if provider in WELL_KNOWN_PROVIDERS:
-            return False
-        if provider and provider == s.openai_compatible_provider:
-            return s.openai_compatible_api_key.get_secret_value() == ""
-        if provider and provider == s.anthropic_compatible_provider:
-            return s.anthropic_compatible_api_key.get_secret_value() == ""
-        return False
+        return is_free_provider(self._settings, provider)
 
     # ── BaseLLMProvider ──────────────────────────────────
 
@@ -357,39 +385,32 @@ class LLMRouter(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        """Primary first, then failovers in random order. An explicit ``model``
-        goes to the primary only: failovers use their own model (see ``stream_turn``)."""
-        primary, failovers = self._primary_and_failovers()
-        try:
-            return await primary.complete(
-                messages,
-                tools=tools,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                reasoning_effort=reasoning_effort,
-                thinking=thinking,
-                pinned=pinned,
-            )
-        except (LLMError, LLMRateLimitError) as primary_err:
-            for provider in random.sample(failovers, len(failovers)):
-                try:
-                    return await provider.complete(
-                        messages,
-                        tools=tools,
-                        model=None,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        system=system,
-                        reasoning_effort=reasoning_effort,
-                        thinking=thinking,
-                        pinned=pinned,
-                    )
-                except (LLMError, LLMRateLimitError) as err:
-                    logger.warning("Failover provider failed: %s — trying next", err)
-                    continue
+        """Providers in the order of ``_first_tries`` until one answers, as in ``stream_turn``:
+        each raises a 429 at once. Then the primary again, with its retry, when its first
+        failure was transient; otherwise its error is raised. An explicit ``model`` goes to
+        the primary only: failovers use their own model (see ``stream_turn``)."""
+        request: dict[str, Any] = {
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system,
+            "reasoning_effort": reasoning_effort,
+            "thinking": thinking,
+            "pinned": pinned,
+        }
+        primary, first_tries = self._first_tries()
+        primary_err: LLMError | None = None
+        for index, provider in enumerate(first_tries):
+            try:
+                with rate_limit_retries(False):
+                    return await provider.complete(messages, model=model if index == 0 else None, **request)
+            except (LLMError, LLMRateLimitError) as err:
+                if index == 0:
+                    primary_err = err
+                logger.warning("complete provider %d failed: %s — trying next", index, err)
+        if primary_err is not None and not primary_err.retryable:
             raise primary_err
+        return await primary.complete(messages, model=model, **request)
 
     async def stream_turn(
         self,
@@ -402,40 +423,48 @@ class LLMRouter(BaseLLMProvider):
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
     ) -> AsyncIterator[StreamTurnEvent]:
-        """Failover discipline: providers are tried in order
+        """Failover discipline: providers are tried in the order of ``_first_tries``
         until one produces its first event; a mid-stream failure propagates.
+        Each raises a 429 at once, so the next one takes over without a wait.
+        When all fail, the primary is asked again, with its retry, if its first
+        failure was transient (its error is then the one raised); otherwise its
+        first error is raised.
 
         An explicit ``model`` is the primary's id (e.g. a voice turn's
         ``azure:gpt-5-mini`` on an azure default): a failover leaf of another
         vendor would 404 on it, so failovers get ``None`` — their own model."""
-        primary, failovers = self._primary_and_failovers()
-        ordered = [primary, *random.sample(failovers, len(failovers))]
-        primary_err: Exception | None = None
-        for index, provider in enumerate(ordered):
-            started = False
+        request: dict[str, Any] = {
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system,
+            "reasoning_effort": reasoning_effort,
+            "thinking": thinking,
+        }
+        primary, first_tries = self._first_tries()
+        primary_err: LLMError | None = None
+        for index, provider in enumerate(first_tries):
+            stream = provider.stream_turn(messages, model=model if index == 0 else None, **request)
             try:
-                async for event in provider.stream_turn(
-                    messages,
-                    tools=tools,
-                    model=model if index == 0 else None,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system,
-                    reasoning_effort=reasoning_effort,
-                    thinking=thinking,
-                ):
-                    started = True
-                    yield event
-                return
+                # Only the first event: the provider's retries all happen before it, and the
+                # setting must not be in force while our consumer handles an event.
+                with rate_limit_retries(False):
+                    first = await anext(stream, None)
             except (LLMError, LLMRateLimitError) as err:
                 if index == 0:
                     primary_err = err
-                if started:
-                    raise  # mid-stream failure propagates — no mid-stream failover
                 logger.warning("stream_turn provider %d failed before first event: %s — trying next", index, err)
                 continue
-        if primary_err is not None:
+            if first is None:
+                return
+            yield first
+            async for event in stream:  # a mid-stream failure propagates — no mid-stream failover
+                yield event
+            return
+        if primary_err is not None and not primary_err.retryable:
             raise primary_err
+        async for event in primary.stream_turn(messages, model=model, **request):
+            yield event
 
     async def close(self) -> None:
         if self._pool:

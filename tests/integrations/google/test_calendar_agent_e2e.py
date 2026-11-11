@@ -44,6 +44,7 @@ from calendar_support import BUILTIN_CALENDAR_TOOLS
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
 from pincer.config import Settings
+from pincer.config.pricing import load_price_table
 from pincer.core.agent import Agent
 from pincer.core.session import SessionManager
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, ToolCall
@@ -210,7 +211,7 @@ def registry(fake, berlin_settings, monkeypatch) -> ToolRegistry:
 
 @pytest_asyncio.fixture
 async def costs(tmp_path) -> AsyncIterator[CostTracker]:
-    tracker = CostTracker(tmp_path / "costs.db", daily_budget=100.0)
+    tracker = CostTracker(tmp_path / "costs.db", daily_budget=100.0, prices=load_price_table())
     await tracker.initialize()
     yield tracker
     await tracker.close()
