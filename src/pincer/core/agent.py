@@ -35,7 +35,7 @@ from pincer.core.onboarding import (
     PROFILE_USAGE_INSTRUCTION,
 )
 from pincer.db.ids import new_id
-from pincer.exceptions import LLMError, LLMOutputTruncatedError, ToolNotFoundError
+from pincer.exceptions import BudgetCheckFailedError, LLMError, LLMOutputTruncatedError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -98,9 +98,9 @@ _HEADLESS_BUDGET_REACHED_TEXT = (
 # Closes the history of a turn the budget stopped after its tool rounds: the model next sees
 # its tool results answered, never a dangling one. Not the warning, which is no reply.
 _BUDGET_STOPPED_MARKER = "(Stopped before answering: the daily budget was reached.)"
-# The daily budget could not be read (PR #366 review): before a turn it is refused as an LLM
-# error; mid-turn it stops like a budget stop (fails closed) with its own text and marker.
-_BUDGET_CHECK_FAILED = "could not check the daily budget, no request was sent"
+# The daily budget could not be read (PR #366 review): before a turn it is refused with
+# `BudgetCheckFailedError`; mid-turn it stops like a budget stop (fails closed) with its own
+# marker. The client gets this text either way (the web API's 503 or stream `error`).
 _BUDGET_CHECK_FAILED_TEXT = (
     "Warning: Could not check the daily budget, so I stopped before answering. Please try again."
 )
@@ -1331,14 +1331,14 @@ class Agent:
     async def _turn_admitted(self) -> bool:
         """False when the daily budget refuses the turn before its first request.
 
-        A budget that cannot be read refuses it too, as an `LLMError` (the web API's 502 or
-        stream `error`): no request is sent and nothing is persisted (PR #366 review).
+        A budget that cannot be read refuses it too, as a `BudgetCheckFailedError` (the web
+        API's 503 or stream `error`): no request is sent and nothing is persisted (PR #366 review).
         """
         try:
             return not await self._costs.budget_reached()
         except Exception as e:
             logger.error("Daily budget check failed: the turn is refused before any request", exc_info=True)
-            raise LLMError(_BUDGET_CHECK_FAILED) from e
+            raise BudgetCheckFailedError(_BUDGET_CHECK_FAILED_TEXT) from e
 
     async def _budget_stop(self) -> _BudgetStop | None:
         """Checked after each request of an admitted turn: None to go on, or why it stops.

@@ -922,7 +922,6 @@ async def test_a_web_chat_turn_that_placed_a_call_before_the_budget_stop_ends_wi
 
 # ── The budget cannot be read during a turn (PR #366 review, lead ruling 2026-11-10) ──
 
-_CHECK_FAILED = "could not check the daily budget, no request was sent"
 _CHECK_FAILED_TEXT = "Warning: Could not check the daily budget, so I stopped before answering. Please try again."
 _CHECK_FAILED_MARKER = "(Stopped before answering: the daily budget could not be checked.)"
 
@@ -934,7 +933,7 @@ async def _conversation_messages(session_manager: Any, conversation: str) -> lis
     return list(session.messages)
 
 
-async def test_a_chat_message_whose_budget_cannot_be_read_is_a_502_and_saves_nothing(  # type: ignore[no-untyped-def]
+async def test_a_chat_message_whose_budget_cannot_be_read_is_a_503_and_saves_nothing(  # type: ignore[no-untyped-def]
     tmp_path, budgeted, session_manager, tool_registry
 ) -> None:
     settings, tracker = await budgeted(1.0)
@@ -945,7 +944,8 @@ async def test_a_chat_message_whose_budget_cannot_be_read_is_a_502_and_saves_not
 
     response = await _post_message(agent, conversation_id=conversation)
 
-    assert (response.status_code, response.json()) == (502, {"detail": _CHECK_FAILED})
+    # One status whenever the budget cannot be read, before the turn or mid-way (PR #366 review)
+    assert (response.status_code, response.json()) == (503, {"detail": _CHECK_FAILED_TEXT})
     assert llm.complete.await_count == 0
     assert await _conversation_messages(session_manager, conversation) == []
 
@@ -961,7 +961,7 @@ async def test_a_web_chat_turn_whose_budget_cannot_be_read_is_one_error_and_save
 
     events = await _web_chat(agent, conversation_id=conversation)
 
-    assert events == [("error", {"message": f"LLM error: {_CHECK_FAILED}"})]
+    assert events == [("error", {"message": _CHECK_FAILED_TEXT, "cost_usd": 0.0})]
     assert (llm.complete.await_count, len(llm.streams)) == (0, 0)
     assert await _conversation_messages(session_manager, conversation) == []
 

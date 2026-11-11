@@ -37,7 +37,7 @@ from pincer.api.approvals import (
 from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
 from pincer.core.session import channel_session_key, conversation_key
-from pincer.exceptions import LLMError
+from pincer.exceptions import BudgetCheckFailedError, LLMError
 from pincer.services.voice import CallsServiceDep
 
 if TYPE_CHECKING:
@@ -161,6 +161,9 @@ async def post_message(
             session_key=_conversation_session_key(user_id, body.conversation_id),
             memory=body.memory,
         )
+    except BudgetCheckFailedError as e:
+        # The same 503 as a turn that loses the budget mid-way: nothing was sent or saved
+        raise HTTPException(503, str(e)) from e
     except LLMError as e:
         raise HTTPException(502, str(e)) from e
     if (resp.budget_reached or resp.budget_check_failed) and not resp.call_sids:
@@ -220,6 +223,9 @@ async def post_stream(
                                 await queue.put(("error", {"message": chunk.content, "cost_usd": chunk.cost_usd}))
                             else:
                                 await queue.put(("done", {"text": chunk.content, "cost_usd": chunk.cost_usd}))
+            except BudgetCheckFailedError as e:
+                # Refused before any request, in the shape of a budget refusal
+                await queue.put(("error", {"message": str(e), "cost_usd": 0.0}))
             except LLMError as e:
                 await queue.put(("error", {"message": f"LLM error: {e}"}))
             except Exception as e:  # noqa: BLE001
