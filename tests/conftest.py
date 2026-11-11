@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+import suites
 
 # Set test env vars before importing config
 os.environ["PINCER_ANTHROPIC_API_KEY"] = "sk-ant-test-key"
@@ -224,6 +225,26 @@ class _StallCapture(logging.Handler):
             for message, end, took in self.slow
             if took - heartbeat.frozen_within(end - took, end) >= LOOP_STALL_THRESHOLD_S
         ]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--suite",
+        choices=suites.NAMES,
+        default=suites.ALL,
+        help="run one CI suite of tests/ (see tests/suites.py); default: all",
+    )
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Skip test files outside --suite before they are imported."""
+    suite = config.getoption("suite")
+    if suite == suites.ALL or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    try:
+        return suites.suite_of(collection_path) != suite or None
+    except ValueError:  # outside tests/, e.g. src/*/tests
+        return None
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

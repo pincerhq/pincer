@@ -172,6 +172,11 @@ markers = [
     "allow_loop_stall: opt out of the event-loop stall guard on tests/test_voice*",
 ]
 
+[tool.coverage.run]
+# CI combines the data of four runners (one per test suite); relative paths
+# make their files line up.
+relative_files = true
+
 [tool.ruff]
 # Deliberately behind `requires-python`. This setting governs the syntax the
 # formatter may EMIT, and at py314 it rewrites every `except (A, B):` into

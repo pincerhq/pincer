@@ -73,29 +73,69 @@ jobs:
             dashboard:
               - dashboard/**
 
+  # tests/ split four ways (tests/suites.py) so the legs run in parallel. Each
+  # leg uploads its coverage data; the `coverage` job combines them and sends
+  # one report to Codecov. The matrix job's result is `failure` if any leg
+  # fails, which is what `checks` gates on.
   pincer:
     needs: changes
     if: needs.changes.outputs.pincer == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, llm, voice, mcp-cli]
+    env:
+      COVERAGE_FILE: .coverage.${{ matrix.suite }}
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
 
-      # tests/db runs in the postgres job, on SQLite and Postgres.
+      # tests/db runs in the postgres job, on SQLite and Postgres. The voice
+      # harness runs in its own step below.
       - name: Run tests with coverage
-        run: uv run pytest --cov=pincer --cov-report=xml tests/ --ignore=tests/db
+        run: >-
+          uv run pytest tests/ --ignore=tests/db --ignore=tests/voice_harness
+          --suite=${{ matrix.suite }} --cov=pincer --cov-report=
 
       # Sprint 10 (T10.5): the voice reliability + red-team harness is a
       # release-blocking gate now that voice is a stable-tier surface. Run it
       # as its own step so a harness failure is instantly distinguishable from
       # an unrelated unit-test failure in the log.
       - name: Voice harness (both languages, all personas incl. red-team)
-        run: uv run pytest tests/voice_harness/ -v --no-cov
+        if: matrix.suite == 'voice'
+        run: uv run pytest tests/voice_harness/ -v --cov=pincer --cov-append --cov-report=
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-${{ matrix.suite }}
+          path: .coverage.${{ matrix.suite }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # Combines the pincer legs' coverage data into one report per commit.
+  # Codecov failures are non-fatal, so `checks` does not wait on this job.
+  coverage:
+    needs: [changes, pincer]
+    if: always() && needs.pincer.result != 'skipped' && needs.pincer.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: Combine coverage
+        run: |
+          uvx --from 'coverage[toml]==7.13.5' coverage combine
+          uvx --from 'coverage[toml]==7.13.5' coverage xml
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
-        if: always()
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
