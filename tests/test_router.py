@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -814,3 +815,24 @@ async def test_an_openai_primary_5xx_earns_its_last_try(settings, method):
 
     assert answer.content == "from the primary's retry"
     assert len(sent) == 2
+
+
+_LOOKUP_TOOL = {"name": "lookup", "description": "Look a word up.", "input_schema": {"type": "object"}}
+
+
+@pytest.mark.parametrize("method", ["stream_turn", "complete"])
+async def test_every_try_sends_the_same_request(settings, method):
+    """The primary's first try, the fallback and the primary's retry all send the call's system,
+    max_tokens and tools: only the model may differ."""
+    async with (
+        sse.ScriptedAnthropic(settings, [429, ([sse.text("ok")], "end_turn")]) as primary,
+        sse.ScriptedAnthropic(settings, [401]) as fallback,
+    ):
+        router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
+        await _answer(router, method, system="S", max_tokens=123, tools=[_LOOKUP_TOOL])
+
+    sent = [primary.requests[0], fallback.requests[0], primary.requests[1]]
+    assert [body["max_tokens"] for body in sent] == [123] * 3
+    assert len({json.dumps([body["system"], body["tools"]], sort_keys=True) for body in sent}) == 1
+    assert [tool["name"] for tool in sent[0]["tools"]] == ["lookup"]  # the precondition: tools were sent
+    assert "S" in json.dumps(sent[0]["system"])

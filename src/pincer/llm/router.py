@@ -389,39 +389,28 @@ class LLMRouter(BaseLLMProvider):
         each raises a 429 at once. Then the primary again, with its retry, when its first
         failure was transient; otherwise its error is raised. An explicit ``model`` goes to
         the primary only: failovers use their own model (see ``stream_turn``)."""
+        request: dict[str, Any] = {
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system,
+            "reasoning_effort": reasoning_effort,
+            "thinking": thinking,
+            "pinned": pinned,
+        }
         primary, first_tries = self._first_tries()
         primary_err: LLMError | None = None
         for index, provider in enumerate(first_tries):
             try:
                 with rate_limit_retries(False):
-                    return await provider.complete(
-                        messages,
-                        tools=tools,
-                        model=model if index == 0 else None,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        system=system,
-                        reasoning_effort=reasoning_effort,
-                        thinking=thinking,
-                        pinned=pinned,
-                    )
+                    return await provider.complete(messages, model=model if index == 0 else None, **request)
             except (LLMError, LLMRateLimitError) as err:
                 if index == 0:
                     primary_err = err
                 logger.warning("complete provider %d failed: %s — trying next", index, err)
         if primary_err is not None and not primary_err.retryable:
             raise primary_err
-        return await primary.complete(
-            messages,
-            tools=tools,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            reasoning_effort=reasoning_effort,
-            thinking=thinking,
-            pinned=pinned,
-        )
+        return await primary.complete(messages, model=model, **request)
 
     async def stream_turn(
         self,
@@ -444,19 +433,18 @@ class LLMRouter(BaseLLMProvider):
         An explicit ``model`` is the primary's id (e.g. a voice turn's
         ``azure:gpt-5-mini`` on an azure default): a failover leaf of another
         vendor would 404 on it, so failovers get ``None`` — their own model."""
+        request: dict[str, Any] = {
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system,
+            "reasoning_effort": reasoning_effort,
+            "thinking": thinking,
+        }
         primary, first_tries = self._first_tries()
         primary_err: LLMError | None = None
         for index, provider in enumerate(first_tries):
-            stream = provider.stream_turn(
-                messages,
-                tools=tools,
-                model=model if index == 0 else None,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system,
-                reasoning_effort=reasoning_effort,
-                thinking=thinking,
-            )
+            stream = provider.stream_turn(messages, model=model if index == 0 else None, **request)
             try:
                 # Only the first event: the provider's retries all happen before it, and the
                 # setting must not be in force while our consumer handles an event.
@@ -475,16 +463,7 @@ class LLMRouter(BaseLLMProvider):
             return
         if primary_err is not None and not primary_err.retryable:
             raise primary_err
-        async for event in primary.stream_turn(
-            messages,
-            tools=tools,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            reasoning_effort=reasoning_effort,
-            thinking=thinking,
-        ):
+        async for event in primary.stream_turn(messages, model=model, **request):
             yield event
 
     async def close(self) -> None:
