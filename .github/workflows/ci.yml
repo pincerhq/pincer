@@ -1,16 +1,95 @@
 # .github/workflows/ci.yml
+#
+# `changes` decides which test jobs run; the test jobs run in parallel, each
+# only when its code (or a shared file) changed; `checks` runs last, fails if
+# any test job failed, then runs format, lint, mypy and bandit on the whole
+# repo. `checks` and `dependency-audit` are the required status checks.
+#
+# Every job runs on the self-hosted runner. YAML anchors are not supported in
+# workflows, so the `runs-on` block is repeated in each job.
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      pincer: ${{ steps.filter.outputs.pincer }}
+      postgres: ${{ steps.filter.outputs.postgres }}
+      ms365: ${{ steps.filter.outputs.ms365 }}
+      doctr: ${{ steps.filter.outputs.doctr }}
+      memory: ${{ steps.filter.outputs.memory }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+    steps:
+      - uses: actions/checkout@v7
+      # A manual run starts every job (see the job conditions), so no diff.
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          filters: |
+            shared:
+              - pyproject.toml
+              - uv.lock
+              - .github/workflows/ci.yml
+              - tests/conftest.py
+              - tests/support.py
+            pincer:
+              - src/pincer/**
+              - tests/**
+              - skills/**
+              - main.py
+            # What tests/db, the migration and the schema drift tests import.
+            postgres:
+              - src/pincer/db/**
+              - src/pincer/models/**
+              - src/pincer/repositories/**
+              - src/pincer/services/**
+              - src/pincer/config/**
+              - src/pincer/core/session.py
+              - src/pincer/security/audit*
+              - src/pincer/voice/telemetry*
+              - src/pincer/llm/base.py
+              - tests/db/**
+              - tests/test_db_migrations.py
+              - tests/test_schema_drift.py
+            ms365:
+              - src/ms365-mcp/**
+            doctr:
+              - src/doctr-mcp/**
+            memory:
+              - src/sqlite-vec-memory-mcp/**
+            dashboard:
+              - dashboard/**
+
   pincer:
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.pincer == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
 
+      # tests/db runs in the postgres job, on SQLite and Postgres.
       - name: Run tests with coverage
-        run: uv run pytest --cov=pincer --cov-report=xml tests/
+        run: uv run pytest --cov=pincer --cov-report=xml tests/ --ignore=tests/db
 
       # Sprint 10 (T10.5): the voice reliability + red-team harness is a
       # release-blocking gate now that voice is a stable-tier surface. Run it
@@ -18,30 +97,6 @@ jobs:
       # an unrelated unit-test failure in the log.
       - name: Voice harness (both languages, all personas incl. red-team)
         run: uv run pytest tests/voice_harness/ -v --no-cov
-
-      - name: Run ms365-mcp tests
-        run: uv run pytest src/ms365-mcp/tests
-
-      - name: Run doctr-mcp tests
-        run: uv run pytest src/doctr-mcp/tests
-
-      - name: Type check
-        run: uv run mypy src/ --exclude '(ms365-mcp|doctr-mcp)'
-
-      - name: Type check ms365-mcp tests
-        run: uv run mypy src/ms365-mcp
-
-      - name: Type check doctr-mcp tests
-        run: uv run mypy src/doctr-mcp
-
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Format check
-        run: uv run ruff format --check .
-
-      - name: Security scan
-        run: uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
@@ -53,8 +108,13 @@ jobs:
   # The SQLModel layer must behave the same on Postgres as on SQLite. Every
   # test parametrised by the `db_url` fixture runs its Postgres variant here
   # (they skip elsewhere); the set grows as each domain moves onto the engine.
+  # The runner needs Docker for the service container.
   postgres:
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.postgres == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
     services:
       postgres:
         image: postgres:16
@@ -77,30 +137,54 @@ jobs:
       - name: Database layer tests (SQLite + Postgres)
         run: uv run pytest tests/db tests/test_db_migrations.py tests/test_schema_drift.py -v --no-cov
 
-  # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
-  # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
-  # an owner and a review date.
-  dependency-audit:
-    runs-on: ubuntu-latest
+  ms365-mcp:
+    needs: changes
+    if: needs.changes.outputs.ms365 == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: dashboard/pnpm-lock.yaml
       - run: uv sync --all-extras
-      - run: pnpm install --frozen-lockfile
-        working-directory: dashboard
-      - name: Audit dependencies
-        run: scripts/audit-deps.sh
+
+      - name: Run ms365-mcp tests
+        run: uv run pytest src/ms365-mcp/tests
+
+  doctr-mcp:
+    needs: changes
+    if: needs.changes.outputs.doctr == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+
+      - name: Run doctr-mcp tests
+        run: uv run pytest src/doctr-mcp/tests
+
+  memory-mcp:
+    needs: changes
+    if: needs.changes.outputs.memory == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+
+      - name: Run sqlite-vec-memory-mcp tests
+        run: uv run pytest src/sqlite-vec-memory-mcp/tests
 
   dashboard:
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
     defaults:
       run:
         working-directory: dashboard
@@ -124,3 +208,66 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # The single required status check for the code. It runs after the chosen
+  # test jobs and always: with a plain `needs:` it would be *skipped* after a
+  # test failure, and branch protection treats skipped as passing. A skipped
+  # test job (its code did not change) is fine.
+  checks:
+    needs: [changes, pincer, postgres, ms365-mcp, doctr-mcp, memory-mcp, dashboard]
+    if: always()
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
+    steps:
+      - name: Fail if a test job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "A needed job failed or was cancelled: ${{ toJSON(needs) }}"
+          exit 1
+
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src/ --exclude '(ms365-mcp|doctr-mcp)'
+
+      - name: Type check ms365-mcp tests
+        run: uv run mypy src/ms365-mcp
+
+      - name: Type check doctr-mcp tests
+        run: uv run mypy src/doctr-mcp
+
+      - name: Security scan
+        run: uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
+
+  # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
+  # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
+  # an owner and a review date.
+  dependency-audit:
+    runs-on:
+      group: Default
+      labels: [self-hosted, pincer-ci, org-ci]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+      - run: uv sync --all-extras
+      - run: pnpm install --frozen-lockfile
+        working-directory: dashboard
+      - name: Audit dependencies
+        run: scripts/audit-deps.sh

@@ -194,6 +194,7 @@ extend-ignore = ["N814", "N818"]
 # Test files use pytest/stdlib imports in annotations at runtime — TC rules don't apply.
 "src/ms365-mcp/tests/**" = ["TC002", "TC003"]
 "src/doctr-mcp/tests/**" = ["TC002", "TC003"]
+"src/sqlite-vec-memory-mcp/tests/**" = ["TC002", "TC003"]
 "tests/**" = ["TC002", "TC003"]
 # SQLModel columns and FastAPI dependencies are resolved from annotations at
 # runtime, so their imports cannot move under TYPE_CHECKING.

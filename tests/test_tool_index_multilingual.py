@@ -15,6 +15,7 @@ FASTEMBED_CACHE_PATH): only with PINCER_RUN_EMBEDDING=1.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from collections.abc import Iterator
@@ -265,6 +266,17 @@ EDIT_CASES = [
     for lang, queries in EDIT_REQUESTS.items()
     for n, query in enumerate(queries, start=1)
 ]
+
+
+@pytest.fixture(scope="session")
+def memory_server_module() -> ModuleType:
+    """src/sqlite-vec-memory-mcp/memory_server.py (a script, not a package), loaded once."""
+    path = _ROOT / "src" / "sqlite-vec-memory-mcp" / "memory_server.py"
+    spec = importlib.util.spec_from_file_location("sqlite_vec_memory_server_under_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(scope="module")
