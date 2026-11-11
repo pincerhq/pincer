@@ -4,11 +4,6 @@
 # only when its code (or a shared file) changed; `checks` runs last, fails if
 # any test job failed, then runs format, lint, mypy and bandit on the whole
 # repo. `checks` and `dependency-audit` are the required status checks.
-#
-# The test jobs and `checks` run on GitHub-hosted ubuntu-latest. `changes` and
-# `dependency-audit` run on the self-hosted runner (non-root, no sudo, no
-# Docker); YAML anchors are not supported in workflows, so its `runs-on` block
-# is repeated in each of those jobs.
 name: CI
 on:
   push:
@@ -24,9 +19,7 @@ concurrency:
 
 jobs:
   changes:
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
@@ -241,9 +234,7 @@ jobs:
   # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
   # an owner and a review date.
   dependency-audit:
-    runs-on:
-      group: Default
-      labels: [self-hosted, pincer-ci, org-ci]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
