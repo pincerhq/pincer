@@ -164,10 +164,21 @@ class CostService:
         return self._prices.cost(provider, model, usage)
 
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
-        async with session_scope(self._url) as session:
-            await ImageCostLogRepository(session).add(
-                ImageCostLog(timestamp=time.time(), provider=provider, model=model, cost_usd=cost_usd),
-                refresh=False,
+        """Record an image generation's cost. Like `record`, never raises: the generation
+        is paid already, so a row the database will not take is logged at ERROR."""
+        try:
+            async with session_scope(self._url) as session:
+                await ImageCostLogRepository(session).add(
+                    ImageCostLog(timestamp=time.time(), provider=provider, model=model, cost_usd=cost_usd),
+                    refresh=False,
+                )
+        except Exception:
+            logger.error(
+                "Could not store the cost of an image from %s (%r, $%.6f): the generation is not recorded",
+                provider,
+                model,
+                cost_usd,
+                exc_info=True,
             )
 
     # ── reads ────────────────────────────────────────────────────────

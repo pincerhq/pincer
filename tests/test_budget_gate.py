@@ -858,6 +858,19 @@ async def test_a_cost_that_cannot_be_stored_is_logged_and_still_returned(tmp_pat
     assert errors[0].exc_info is not None
 
 
+async def test_an_image_cost_that_cannot_be_stored_is_logged_and_does_not_raise(tmp_path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """The generation is paid: its spend must not be lost silently, nor fail the tool."""
+    service = CostService(_not_a_database(tmp_path))
+
+    with caplog.at_level("ERROR", logger="pincer.services.costs"):
+        await service.add_image_cost(0.003, "fal", "fal-ai/nano-banana-2")
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "fal" in errors[0].getMessage()
+    assert errors[0].exc_info is not None
+
+
 async def _drop_cost_table(tmp_path: Path) -> None:
     """Every later cost write (and read) on the session DB raises: the table is gone."""
     from sqlalchemy import text
