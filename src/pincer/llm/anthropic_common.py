@@ -28,13 +28,13 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
+    RequestClients,
     StreamTurnEvent,
     ThinkingBlock,
     TokenCounts,
     ToolCall,
     rate_limit_attempts,
     rate_limit_backoff,
-    request_client,
     transient_status,
 )
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
@@ -79,6 +79,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             model = settings.anthropic_compatible_model or settings.default_model
 
         self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, max_retries=2)
+        self._request_clients = RequestClients[AsyncAnthropic]()
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
@@ -196,7 +197,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         for attempt in range(attempts):
             started = False
             try:
-                async with request_client(self._client).messages.stream(**kwargs) as stream:
+                async with self._request_clients.pick(self._client).messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
                         started = True
                         yield StreamTurnEvent(text=text)
@@ -236,7 +237,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                async with request_client(self._client).messages.stream(**kwargs) as stream:
+                async with self._request_clients.pick(self._client).messages.stream(**kwargs) as stream:
                     result: Message = await stream.get_final_message()
                 return result
             except anthropic.RateLimitError as e:

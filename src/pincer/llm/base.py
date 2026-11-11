@@ -8,7 +8,6 @@ never depends on Anthropic/OpenAI specifics.
 from __future__ import annotations
 
 import base64
-import weakref
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -32,9 +31,6 @@ _RATE_LIMIT_MAX_WAIT_S = 60.0
 # False while the router sends a request that fails over on a 429 (Q23: fail over first): set by
 # the router around one provider call, read by the providers before their first request
 _rate_limit_retries: ContextVar[bool] = ContextVar("pincer_rate_limit_retries", default=True)
-# An SDK client → its copy without the SDK's own retries, made once; keyed on the client object,
-# so a replaced client gets its own copy and a dropped one takes its copy with it
-_no_retry_clients: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 # Where the requests of the current conversation get their prompt cache key (issue #357, Q21):
 # set by the agent around a turn, read by providers that route on it (OpenAI's prompt_cache_key)
 _prompt_cache_key_source: ContextVar[Callable[[], str] | None] = ContextVar("pincer_prompt_cache_key", default=None)
@@ -79,21 +75,26 @@ def rate_limit_attempts() -> int:
 
 
 class _SDKClient(Protocol):
-    """What ``request_client`` needs of an SDK client (AsyncAnthropic, AsyncOpenAI)."""
+    """What ``RequestClients`` needs of an SDK client (AsyncAnthropic, AsyncOpenAI)."""
 
     def with_options(self, *, max_retries: int) -> Self: ...
 
 
-def request_client[C: _SDKClient](client: C) -> C:
-    """The client to send one request with: ``client``, or, inside ``rate_limit_retries(False)``,
-    its copy without the SDK's own retries, so a 429 fails over at once. The copy is made once
-    per client and shares the client's HTTP connection pool."""
-    if rate_limit_attempts() > 1:
-        return client
-    copy: C | None = _no_retry_clients.get(client)
-    if copy is None:
-        copy = _no_retry_clients[client] = client.with_options(max_retries=0)
-    return copy
+class RequestClients[C: _SDKClient]:
+    """A provider's client for one request: its client, or, inside ``rate_limit_retries(False)``,
+    a copy without the SDK's own retries, so a 429 fails over at once. The copy shares the
+    client's HTTP connection pool; it is made once, and again when the provider's client is
+    replaced (tests swap it after construction)."""
+
+    def __init__(self) -> None:
+        self._pair: tuple[C, C] | None = None  # (client, its no-retry copy)
+
+    def pick(self, client: C) -> C:
+        if rate_limit_attempts() > 1:
+            return client
+        if self._pair is None or self._pair[0] is not client:
+            self._pair = (client, client.with_options(max_retries=0))
+        return self._pair[1]
 
 
 class MessageRole(StrEnum):

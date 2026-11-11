@@ -22,13 +22,13 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
+    RequestClients,
     StreamTurnEvent,
     TokenCounts,
     ToolCall,
     prompt_cache_key,
     rate_limit_attempts,
     rate_limit_backoff,
-    request_client,
     transient_status,
 )
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
@@ -247,6 +247,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             settings, provider
         )
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
+        self._request_clients = RequestClients[AsyncOpenAI]()
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
@@ -378,7 +379,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             model_name = ""
             usage: Any = None
             try:
-                stream = await request_client(self._client).chat.completions.create(**kwargs)
+                stream = await self._request_clients.pick(self._client).chat.completions.create(**kwargs)
                 async for chunk in stream:
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
@@ -444,7 +445,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                result: ChatCompletion = await request_client(self._client).chat.completions.create(**kwargs)
+                result: ChatCompletion = await self._request_clients.pick(self._client).chat.completions.create(
+                    **kwargs
+                )
                 return result
             except openai.RateLimitError as e:
                 if attempt == attempts - 1:

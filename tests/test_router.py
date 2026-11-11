@@ -20,10 +20,10 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
+    RequestClients,
     StreamTurnEvent,
     rate_limit_attempts,
     rate_limit_retries,
-    request_client,
 )
 from pincer.llm.router import LLMRouter
 
@@ -707,19 +707,42 @@ async def test_one_no_retry_copy_per_sdk_client():
     swapped-in client (as the scripted tests do) gets its own."""
     from anthropic import AsyncAnthropic
 
+    clients = RequestClients[AsyncAnthropic]()
     client, other = AsyncAnthropic(api_key="sk-ant-test"), AsyncAnthropic(api_key="sk-ant-test")
     try:
-        assert request_client(client) is client  # retries on: the client itself
+        assert clients.pick(client) is client  # retries on: the client itself
         with rate_limit_retries(False):
-            copy = request_client(client)
+            copy = clients.pick(client)
             assert copy is not client
             assert copy.max_retries == 0
-            assert request_client(client) is copy
-            assert request_client(other) is not copy
-            assert request_client(other).max_retries == 0
+            assert clients.pick(client) is copy
+            assert clients.pick(other) is not copy
+            assert clients.pick(other).max_retries == 0
     finally:
         await client.close()
         await other.close()
+
+
+class _PlainClient:
+    """An SDK client double that can be neither hashed nor weakly referenced."""
+
+    __slots__ = ("max_retries",)
+    __hash__ = None  # type: ignore[assignment]
+
+    def __init__(self, max_retries: int = 2) -> None:
+        self.max_retries = max_retries
+
+    def with_options(self, *, max_retries: int) -> _PlainClient:
+        return _PlainClient(max_retries)
+
+
+def test_a_client_that_cannot_be_hashed_or_weakly_referenced_gets_its_copy():
+    clients = RequestClients[_PlainClient]()
+    client = _PlainClient()
+    with rate_limit_retries(False):
+        copy = clients.pick(client)
+        assert copy.max_retries == 0
+        assert clients.pick(client) is copy
 
 
 @pytest.mark.parametrize("method", ["stream_turn", "complete"])
