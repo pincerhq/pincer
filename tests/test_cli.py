@@ -817,7 +817,11 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         registered_with.append((tools, channel_map))
         raise RuntimeError("stop here — rest of _run_agent is out of scope for this test")
 
-    monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
+    order: list[str] = []
+    prepare = AsyncMock(side_effect=lambda *_a, **_k: order.append("storage"))
+    build = AsyncMock(side_effect=lambda *_a: order.append("core") or core)
+    monkeypatch.setattr("pincer.cli.run._prepare_storage_or_exit", prepare)
+    monkeypatch.setattr("pincer.cli.run._build_core", build)
     monkeypatch.setattr("pincer.cli.run._register_channel_bound_tools", _fake_register)
 
     settings = MagicMock()
@@ -826,6 +830,9 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         await _run_agent(settings)
 
     assert registered_with == [(mock_tools, {})]
+    # The storage root is prepared (with the legacy migration) before anything reads skills.
+    prepare.assert_awaited_once_with(settings, migrate=True)
+    assert order == ["storage", "core"]
 
 
 @pytest.mark.asyncio
@@ -839,6 +846,7 @@ async def test_run_agent_starts_skill_index_watcher(monkeypatch: pytest.MonkeyPa
     core = MagicMock()
     watcher_cls = MagicMock()
     watcher_cls.return_value.start = AsyncMock()
+    monkeypatch.setattr("pincer.cli.run._prepare_storage_or_exit", AsyncMock())
     monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
     monkeypatch.setattr("pincer.services.skills.SkillIndexWatcher", watcher_cls)
     monkeypatch.setattr(
@@ -855,3 +863,75 @@ async def test_run_agent_starts_skill_index_watcher(monkeypatch: pytest.MonkeyPa
         watcher_cls.return_value.start.assert_awaited_once()
     else:
         watcher_cls.assert_not_called()
+
+
+# ── patch-coverage: storage root wiring ──────────────────────────────────────
+
+
+def test_run_banner_shows_the_storage_root_and_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock
+
+    from pincer.config.main import _RelaxedSettings
+
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root="s3://acme/")  # type: ignore[call-arg]
+    monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
+    monkeypatch.setattr("pincer.cli.run._run_agent", AsyncMock())
+
+    result = runner.invoke(app, ["run"])
+
+    assert "Storage root: s3://acme/" in result.output
+    assert "Skills dir: s3://acme/skills" in result.output
+    assert "Workspace: s3://acme/workspace" in result.output
+
+
+@pytest.mark.asyncio
+async def test_tasks_worker_prepares_storage_without_migrating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker creates the folders before building its core, and leaves the one-time
+    migration to the main process."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _run_tasks_worker
+
+    prepare = AsyncMock()
+    monkeypatch.setattr("pincer.cli.run._prepare_storage_or_exit", prepare)
+    monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(side_effect=RuntimeError("stop here")))
+
+    settings = MagicMock()
+    with pytest.raises(RuntimeError, match="stop here"):
+        await _run_tasks_worker(settings)
+
+    prepare.assert_awaited_once_with(settings, migrate=False)
+
+
+@pytest.mark.asyncio
+async def test_build_core_gives_mcp_the_workspace_uploads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """MCP servers get the workspace's uploads/ folder and a hook that refreshes it from the bucket."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _build_core
+
+    settings = _mock_settings_for_build_core(tmp_path)
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = AsyncMock()
+    mcp_cfg = MagicMock(enabled=True, servers={"ocr": MagicMock()})
+    manager = MagicMock(start=AsyncMock(return_value={"ocr": True}), total_tool_count=MagicMock(return_value=1))
+    manager_cls = MagicMock(return_value=manager)
+    fetch = MagicMock()
+
+    monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
+    monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
+    monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(return_value=mcp_cfg))
+    monkeypatch.setattr("pincer.mcp.MCPClientManager", manager_cls)
+    monkeypatch.setattr("pincer.cli.run._workspace_local", lambda _s: tmp_path / "ws")
+    monkeypatch.setattr("pincer.cli.run._workspace_fetch", lambda _s: fetch)
+
+    core = await _build_core(settings)
+
+    assert core.mcp_manager is manager
+    kwargs = manager_cls.call_args.kwargs
+    assert kwargs["local_upload_root"] == tmp_path / "ws" / "uploads"
+    assert kwargs["local_file_fetch"] is fetch

@@ -236,9 +236,6 @@ class Workspace:
     def is_dir(self, local_path: str | Path) -> bool:
         return self.to_remote(local_path).is_dir()
 
-    def size(self, local_path: str | Path) -> int:
-        return self.to_remote(local_path).stat().st_size
-
     def publish(self, local_path: str | Path) -> None:
         """Upload a file a tool wrote straight into `local`. A no-op on a local root."""
         source = self.confine(local_path)

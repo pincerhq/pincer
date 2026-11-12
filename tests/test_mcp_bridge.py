@@ -699,3 +699,49 @@ async def test_handler_leaves_kwargs_untouched_when_no_upload_root_configured() 
 
     called_kwargs = session.call_tool.call_args.args[1]
     assert called_kwargs["params"]["source"]["file_path"] == "/some/path"
+
+
+async def test_handler_refreshes_upload_paths_before_the_call(tmp_path) -> None:
+    """With a workspace fetch hook, a file_path under the upload root is brought up to
+    date from the bucket before any server (stdio included) reads it."""
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    saved = upload_root / "scan.png"
+    saved.write_bytes(b"stale")
+    fetched: list[str] = []
+
+    def fetch(path):
+        fetched.append(str(path))
+        saved.write_bytes(b"fresh")
+        return path
+
+    tool = FakeTool("ocr_document_text")
+    session = _make_session([tool])
+    session.config.approval_required = ["none"]
+    session.config.transport = MCPTransport.STDIO
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="ocr result")]))
+
+    registry = _make_registry()
+    bridge = MCPToolBridge(
+        session, registry, _make_audit(), prefix=True, local_upload_root=upload_root, local_file_fetch=fetch
+    )
+    bridge.register_tools()
+
+    args = {"params": {"source": {"file_path": str(saved)}, "other": [{"file_path": "/etc/hosts"}]}}
+    await registry.execute("testserver__ocr_document_text", args)
+
+    assert fetched == [str(saved)]  # only the path under the upload root
+    assert saved.read_bytes() == b"fresh"
+
+
+def test_refresh_survives_a_failing_fetch(tmp_path, caplog) -> None:
+    from pincer.mcp.bridge import _refresh_local_file_paths
+
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+
+    def fetch(path):
+        raise OSError("bucket unreachable")
+
+    _refresh_local_file_paths({"file_path": str(upload_root / "a.png")}, upload_root, fetch)
+    assert "Could not refresh" in caplog.text

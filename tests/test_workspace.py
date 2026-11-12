@@ -14,10 +14,14 @@ import pytest
 
 from pincer.cli._attachments import describe_file_attachments, describe_image_attachments
 from pincer.config.main import _RelaxedSettings
+from pincer.storage import workspace as _workspace_module
 from pincer.storage.errors import StorageUnavailable
 from pincer.storage.keys import FOLDER_MARKER
 from pincer.storage.workspace import Workspace, get_workspace, migrate_legacy, prepare_storage
 from pincer.tools.path_sandbox import SandboxDenied
+
+# Captured at import, before the autouse fixture swaps it for a temporary home.
+_REAL_LEGACY_HOME_DIR = _workspace_module.legacy_home_dir
 
 _ROOTS = {"s3": "s3://ws-bucket/", "azure": "az://ws-container/", "gs": "gs://ws-bucket/"}
 
@@ -419,3 +423,354 @@ def test_storage_root_for(tmp_path: Path) -> None:
     assert storage_root_for(_RelaxedSettings(data_dir=tmp_path, storage_root="s3://b/")) == "s3://b/"  # type: ignore[call-arg]
     assert storage_root_for(_RelaxedSettings(data_dir=tmp_path, skills_dir="gs://g/team")) == "gs://g/"  # type: ignore[call-arg]
     assert storage_root_for(_RelaxedSettings(data_dir=tmp_path)) == tmp_path / "storage"  # type: ignore[call-arg]
+
+
+# ── Coverage: file tools on every backend ────────────────────────────────────
+
+
+@pytest.fixture
+def file_tools(env: Env, monkeypatch: pytest.MonkeyPatch) -> Any:
+    from pincer.tools.builtin import files
+
+    monkeypatch.setattr(files, "_workspace", lambda: env.ws)
+    env.ws.ensure()
+    return files
+
+
+async def test_file_write_then_read(env: Env, file_tools: Any) -> None:
+    assert "Successfully wrote 5 chars" in await file_tools.file_write("notes/a.txt", "hello")
+    assert env.external("workspace/notes/a.txt").read_text() == "hello"
+    result = await file_tools.file_read("notes/a.txt")
+    assert result == "File: a.txt (5 chars)\n\nhello"
+
+
+async def test_file_read_errors(env: Env, file_tools: Any) -> None:
+    assert "File not found" in await file_tools.file_read("missing.txt")
+    if not env.ws.is_cloud:  # cloudpathlib's mocks stat a folder like a file (real buckets don't)
+        assert "Not a file" in await file_tools.file_read("uploads")
+    env.ws.save("uploads", "big.txt", b"x" * (file_tools.MAX_READ_SIZE + 1))
+    assert "File too large" in await file_tools.file_read("uploads/big.txt")
+
+
+async def test_file_read_reports_a_failed_download(env: Env, file_tools: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    env.ws.save("uploads", "a.txt", b"a")
+    monkeypatch.setattr(env.ws, "fetch", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom")))
+    assert "Error reading file: boom" in await file_tools.file_read("uploads/a.txt")
+
+
+async def test_file_write_reports_a_failed_upload(env: Env, file_tools: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(env.ws, "write_text", lambda *_a: (_ for _ in ()).throw(OSError("denied")))
+    assert "Error writing file: denied" in await file_tools.file_write("a.txt", "x")
+
+
+async def test_file_list(env: Env, file_tools: Any) -> None:
+    env.ws.save("uploads", "small.txt", b"x" * 10)
+    env.ws.save("uploads", "mid.bin", b"x" * 2048)
+    env.ws.save("uploads", "big.bin", b"x" * (2 * 1024 * 1024))
+    result = await file_tools.file_list("uploads")
+    assert result.startswith("Contents of uploads/:")
+    assert "small.txt (10B)" in result
+    assert "mid.bin (2.0KB)" in result
+    assert "big.bin (2.0MB)" in result
+    assert "  uploads/" in await file_tools.file_list()
+
+
+async def test_file_list_errors(env: Env, file_tools: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "Directory not found" in await file_tools.file_list("nowhere")
+    env.ws.save("uploads", "a.txt", b"a")
+    assert "Not a directory" in await file_tools.file_list("uploads/a.txt")
+    assert "Directory is empty" in await file_tools.file_list("screenshots")
+    monkeypatch.setattr(env.ws, "list", lambda *_a: (_ for _ in ()).throw(PermissionError()))
+    assert "Permission denied" in await file_tools.file_list("uploads")
+
+
+def test_file_tools_use_the_configured_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.tools.builtin import files
+
+    settings = _RelaxedSettings(data_dir=tmp_path)  # type: ignore[call-arg]
+    monkeypatch.setattr(files, "get_settings", lambda: settings)
+    assert files._workspace() is get_workspace(settings)
+
+
+# ── Coverage: PDF attachments ────────────────────────────────────────────────
+
+
+def _pdf(text: str) -> bytes:
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), text)
+    data: bytes = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_pdf_attachment_text_is_extracted(env: Env) -> None:
+    text = "Quarterly revenue grew twelve percent over the previous year"
+    [part] = describe_file_attachments(env.ws, [(_pdf(text), "application/pdf", "q.pdf")])
+    assert text in part
+    assert str(env.ws.local / "uploads" / "q.pdf") in part
+
+
+def test_pdf_attachment_without_pymupdf(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+    [part] = describe_file_attachments(env.ws, [(b"%PDF", "application/pdf", "q.pdf")])
+    assert "PDF text extraction unavailable" in part
+
+
+def test_pdf_attachment_that_cannot_be_parsed(env: Env) -> None:
+    [part] = describe_file_attachments(env.ws, [(b"not a pdf", "application/pdf", "bad.pdf")])
+    assert "PDF extraction failed" in part
+
+
+def test_binary_attachment_names_its_path(env: Env) -> None:
+    [part] = describe_file_attachments(env.ws, [(b"\x00", "application/zip", "a.zip")])
+    assert "Use shell_exec" in part
+
+
+# ── Coverage: python_exec edge cases ─────────────────────────────────────────
+
+
+@pytest.fixture
+def py(env: Env, monkeypatch: pytest.MonkeyPatch) -> Any:
+    from pincer.tools.builtin import python_exec as module
+
+    monkeypatch.setattr(module, "_workspace", lambda: env.ws)
+    return module
+
+
+async def test_python_exec_rejects_empty_code(py: Any) -> None:
+    assert await py.python_exec("  ") == "Error: No code provided."
+
+
+async def test_python_exec_reports_stderr_exit_code_and_truncates(py: Any) -> None:
+    assert "[stderr]" in await py.python_exec("import sys; sys.stderr.write('oops')")
+    assert "[Process exited with code 3]" in await py.python_exec("raise SystemExit(3)")
+    result = await py.python_exec(f"print('x' * {py.MAX_OUTPUT_LENGTH + 100})")
+    assert result.endswith("...[output truncated]")
+    assert await py.python_exec("pass") == "(no output)"
+
+
+async def test_python_exec_runs_on_the_cache_when_sync_fails(
+    env: Env, py: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(env.ws, "sync", lambda _sub: (_ for _ in ()).throw(OSError("offline")))
+    assert "42" in await py.python_exec("print(42)")
+
+
+async def test_python_exec_still_reports_a_file_that_failed_to_upload(
+    env: Env, py: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(env.ws, "publish", lambda _p: (_ for _ in ()).throw(OSError("offline")))
+    result = await py.python_exec("open('r.txt', 'w').write('1')")
+    assert "[File saved:" in result
+
+
+async def test_python_exec_reports_a_subprocess_that_cannot_start(py: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fail(*_a: Any, **_k: Any) -> Any:
+        raise OSError("no python")
+
+    monkeypatch.setattr(py.asyncio, "create_subprocess_exec", fail)
+    assert "Error starting subprocess: OSError: no python" in await py.python_exec("print(1)")
+
+
+def test_snapshot_skips_files_it_cannot_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.tools.builtin import python_exec as module
+
+    (tmp_path / "a.txt").write_text("a")
+    real_is_file = Path.is_file
+
+    def flaky(self: Path) -> bool:
+        if self.name == "a.txt":
+            raise OSError("gone")
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", flaky)
+    assert module._snapshot(tmp_path) == {}
+
+
+def test_python_exec_uses_the_configured_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.tools.builtin import python_exec as module
+
+    settings = _RelaxedSettings(data_dir=tmp_path)  # type: ignore[call-arg]
+    monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
+    assert module._workspace() is get_workspace(settings)
+
+
+# ── Coverage: workspace edge cases ───────────────────────────────────────────
+
+
+def test_ensure_sibling(env: Env) -> None:
+    folder = env.ws.ensure_sibling("skills")
+    assert folder.is_dir()
+    if env.ws.is_cloud:
+        assert (folder / FOLDER_MARKER).is_file()
+
+
+def test_sizes_reports_zero_for_unreadable_files(env: Env) -> None:
+    env.ws.save("uploads", "a.txt", b"abc")
+    assert env.ws.sizes(["uploads/a.txt", "uploads/missing.txt"]) == [3, 0]
+
+
+def test_files_skips_hidden_entries(env: Env) -> None:
+    env.ws.ensure()
+    _put(env.external("workspace/.hidden/secret.txt"), b"s")
+    _put(env.external("workspace/uploads/.dotfile"), b"d")
+    env.ws.save("uploads", "seen.txt", b"x")
+    if not env.ws.is_cloud:
+        (env.ws.local / "uploads" / "linked").symlink_to(env.ws.local / "downloads", target_is_directory=True)
+    assert [rel for rel, _local in env.ws.files()] == ["uploads/seen.txt"]
+
+
+def test_prepare_storage_wraps_unexpected_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root=str(tmp_path / "root"))  # type: ignore[call-arg]
+    monkeypatch.setattr(Workspace, "ensure", lambda _self: (_ for _ in ()).throw(PermissionError("read-only")))
+    with pytest.raises(StorageUnavailable, match="Cannot prepare the storage root .*read-only"):
+        prepare_storage(settings)
+
+
+def test_prepare_storage_passes_storage_errors_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root=str(tmp_path / "root"))  # type: ignore[call-arg]
+    monkeypatch.setattr(Workspace, "ensure", lambda _self: (_ for _ in ()).throw(StorageUnavailable("down")))
+    with pytest.raises(StorageUnavailable, match="^down$"):
+        prepare_storage(settings)
+
+
+def test_legacy_home_dir_is_under_the_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert _REAL_LEGACY_HOME_DIR() == tmp_path / ".pincer"
+
+
+def test_a_failed_copy_is_retried_at_the_next_start(env: Env) -> None:
+    data_dir = Path(env.settings.data_dir)
+    (data_dir / "downloads").mkdir(parents=True)
+    (data_dir / "downloads" / "r.pdf").write_bytes(b"R")
+    with patch("pincer.storage.workspace._copy_tree", side_effect=OSError("bucket down")):
+        assert migrate_legacy(env.settings, env.ws) == {}
+    assert (data_dir / "downloads").is_dir()
+    assert migrate_legacy(env.settings, env.ws) == {"downloads": 1}
+
+
+def test_an_unreadable_migration_state_is_ignored(env: Env) -> None:
+    data_dir = Path(env.settings.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "storage-migration.json").write_text("{not json")
+    (data_dir / "downloads").mkdir()
+    (data_dir / "downloads" / "r.pdf").write_bytes(b"R")
+    assert migrate_legacy(env.settings, env.ws) == {"downloads": 1}
+
+
+def test_has_skills_on_a_missing_folder() -> None:
+    from pincer.storage.workspace import _has_skills
+
+    class Missing:
+        def glob(self, _pattern: str) -> Any:
+            raise FileNotFoundError
+
+    assert _has_skills(Missing()) is False  # type: ignore[arg-type]
+
+
+def test_migration_skips_symlinks_and_picks_a_free_name(env: Env, tmp_path: Path) -> None:
+    data_dir = Path(env.settings.data_dir)
+    (data_dir / "downloads").mkdir(parents=True)
+    (data_dir / "downloads" / "r.pdf").write_bytes(b"R")
+    (tmp_path / "outside.txt").write_text("secret")
+    (data_dir / "downloads" / "link.txt").symlink_to(tmp_path / "outside.txt")
+    (data_dir / "downloads.migrated").mkdir()  # taken by an earlier migration
+    assert migrate_legacy(env.settings, env.ws) == {"downloads": 1}
+    assert not env.external("workspace/downloads/link.txt").exists()
+    assert (data_dir / "downloads.migrated.2" / "r.pdf").is_file()
+
+
+# ── Coverage: Drive / Gmail lookups ──────────────────────────────────────────
+
+
+def test_google_tools_use_the_configured_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.integrations.google import workspace_files
+
+    settings = _RelaxedSettings(data_dir=tmp_path)  # type: ignore[call-arg]
+    monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
+    assert workspace_files._workspace() is get_workspace(settings)
+
+
+def test_upload_lookup_by_absolute_workspace_path_and_desktop(
+    env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pincer.integrations.google import workspace_files
+
+    monkeypatch.setattr(workspace_files, "_workspace", lambda: env.ws)
+    local = env.ws.save("downloads", "r.pdf", b"R")
+    assert workspace_files.resolve_upload_path(str(local)) == str(local)
+
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    (desktop / "slides.pptx").write_bytes(b"S")
+    monkeypatch.setattr(
+        workspace_files.os.path,
+        "expanduser",
+        lambda p: p.replace("~/Desktop", str(desktop)).replace("~", "/nonexistent"),
+    )
+    assert workspace_files.resolve_upload_path("slides.pptx") == str(desktop / "slides.pptx")
+
+
+# ── Coverage: run.py helpers ─────────────────────────────────────────────────
+
+
+def test_banner_labels_and_workspace_helpers(tmp_path: Path) -> None:
+    from pincer.cli.run import _storage_root_label, _workspace_fetch, _workspace_local
+
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root="s3://b/")  # type: ignore[call-arg]
+    assert _storage_root_label(settings) == "s3://b/"
+    assert _storage_root_label(settings, "workspace") == "s3://b/workspace"
+
+    local = _RelaxedSettings(data_dir=tmp_path / "data", storage_root=str(tmp_path / "root"))  # type: ignore[call-arg]
+    ws_dir = _workspace_local(local)
+    assert ws_dir == (tmp_path / "root" / "workspace").resolve()
+    (ws_dir / "a.txt").write_text("a")
+    assert _workspace_fetch(local)(ws_dir / "a.txt") == ws_dir / "a.txt"
+
+
+async def test_send_file_refreshes_workspace_files(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _register_channel_bound_tools
+    from pincer.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("pincer.config.get_settings", lambda: env.settings)
+    monkeypatch.setattr("pincer.storage.workspace.get_workspace", lambda _s: env.ws)
+    local = env.ws.save("exec_output", "chart.png", b"PNG")
+    channel = MagicMock(send_file=AsyncMock())
+    registry = ToolRegistry()
+    _register_channel_bound_tools(registry, {"telegram": channel})
+
+    context = {"user_id": "u1", "channel": "telegram"}
+    assert await registry.execute("send_file", {"path": str(local)}, context) == "File sent: chart.png"
+    channel.send_file.assert_awaited_once_with("u1", str(local), "")
+
+    env.external("workspace/exec_output/chart.png").unlink()
+    result = await registry.execute("send_file", {"path": str(local)}, context)
+    assert result.startswith("Error: File not found")
+
+
+# ── Coverage: browser screenshots ────────────────────────────────────────────
+
+
+async def test_screenshot_is_saved_to_the_workspace(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.tools.builtin import browser
+
+    page = MagicMock(goto=AsyncMock(), screenshot=AsyncMock(return_value=b"PNGDATA"), close=AsyncMock())
+    fake_browser = MagicMock(new_page=AsyncMock(return_value=page))
+    monkeypatch.setattr(browser, "_ensure_browser", AsyncMock(return_value=fake_browser))
+    monkeypatch.setattr(browser.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr("pincer.config.get_settings", lambda: env.settings)
+    monkeypatch.setattr("pincer.storage.workspace.get_workspace", lambda _s: env.ws)
+
+    result = await browser.screenshot("https://example.com")
+    assert "Screenshot saved to:" in result
+    [(rel, _local)] = list(env.ws.files())
+    assert rel.startswith("screenshots/screenshot_") and rel.endswith(".png")
+    assert env.external(f"workspace/{rel}").read_bytes() == b"PNGDATA"
