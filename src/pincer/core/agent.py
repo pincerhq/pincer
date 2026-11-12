@@ -2654,7 +2654,7 @@ class Agent:
                 try:
                     approved = await self._approval_callback(
                         tool_call.name,
-                        tool_call.arguments,
+                        await self._tools.approval_display_args(tool_call.name, tool_call.arguments),
                         user_id,
                         channel_name or channel,
                     )

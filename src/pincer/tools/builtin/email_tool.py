@@ -9,9 +9,11 @@ Tools are registered in cli.py via tools.register().
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import email
 import email.policy
+import email.utils
 import logging
 import re
 from datetime import UTC, datetime, timedelta
@@ -19,6 +21,13 @@ from email.message import EmailMessage
 from typing import Any
 
 from pincer.config import get_settings
+from pincer.tools.attachments import (
+    Attachment,
+    AttachmentError,
+    attachment_names,
+    attachment_part,
+    load_attachments_async,
+)
 from pincer.utils.csv_list import split_csv
 
 logger = logging.getLogger(__name__)
@@ -229,33 +238,73 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
 
 # ── Tool: email_send ─────────────────────────────
 
+# For messages sent as bytes. aiosmtplib only negotiates 8BITMIME (and downgrades
+# to 7bit when the server lacks it) for a message object; raw bytes go straight to
+# sendmail. So serialise 7-bit-safe: 8-bit text parts, e.g. in an embedded .eml,
+# are re-encoded, and the body is quoted-printable (_build_smtp_message).
+_SMTP_7BIT = email.policy.SMTP.clone(cte_type="7bit")
 
-async def email_send(to: str, subject: str, body: str, cc: str = "") -> str:
-    """Send an email via SMTP. Returns a status message."""
+
+def _build_smtp_message(from_: str, to: str, subject: str, body: str, cc: str, files: list[Attachment]) -> EmailMessage:
+    message = EmailMessage()
+    message["From"] = from_
+    message["To"] = to
+    message["Subject"] = subject
+    if cc:
+        message["Cc"] = cc
+    if files and not body.isascii():
+        # A message with attachments is sent as pre-serialised bytes, which skips
+        # aiosmtplib's 8BITMIME check: keep the body 7-bit (see _SMTP_7BIT).
+        message.set_content(body, cte="quoted-printable")
+    else:
+        message.set_content(body)
+    if files:
+        message.make_mixed()
+        for f in files:
+            message.attach(attachment_part(f))
+    return message
+
+
+async def email_send(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    attachments: list[str] | str | None = None,
+) -> str:
+    """Send an email via SMTP, optionally with file attachments. Returns a status message."""
+    try:
+        files = await load_attachments_async(attachments)
+    except AttachmentError as e:
+        return f"Email NOT sent: {e}"
+
     try:
         import aiosmtplib
 
         settings = get_settings()
-        message = EmailMessage()
-        message["From"] = settings.email_from or settings.email_username
-        message["To"] = to
-        message["Subject"] = subject
-        if cc:
-            message["Cc"] = cc
-        message.set_content(body)
+        from_ = settings.email_from or settings.email_username
+        smtp = {
+            "hostname": settings.email_smtp_host,
+            "port": settings.email_smtp_port,
+            "username": settings.email_username,
+            "password": settings.email_password.get_secret_value(),
+            "use_tls": settings.email_smtp_port == 465,
+            "start_tls": settings.email_smtp_port == 587,
+        }
 
-        await aiosmtplib.send(
-            message,
-            hostname=settings.email_smtp_host,
-            port=settings.email_smtp_port,
-            username=settings.email_username,
-            password=settings.email_password.get_secret_value(),
-            use_tls=settings.email_smtp_port == 465,
-            start_tls=settings.email_smtp_port == 587,
-        )
+        if files:
+            # Base64-encoding and serialising up to 17 MB takes ~0.3 s: do it off the
+            # event loop and hand aiosmtplib the bytes, with the envelope spelled out.
+            raw = await asyncio.to_thread(
+                lambda: _build_smtp_message(from_, to, subject, body, cc, files).as_bytes(policy=_SMTP_7BIT)
+            )
+            recipients = [addr for _, addr in email.utils.getaddresses([to, cc]) if addr]
+            await aiosmtplib.send(raw, sender=email.utils.parseaddr(from_)[1], recipients=recipients, **smtp)
+        else:
+            await aiosmtplib.send(_build_smtp_message(from_, to, subject, body, cc, []), **smtp)
 
         logger.info("Email sent to %s: %s", to, subject)
-        return f"Email sent to {to} — Subject: {subject}"
+        return f"Email sent to {to} — Subject: {subject}{attachment_names(files)}"
 
     except Exception as e:
         logger.error("email_send error: %s", e, exc_info=True)

@@ -4,7 +4,13 @@ Tests for Gmail tools — one test per tool (19 tools).
 
 from __future__ import annotations
 
+import email
+import email.policy
+
+import pytest
+
 from pincer.integrations.google.tools_gmail import (
+    _build_mime,
     _extract_attachments,
     google__add_label,
     google__create_draft,
@@ -476,3 +482,180 @@ async def test_fallback_guard_pattern_matching():
 
     imap_code = "import imaplib; m = imaplib.IMAP4_SSL('imap.gmail.com')"
     assert any(p in imap_code.lower() for p in _GOOGLE_FALLBACK_PATTERNS)
+
+
+# ── Outgoing attachments ──────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def downloads(workspace_dir, monkeypatch):
+    """The workspace's downloads/ (with report.pdf), which outgoing attachments are read from."""
+    from pincer.storage.workspace import Workspace
+
+    ws = Workspace(workspace_dir, workspace_dir)
+    monkeypatch.setattr("pincer.tools.attachments._workspace", lambda: ws)
+    d = workspace_dir / "downloads"
+    (d / "report.pdf").write_bytes(b"%PDF-1.4 report")
+    return d
+
+
+def _parse(*args, **kwargs) -> email.message.EmailMessage:
+    """Build with _build_mime and re-parse the bytes, as a recipient would see them."""
+    return email.message_from_bytes(_build_mime(*args, **kwargs).as_bytes(), policy=email.policy.default)
+
+
+def _sent_call(mock_method):
+    """The real call to a mocked API method (fixtures also call it bare to configure .execute)."""
+    calls = [c for c in mock_method.call_args_list if c.kwargs]
+    assert calls, "API method was not called"
+    return calls[-1]
+
+
+def _uploaded(call) -> email.message.EmailMessage:
+    media = call.kwargs["media_body"]
+    assert media.mimetype() == "message/rfc822"
+    return email.message_from_bytes(media.getbytes(0, media.size()), policy=email.policy.default)
+
+
+def test_build_mime_without_attachments_unchanged():
+    msg = _parse("bob@example.com", "Hi", "Body")
+    assert msg.get_content_type() == "text/plain"
+    assert msg["to"] == "bob@example.com"
+    html = _parse("bob@example.com", "Hi", "<b>x</b>", body_type="html")
+    assert html.get_content_type() == "multipart/alternative"
+
+
+def test_build_mime_with_attachments(downloads):
+    from pincer.tools.attachments import load_attachments
+
+    files = load_attachments(["report.pdf"])
+    msg = _parse("bob@example.com", "Hi", "Body", attachments=files, in_reply_to="<m@x>")
+    assert msg.get_content_type() == "multipart/mixed"
+    assert msg["In-Reply-To"] == "<m@x>"
+    parts = list(msg.iter_parts())
+    assert parts[0].get_content_type() == "text/plain"
+    assert parts[0].get_content().strip() == "Body"
+    assert parts[1].get_filename() == "report.pdf"
+    assert parts[1].get_content_type() == "application/pdf"
+    assert parts[1].get_content() == b"%PDF-1.4 report"
+
+
+def test_build_mime_html_with_attachments(downloads):
+    from pincer.tools.attachments import load_attachments
+
+    msg = _parse("b@x.com", "Hi", "<b>x</b>", body_type="html", attachments=load_attachments("report.pdf"))
+    parts = list(msg.iter_parts())
+    assert msg.get_content_type() == "multipart/mixed"
+    assert parts[0].get_content_type() == "multipart/alternative"
+    assert parts[1].get_filename() == "report.pdf"
+
+
+def test_build_mime_embeds_eml_without_base64(downloads):
+    from pincer.tools.attachments import load_attachments
+
+    (downloads / "fwd.eml").write_bytes(b"Subject: inner\r\nFrom: x@y.z\r\n\r\ninner body\r\n")
+    msg = _parse("b@x.com", "Fwd", "see below", attachments=load_attachments("fwd.eml"))
+    part = list(msg.iter_parts())[1]
+    assert part.get_content_type() == "message/rfc822"
+    assert part.get_filename() == "fwd.eml"
+    assert part["Content-Transfer-Encoding"] in (None, "7bit", "8bit")
+    assert part.get_content()["subject"] == "inner"
+
+
+async def test_send_message_with_attachment_uses_media_upload(mock_factory, mock_gmail_service, downloads):
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "sent1"}
+    result = await google__send_message(
+        mock_factory, to="bob@example.com", subject="Report", body="Attached", attachments=["report.pdf"]
+    )
+    assert "report.pdf" in result
+    call = _sent_call(send)
+    assert "raw" not in call.kwargs["body"]
+    sent = _uploaded(call)
+    assert sent["to"] == "bob@example.com"
+    assert [p.get_filename() for p in sent.iter_attachments()] == ["report.pdf"]
+
+
+async def test_send_message_without_attachment_uses_raw(mock_factory, mock_gmail_service):
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "sent1"}
+    await google__send_message(mock_factory, to="bob@example.com", subject="Hello", body="World")
+    call = _sent_call(send)
+    assert "raw" in call.kwargs["body"]
+    assert "media_body" not in call.kwargs
+
+
+async def test_reply_with_attachment_keeps_thread(mock_factory, mock_gmail_service, downloads):
+    mock_gmail_service.users().messages().get().execute.return_value = _msg()
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "r1"}
+    result = await google__reply_to_message(
+        mock_factory, message_id="msg1", body="Here it is", attachments="report.pdf"
+    )
+    assert "Reply sent" in result
+    assert "report.pdf" in result
+    call = _sent_call(send)
+    assert call.kwargs["body"] == {"threadId": "thread1"}
+    sent = _uploaded(call)
+    assert sent["In-Reply-To"] == "<test-msg-id@example.com>"
+    assert sent["subject"] == "Re: Test"
+    assert [p.get_filename() for p in sent.iter_attachments()] == ["report.pdf"]
+
+
+async def test_reply_all_with_attachment(mock_factory, mock_gmail_service, downloads):
+    mock_gmail_service.users().messages().get().execute.return_value = _msg()
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "r1"}
+    result = await google__reply_all(mock_factory, message_id="msg1", body="x", attachments=["report.pdf"])
+    assert "report.pdf" in result
+    assert _sent_call(send).kwargs["body"] == {"threadId": "thread1"}
+
+
+async def test_forward_with_attachment(mock_factory, mock_gmail_service, downloads):
+    mock_gmail_service.users().messages().get().execute.return_value = _msg()
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "f1"}
+    result = await google__forward_message(
+        mock_factory, message_id="msg1", to="c@example.com", attachments=["report.pdf"]
+    )
+    assert "report.pdf" in result
+    assert [p.get_filename() for p in _uploaded(_sent_call(send)).iter_attachments()] == ["report.pdf"]
+
+
+async def test_create_draft_with_attachment(mock_factory, mock_gmail_service, downloads):
+    create = mock_gmail_service.users().drafts().create
+    create().execute.return_value = {"id": "draft1"}
+    result = await google__create_draft(
+        mock_factory, to="dave@example.com", subject="S", body="B", attachments=["report.pdf"]
+    )
+    assert "draft1" in result
+    assert "report.pdf" in result
+    call = _sent_call(create)
+    assert call.kwargs["body"] == {"message": {}}
+    draft = _uploaded(call)
+    assert draft["to"] == "dave@example.com"
+    assert [p.get_filename() for p in draft.iter_attachments()] == ["report.pdf"]
+
+
+async def test_bad_attachment_blocks_before_api_call(mock_factory, mock_gmail_service, downloads):
+    send = mock_gmail_service.users().messages().send
+    get = mock_gmail_service.users().messages().get
+    send.reset_mock()
+    get.reset_mock()
+    result = await google__reply_to_message(mock_factory, message_id="msg1", body="x", attachments=["/etc/passwd"])
+    assert "NOT sent" in result
+    send.assert_not_called()
+    get.assert_not_called()
+
+
+async def test_send_with_control_char_filename(mock_factory, mock_gmail_service, downloads):
+    (downloads / "a\nBcc: x@evil.com\n.pdf").write_bytes(b"%PDF")
+    send = mock_gmail_service.users().messages().send
+    send().execute.return_value = {"id": "s"}
+    result = await google__send_message(
+        mock_factory, to="b@x.com", subject="S", body="B", attachments=["a\nBcc: x@evil.com\n.pdf"]
+    )
+    assert "Email sent" in result
+    sent = _uploaded(_sent_call(send))
+    assert sent["bcc"] is None
+    assert [p.get_filename() for p in sent.iter_attachments()] == ["a_Bcc: x@evil.com_.pdf"]

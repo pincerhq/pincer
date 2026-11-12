@@ -189,6 +189,7 @@ def _register_builtins(tools: ToolRegistry, settings: Settings, report: dict[str
 
 
 def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
+    from pincer.tools.attachments import ATTACHMENTS_HINT, attachments_param
     from pincer.tools.builtin.email_tool import (
         email_check,
         email_empty_folder,
@@ -224,7 +225,7 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
         name="email_send",
         description=(
             "Send an email. Requires recipient, subject, body. "
-            "Use when the user asks to send, write, or compose an email."
+            "Use when the user asks to send, write, or compose an email." + ATTACHMENTS_HINT
         ),
         handler=email_send,
         parameters={
@@ -234,10 +235,12 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
                 "subject": {"type": "string"},
                 "body": {"type": "string"},
                 "cc": {"type": "string", "default": ""},
+                "attachments": attachments_param(),
             },
             "required": ["to", "subject", "body"],
         },
         require_approval=True,
+        file_path_params=("attachments",),
     )
     tools.register(
         name="email_search",
