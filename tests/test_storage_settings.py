@@ -54,6 +54,25 @@ def test_storage_root_setting_keeps_uris() -> None:
     assert _RelaxedSettings(storage_root="").storage_root is None  # type: ignore[call-arg]
 
 
+@pytest.mark.parametrize("field", ["storage_root", "skills_dir"])
+@pytest.mark.parametrize("uri", ["gcs://b/", "s3a://b/", "abfs://b/"])
+def test_unsupported_uri_schemes_are_rejected(field: str, uri: str) -> None:
+    scheme = uri.split("://")[0]
+    with pytest.raises(ValidationError, match=rf"{field}: unsupported URI scheme '{scheme}'.*s3://, az:// or gs://"):
+        _RelaxedSettings(**{field: uri})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["storage_root", "skills_dir"])
+@pytest.mark.parametrize("value", ["s3://b/x", "az://c/x", "gs://b/x"])
+def test_supported_uris_are_kept(field: str, value: str) -> None:
+    assert getattr(_RelaxedSettings(**{field: value}), field) == value  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["storage_root", "skills_dir"])
+def test_plain_paths_are_accepted(field: str, tmp_path: Path) -> None:
+    assert getattr(_RelaxedSettings(**{field: str(tmp_path / "x")}), field) == tmp_path / "x"  # type: ignore[arg-type]
+
+
 # ── Skills default: <storage root>/skills ────────────────────────────────────
 
 

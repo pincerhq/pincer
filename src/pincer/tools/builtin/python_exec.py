@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import tempfile
+import weakref
 from typing import TYPE_CHECKING
 
 from pincer.tools.sandbox import scrubbed_env
@@ -28,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_LENGTH = 8000
 MAX_TIMEOUT = 120
+
+# Held across sync → run → publish on a cloud root: a run's sync prunes cached files
+# that have no object yet, which would delete what a concurrent run just wrote.
+# One per event loop (an asyncio.Lock is bound to the loop it first waits on).
+_cloud_run_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _cloud_run_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _cloud_run_locks.get(loop)
+    if lock is None:
+        lock = _cloud_run_locks[loop] = asyncio.Lock()
+    return lock
+
 
 # Wrapper injected before user code to capture matplotlib figures
 _MATPLOTLIB_WRAPPER = """
@@ -86,6 +101,10 @@ def _prepare_output_dir() -> tuple[Path, dict[Path, float]]:
     """
     ws = _workspace()
     try:
+        ws.retry_pending("exec_output")
+    except Exception:
+        logger.warning("Could not retry the pending uploads of exec_output/", exc_info=True)
+    try:
         ws.sync("exec_output")
     except Exception:
         logger.warning("Could not sync exec_output/ from the workspace; using the cached copy", exc_info=True)
@@ -108,21 +127,33 @@ def _snapshot(output_dir: Path) -> dict[Path, float]:
     return files
 
 
-def _publish_changes(output_dir: Path, before: dict[Path, float]) -> list[Path]:
-    """Upload the files the run created or changed under `output_dir`; return the new ones.
+def _publish_changes(output_dir: Path, before: dict[Path, float]) -> tuple[list[Path], list[Path]]:
+    """Upload the files the run created or changed under `output_dir` and delete the
+    objects of the files it removed. Returns (new files uploaded, files that failed to upload).
 
-    On a local storage root publishing is a no-op. A file that fails to upload
-    is logged and still reported: it exists locally.
+    On a local storage root this is a no-op. A file that fails to upload is kept
+    locally as pending (see `Workspace.mark_pending`) and retried on the next run.
     """
     after = _snapshot(output_dir)
     changed = [path for path, mtime in after.items() if before.get(path) != mtime]
     ws = _workspace()
+    if not ws.is_cloud:
+        return sorted(path for path in changed if path not in before), []
+    failed: list[Path] = []
     for path in changed:
         try:
             ws.publish(path)
         except Exception:
             logger.warning("Could not upload %s to the workspace", path, exc_info=True)
-    return sorted(path for path in changed if path not in before)
+            ws.mark_pending(path)
+            failed.append(path)
+    for path in sorted(set(before) - set(after)):
+        try:
+            ws.remove(path)
+        except Exception:
+            logger.warning("Could not delete %s from the workspace", path, exc_info=True)
+    new_saved = sorted(path for path in changed if path not in before and path not in failed)
+    return new_saved, sorted(failed)
 
 
 async def python_exec(code: str = "", timeout: int = 30) -> str:
@@ -137,16 +168,14 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
 
     timeout = min(max(timeout, 1), MAX_TIMEOUT)
 
-    output_dir, existing_files = await asyncio.to_thread(_prepare_output_dir)
-
-    try:
-        outcome = await _run(code, timeout, output_dir)
-    finally:
-        # Upload what the run created or changed, even when it timed out or failed:
-        # files it wrote are in the workspace's local copy either way.
-        new_files = await asyncio.to_thread(_publish_changes, output_dir, existing_files)
+    if _workspace().is_cloud:
+        async with _cloud_run_lock():
+            outcome, new_files, failed = await _run_in_workspace(code, timeout)
+    else:
+        outcome, new_files, failed = await _run_in_workspace(code, timeout)
+    not_uploaded = [f"[File NOT uploaded: {path} (kept locally, retried on the next run)]" for path in failed]
     if isinstance(outcome, str):
-        return outcome
+        return "\n".join([outcome, *not_uploaded])
     stdout, stderr, returncode = outcome
 
     output_parts: list[str] = []
@@ -156,6 +185,7 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
         output_parts.append(f"[stderr]\n{stderr.strip()}")
     for nf in new_files:
         output_parts.append(f"[File saved: {nf}]")
+    output_parts += not_uploaded
 
     if returncode != 0 and not stderr.strip():
         output_parts.append(f"[Process exited with code {returncode}]")
@@ -166,6 +196,20 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
         result = result[:MAX_OUTPUT_LENGTH] + "\n...[output truncated]"
 
     return result
+
+
+async def _run_in_workspace(
+    code: str, timeout: int
+) -> tuple[tuple[str, str, int | None] | str, list[Path], list[Path]]:
+    """Sync exec_output/, run `code` there, publish what changed: (outcome, new files, failed uploads)."""
+    output_dir, existing_files = await asyncio.to_thread(_prepare_output_dir)
+    try:
+        outcome = await _run(code, timeout, output_dir)
+    finally:
+        # Upload what the run created or changed, even when it timed out or failed:
+        # files it wrote are in the workspace's local copy either way.
+        new_files, failed = await asyncio.to_thread(_publish_changes, output_dir, existing_files)
+    return outcome, new_files, failed
 
 
 async def _run(code: str, timeout: int, output_dir: Path) -> tuple[str, str, int | None] | str:

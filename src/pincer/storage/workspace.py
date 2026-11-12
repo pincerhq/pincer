@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -41,6 +42,10 @@ if TYPE_CHECKING:
     from pincer.storage.root import StoragePath
 
 logger = logging.getLogger(__name__)
+
+_PARALLEL_REQUESTS = 16
+_MIGRATION_STATE = "storage-migration.json"
+_workspace: tuple[Any, Workspace] | None = None
 
 
 def safe_upload_path(directory: Path, filename: str) -> Path:
@@ -72,6 +77,10 @@ class Workspace:
     def __init__(self, remote: StoragePath, local: Path) -> None:
         self.remote = remote
         self.local = local
+        # Relative keys of files written into `local` whose upload failed: `sync` and
+        # `fetch` leave them alone until `publish` (or `retry_pending`) gets them up.
+        self.pending: set[str] = set()
+        self._pending_lock = threading.Lock()
 
     @property
     def is_cloud(self) -> bool:
@@ -188,7 +197,7 @@ class Workspace:
             return target
         if known_file or remote.is_file():
             return clients.cached_copy(remote)
-        if target.is_file():
+        if target.is_file() and not self.is_pending(target):
             logger.debug("Dropping the cached copy of %s: the object is gone", remote)
             target.unlink(missing_ok=True)
         return target
@@ -214,14 +223,18 @@ class Workspace:
         if isinstance(self.remote, Path):
             return
         remote_dir, local_dir = self.remote / subdir, self.local / subdir
+        prefix = f"{subdir.strip('/')}/" if subdir.strip("/") else ""
+        with self._pending_lock:
+            pending = {rel.removeprefix(prefix) for rel in self.pending if rel.startswith(prefix)}
         base_depth = len(remote_dir.parts)
         rels = [
             "/".join((*dirpath.parts[base_depth:], name))
             for dirpath, _dirnames, filenames in remote_dir.walk()
             for name in filenames
         ]
-        _parallel(lambda rel: clients.cached_copy(remote_dir / rel), rels)
-        keep = set(rels)
+        # A pending file is newer than its object (or has none): never overwrite or prune it.
+        _parallel(lambda rel: clients.cached_copy(remote_dir / rel), [rel for rel in rels if rel not in pending])
+        keep = set(rels) | pending
         if local_dir.is_dir():
             for dirpath, _dirnames, filenames in local_dir.walk():
                 for name in filenames:
@@ -247,6 +260,51 @@ class Workspace:
         # take it for a local edit (cloudpathlib refuses to overwrite a newer copy).
         mtime = remote.stat().st_mtime
         os.utime(source, times=(mtime, mtime))
+        with self._pending_lock:
+            self.pending.discard(self.relative(source))
+
+    def mark_pending(self, local_path: str | Path) -> None:
+        """Record that the file at `local_path` failed to upload: it is kept locally
+        (not pruned or overwritten by `sync`/`fetch`) until `retry_pending` gets it up."""
+        rel = self.relative(local_path)
+        with self._pending_lock:
+            self.pending.add(rel)
+
+    def is_pending(self, local_path: str | Path) -> bool:
+        rel = self.relative(local_path)
+        with self._pending_lock:
+            return rel in self.pending
+
+    def retry_pending(self, subdir: str) -> builtins.list[Path]:
+        """Upload again the pending files under `subdir`. Ones gone locally are dropped
+        from `pending`; returns the local paths that still fail."""
+        prefix = f"{subdir.strip('/')}/" if subdir.strip("/") else ""
+        with self._pending_lock:
+            rels = sorted(rel for rel in self.pending if rel.startswith(prefix))
+        failed: builtins.list[Path] = []
+        for rel in rels:
+            path = self.local / rel
+            if not path.is_file():
+                with self._pending_lock:
+                    self.pending.discard(rel)
+                continue
+            try:
+                self.publish(path)
+            except Exception:
+                logger.warning("Could not upload %s to the workspace (pending)", path, exc_info=True)
+                failed.append(path)
+        return failed
+
+    def remove(self, local_path: str | Path) -> None:
+        """Delete the workspace object at `local_path` (a file a tool removed from
+        `local`). A no-op on a local root, where the file is already gone."""
+        target = self.confine(local_path)
+        remote = self.to_remote(target)
+        with self._pending_lock:
+            self.pending.discard(self.relative(target))
+        if isinstance(remote, Path):
+            return
+        remote.unlink(missing_ok=True)
 
     def list(self, local_dir: str | Path = "") -> list[Entry]:
         """The children of a workspace folder, listed from the bucket for a cloud root
@@ -300,9 +358,6 @@ class Workspace:
                 yield rel, self.local / rel
 
 
-_PARALLEL_REQUESTS = 16
-
-
 def _parallel[T, R](fn: Callable[[T], R], items: list[T]) -> list[R]:
     """`fn` over `items` in order, with up to 16 at a time (bucket round trips)."""
     if len(items) <= 1:
@@ -315,9 +370,6 @@ def _ensure_marker(folder: Any) -> None:
     marker = folder / FOLDER_MARKER
     if not marker.exists():
         marker.write_bytes(b"")
-
-
-_workspace: tuple[Any, Workspace] | None = None
 
 
 def get_workspace(settings: Settings) -> Workspace:
@@ -349,17 +401,18 @@ def prepare_storage(settings: Settings, *, migrate: bool = True) -> Workspace:
     copy the same folders at once. Raises StorageUnavailable when the root
     can't be reached or is refused.
     """
-    ws = get_workspace(settings)
     try:
+        ws = get_workspace(settings)
         ws.ensure()
         if settings.skills_dir_defaulted:
             ws.ensure_sibling(layout.SKILLS)
+        if migrate:
+            migrate_legacy(settings, ws)
     except StorageUnavailable:
         raise
     except Exception as e:
-        raise StorageUnavailable(f"Cannot prepare the storage root {ws.remote.parent}: {type(e).__name__}: {e}") from e
-    if migrate:
-        migrate_legacy(settings, ws)
+        root = layout.storage_root_for(settings)
+        raise StorageUnavailable(f"Cannot prepare the storage root {root}: {type(e).__name__}: {e}") from e
     return ws
 
 
@@ -371,9 +424,6 @@ def legacy_home_dir() -> Path:
 def legacy_skills_dir() -> Path:
     """Where user skills lived before they defaulted to `<storage root>/skills`."""
     return legacy_home_dir() / "skills"
-
-
-_MIGRATION_STATE = "storage-migration.json"
 
 
 def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
@@ -416,7 +466,7 @@ def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
             continue
         seen.add(key)
         try:
-            n_copied, n_skipped = _copy_tree(source, target)
+            n_copied, n_skipped, not_copied = _copy_tree(source, target)
         except Exception:
             logger.warning("Could not migrate %s from %s; will retry at the next start", label, source, exc_info=True)
             continue
@@ -428,14 +478,24 @@ def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
             moved = f"left in place ({type(e).__name__}: {e}); recorded in {state_path}, so it is not copied again"
         copied[label] = copied.get(label, 0) + n_copied
         logger.info(
-            "Migrated %s: %d file(s) copied from %s to %s, %d already there; the old folder is now %s",
+            "Migrated %s: %d file(s) copied from %s to %s, %d already there, %d not copied "
+            "(symlinks or special files); the old folder is now %s",
             label,
             n_copied,
             source,
             target,
             n_skipped,
+            len(not_copied),
             moved,
         )
+        if not_copied:
+            logger.warning(
+                "Migration of %s did not copy %d symlink(s) or special file(s); they stay in %s: %s",
+                label,
+                len(not_copied),
+                moved,
+                _name_some(not_copied),
+            )
     if copied.get("skills"):
         from pincer.services.skills import announce_index_change
 
@@ -475,27 +535,51 @@ def _same_place(source: Path, target: StoragePath) -> bool:
     return source == target or target.is_relative_to(source) or source.is_relative_to(target)
 
 
-def _copy_tree(source: Path, target: StoragePath) -> tuple[int, int]:
-    """Copy every file under `source` to the same relative key under `target`,
-    skipping keys that exist. Returns (copied, skipped)."""
+_NAMED_MAX = 20
+
+
+def _name_some(rels: list[str]) -> str:
+    """`rels` joined for a log line, capped at `_NAMED_MAX` names."""
+    shown = ", ".join(rels[:_NAMED_MAX])
+    rest = len(rels) - _NAMED_MAX
+    return f"{shown} and {rest} more" if rest > 0 else shown
+
+
+def _copy_tree(source: Path, target: StoragePath) -> tuple[int, int, list[str]]:
+    """Copy every regular file under `source` to the same relative key under
+    `target`, skipping keys that exist. Symlinks (to files or folders) and special
+    files are not copied. Returns (copied, skipped, relative paths not copied).
+
+    A local copy goes through a `.part` file renamed into place, so an interrupted
+    copy never leaves a truncated file that the retry would take as done.
+    """
     copied = skipped = 0
-    for dirpath, _dirnames, filenames in source.walk():
+    not_copied: list[str] = []
+    for dirpath, dirnames, filenames in source.walk():
+        # walk() does not descend into a symlinked folder; it still lists it here.
+        not_copied += [(dirpath / d).relative_to(source).as_posix() for d in dirnames if (dirpath / d).is_symlink()]
         for name in filenames:
             path = dirpath / name
-            if path.is_symlink() or not path.is_file():
-                continue
             rel = path.relative_to(source).as_posix()
+            if path.is_symlink() or not path.is_file():
+                not_copied.append(rel)
+                continue
             dest = target / rel
             if dest.exists():
                 skipped += 1
                 continue
             if isinstance(dest, Path):
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest)
+                part = dest.with_name(f".{dest.name}.part")
+                try:
+                    shutil.copy2(path, part)
+                    os.replace(part, dest)
+                finally:
+                    part.unlink(missing_ok=True)
             else:
                 dest.upload_from(path, force_overwrite_to_cloud=True)
             copied += 1
-    return copied, skipped
+    return copied, skipped, sorted(not_copied)
 
 
 def _mark_migrated(source: Path) -> Path:

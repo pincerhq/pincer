@@ -560,12 +560,114 @@ async def test_python_exec_runs_on_the_cache_when_sync_fails(
     assert "42" in await py.python_exec("print(42)")
 
 
-async def test_python_exec_still_reports_a_file_that_failed_to_upload(
+async def test_python_exec_reports_a_file_that_failed_to_upload_and_retries_it(
     env: Env, py: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(env.ws, "publish", lambda _p: (_ for _ in ()).throw(OSError("offline")))
+    if not env.ws.is_cloud:
+        pytest.skip("nothing is uploaded on a local root")
+    local = env.ws.local / "exec_output" / "r.txt"
+    with monkeypatch.context() as m:
+        m.setattr(env.ws, "publish", lambda _p: (_ for _ in ()).throw(OSError("offline")))
+        result = await py.python_exec("open('r.txt', 'w').write('1')")
+        assert f"[File NOT uploaded: {local} (kept locally, retried on the next run)]" in result
+        assert "[File saved:" not in result
+        # Still offline on the next run: the file is not pruned by its sync.
+        result = await py.python_exec("print(open('r.txt').read())")
+        assert "1" in result
+    assert local.is_file()
+    assert not env.external("workspace/exec_output/r.txt").exists()
+    # Back online: the next run uploads it.
+    await py.python_exec("print('hi')")
+    assert env.external("workspace/exec_output/r.txt").read_text() == "1"
+    assert not env.ws.pending
+
+
+async def test_python_exec_on_a_local_root_does_not_track_uploads(env: Env, py: Any) -> None:
+    if env.ws.is_cloud:
+        pytest.skip("local root only")
     result = await py.python_exec("open('r.txt', 'w').write('1')")
     assert "[File saved:" in result
+    assert not env.ws.pending
+
+
+async def test_concurrent_python_exec_runs_do_not_prune_each_other(env: Env, py: Any) -> None:
+    import asyncio
+
+    slow = "import time\nopen('a.csv', 'w').write('x,y')\ntime.sleep(1.5)\nprint(open('a.csv').read())"
+    fast = "print('b')"
+
+    async def later() -> str:
+        await asyncio.sleep(0.5)
+        return await py.python_exec(fast)
+
+    a, b = await asyncio.gather(py.python_exec(slow), later())
+    assert "x,y" in a
+    assert "Traceback" not in a
+    assert "b" in b
+    assert env.external("workspace/exec_output/a.csv").read_text() == "x,y"
+
+
+async def test_a_file_deleted_by_a_script_is_removed_from_the_workspace(env: Env, py: Any) -> None:
+    await py.python_exec("open('gone.txt', 'w').write('1')")
+    assert env.external("workspace/exec_output/gone.txt").exists()
+    await py.python_exec("import os\nos.remove('gone.txt')")
+    assert not env.external("workspace/exec_output/gone.txt").exists()
+    result = await py.python_exec("import os\nprint(os.path.exists('gone.txt'))")
+    assert "False" in result
+
+
+async def test_a_failed_delete_is_logged(
+    env: Env, py: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    await py.python_exec("open('gone.txt', 'w').write('1')")
+    monkeypatch.setattr(env.ws, "remove", lambda _p: (_ for _ in ()).throw(OSError("offline")))
+    await py.python_exec("import os\nos.remove('gone.txt')")
+    if env.ws.is_cloud:
+        assert "Could not delete" in caplog.text
+
+
+def test_sync_and_fetch_keep_pending_files(env: Env) -> None:
+    if not env.ws.is_cloud:
+        pytest.skip("sync and fetch only touch the cache of a cloud root")
+    path = env.ws.local / "exec_output" / "p.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("unpublished")
+    env.ws.mark_pending(path)
+    assert env.ws.is_pending(path)
+    env.ws.sync("exec_output")
+    assert path.read_text() == "unpublished"
+    assert env.ws.fetch(path) == path
+    assert path.read_text() == "unpublished"
+    # An object changed behind the cache does not overwrite the pending copy either.
+    _put(env.external("workspace/exec_output/p.txt"), "remote")
+    env.ws.sync("exec_output")
+    assert path.read_text() == "unpublished"
+    env.ws.publish(path)
+    assert not env.ws.is_pending(path)
+    assert env.external("workspace/exec_output/p.txt").read_text() == "unpublished"
+
+
+def test_retry_pending_drops_files_gone_locally_and_reports_failures(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    gone = env.ws.local / "exec_output" / "gone.txt"
+    stuck = env.ws.local / "exec_output" / "stuck.txt"
+    stuck.parent.mkdir(parents=True, exist_ok=True)
+    stuck.write_text("s")
+    env.ws.mark_pending(gone)
+    env.ws.mark_pending(stuck)
+    monkeypatch.setattr(env.ws, "publish", lambda _p: (_ for _ in ()).throw(OSError("offline")))
+    assert env.ws.retry_pending("exec_output") == [stuck]
+    assert env.ws.pending == {"exec_output/stuck.txt"}
+
+
+def test_remove_deletes_the_object(env: Env) -> None:
+    path = env.ws.save("exec_output", "x.txt", b"x")
+    env.ws.mark_pending(path)
+    if not env.ws.is_cloud:
+        path.unlink()
+    env.ws.remove(path)
+    assert not env.external("workspace/exec_output/x.txt").exists()
+    assert not env.ws.pending
+    env.ws.remove(path)  # already gone: no error
 
 
 async def test_python_exec_reports_a_subprocess_that_cannot_start(py: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -774,3 +876,102 @@ async def test_screenshot_is_saved_to_the_workspace(env: Env, monkeypatch: pytes
     [(rel, _local)] = list(env.ws.files())
     assert rel.startswith("screenshots/screenshot_") and rel.endswith(".png")
     assert env.external(f"workspace/{rel}").read_bytes() == b"PNGDATA"
+
+
+# ── Second review ────────────────────────────────────────────────────────────
+
+
+def test_prepare_storage_on_an_unreachable_root(tmp_path: Path) -> None:
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root="/nonexistent/root")  # type: ignore[call-arg]
+    with pytest.raises(StorageUnavailable, match="/nonexistent/root"):
+        prepare_storage(settings)
+
+
+def test_prepare_storage_on_a_root_that_is_a_file(tmp_path: Path) -> None:
+    (tmp_path / "root").write_text("not a folder")
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root=str(tmp_path / "root"))  # type: ignore[call-arg]
+    with pytest.raises(StorageUnavailable, match="storage root"):
+        prepare_storage(settings)
+
+
+def test_copy_tree_leaves_no_truncated_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.storage.workspace import _copy_tree
+
+    source, target = tmp_path / "src", tmp_path / "dst"
+    source.mkdir()
+    (source / "big.bin").write_bytes(b"x" * 1000)
+
+    def broken_copy(src: Path, dst: Path) -> None:
+        Path(dst).write_bytes(b"x" * 10)
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pincer.storage.workspace.shutil.copy2", broken_copy)
+    with pytest.raises(OSError, match="disk full"):
+        _copy_tree(source, target)
+    assert not (target / "big.bin").exists()
+    assert list(target.iterdir()) == []
+    monkeypatch.undo()
+    assert _copy_tree(source, target) == (1, 0, [])
+    assert (target / "big.bin").read_bytes() == b"x" * 1000
+
+
+def test_migration_names_the_symlinks_it_leaves_behind(
+    env: Env, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    data_dir = Path(env.settings.data_dir)
+    downloads = data_dir / "downloads"
+    downloads.mkdir(parents=True)
+    (downloads / "r.pdf").write_bytes(b"R")
+    (tmp_path / "outside.txt").write_text("secret")
+    (tmp_path / "my-skill").mkdir()
+    (tmp_path / "my-skill" / "SKILL.md").write_text("---\nname: s\n---\n")
+    (downloads / "link.txt").symlink_to(tmp_path / "outside.txt")
+    (downloads / "skill-link").symlink_to(tmp_path / "my-skill", target_is_directory=True)
+    with caplog.at_level("INFO", logger="pincer.storage.workspace"):
+        assert migrate_legacy(env.settings, env.ws) == {"downloads": 1}
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "link.txt" in warnings[0]
+    assert "skill-link" in warnings[0]
+    assert "downloads.migrated" in warnings[0]
+    assert "2 not copied" in caplog.text
+    assert not env.external("workspace/downloads/skill-link/SKILL.md").exists()
+
+
+def test_name_some_caps_the_list() -> None:
+    from pincer.storage.workspace import _name_some
+
+    names = [f"f{i}" for i in range(25)]
+    text = _name_some(names)
+    assert text.endswith("f19 and 5 more")
+    assert "f20" not in text
+    assert _name_some(["a", "b"]) == "a, b"
+
+
+@pytest.mark.parametrize("name", ["..", ".", "", "a\0b", "\x01\x02"])
+def test_save_download_cleans_unsafe_names(env: Env, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    from pincer.integrations.google import workspace_files
+
+    monkeypatch.setattr(workspace_files, "_workspace", lambda: env.ws)
+    path = Path(workspace_files.save_download(name, b"data"))
+    assert path.parent == env.ws.local / "downloads"
+    assert "\0" not in path.name
+    assert path.name not in ("", ".", "..")
+    if name == "a\0b":
+        assert path.name == "ab"
+    else:
+        assert path.name.startswith("attachment_")
+    assert env.external(f"workspace/downloads/{path.name}").read_bytes() == b"data"
+
+
+def test_concurrent_downloads_of_one_name_get_distinct_paths(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pincer.integrations.google import workspace_files
+
+    monkeypatch.setattr(workspace_files, "_workspace", lambda: env.ws)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(lambda i: workspace_files.save_download("r.pdf", str(i).encode()), range(8)))
+    assert len(set(paths)) == 8
+    contents = {env.external(f"workspace/downloads/{Path(p).name}").read_bytes() for p in paths}
+    assert contents == {str(i).encode() for i in range(8)}

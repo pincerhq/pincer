@@ -11,6 +11,9 @@ Everything here blocks (it may reach the bucket); call it via `asyncio.to_thread
 from __future__ import annotations
 
 import os
+import threading
+import unicodedata
+import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,6 +22,9 @@ if TYPE_CHECKING:
 DOWNLOADS = "downloads"
 # Searched in this order for a bare filename, before a walk of the whole workspace.
 _SEARCH_DIRS = (DOWNLOADS, "", "exec_output", "uploads", "screenshots")
+# Picking a free name and saving under it must not interleave between threads,
+# or two downloads of the same name both pick it and one overwrites the other.
+_save_lock = threading.Lock()
 
 
 def _workspace() -> Workspace:
@@ -28,15 +34,26 @@ def _workspace() -> Workspace:
     return get_workspace(get_settings())
 
 
+def _clean_filename(filename: str) -> str:
+    """The last component of `filename` without control characters (NUL included);
+    `attachment_<id>` when nothing usable is left (empty, `.`, `..`)."""
+    base = os.path.basename(filename)
+    base = "".join(c for c in base if not unicodedata.category(c).startswith("C")).strip()
+    if base in ("", ".", ".."):
+        return f"attachment_{uuid.uuid4().hex[:8]}"
+    return base
+
+
 def save_download(filename: str, data: bytes) -> str:
     """Save `data` as `downloads/<filename>` (`<name>_<n><ext>` when taken) and return its local path."""
     ws = _workspace()
-    name, ext = os.path.splitext(os.path.basename(filename) or "download")
-    candidate, counter = f"{name}{ext}", 1
-    while ws.is_file(ws.local / DOWNLOADS / candidate):
-        candidate = f"{name}_{counter}{ext}"
-        counter += 1
-    return str(ws.save(DOWNLOADS, candidate, data))
+    name, ext = os.path.splitext(_clean_filename(filename))
+    with _save_lock:
+        candidate, counter = f"{name}{ext}", 1
+        while ws.is_file(ws.local / DOWNLOADS / candidate):
+            candidate = f"{name}_{counter}{ext}"
+            counter += 1
+        return str(ws.save(DOWNLOADS, candidate, data))
 
 
 def resolve_upload_path(file_path: str) -> str | None:

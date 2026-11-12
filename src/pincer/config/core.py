@@ -141,13 +141,20 @@ class CoreSettings(BaseModel):
     @field_validator("skills_dir", "storage_root", mode="before")
     @classmethod
     def _keep_remote_storage_uri(cls, value: Any, info: ValidationInfo) -> Any:
-        """Keep cloud URIs as strings: Path coercion would collapse `s3://` into `s3:/`."""
-        from pincer.storage.clients import is_remote_uri
+        """Keep cloud URIs as strings: Path coercion would collapse `s3://` into `s3:/`.
+        A URI with any other scheme is refused rather than taken for a relative path."""
+        from pincer.storage.clients import ANY_SCHEME_RE, is_remote_uri
 
         if info.field_name == "storage_root" and value in (None, ""):
             return None
         if isinstance(value, str) and is_remote_uri(value):
             return value
+        if isinstance(value, str) and (match := ANY_SCHEME_RE.match(value)):
+            scheme = match.group(0).removesuffix("://")
+            raise ValueError(
+                f"{info.field_name}: unsupported URI scheme {scheme!r} in {value!r}; "
+                "use a local path or an s3://, az:// or gs:// URI"
+            )
         return Path(value).expanduser()
 
     @field_validator("storage_upload_file_max_size", mode="before")
