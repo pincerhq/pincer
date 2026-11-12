@@ -50,25 +50,22 @@ jobs:
               - .github/workflows/ci.yml
               - tests/conftest.py
               - tests/support.py
+            # Everything tests/ reads, not only what it imports: it scans all of
+            # src/ (tool approval allowlist, calendar export), loads scripts/
+            # (smoke_llm, calendar_smoke) and reads .env.example and pincer.toml.
             pincer:
-              - src/pincer/**
+              - src/**
               - tests/**
+              - scripts/**
               - skills/**
               - main.py
               - pincer.toml
-            # What tests/db, the migration and the schema drift tests import.
+              - .env.example
+            # All of src/pincer: the services, repositories and models these
+            # tests use import from across the package, so no shorter list holds.
             postgres:
-              - src/pincer/db/**
-              - src/pincer/models/**
-              - src/pincer/repositories/**
-              - src/pincer/services/**
-              - src/pincer/config/**
-              - src/pincer/core/session.py
-              - src/pincer/security/audit*
-              - src/pincer/voice/telemetry/**
-              - src/pincer/__init__.py
-              - src/pincer/voice/__init__.py
-              - src/pincer/llm/base.py
+              - src/pincer/**
+              - pincer.toml
               - tests/db/**
               - tests/test_db_migrations.py
               - tests/test_schema_drift.py
