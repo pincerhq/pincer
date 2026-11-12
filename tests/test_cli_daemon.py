@@ -28,6 +28,7 @@ from daemon_support import (
     alive,
     append_log,
     child_env,
+    exited,
     free_port,
     lease_held_elsewhere,
     numbered,
@@ -876,7 +877,7 @@ def test_ctrl_c_while_attached_stops_the_daemon_and_shows_its_shutdown(
     assert returncode == 0, err
     assert err == b""
     # It returned only once the daemon had exited, after showing the whole graceful shutdown.
-    assert not alive(pid)
+    assert exited(pid)
     lines = attached.lines
     stopping = lines.index(f"Stopping Pincer (pid {pid})…")
     shutting_down = attached.wait_for(f"fake child {pid} shutting down")
@@ -948,7 +949,7 @@ def test_ctrl_c_the_moment_attach_starts_still_stops_the_daemon(
     assert returncode == 0, err
     assert err == b""
     assert attached.lines[-1] == f"Pincer stopped (pid {pid})"
-    assert not alive(pid)
+    assert exited(pid)
 
 
 def test_an_attached_stop_that_times_out_says_so_at_once_and_keeps_following(

@@ -27,6 +27,7 @@ from daemon_support import (
     alive,
     append_log,
     child_env,
+    exited,
     lease_held_elsewhere,
     numbered,
     stop_within,
@@ -141,7 +142,7 @@ def test_stop_returns_only_after_the_daemon_has_exited(data_dir: Path) -> None:
 
     stop_within(data_dir)
 
-    assert not alive(pid)
+    assert exited(pid)
     # It went through the child's graceful path, not a kill.
     assert "Shutdown complete" in daemon.log_path(data_dir).read_text()
 
@@ -249,7 +250,7 @@ def test_daemons_on_different_data_dirs_do_not_see_each_other(data_dir: Path, tm
         assert second.state.pid != first
 
         stop_within(data_dir)
-        assert not alive(first)
+        assert exited(first)
         assert alive(second.state.pid)
     finally:
         daemon.stop(other_dir)
@@ -414,7 +415,7 @@ def test_stop_waits_out_a_slow_shutdown_within_its_timeout(data_dir: Path) -> No
 
     assert result.outcome is StopOutcome.STOPPED
     assert time.monotonic() - began >= daemon_fake_child.SLOW_SHUTDOWN_SECONDS - 0.2
-    assert not alive(pid)
+    assert exited(pid)
     assert "Shutdown complete" in daemon.log_path(data_dir).read_text()
 
 
@@ -439,7 +440,7 @@ def test_force_kills_at_once_and_the_next_start_works(data_dir: Path) -> None:
 
     assert result.outcome is StopOutcome.KILLED
     assert result.pid == pid
-    assert not alive(pid)
+    assert exited(pid)
     assert daemon.read_state(data_dir) is None
     assert _start(data_dir).outcome is StartOutcome.READY
     stop_within(data_dir)
@@ -481,12 +482,12 @@ def test_force_kills_the_whole_process_group(data_dir: Path) -> None:
     result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
 
     assert result.outcome is StopOutcome.KILLED
-    assert not alive(pid)
+    assert exited(pid)
     # Reparented once the daemon died; give init a moment to reap it.
     deadline = time.monotonic() + 3.0
     while alive(grandchild) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not alive(grandchild)
+    assert exited(grandchild)
 
 
 def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: Path) -> None:
@@ -507,7 +508,7 @@ def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: P
         deadline = time.monotonic() + 3.0  # the leader, not pytest, reaps it
         while alive(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not alive(pid)
+        assert exited(pid)
         assert leader.poll() is None
     finally:
         with contextlib.suppress(ProcessLookupError):
@@ -806,7 +807,7 @@ def test_stop_never_signals_a_daemon_without_a_record_and_waits_for_it(data_dir:
     gone = within(15.0, lambda: daemon.stop(data_dir, timeout=10.0, force=force))
 
     assert gone == daemon.StopResult(StopOutcome.STOPPED, None, daemon.Identity.UNKNOWN)
-    assert not alive(pid)
+    assert exited(pid)
     assert "left the lease" in daemon.log_path(data_dir).read_text()
 
 
@@ -839,7 +840,7 @@ def test_stop_stops_a_daemon_whose_record_it_cant_read_when_its_pid_and_token_st
 
     outcome = StopOutcome.KILLED if force else StopOutcome.STOPPED
     assert result == daemon.StopResult(outcome, state.pid, daemon.Identity.VERIFIED)
-    assert not alive(state.pid)
+    assert exited(state.pid)
 
 
 @pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
@@ -875,7 +876,7 @@ def test_a_daemon_that_cant_read_its_own_start_token_is_stopped_by_its_record_pi
 
     outcome = StopOutcome.KILLED if force else StopOutcome.STOPPED
     assert result == daemon.StopResult(outcome, state.pid, daemon.Identity.UNCHECKED)
-    assert not alive(state.pid)
+    assert exited(state.pid)
     assert recorded == daemon.NO_START_TOKEN
 
 
@@ -1218,7 +1219,7 @@ def test_stop_stops_the_daemon_where_ps_is_missing(
 
     assert result.outcome is (StopOutcome.KILLED if force else StopOutcome.STOPPED)
     assert result.pid == pid
-    assert not alive(pid)
+    assert exited(pid)
 
 
 # From a process of its own: whether a daemon of the data dir is running, and whether a second
@@ -1354,7 +1355,7 @@ def test_without_start_tokens_the_lease_works_and_stop_signals_the_record_pid(
     result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0))
 
     assert result == daemon.StopResult(StopOutcome.STOPPED, state.pid, daemon.Identity.UNCHECKED)
-    assert not alive(state.pid)
+    assert exited(state.pid)
     other = tmp_path / "foreground"
     with daemon.DaemonLease(other, port=8080) as lease:
         assert daemon.daemon_running(other)

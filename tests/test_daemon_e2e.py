@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from daemon_support import alive, free_port, scratch_env, signal_channel_env, wait_for_output, write_test_pricing
+from daemon_support import exited, free_port, scratch_env, signal_channel_env, wait_for_output, write_test_pricing
 
 from pincer import __version__, daemon
 
@@ -126,7 +126,7 @@ def test_run_detach_status_logs_and_stop_against_real_pincer(scratch: _Scratch) 
     stopped = scratch.pincer("stop")
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
     assert stopped.stdout.splitlines() == [f"Stopping Pincer (pid {pid})…", f"Pincer stopped (pid {pid})"]
-    assert not alive(pid)
+    assert exited(pid)
     with socket.create_server(("127.0.0.1", scratch.port)):  # the port is free again
         pass
     log = scratch.log()
