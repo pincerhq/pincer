@@ -238,6 +238,12 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
 
 # ── Tool: email_send ─────────────────────────────
 
+# For messages sent as bytes. aiosmtplib only negotiates 8BITMIME (and downgrades
+# to 7bit when the server lacks it) for a message object; raw bytes go straight to
+# sendmail. So serialise 7-bit-safe: 8-bit text parts, e.g. in an embedded .eml,
+# are re-encoded, and the body is quoted-printable (_build_smtp_message).
+_SMTP_7BIT = email.policy.SMTP.clone(cte_type="7bit")
+
 
 def _build_smtp_message(from_: str, to: str, subject: str, body: str, cc: str, files: list[Attachment]) -> EmailMessage:
     message = EmailMessage()
@@ -246,7 +252,12 @@ def _build_smtp_message(from_: str, to: str, subject: str, body: str, cc: str, f
     message["Subject"] = subject
     if cc:
         message["Cc"] = cc
-    message.set_content(body)
+    if files and not body.isascii():
+        # A message with attachments is sent as pre-serialised bytes, which skips
+        # aiosmtplib's 8BITMIME check: keep the body 7-bit (see _SMTP_7BIT).
+        message.set_content(body, cte="quoted-printable")
+    else:
+        message.set_content(body)
     if files:
         message.make_mixed()
         for f in files:
@@ -285,7 +296,7 @@ async def email_send(
             # Base64-encoding and serialising up to 17 MB takes ~0.3 s: do it off the
             # event loop and hand aiosmtplib the bytes, with the envelope spelled out.
             raw = await asyncio.to_thread(
-                lambda: _build_smtp_message(from_, to, subject, body, cc, files).as_bytes(policy=email.policy.SMTP)
+                lambda: _build_smtp_message(from_, to, subject, body, cc, files).as_bytes(policy=_SMTP_7BIT)
             )
             recipients = [addr for _, addr in email.utils.getaddresses([to, cc]) if addr]
             await aiosmtplib.send(raw, sender=email.utils.parseaddr(from_)[1], recipients=recipients, **smtp)

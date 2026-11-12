@@ -488,11 +488,13 @@ async def test_fallback_guard_pattern_matching():
 
 
 @pytest.fixture
-def downloads(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("pincer.tools.attachments._configured_data_dir", lambda: None)
-    d = tmp_path / ".pincer" / "downloads"
-    d.mkdir(parents=True)
+def downloads(workspace_dir, monkeypatch):
+    """The workspace's downloads/ (with report.pdf), which outgoing attachments are read from."""
+    from pincer.storage.workspace import Workspace
+
+    ws = Workspace(workspace_dir, workspace_dir)
+    monkeypatch.setattr("pincer.tools.attachments._workspace", lambda: ws)
+    d = workspace_dir / "downloads"
     (d / "report.pdf").write_bytes(b"%PDF-1.4 report")
     return d
 

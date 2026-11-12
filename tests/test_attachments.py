@@ -2,32 +2,35 @@
 
 from __future__ import annotations
 
-import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from pincer.storage.errors import StorageUnavailable
+from pincer.storage.workspace import Workspace
 from pincer.tools import attachments as att
 from pincer.tools.attachments import (
     AttachmentError,
     describe_attachments,
     load_attachments,
-    resolve_attachment_path,
+    normalize_attachment_args,
+    resolve_attachment,
 )
 from pincer.tools.registry import ToolRegistry
-from pincer.utils.file_search import iter_named_files
-
-_REAL_CONFIGURED_DATA_DIR = att._configured_data_dir
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(att, "_configured_data_dir", lambda: None)
-    (tmp_path / ".pincer" / "downloads").mkdir(parents=True)
-    (tmp_path / ".pincer" / "workspace" / "exec_output").mkdir(parents=True)
-    return tmp_path
+def ws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A local workspace (`<tmp>/storage/workspace`) the attachment tools use; returns its folder."""
+    root = tmp_path / "storage" / "workspace"
+    workspace = Workspace(root, root)
+    workspace.ensure()
+    monkeypatch.setattr(att, "_workspace", lambda: workspace)
+    return root
 
 
 def _write(path: Path, data: bytes = b"hello") -> Path:
@@ -36,166 +39,181 @@ def _write(path: Path, data: bytes = b"hello") -> Path:
     return path
 
 
-# ── resolve_attachment_path ──────────────────────────────────────────────────
+# ── resolve_attachment ───────────────────────────────────────────────────────
 
 
-def test_absolute_path_in_downloads(home: Path) -> None:
-    f = _write(home / ".pincer" / "downloads" / "report.pdf")
-    assert resolve_attachment_path(str(f)) == f.resolve()
+def test_absolute_path_in_workspace(ws: Path) -> None:
+    _write(ws / "downloads" / "report.pdf")
+    assert resolve_attachment(str(ws / "downloads" / "report.pdf")) == "downloads/report.pdf"
 
 
-def test_tilde_path(home: Path) -> None:
-    f = _write(home / ".pincer" / "workspace" / "notes.txt")
-    assert resolve_attachment_path("~/.pincer/workspace/notes.txt") == f.resolve()
+def test_tilde_path(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(ws.parent))
+    _write(ws / "notes.txt")
+    assert resolve_attachment("~/workspace/notes.txt") == "notes.txt"
 
 
-def test_bare_filename_found_in_allowed_dir(home: Path) -> None:
-    f = _write(home / ".pincer" / "downloads" / "report.pdf")
-    assert resolve_attachment_path("report.pdf") == f.resolve()
+def test_bare_filename_found_in_downloads(ws: Path) -> None:
+    _write(ws / "downloads" / "report.pdf")
+    assert resolve_attachment("report.pdf") == "downloads/report.pdf"
 
 
-def test_bare_filename_found_by_walk(home: Path) -> None:
-    f = _write(home / ".pincer" / "workspace" / "exec_output" / "chart.png")
-    assert resolve_attachment_path("chart.png") == f.resolve()
+def test_bare_filename_found_deep(ws: Path) -> None:
+    _write(ws / "exec_output" / "charts" / "chart.png")
+    assert resolve_attachment("chart.png") == "exec_output/charts/chart.png"
 
 
-def test_relative_to_pincer_home(home: Path) -> None:
-    f = _write(home / ".pincer" / "downloads" / "a.csv")
-    assert resolve_attachment_path("downloads/a.csv") == f.resolve()
+def test_relative_path(ws: Path) -> None:
+    _write(ws / "downloads" / "a.csv")
+    assert resolve_attachment("downloads/a.csv") == "downloads/a.csv"
 
 
-def test_rejects_absolute_path_outside_allowed(home: Path) -> None:
-    secret = _write(home / "secret.txt")
-    with pytest.raises(AttachmentError, match="outside the allowed folders"):
-        resolve_attachment_path(str(secret))
+def test_rejects_absolute_path_outside_workspace(ws: Path) -> None:
+    secret = _write(ws.parent.parent / "secret.txt")
+    with pytest.raises(AttachmentError, match="outside the workspace") as exc:
+        resolve_attachment(str(secret))
+    assert exc.value.reason == "outside the workspace"
 
 
-def test_rejects_etc_passwd(home: Path) -> None:
-    with pytest.raises(AttachmentError):
-        resolve_attachment_path("/etc/passwd")
+def test_rejects_etc_passwd(ws: Path) -> None:
+    with pytest.raises(AttachmentError, match="outside the workspace"):
+        resolve_attachment("/etc/passwd")
 
 
-def test_absolute_path_not_swapped_for_same_basename(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "report.pdf")
+def test_legacy_pincer_home_path_is_outside(ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Files under ~/.pincer were migrated into the workspace (#375); the old path is not followed.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write(tmp_path / ".pincer" / "downloads" / "report.pdf")
+    _write(ws / "downloads" / "report.pdf")
+    with pytest.raises(AttachmentError, match="outside the workspace"):
+        resolve_attachment("~/.pincer/downloads/report.pdf")
+
+
+def test_absolute_path_not_swapped_for_same_basename(ws: Path) -> None:
+    _write(ws / "downloads" / "report.pdf")
     with pytest.raises(AttachmentError, match="not found"):
-        resolve_attachment_path(str(home / "elsewhere" / "report.pdf"))
-
-
-def test_rejects_dotdot_traversal(home: Path) -> None:
-    _write(home / "secret.txt")
-    with pytest.raises(AttachmentError, match="outside the allowed folders"):
-        resolve_attachment_path("../../secret.txt")
-
-
-def test_rejects_symlink_escape(home: Path) -> None:
-    secret = _write(home / "secret.txt")
-    link = home / ".pincer" / "downloads" / "innocent.pdf"
-    link.symlink_to(secret)
-    with pytest.raises(AttachmentError, match="outside the allowed folders"):
-        resolve_attachment_path(str(link))
-    with pytest.raises(AttachmentError, match="not found"):
-        resolve_attachment_path("innocent.pdf")
-
-
-def test_symlink_escape_not_found_by_walk(home: Path) -> None:
-    secret = _write(home / "secret.txt")
-    (home / ".pincer" / "workspace" / "sub").mkdir()
-    (home / ".pincer" / "workspace" / "sub" / "leak.txt").symlink_to(secret)
-    with pytest.raises(AttachmentError):
-        resolve_attachment_path("leak.txt")
-
-
-def test_outside_candidate_is_skipped_not_reported(home: Path) -> None:
-    # ~/.pincer/config.toml exists but is outside the allowlist: keep searching.
-    _write(home / ".pincer" / "config.toml", b"secret")
-    f = _write(home / ".pincer" / "workspace" / "exec_output" / "config.toml", b"ok")
-    assert resolve_attachment_path("config.toml") == f.resolve()
-
-
-def test_relative_path_with_folder_wins_over_basename_matches(home: Path) -> None:
-    direct = _write(home / ".pincer" / "downloads" / "report.pdf")
-    _write(home / ".pincer" / "workspace" / "exec_output" / "report.pdf")
-    assert resolve_attachment_path("downloads/report.pdf") == direct.resolve()
-    with pytest.raises(AttachmentError, match="matches 2 files"):
-        resolve_attachment_path("report.pdf")
-
-
-def test_relative_path_with_folder_falls_back_to_basename_search(home: Path) -> None:
-    f = _write(home / ".pincer" / "workspace" / "exec_output" / "chart.png")
-    assert resolve_attachment_path("charts/chart.png") == f.resolve()
-
-
-def test_data_dir_settings_failure_is_logged(home: Path, monkeypatch, caplog) -> None:
-    monkeypatch.setattr(att, "_configured_data_dir", _REAL_CONFIGURED_DATA_DIR)
-    import pincer.config
-
-    def broken():
-        raise ValueError("bad config")
-
-    monkeypatch.setattr(pincer.config, "get_settings_relaxed", broken)
-    monkeypatch.setattr(att, "_data_dir_failure", att.LogOnce(att.logger, logging.WARNING))
-    with caplog.at_level(logging.WARNING, logger=att.logger.name):
-        assert att._configured_data_dir() is None
-    assert "Could not read data_dir" in caplog.text
-
-
-def test_iter_named_files(tmp_path: Path) -> None:
-    _write(tmp_path / "a" / "x.txt")
-    _write(tmp_path / "a" / ".hidden" / "x.txt")
-    _write(tmp_path / "b" / "deep" / "x.txt")
-    found = list(iter_named_files([tmp_path / "a", tmp_path / "missing", tmp_path / "b"], "x.txt"))
-    assert found == [tmp_path / "a" / "x.txt", tmp_path / "b" / "deep" / "x.txt"]
-
-
-def test_outside_candidate_alone_is_not_found(home: Path) -> None:
-    _write(home / ".pincer" / "pincer.db")
-    with pytest.raises(AttachmentError, match="not found"):
-        resolve_attachment_path("pincer.db")
-
-
-def test_ambiguous_bare_name_rejected(home: Path) -> None:
-    a = _write(home / ".pincer" / "workspace" / "uploads" / "alice" / "contract.pdf")
-    b = _write(home / ".pincer" / "workspace" / "uploads" / "bob" / "contract.pdf")
-    with pytest.raises(AttachmentError, match="matches 2 files") as exc:
-        resolve_attachment_path("contract.pdf")
-    assert str(a.resolve()) in str(exc.value)
-    assert str(b.resolve()) in str(exc.value)
-    assert resolve_attachment_path(str(a)) == a.resolve()
-
-
-def test_data_dir_workspace_allowed(home: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch) -> None:
-    data_dir = tmp_path_factory.mktemp("appdata")
-    monkeypatch.setattr(att, "_configured_data_dir", lambda: data_dir)
-    f = _write(data_dir / "workspace" / "uploads" / "report.pdf")
-    assert resolve_attachment_path(str(f)) == f.resolve()
-    assert resolve_attachment_path("report.pdf") == f.resolve()
-    assert resolve_attachment_path("workspace/uploads/report.pdf") == f.resolve()
+        resolve_attachment(str(ws / "uploads" / "report.pdf"))
     with pytest.raises(AttachmentError, match="outside"):
-        resolve_attachment_path(str(_write(data_dir / "pincer.db")))
+        resolve_attachment(str(ws.parent / "elsewhere" / "report.pdf"))
 
 
-def test_missing_file(home: Path) -> None:
+def test_rejects_dotdot_traversal(ws: Path) -> None:
+    _write(ws.parent / "secret.txt")
+    with pytest.raises(AttachmentError, match="outside the workspace"):
+        resolve_attachment("../secret.txt")
+    with pytest.raises(AttachmentError, match="outside the workspace"):
+        resolve_attachment("downloads/../../secret.txt")
+
+
+def test_rejects_symlink_escape(ws: Path) -> None:
+    secret = _write(ws.parent / "secret.txt")
+    link = ws / "downloads" / "innocent.pdf"
+    link.symlink_to(secret)
+    with pytest.raises(AttachmentError, match="outside the workspace"):
+        resolve_attachment(str(link))
     with pytest.raises(AttachmentError, match="not found"):
-        resolve_attachment_path("nope.pdf")
+        resolve_attachment("innocent.pdf")
 
 
-def test_empty_path(home: Path) -> None:
+def test_symlinked_folder_escape_not_found_by_search(ws: Path) -> None:
+    _write(ws.parent / "outside" / "leak.txt")
+    (ws / "uploads" / "sub").symlink_to(ws.parent / "outside", target_is_directory=True)
+    with pytest.raises(AttachmentError):
+        resolve_attachment("leak.txt")
+    with pytest.raises(AttachmentError):
+        resolve_attachment("uploads/sub/leak.txt")
+
+
+def test_relative_path_with_folder_wins_over_basename_matches(ws: Path) -> None:
+    _write(ws / "downloads" / "report.pdf")
+    _write(ws / "exec_output" / "report.pdf")
+    assert resolve_attachment("downloads/report.pdf") == "downloads/report.pdf"
+    with pytest.raises(AttachmentError, match="matches 2 files") as exc:
+        resolve_attachment("report.pdf")
+    assert exc.value.reason == "matches 2 files"
+
+
+def test_relative_path_with_folder_falls_back_to_basename_search(ws: Path) -> None:
+    _write(ws / "exec_output" / "chart.png")
+    assert resolve_attachment("charts/chart.png") == "exec_output/chart.png"
+
+
+def test_ambiguous_bare_name_lists_both(ws: Path) -> None:
+    _write(ws / "uploads" / "alice" / "contract.pdf")
+    _write(ws / "uploads" / "bob" / "contract.pdf")
+    with pytest.raises(AttachmentError, match="matches 2 files") as exc:
+        resolve_attachment("contract.pdf")
+    assert "uploads/alice/contract.pdf" in str(exc.value)
+    assert "uploads/bob/contract.pdf" in str(exc.value)
+    assert resolve_attachment(str(ws / "uploads" / "alice" / "contract.pdf")) == "uploads/alice/contract.pdf"
+
+
+def test_hidden_files_not_found_by_search(ws: Path) -> None:
+    _write(ws / ".secrets" / "key.pem")
+    with pytest.raises(AttachmentError, match="not found"):
+        resolve_attachment("key.pem")
+
+
+def test_missing_file(ws: Path) -> None:
+    with pytest.raises(AttachmentError, match="not found") as exc:
+        resolve_attachment("nope.pdf")
+    assert exc.value.reason == "not found"
+
+
+def test_empty_path(ws: Path) -> None:
     with pytest.raises(AttachmentError, match="empty"):
-        resolve_attachment_path("   ")
+        resolve_attachment("   ")
+
+
+def test_unavailable_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(_settings: Any) -> Workspace:
+        raise StorageUnavailable("bucket unreachable")
+
+    monkeypatch.setattr("pincer.storage.workspace.get_workspace", unavailable)
+    with pytest.raises(AttachmentError, match="bucket unreachable") as exc:
+        resolve_attachment("report.pdf")
+    assert exc.value.reason == "workspace unavailable"
+
+
+# ── normalize_attachment_args ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, []),
+        ("", []),
+        ([], []),
+        (["a.pdf", " ", "b.pdf "], ["a.pdf", "b.pdf"]),
+        ("a.pdf, b.pdf", ["a.pdf", "b.pdf"]),
+        ('["a.pdf","b.pdf"]', ["a.pdf", "b.pdf"]),
+        (' ["a, 1.pdf"] ', ["a, 1.pdf"]),
+        ("[draft] report.pdf", ["[draft] report.pdf"]),
+    ],
+)
+def test_normalize_attachment_args(value: object, expected: list[str]) -> None:
+    assert normalize_attachment_args(value) == expected
+
+
+@pytest.mark.parametrize("value", [5, {"a": 1}, ["a.pdf", 3], '["a.pdf", 3]', True])
+def test_normalize_rejects_non_paths(value: object) -> None:
+    with pytest.raises(AttachmentError, match="must be a list of file paths") as exc:
+        normalize_attachment_args(value)
+    assert exc.value.reason == "not a list of file paths"
 
 
 # ── load_attachments ─────────────────────────────────────────────────────────
 
 
-def test_load_none_and_empty(home: Path) -> None:
+def test_load_none_and_empty(ws: Path) -> None:
     assert load_attachments(None) == []
     assert load_attachments([]) == []
     assert load_attachments("") == []
 
 
-def test_load_mime_types(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "a.pdf", b"%PDF")
-    _write(home / ".pincer" / "downloads" / "b.unknownext", b"x")
+def test_load_mime_types(ws: Path) -> None:
+    _write(ws / "downloads" / "a.pdf", b"%PDF")
+    _write(ws / "downloads" / "b.unknownext", b"x")
     result = load_attachments(["a.pdf", "b.unknownext"])
     assert [(a.filename, a.maintype, a.subtype) for a in result] == [
         ("a.pdf", "application", "pdf"),
@@ -204,42 +222,42 @@ def test_load_mime_types(home: Path) -> None:
     assert result[0].data == b"%PDF"
 
 
-def test_load_csv_string(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "a.pdf")
-    _write(home / ".pincer" / "downloads" / "b.txt")
-    result = load_attachments("a.pdf, b.txt")
-    assert [a.filename for a in result] == ["a.pdf", "b.txt"]
+def test_load_csv_and_json_strings(ws: Path) -> None:
+    _write(ws / "downloads" / "a.pdf")
+    _write(ws / "downloads" / "b.txt")
+    assert [a.filename for a in load_attachments("a.pdf, b.txt")] == ["a.pdf", "b.txt"]
+    assert [a.filename for a in load_attachments('["a.pdf", "b.txt"]')] == ["a.pdf", "b.txt"]
 
 
-def test_load_dedupes(home: Path) -> None:
-    f = _write(home / ".pincer" / "downloads" / "a.pdf")
-    assert len(load_attachments(["a.pdf", str(f), "~/.pincer/downloads/a.pdf"])) == 1
+def test_load_dedupes(ws: Path) -> None:
+    f = _write(ws / "downloads" / "a.pdf")
+    assert len(load_attachments(["a.pdf", str(f), "downloads/a.pdf"])) == 1
 
 
-def test_load_size_limit(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_size_limit(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(att, "MAX_ATTACHMENT_BYTES", 10)
-    _write(home / ".pincer" / "downloads" / "big.bin", b"x" * 11)
+    _write(ws / "downloads" / "big.bin", b"x" * 11)
     with pytest.raises(AttachmentError, match=r"limit is .*Drive link"):
         load_attachments(["big.bin"])
 
 
-def test_load_count_limit(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_count_limit(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(att, "MAX_ATTACHMENTS", 2)
     for name in ("a", "b", "c"):
-        _write(home / ".pincer" / "downloads" / f"{name}.txt")
+        _write(ws / "downloads" / f"{name}.txt")
     with pytest.raises(AttachmentError, match="Too many attachments"):
         load_attachments(["a.txt", "b.txt", "c.txt"])
 
 
-def test_load_caps_bytes_read_not_just_stat(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A file that grows between the stat check and the read is still capped.
+def test_load_caps_bytes_read_not_just_size(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A file that grows between the size check and the read is still capped.
     monkeypatch.setattr(att, "MAX_ATTACHMENT_BYTES", 10)
-    f = _write(home / ".pincer" / "downloads" / "growing.csv", b"x" * 5)
+    f = _write(ws / "downloads" / "growing.csv", b"x" * 5)
     real_read = att._read_verified
 
-    def grow_then_read(path: Path, budget: int, allowed: list[Path]) -> bytes:
+    def grow_then_read(path: Path, budget: int, base: Path) -> bytes:
         f.write_bytes(b"x" * 50)
-        data = real_read(path, budget, allowed)
+        data = real_read(path, budget, base)
         assert len(data) <= budget + 1
         return data
 
@@ -248,55 +266,78 @@ def test_load_caps_bytes_read_not_just_stat(home: Path, monkeypatch: pytest.Monk
         load_attachments(["growing.csv"])
 
 
-def test_load_rejects_symlink_swapped_after_resolve(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    secret = _write(home / "secret.txt")
-    f = _write(home / ".pincer" / "downloads" / "a.txt")
-    real_resolve = att.resolve_attachment_path
+def test_load_rejects_symlink_swapped_after_resolve(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = _write(ws.parent / "secret.txt")
+    f = _write(ws / "downloads" / "a.txt")
+    real_resolve = att.resolve_attachment
 
-    def resolve_then_swap(p: str) -> Path:
-        path = real_resolve(p)
+    def resolve_then_swap(p: str) -> str:
+        rel = real_resolve(p)
         f.unlink()
         f.symlink_to(secret)
-        return path
+        return rel
 
-    monkeypatch.setattr(att, "resolve_attachment_path", resolve_then_swap)
+    monkeypatch.setattr(att, "resolve_attachment", resolve_then_swap)
+    with pytest.raises(AttachmentError, match="outside the workspace"):
+        load_attachments(["a.txt"])
+
+
+def test_load_rejects_symlink_swapped_before_read(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Swapped after the workspace checks, right before the open: O_NOFOLLOW refuses it.
+    secret = _write(ws.parent / "secret.txt")
+    f = _write(ws / "downloads" / "a.txt")
+    real_read = att._read_verified
+
+    def swap_then_read(path: Path, budget: int, base: Path) -> bytes:
+        f.unlink()
+        f.symlink_to(secret)
+        return real_read(path, budget, base)
+
+    monkeypatch.setattr(att, "_read_verified", swap_then_read)
     with pytest.raises(AttachmentError, match="Could not read"):
         load_attachments(["a.txt"])
 
 
-def _resolve_to(monkeypatch: pytest.MonkeyPatch, fn) -> None:
-    """Make load_attachments see *fn*'s path, as if the file changed after resolve()."""
-    monkeypatch.setattr(att, "resolve_attachment_path", fn)
-
-
-def test_load_rejects_fifo_without_hanging(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    fifo = home / ".pincer" / "downloads" / "pipe.pdf"
-    os.mkfifo(fifo)
-    _resolve_to(monkeypatch, lambda p: fifo.resolve())
+def test_load_rejects_fifo_without_hanging(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    os.mkfifo(ws / "downloads" / "pipe.pdf")
+    monkeypatch.setattr(att, "resolve_attachment", lambda p: "downloads/pipe.pdf")
     with pytest.raises(AttachmentError, match="not a regular file"):
         load_attachments(["pipe.pdf"])
 
 
-def test_load_rejects_intermediate_dir_swapped_for_symlink(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    outside = home / "outside"
+def test_load_rejects_intermediate_dir_swapped_for_symlink(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    outside = ws.parent / "outside"
     _write(outside / "a.txt", b"secret")
-    sub = home / ".pincer" / "workspace" / "exec_output" / "sub"
-    f = _write(sub / "a.txt", b"ok")
-    resolved = f.resolve()
+    sub = ws / "exec_output" / "sub"
+    _write(sub / "a.txt", b"ok")
 
-    def resolve_then_swap(p: str) -> Path:
+    real_read = att._read_verified
+
+    def swap_then_read(path: Path, budget: int, base: Path) -> bytes:
         (sub / "a.txt").unlink()
         sub.rmdir()
         sub.symlink_to(outside, target_is_directory=True)
-        return resolved
+        return real_read(path, budget, base)
 
-    _resolve_to(monkeypatch, resolve_then_swap)
-    with pytest.raises(AttachmentError, match="outside the allowed folders"):
+    monkeypatch.setattr(att, "_read_verified", swap_then_read)
+    with pytest.raises(AttachmentError, match="outside the workspace"):
         load_attachments(["sub/a.txt"])
 
 
-def test_control_characters_in_filename_replaced(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "a\nBcc: x@evil.com\n.pdf")
+def test_load_bucket_error_is_an_attachment_error(ws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(ws / "downloads" / "a.txt")
+    workspace = att._workspace()
+
+    def broken(*_a: Any, **_k: Any) -> Path:
+        raise RuntimeError("bucket says no")
+
+    monkeypatch.setattr(workspace, "fetch", broken)
+    with pytest.raises(AttachmentError, match="bucket says no"):
+        load_attachments(["a.txt"])
+
+
+def test_control_characters_in_filename_replaced(ws: Path) -> None:
+    _write(ws / "downloads" / "a\nBcc: x@evil.com\n.pdf")
     [a] = load_attachments(["a\nBcc: x@evil.com\n.pdf"])
     assert a.filename == "a_Bcc: x@evil.com_.pdf"
     part = att.attachment_part(a)
@@ -304,36 +345,124 @@ def test_control_characters_in_filename_replaced(home: Path) -> None:
     part.as_bytes()  # serialises without HeaderParseError
 
 
-def test_message_types(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "fwd.eml", b"Subject: hi\n\nbody")
+def test_message_types(ws: Path) -> None:
+    _write(ws / "downloads" / "fwd.eml", b"Subject: hi\n\nbody")
     [eml] = load_attachments(["fwd.eml"])
     assert (eml.maintype, eml.subtype) == ("message", "rfc822")
 
 
-async def test_load_attachments_async(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "a.pdf")
+async def test_load_attachments_async(ws: Path) -> None:
+    _write(ws / "downloads" / "a.pdf")
     assert [a.filename for a in await att.load_attachments_async(["a.pdf"])] == ["a.pdf"]
     assert await att.load_attachments_async(None) == []
+    with pytest.raises(AttachmentError):
+        await att.load_attachments_async(5)
 
 
-def test_load_rejects_disallowed_path(home: Path) -> None:
+def test_load_rejects_disallowed_path(ws: Path) -> None:
     with pytest.raises(AttachmentError):
         load_attachments(["/etc/passwd"])
+
+
+# ── Cloud storage root ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def cloud_ws(tmp_path: Path, mock_cloud_client: Callable[..., Any], monkeypatch: pytest.MonkeyPatch) -> Workspace:
+    """A workspace on cloudpathlib's offline S3 mock, with a cache of its own."""
+    from pincer.config.main import _RelaxedSettings
+
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root="s3://ws-bucket/")  # type: ignore[call-arg]
+    with patch("pincer.storage.clients.build_client", return_value=mock_cloud_client("s3")):
+        workspace = Workspace.from_settings(settings)
+    workspace.ensure()
+    monkeypatch.setattr(att, "_workspace", lambda: workspace)
+    return workspace
+
+
+def test_cloud_file_only_in_bucket_is_fetched(cloud_ws: Workspace) -> None:
+    # Uploaded through Documents: in the bucket, not yet in the local cache.
+    (cloud_ws.remote / "uploads" / "contract.pdf").write_bytes(b"%PDF-cloud")
+    (cloud_ws.local / "uploads" / "contract.pdf").unlink(missing_ok=True)
+    assert resolve_attachment("contract.pdf") == "uploads/contract.pdf"
+    [a] = load_attachments(["contract.pdf"])
+    assert (a.filename, a.data) == ("contract.pdf", b"%PDF-cloud")
+
+
+def test_cloud_absolute_cache_path_resolves(cloud_ws: Workspace) -> None:
+    # A download returns the cached copy's path; that is what the model passes back.
+    path = cloud_ws.save("downloads", "report.pdf", b"%PDF")
+    assert resolve_attachment(str(path)) == "downloads/report.pdf"
+    assert [a.data for a in load_attachments([str(path)])] == [b"%PDF"]
+
+
+def test_cloud_size_limit_checked_before_download(cloud_ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(att, "MAX_ATTACHMENT_BYTES", 10)
+    (cloud_ws.remote / "downloads" / "big.bin").write_bytes(b"x" * 11)
+    fetched: list[Any] = []
+    monkeypatch.setattr(cloud_ws, "fetch", lambda *a, **k: fetched.append(a))
+    with pytest.raises(AttachmentError, match="limit is"):
+        load_attachments(["big.bin"])
+    assert fetched == []
+
+
+def test_cloud_deleted_object_is_not_found(cloud_ws: Workspace) -> None:
+    path = cloud_ws.save("downloads", "gone.pdf", b"%PDF")
+    (cloud_ws.remote / "downloads" / "gone.pdf").unlink()
+    assert path.is_file()  # a stale cached copy is not enough
+    with pytest.raises(AttachmentError, match="not found"):
+        resolve_attachment("gone.pdf")
 
 
 # ── Approval display ─────────────────────────────────────────────────────────
 
 
-def test_describe_attachments_shows_resolved_path_and_size(home: Path) -> None:
-    _write(home / ".pincer" / "downloads" / "Q3 report.pdf", b"x" * 2500)
-    _write(home / ".pincer" / "downloads" / "a.pdf, ~/.pincer/downloads/b.pdf")
-    text = describe_attachments(["Q3 report.pdf", "~/.pincer/downloads/a.pdf, ~/.pincer/downloads/b.pdf", "nope.pdf"])
-    lines = text.strip().split("\n")
-    assert lines == [
-        "• ~/.pincer/downloads/Q3 report.pdf (2 KB)",
-        "• ~/.pincer/downloads/a.pdf, ~/.pincer/downloads/b.pdf (5 B)",
-        "• nope.pdf (will not be attached: Attachment not found: 'nope.pdf')",
+def test_describe_attachments_shows_resolved_path_and_size(ws: Path) -> None:
+    _write(ws / "downloads" / "Q3 report.pdf", b"x" * 2500)
+    _write(ws / "downloads" / "a.pdf, downloads/b.pdf")
+    text = describe_attachments(["Q3 report.pdf", "downloads/a.pdf, downloads/b.pdf", "nope.pdf"])
+    assert text.split("\n") == [
+        "2 files, 3 KB; 1 will not be attached",
+        "• downloads/Q3 report.pdf (2 KB)",
+        "• downloads/a.pdf, downloads/b.pdf (5 B)",
+        "• nope.pdf (will not be attached: not found)",
     ]
+
+
+def test_describe_attachments_caps_the_list(ws: Path) -> None:
+    for name in "abcde":
+        _write(ws / "downloads" / f"{name}.pdf", b"x")
+    lines = describe_attachments([f"{n}.pdf" for n in "abcde"]).split("\n")
+    assert lines[0] == "5 files, 5 B"
+    assert lines[1:] == ["• downloads/a.pdf (1 B)", "• downloads/b.pdf (1 B)", "• downloads/c.pdf (1 B)", "+2 more"]
+
+
+def test_describe_attachments_cannot_forge_lines(ws: Path) -> None:
+    _write(ws / "downloads" / "report.pdf", b"x")
+    text = describe_attachments(["nope\n• downloads/report.pdf (1 B)"])
+    assert text.split("\n") == [
+        "0 files, 0 B; 1 will not be attached",
+        "• nope_• downloads/report.pdf (1 B) (will not be attached: not found)",
+    ]
+
+
+def test_describe_attachments_short_reasons(ws: Path) -> None:
+    _write(ws / "downloads" / "report.pdf")
+    _write(ws / "exec_output" / "report.pdf")
+    text = describe_attachments(["report.pdf", "/etc/passwd"])
+    assert text.split("\n")[1:] == [
+        "• report.pdf (will not be attached: matches 2 files)",
+        "• /etc/passwd (will not be attached: outside the workspace)",
+    ]
+    assert describe_attachments(5) == "none will be attached: not a list of file paths"
+
+
+def test_describe_attachments_shortens_long_paths(ws: Path) -> None:
+    name = "x" * 100 + ".pdf"
+    _write(ws / "downloads" / name)
+    line = describe_attachments([name]).split("\n")[1]
+    assert line.startswith("• …") and line.endswith(".pdf (5 B)")
+    assert len(line) < 80
 
 
 def _registry() -> ToolRegistry:
@@ -346,23 +475,41 @@ def _registry() -> ToolRegistry:
     return reg
 
 
-async def test_registry_approval_display_puts_attachments_first(home: Path) -> None:
-    _write(home / ".pincer" / "workspace" / "uploads" / "secret.pdf")
-    args = {"to": "a@b.c", "body": "B" * 300, "attachments": ["secret.pdf"]}
+def _preview(shown: dict[str, Any]) -> str:
+    """The approval preview Telegram, WhatsApp and Teams build: `k=v, ...` cut at 200 chars."""
+    return ", ".join(f"{k}={v}" for k, v in shown.items())[:200]
+
+
+async def test_registry_approval_display_order(ws: Path) -> None:
+    _write(ws / "uploads" / "secret.pdf")
+    args = {"body": "B" * 300, "attachments": ["secret.pdf"], "to": "a@b.c", "subject": "Hi"}
     shown = await _registry().approval_display_args("email_send", args)
-    assert list(shown) == ["attachments", "to", "body"]
-    assert "~/.pincer/workspace/uploads/secret.pdf" in shown["attachments"]
-    # The preview a channel builds now names the file within its first 200 chars.
-    assert "secret.pdf" in ", ".join(f"{k}={v}" for k, v in shown.items())[:200]
+    assert list(shown) == ["to", "subject", "attachments", "body"]
+    assert "uploads/secret.pdf" in shown["attachments"]
+    # A long body can't push the file out of the preview.
+    assert "secret.pdf" in _preview(shown)
     assert args["attachments"] == ["secret.pdf"]  # the tool still gets the original
 
 
-async def test_registry_approval_display_leaves_other_args_alone(home: Path) -> None:
+async def test_registry_approval_display_keeps_recipient_in_preview(ws: Path) -> None:
+    # Many long paths, some rejected: the recipient still shows (review of #367).
+    for i in range(3):
+        _write(ws / "downloads" / f"quarterly-financial-report-{i}-final-version.pdf")
+    files = [f"quarterly-financial-report-{i}-final-version.pdf" for i in range(3)] + ["/etc/passwd"] * 3
+    args = {"attachments": files, "to": "ceo@corp.com", "subject": "Q3"}
+    preview = _preview(await _registry().approval_display_args("email_send", args))
+    assert preview.startswith("to=ceo@corp.com, subject=Q3, attachments=3 files")
+
+
+async def test_registry_approval_display_leaves_other_args_alone(ws: Path) -> None:
     reg = _registry()
     slack_args = {"attachments": [{"text": "", "footer": "https://x/y"}]}
     assert await reg.approval_display_args("slack__post", slack_args) is slack_args
     assert await reg.approval_display_args("unknown_tool", slack_args) is slack_args
     plain = {"to": "a@b.c"}
     assert await reg.approval_display_args("email_send", plain) is plain
-    weird = {"attachments": {"a": 1}}
-    assert await reg.approval_display_args("email_send", weird) is weird
+
+
+async def test_registry_approval_display_flags_bad_argument(ws: Path) -> None:
+    shown = await _registry().approval_display_args("email_send", {"to": "a@b.c", "attachments": {"a": 1}})
+    assert shown["attachments"] == "none will be attached: not a list of file paths"

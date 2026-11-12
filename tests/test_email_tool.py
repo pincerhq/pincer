@@ -159,11 +159,14 @@ def _smtp_settings():
 
 @pytest.fixture
 def pincer_downloads(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("pincer.tools.attachments._configured_data_dir", lambda: None)
-    downloads = tmp_path / ".pincer" / "downloads"
-    downloads.mkdir(parents=True)
-    return downloads
+    """The workspace's downloads/, which outgoing attachments are read from."""
+    from pincer.storage.workspace import Workspace
+
+    root = tmp_path / "storage" / "workspace"
+    ws = Workspace(root, root)
+    ws.ensure()
+    monkeypatch.setattr("pincer.tools.attachments._workspace", lambda: ws)
+    return root / "downloads"
 
 
 @pytest.mark.asyncio
@@ -265,6 +268,42 @@ class TestEmailSendAttachments:
             result = await email_send("user@example.com", "x", "y", attachments="big.bin")
 
         assert "limit is" in result
+        mock_send.assert_not_called()
+
+    async def test_non_ascii_mail_with_attachments_is_7bit(self, pincer_downloads):
+        # Raw bytes skip aiosmtplib's 8BITMIME negotiation, so they must be 7-bit safe.
+        (pincer_downloads / "a.pdf").write_bytes(b"%PDF")
+        (pincer_downloads / "fwd.eml").write_bytes(
+            "Subject: inner\r\nContent-Type: text/plain; charset=utf-8\r\n"
+            "Content-Transfer-Encoding: 8bit\r\n\r\nпривіт\r\n".encode()
+        )
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            await email_send("Тарас <t@x.com>", "тема", "тело письма", attachments=["a.pdf", "fwd.eml"])
+
+        raw = mock_send.call_args.args[0]
+        assert raw.isascii()
+        message = email.message_from_bytes(raw, policy=email.policy.default)
+        assert message["Subject"] == "тема"
+        assert message.get_body(("plain",)).get_content().strip() == "тело письма"
+        inner = list(message.iter_attachments())[1].get_content()
+        assert inner.get_content().strip() == "привіт"
+
+    async def test_bad_attachments_argument_rejected(self, pincer_downloads):
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings", return_value=_smtp_settings()),
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
+            from pincer.tools.builtin.email_tool import email_send
+
+            result = await email_send("user@example.com", "x", "y", attachments=5)
+
+        assert result.startswith("Email NOT sent:")
+        assert "list of file paths" in result
         mock_send.assert_not_called()
 
 
