@@ -19,6 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.config.channels import WHATSAPP_SQLITE_FILE
 from pincer.utils.csv_list import split_csv
 
 if TYPE_CHECKING:
@@ -1380,7 +1381,7 @@ class SecurityDoctor:
         if cfg.whatsapp_session_db.get_secret_value():
             return CheckResult(name, CheckStatus.PASS, "WhatsApp session stored in Postgres", category="filesystem")
         data_dir = Path(cfg.data_dir)
-        session_file = data_dir / "pincer-wa.db"
+        session_file = data_dir / WHATSAPP_SQLITE_FILE
         if session_file.exists():
             target, writable = session_file, os.access(session_file, os.W_OK) and os.access(data_dir, os.W_OK)
         elif data_dir.is_dir():

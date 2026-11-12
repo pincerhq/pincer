@@ -15,6 +15,15 @@ from pincer.utils.csv_list import split_csv
 VOICE_MAX_RESPONSE_TOKENS_CEILING = 128_000
 
 
+# The WhatsApp session file under data_dir when PINCER_WHATSAPP_SESSION_DB is empty.
+WHATSAPP_SQLITE_FILE = "pincer-wa.db"
+
+
+def is_postgres_url(s: str) -> bool:
+    """True for a postgres:// or postgresql:// URL (scheme matched case-insensitively)."""
+    return s.lower().startswith(("postgres://", "postgresql://"))
+
+
 class ChannelSettings(BaseModel):
     # ── Telegram ─────────────────────────────────────────
     telegram_bot_token: SecretStr = Field(default=SecretStr(""), description="Telegram bot token")
@@ -587,12 +596,16 @@ class ChannelSettings(BaseModel):
 
         raw = v.get_secret_value() if isinstance(v, SecretStr) else str(v or "")
         raw = raw.strip()
-        if raw and not raw.lower().startswith(("postgres://", "postgresql://")):
+        if raw and not is_postgres_url(raw):
             # Never echo the value: it may hold a password.
             scheme = raw.split("://", 1)[0] if "://" in raw else "<none>"
             raise ConfigError(
                 f"PINCER_WHATSAPP_SESSION_DB must be empty or a postgres:// / postgresql:// URL (got scheme {scheme!r})"
             )
+        if raw:
+            # Lowercase the scheme: libpq and lib/pq only accept it in lowercase.
+            scheme, sep, rest = raw.partition("://")
+            raw = scheme.lower() + sep + rest
         return SecretStr(raw)
 
     @field_validator("whatsapp_jid", mode="before")

@@ -14,6 +14,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import io
 import logging
@@ -25,7 +26,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 try:
     import neonize
@@ -65,6 +66,7 @@ from pincer.channels.base import (
     MessageHandler,
 )
 from pincer.channels.group_trigger import matches_group_trigger, strip_group_triggers
+from pincer.config.channels import WHATSAPP_SQLITE_FILE, is_postgres_url
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -135,43 +137,47 @@ _WA_CONNECT_FAILURE_REMEDIATION: dict[int, tuple[str, str]] = {
 # The neonize session key. Without an explicit uuid neonize falls back to
 # `name`, which for Postgres is the URL with its password.
 _WA_SESSION_UUID = "pincer-wa"
-_WA_SQLITE_FILE = "pincer-wa.db"
 _WA_CONNECT_TIMEOUT = 120
+# How long to wait for a LoggedOut/ConnectFailure handler (scheduled with
+# call_soon_threadsafe) after the connect task has already ended.
+_WA_LOGIN_ERROR_GRACE = 1.0
+# URL parameters lib/pq (Go) understands but libpq rejects as unknown.
+_LIBPQ_UNKNOWN_PARAMS = frozenset({"search_path", "binary_parameters", "disable_prepared_binary_result"})
 
 
-def _is_postgres_store(store: str) -> bool:
-    return store.lower().startswith(("postgres://", "postgresql://"))
+def _libpq_conninfo(url: str) -> tuple[str, str | None]:
+    """Make a lib/pq session URL usable by libpq; return (url, search_path).
 
-
-def _split_search_path(url: str) -> tuple[str, str | None]:
-    """Remove `search_path` from a Postgres URL's query; return (url, search_path).
-
-    lib/pq (Go) passes it through as a session setting, but libpq rejects it as
-    an unknown URL parameter, so psycopg has to get it as `options` instead.
+    lib/pq passes `search_path` through as a session setting and has a few
+    parameters of its own; libpq rejects all of them as unknown URL
+    parameters. They are dropped, and psycopg gets `search_path` as `options`.
     """
     parts = urlsplit(url)
     query = parse_qsl(parts.query, keep_blank_values=True)
     search_path = next((v for k, v in query if k == "search_path"), None)
-    rest = [(k, v) for k, v in query if k != "search_path"]
+    rest = [(k, v) for k, v in query if k not in _LIBPQ_UNKNOWN_PARAMS]
     return urlunsplit(parts._replace(query=urlencode(rest))), search_path or None
 
 
 def _redact_store(text: str, store: str) -> str:
     """Strip the session store URL and its password from an error message."""
-    if not _is_postgres_store(store):
+    if not is_postgres_url(store):
         return text
     text = text.replace(store, "<session db url>")
     password = urlsplit(store).password
     if password:
-        text = text.replace(password, "***")
+        # Go may print the password percent-decoded; redact both, longest first
+        # so one form never leaves part of the other behind.
+        for secret in sorted({password, unquote(password)}, key=len, reverse=True):
+            text = text.replace(secret, "***")
     return text
 
 
 def _describe_store(store: str) -> str:
     """A log-safe description of the session store (never the URL)."""
-    if not _is_postgres_store(store):
+    if not is_postgres_url(store):
         return f"sqlite {store}"
-    _, search_path = _split_search_path(store)
+    _, search_path = _libpq_conninfo(store)
     return f"postgres (schema={search_path or 'default'})"
 
 
@@ -182,7 +188,7 @@ def _jid_user(jid: str) -> str:
 
 def _stored_device_jids(store: str) -> list[str]:
     """Every `whatsmeow_device.jid` in the store; a missing file or table means none."""
-    if not _is_postgres_store(store):
+    if not is_postgres_url(store):
         path = Path(store)
         if not path.is_file():
             return []
@@ -203,7 +209,7 @@ def _stored_device_jids(store: str) -> list[str]:
             "PINCER_WHATSAPP_SESSION_DB is a Postgres URL but psycopg is not installed; "
             "install the `postgres` extra (pip install 'pincer-agent[postgres]')"
         ) from None
-    conninfo, search_path = _split_search_path(store)
+    conninfo, search_path = _libpq_conninfo(store)
     kwargs: dict[str, Any] = {"connect_timeout": 10}
     if search_path:
         kwargs["options"] = "-c search_path=" + search_path.replace("\\", "\\\\").replace(" ", "\\ ")
@@ -721,7 +727,9 @@ class WhatsAppChannel(BaseChannel):
             WhatsAppChannel._loop_started = True
             logger.debug("Started neonize event_global_loop in daemon thread")
 
-        store = self._settings.whatsapp_session_db.get_secret_value() or str(self._settings.data_dir / _WA_SQLITE_FILE)
+        store = self._settings.whatsapp_session_db.get_secret_value() or str(
+            self._settings.data_dir / WHATSAPP_SQLITE_FILE
+        )
         logger.info("WhatsApp session store: %s", _describe_store(store))
         client_kwargs: dict[str, Any] = {"name": store, "uuid": _WA_SESSION_UUID}
         phone = self._settings.whatsapp_jid
@@ -807,18 +815,32 @@ class WhatsAppChannel(BaseChannel):
             if not waiter.done():
                 waiter.cancel()
         if waiter in done:
-            if isinstance(connect_task, asyncio.Future):
-                connect_task.add_done_callback(lambda t: self._log_connect_task_end(t, store))
+            self._watch_connect_task(connect_task, store)
             return
         if connect_task in done:
             exc = None if connect_task.cancelled() else connect_task.exception()
+            if exc is None:
+                # A clean exit may be a login failure whose LoggedOut /
+                # ConnectFailure handler is still queued via
+                # call_soon_threadsafe; give it a moment to record the reason.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._connected.wait(), timeout=_WA_LOGIN_ERROR_GRACE)
+                if self._login_error:
+                    return  # start() raises "WhatsApp login failed: …"
             reason = _redact_store(str(exc), store) if exc else "the client stopped before connecting"
-            if _is_postgres_store(store) and '"whatsmeow_version" does not exist' in reason:
+            if is_postgres_url(store) and '"whatsmeow_version" does not exist' in reason:
                 # What a missing (or unusable) search_path schema looks like.
-                schema = _split_search_path(store)[1] or "public"
+                schema = _libpq_conninfo(store)[1] or "public"
                 reason += f" (does schema {schema!r} exist, and may this role use and create in it?)"
             raise RuntimeError(f"WhatsApp store/connect failed: {reason}") from None
+        # Still running: log a later failure (redacted) instead of letting
+        # asyncio report "exception never retrieved" with the raw URL.
+        self._watch_connect_task(connect_task, store)
         raise RuntimeError("WhatsApp connection timed out. Did you scan the QR code?")
+
+    def _watch_connect_task(self, connect_task: Any, store: str) -> None:
+        if isinstance(connect_task, asyncio.Future):
+            connect_task.add_done_callback(lambda t: self._log_connect_task_end(t, store))
 
     @staticmethod
     def _log_connect_task_end(task: asyncio.Future[Any], store: str) -> None:
@@ -991,7 +1013,6 @@ class WhatsAppChannel(BaseChannel):
         # before the owner has sent anything; outgoing messages stay a fallback.
         if me.HasField("LID") and me.LID.User:
             self._own_lid = me.LID.User
-        self._connected.set()
         expected = self._settings.whatsapp_jid
         if expected and self._own_jid != expected:
             logger.error(
@@ -1000,6 +1021,12 @@ class WhatsAppChannel(BaseChannel):
                 expected,
                 self._own_jid,
             )
+            # Set before waking _connected so start() sees it and fails.
+            self._login_error = (
+                f"paired account {self._own_jid} but PINCER_WHATSAPP_JID is {expected} — "
+                "unlink the device in WhatsApp → Linked devices and re-pair with the right phone"
+            )
+        self._connected.set()
         logger.info(
             "WhatsApp connected — own_jid=%r  full_jid=%s  own_lid=%r",
             self._own_jid,

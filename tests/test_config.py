@@ -385,3 +385,31 @@ def test_whatsapp_jid_rejects_non_numbers(tmp_path: Path) -> None:
 
     with pytest.raises((ConfigError, ValidationError), match="PINCER_WHATSAPP_JID"):
         _wa_settings(tmp_path, whatsapp_jid="491512345678@s.whatsapp.net")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("POSTGRES://u:P@h/DB", "postgres://u:P@h/DB"),
+        ("PostgreSQL://u:p@h/db?search_path=WA", "postgresql://u:p@h/db?search_path=WA"),
+    ],
+)
+def test_whatsapp_session_db_lowercases_scheme_only(tmp_path: Path, url: str, expected: str) -> None:
+    assert _wa_settings(tmp_path, whatsapp_session_db=url).whatsapp_session_db.get_secret_value() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("postgres://h/db", True),
+        ("postgresql://h/db", True),
+        ("POSTGRES://h/db", True),
+        ("postgres:/h/db", False),
+        ("sqlite:///x.db", False),
+        ("", False),
+    ],
+)
+def test_is_postgres_url(value: str, expected: bool) -> None:
+    from pincer.config.channels import is_postgres_url
+
+    assert is_postgres_url(value) is expected

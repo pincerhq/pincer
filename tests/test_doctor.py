@@ -2241,3 +2241,41 @@ def test_whatsapp_session_store_unwritable_data_dir_warns(tmp_path, monkeypatch)
     result = SecurityDoctor()._check_whatsapp_session_store(cfg)
     assert result.status == CheckStatus.WARNING
     assert "PINCER_WHATSAPP_SESSION_DB" in result.fix_hint
+
+
+def test_whatsapp_session_store_existing_file_writable_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    (cfg.data_dir / "pincer-wa.db").touch()
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "pincer-wa.db" in result.message
+
+
+def test_whatsapp_session_store_existing_file_unwritable_warns(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    session_file = cfg.data_dir / "pincer-wa.db"
+    session_file.touch()
+    monkeypatch.setattr(os, "access", lambda path, mode: path != session_file)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert str(session_file) in result.message
+
+
+def test_whatsapp_session_store_missing_data_dir_writable_parent_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir = tmp_path / "not" / "yet" / "data"
+    assert SecurityDoctor()._check_whatsapp_session_store(cfg).status == CheckStatus.PASS
+
+
+def test_whatsapp_session_store_missing_data_dir_unwritable_parent_warns(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    monkeypatch.setattr(os, "access", lambda path, mode: path != tmp_path)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert str(cfg.data_dir) in result.message
