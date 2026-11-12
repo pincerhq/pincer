@@ -5,6 +5,7 @@ import logging
 import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from pydantic import SecretStr
@@ -733,51 +734,50 @@ def _make_device_db(path, jids):
 
 class TestStoredDeviceJid:
     def test_hit_matches_user_part(self, tmp_path):
-        from pincer.channels.whatsapp import _stored_device_jid
+        from pincer.channels.whatsapp_store import stored_device_jid
 
         db = tmp_path / "pincer-wa.db"
         _make_device_db(db, ["491111111111:3@s.whatsapp.net", "492222222222:12@s.whatsapp.net"])
-        assert _stored_device_jid(str(db), "492222222222") == "492222222222:12@s.whatsapp.net"
+        assert stored_device_jid(str(db), "492222222222") == "492222222222:12@s.whatsapp.net"
 
     def test_miss(self, tmp_path):
-        from pincer.channels.whatsapp import _stored_device_jid
+        from pincer.channels.whatsapp_store import stored_device_jid
 
         db = tmp_path / "pincer-wa.db"
         _make_device_db(db, ["491111111111:3@s.whatsapp.net"])
-        assert _stored_device_jid(str(db), "4922") is None
+        assert stored_device_jid(str(db), "4922") is None
 
     def test_missing_file_means_no_devices(self, tmp_path):
-        from pincer.channels.whatsapp import _stored_device_jid
+        from pincer.channels.whatsapp_store import stored_device_jid
 
         db = tmp_path / "absent.db"
-        assert _stored_device_jid(str(db), "491111111111") is None
+        assert stored_device_jid(str(db), "491111111111") is None
         assert not db.exists()  # read-only: never created
 
     def test_missing_table_means_no_devices(self, tmp_path):
         import sqlite3
 
-        from pincer.channels.whatsapp import _stored_device_jid
+        from pincer.channels.whatsapp_store import stored_device_jid
 
         db = tmp_path / "empty.db"
         sqlite3.connect(db).close()
-        assert _stored_device_jid(str(db), "491111111111") is None
+        assert stored_device_jid(str(db), "491111111111") is None
 
     def test_libpq_conninfo_and_describe(self):
-        from pincer.channels.whatsapp import _describe_store, _libpq_conninfo
+        from pincer.channels.whatsapp_store import describe_store, libpq_conninfo
 
-        url, sp = _libpq_conninfo(_PG_URL)
+        url, sp = libpq_conninfo(_PG_URL)
         assert sp == "whatsapp"
-        assert "search_path" not in url
-        assert "sslmode=disable" in url
-        assert _describe_store(_PG_URL) == "postgres (schema=whatsapp)"
-        assert "hunter2secret" not in _describe_store(_PG_URL)
-        assert _describe_store("/data/pincer-wa.db") == "sqlite /data/pincer-wa.db"
+        assert url.endswith("?sslmode=disable&options=-c%20search_path%3Dwhatsapp")
+        assert describe_store(_PG_URL) == "postgres (schema=whatsapp)"
+        assert "hunter2secret" not in describe_store(_PG_URL)
+        assert describe_store("/data/pincer-wa.db") == "sqlite /data/pincer-wa.db"
 
     def test_redact_store(self):
-        from pincer.channels.whatsapp import _redact_store
+        from pincer.channels.whatsapp_store import redact_store
 
         msg = f'parse "{_PG_URL}": invalid port; pq: password hunter2secret rejected'
-        out = _redact_store(msg, _PG_URL)
+        out = redact_store(msg, _PG_URL)
         assert "hunter2secret" not in out
         assert "<session db url>" in out
 
@@ -830,9 +830,23 @@ def wa_mod(monkeypatch):
     return patch
 
 
+@pytest.fixture
+def wa_store(monkeypatch):
+    """Patch a name in the `whatsapp_store` module the channel class actually calls."""
+    store_mod = WhatsAppChannel.start.__globals__["whatsapp_store"]
+
+    def patch(name, value):
+        monkeypatch.setattr(store_mod, name, value)
+
+    patch.module = store_mod  # type: ignore[attr-defined]
+    return patch
+
+
 class TestStartSessionStore:
     @pytest.mark.asyncio
-    async def test_sqlite_default_name_and_uuid(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+    async def test_sqlite_default_keeps_neonize_session_key(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+        # No uuid: neonize keys the session by the path, as before, so an
+        # already-paired SQLite session resumes unchanged.
         factory, created = _fake_client_factory()
         wa_mod("NewAClient", factory)
         wa_channel._settings.data_dir = tmp_path
@@ -840,7 +854,7 @@ class TestStartSessionStore:
 
         await wa_channel.start(AsyncMock())
 
-        assert created == [{"name": str(tmp_path / "pincer-wa.db"), "uuid": "pincer-wa"}]
+        assert created == [{"name": str(tmp_path / "pincer-wa.db")}]
 
     @pytest.mark.asyncio
     async def test_postgres_url_is_name_and_never_logged(self, wa_channel, wa_mod, monkeypatch, caplog):
@@ -859,10 +873,10 @@ class TestStartSessionStore:
         assert _PG_URL not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_jid_found_passes_jid(self, wa_channel, wa_mod, monkeypatch, tmp_path):
+    async def test_jid_found_passes_jid(self, wa_channel, wa_mod, wa_store, monkeypatch, tmp_path):
         factory, created = _fake_client_factory()
         wa_mod("NewAClient", factory)
-        wa_mod("build_jid", lambda user, server: MagicMock(User=user, Server=server))
+        wa_store("build_jid", lambda user, server: MagicMock(User=user, Server=server))
         _make_device_db(tmp_path / "pincer-wa.db", ["491111111111:3@s.whatsapp.net", "492222222222:12@s.whatsapp.net"])
         wa_channel._settings.data_dir = tmp_path
         wa_channel._settings.whatsapp_jid = "492222222222"
@@ -960,9 +974,9 @@ class TestWrongPhoneCheck:
 
 class TestSessionStoreHelpers:
     def test_libpq_conninfo_drops_lib_pq_only_params(self):
-        from pincer.channels.whatsapp import _libpq_conninfo
+        from pincer.channels.whatsapp_store import libpq_conninfo
 
-        url, sp = _libpq_conninfo(
+        url, sp = libpq_conninfo(
             "postgres://u:p@h/db?binary_parameters=yes&sslmode=require&disable_prepared_binary_result=yes"
         )
         assert sp is None
@@ -971,14 +985,14 @@ class TestSessionStoreHelpers:
     def test_sqlite_other_operational_error_is_raised(self, tmp_path):
         import sqlite3
 
-        from pincer.channels.whatsapp import _stored_device_jids
+        from pincer.channels.whatsapp_store import stored_device_jids
 
         db = tmp_path / "pincer-wa.db"
         conn = sqlite3.connect(db)
         conn.execute("CREATE TABLE whatsmeow_device (other TEXT)")
         conn.close()
         with pytest.raises(sqlite3.OperationalError, match="no such column"):
-            _stored_device_jids(str(db))
+            stored_device_jids(str(db))
 
     @pytest.mark.parametrize(
         ("jid", "expected"),
@@ -988,29 +1002,29 @@ class TestSessionStoreHelpers:
             ("492222222222:3", ("492222222222", "s.whatsapp.net", 3, 0)),
         ],
     )
-    def test_parse_device_jid(self, wa_mod, jid, expected):
-        wa_mod("build_jid", lambda user, server: MagicMock(User=user, Server=server))
-        parsed = WhatsAppChannel.start.__globals__["_parse_device_jid"](jid)
+    def test_parse_device_jid(self, wa_store, jid, expected):
+        wa_store("build_jid", lambda user, server: MagicMock(User=user, Server=server))
+        parsed = wa_store.module.parse_device_jid(jid)
         assert (parsed.User, parsed.Server, parsed.Device, parsed.RawAgent) == expected
 
     def test_describe_sqlite(self):
-        from pincer.channels.whatsapp import _describe_store
+        from pincer.channels.whatsapp_store import describe_store
 
-        assert _describe_store("/data/pincer-wa.db") == "sqlite /data/pincer-wa.db"
+        assert describe_store("/data/pincer-wa.db") == "sqlite /data/pincer-wa.db"
 
     def test_redact_sqlite_passthrough(self):
-        from pincer.channels.whatsapp import _redact_store
+        from pincer.channels.whatsapp_store import redact_store
 
-        assert _redact_store("open /data/pincer-wa.db: denied", "/data/pincer-wa.db") == (
+        assert redact_store("open /data/pincer-wa.db: denied", "/data/pincer-wa.db") == (
             "open /data/pincer-wa.db: denied"
         )
 
     def test_redact_percent_encoded_password_both_forms(self):
-        from pincer.channels.whatsapp import _redact_store
+        from pincer.channels.whatsapp_store import redact_store
 
         store = "postgres://u:p%40ss%2Fword@h/db"
         msg = "pq: password p@ss/word rejected; raw p%40ss%2Fword"
-        out = _redact_store(msg, store)
+        out = redact_store(msg, store)
         assert "p@ss/word" not in out
         assert "p%40ss%2Fword" not in out
         assert out.count("***") == 2
@@ -1049,46 +1063,48 @@ def _fake_psycopg(monkeypatch, *, rows=(), raise_undefined=False):
 
 class TestStoredDeviceJidsPostgres:
     def test_rows_and_conninfo(self, monkeypatch):
-        from pincer.channels.whatsapp import _stored_device_jids
+        from pincer.channels.whatsapp_store import stored_device_jids
 
         calls = _fake_psycopg(monkeypatch, rows=["491111111111:3@s.whatsapp.net"])
         url = "postgres://u:p@h/db?sslmode=disable&binary_parameters=yes&search_path=wa schema\\x"
-        assert _stored_device_jids(url) == ["491111111111:3@s.whatsapp.net"]
+        assert stored_device_jids(url) == ["491111111111:3@s.whatsapp.net"]
         conninfo, kwargs = calls[0]
-        assert conninfo == "postgres://u:p@h/db?sslmode=disable"
-        assert kwargs["connect_timeout"] == 10
-        assert kwargs["options"] == "-c search_path=wa\\ schema\\\\x"
+        assert parse_qsl(urlsplit(conninfo).query) == [
+            ("sslmode", "disable"),
+            ("options", "-c search_path=wa\\ schema\\\\x"),
+        ]
+        assert kwargs == {"connect_timeout": 10}
 
     def test_no_search_path_no_options(self, monkeypatch):
-        from pincer.channels.whatsapp import _stored_device_jids
+        from pincer.channels.whatsapp_store import stored_device_jids
 
         calls = _fake_psycopg(monkeypatch)
-        assert _stored_device_jids("postgresql://u:p@h/db") == []
-        assert "options" not in calls[0][1]
+        assert stored_device_jids("postgresql://u:p@h/db") == []
+        assert calls[0] == ("postgresql://u:p@h/db", {"connect_timeout": 10})
 
     def test_undefined_table_means_no_devices(self, monkeypatch):
-        from pincer.channels.whatsapp import _stored_device_jids
+        from pincer.channels.whatsapp_store import stored_device_jids
 
         _fake_psycopg(monkeypatch, raise_undefined=True)
-        assert _stored_device_jids(_PG_URL) == []
+        assert stored_device_jids(_PG_URL) == []
 
     def test_psycopg_missing_names_the_extra(self, monkeypatch):
-        from pincer.channels.whatsapp import _stored_device_jids
+        from pincer.channels.whatsapp_store import stored_device_jids
 
         monkeypatch.setitem(sys.modules, "psycopg", None)
         with pytest.raises(RuntimeError, match=r"pincer-agent\[postgres\]"):
-            _stored_device_jids(_PG_URL)
+            stored_device_jids(_PG_URL)
 
 
 class TestStartFailures:
     @pytest.mark.asyncio
-    async def test_store_lookup_error_is_redacted(self, wa_channel, wa_mod):
+    async def test_store_lookup_error_is_redacted(self, wa_channel, wa_mod, wa_store):
         def boom(store, phone):
             raise RuntimeError(f"cannot reach {store}")
 
         factory, created = _fake_client_factory()
         wa_mod("NewAClient", factory)
-        wa_mod("_stored_device_jid", boom)
+        wa_store("stored_device_jid", boom)
         wa_channel._settings.whatsapp_session_db = SecretStr(_PG_URL)
         wa_channel._settings.whatsapp_jid = "492222222222"
 
@@ -1174,7 +1190,7 @@ class TestStartFailures:
         assert not caplog.records
 
     @pytest.mark.asyncio
-    async def test_wrong_phone_fails_start(self, wa_channel, wa_mod, tmp_path):
+    async def test_wrong_phone_fails_start(self, wa_channel, wa_mod, wa_store, tmp_path):
         me = MagicMock()
         me.JID.User = "491111111111"
         me.HasField.return_value = False
@@ -1186,10 +1202,91 @@ class TestStartFailures:
 
         factory, _ = _fake_client_factory(connects_as_other_phone)
         wa_mod("NewAClient", factory)
-        wa_mod("_stored_device_jid", lambda store, phone: None)
+        wa_store("stored_device_jid", lambda store, phone: None)
         wa_channel._settings.data_dir = tmp_path
         wa_channel._settings.whatsapp_jid = "492222222222"
 
         with pytest.raises(RuntimeError, match="WhatsApp login failed: paired account 491111111111") as exc:
             await wa_channel.start(AsyncMock())
         assert "re-pair with the right phone" in str(exc.value)
+
+
+class TestReviewHardening:
+    """Malformed URLs, redaction gaps, lib/pq params and duplicate devices."""
+
+    @pytest.mark.parametrize("store", ["postgres://u:sekret99@[db:5432/x", "postgres://u:sekret99@h:99999/db"])
+    def test_malformed_url_helpers_do_not_raise(self, store):
+        from pincer.channels.whatsapp_store import describe_store, redact_store
+
+        assert describe_store(store) in ("postgres (schema=unknown)", "postgres (schema=default)")
+        out = redact_store(f"open {store}: pq password=sekret99 rejected; parse postgres://u:sekret99@h/x", store)
+        assert "sekret99" not in out
+
+    def test_bracket_url_redacted_wholesale(self):
+        from pincer.channels.whatsapp_store import describe_store, redact_store
+
+        store = "postgres://u:pw@[db:5432/x"
+        assert describe_store(store) == "postgres (schema=unknown)"
+        assert redact_store(f"bad url {store}", store) == "bad url <session db url>"
+
+    def test_query_password_redacted(self):
+        from pincer.channels.whatsapp_store import redact_store
+
+        store = "postgres://u@h/db?password=sekret&x=1"
+        out = redact_store("pq: auth failed with password=sekret for host=h; dsn host=h password=sekret", store)
+        assert "sekret" not in out
+        assert out.count("password=***") == 2
+
+    def test_rebuilt_conninfo_redacted(self):
+        from pincer.channels.whatsapp_store import libpq_conninfo, redact_store
+
+        store = "postgres://u:hunter2secret@h/db?search_path=wa"
+        rebuilt = libpq_conninfo(store)[0]
+        assert rebuilt != store
+        assert redact_store(f"connect {rebuilt} failed", store) == "connect <session db url> failed"
+
+    def test_short_password_does_not_garble_port(self):
+        from pincer.channels.whatsapp_store import redact_store
+
+        store = "postgres://u:54@db:5432/pincer"
+        out = redact_store("dial tcp db:5432: refused; url postgres://u:54@db:5432/other", store)
+        assert "db:5432: refused" in out
+        assert "postgres://u:***@db:5432/other" in out
+
+    def test_unknown_param_moves_into_options(self):
+        from pincer.channels.whatsapp_store import libpq_conninfo
+
+        url, _ = libpq_conninfo("postgres://u:p@h/db?statement_timeout=5&sslmode=disable")
+        assert parse_qsl(urlsplit(url).query) == [("sslmode", "disable"), ("options", "-c statement_timeout=5")]
+
+    def test_unknown_params_merge_with_existing_options(self):
+        from pincer.channels.whatsapp_store import libpq_conninfo
+
+        url, sp = libpq_conninfo(
+            "postgres://u:p@h/db?options=-c%20work_mem%3D4MB&search_path=wa&statement_timeout=5&binary_parameters=yes"
+        )
+        assert sp == "wa"
+        assert parse_qsl(urlsplit(url).query) == [
+            ("options", "-c work_mem=4MB -c search_path=wa -c statement_timeout=5")
+        ]
+
+    def test_duplicate_devices_pick_highest_and_warn(self, tmp_path, caplog):
+        from pincer.channels.whatsapp_store import stored_device_jid
+
+        db = tmp_path / "pincer-wa.db"
+        _make_device_db(
+            db, ["4915:9@s.whatsapp.net", "4915:3@s.whatsapp.net", "4915:12@s.whatsapp.net", "4916:20@s.whatsapp.net"]
+        )
+        with caplog.at_level(logging.WARNING, logger="pincer.channels.whatsapp_store"):
+            assert stored_device_jid(str(db), "4915") == "4915:12@s.whatsapp.net"
+        assert "3 stored devices for 4915" in caplog.text
+        assert str(db) not in caplog.text
+
+    def test_single_device_no_warning(self, tmp_path, caplog):
+        from pincer.channels.whatsapp_store import stored_device_jid
+
+        db = tmp_path / "pincer-wa.db"
+        _make_device_db(db, ["4915:3@s.whatsapp.net"])
+        with caplog.at_level(logging.WARNING, logger="pincer.channels.whatsapp_store"):
+            assert stored_device_jid(str(db), "4915") == "4915:3@s.whatsapp.net"
+        assert not caplog.records

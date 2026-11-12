@@ -23,7 +23,9 @@ ALLOWED = {
     "voice/retention.py": "ensure_schema_for_connection() takes a caller's connection (a test seam)",
     "observability/call_costs.py": "ensure_call_costs_table() is the same seam",
     "voice/safety_gates.py": "ensure_outbound_tables() is the same seam",
-    "channels/whatsapp.py": "reads whatsmeow_device from neonize's own session file, not Pincer's database",
+    "channels/whatsapp_store.py": (
+        "reads whatsmeow_device via sqlite3 or psycopg from whatsmeow's own session store, not Pincer's database"
+    ),
 }
 
 

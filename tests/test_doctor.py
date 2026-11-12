@@ -2279,3 +2279,66 @@ def test_whatsapp_session_store_missing_data_dir_unwritable_parent_warns(tmp_pat
     result = SecurityDoctor()._check_whatsapp_session_store(cfg)
     assert result.status == CheckStatus.WARNING
     assert str(cfg.data_dir) in result.message
+
+
+def test_whatsapp_session_store_names_the_euid(tmp_path):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert f"euid={os.geteuid()}" in result.message
+
+
+def test_whatsapp_session_store_existing_file_needs_dir_search(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    (cfg.data_dir / "pincer-wa.db").touch()
+    modes = []
+
+    def access(path, mode):
+        modes.append((path, mode))
+        return not (path == cfg.data_dir and mode & os.X_OK)
+
+    monkeypatch.setattr(os, "access", access)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert (cfg.data_dir, os.W_OK | os.X_OK) in modes
+
+
+def test_whatsapp_session_store_root_owned_dir_warns_when_run_as_root(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    from pathlib import Path
+
+    real_stat = Path.stat
+
+    def stat(self, *a, **kw):
+        st = real_stat(self, *a, **kw)
+        if self == cfg.data_dir:
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 0, 0, *tuple(st)[6:10]))
+        return st
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(Path, "stat", stat)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "euid=0" in result.message
+    assert "owned by root" in result.message
+    assert "USER pincer" in result.message
+
+
+def test_whatsapp_session_store_run_as_root_other_owner_passes_with_note(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "euid=0" in result.message
+    assert "checked as root" in result.message

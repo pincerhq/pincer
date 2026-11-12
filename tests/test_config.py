@@ -374,17 +374,61 @@ def test_whatsapp_session_db_rejects_other_schemes(tmp_path: Path, url: str) -> 
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("+49 151 2345-678", "491512345678"), ("491512345678", "491512345678"), ("", "")],
+    [
+        ("+49 151 2345-678", "491512345678"),
+        ("491512345678", "491512345678"),
+        ("+49 (0) 151 234567", "49151234567"),
+        ("", ""),
+    ],
 )
 def test_whatsapp_jid_normalised(tmp_path: Path, raw: str, expected: str) -> None:
     assert _wa_settings(tmp_path, whatsapp_jid=raw).whatsapp_jid == expected
 
 
-def test_whatsapp_jid_rejects_non_numbers(tmp_path: Path) -> None:
+@pytest.mark.parametrize("raw", ["491512345678@s.whatsapp.net", "٣٤٥٦٧٨", "49151²", "4915", "4" * 16])
+def test_whatsapp_jid_rejects_non_numbers(tmp_path: Path, raw: str) -> None:
     from pincer.exceptions import ConfigError
 
     with pytest.raises((ConfigError, ValidationError), match="PINCER_WHATSAPP_JID"):
-        _wa_settings(tmp_path, whatsapp_jid="491512345678@s.whatsapp.net")
+        _wa_settings(tmp_path, whatsapp_jid=raw)
+
+
+@pytest.mark.parametrize("raw", ["0049151234567", "0151 234567"])
+def test_whatsapp_jid_rejects_00_and_trunk_zero(tmp_path: Path, raw: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="E.164"):
+        _wa_settings(tmp_path, whatsapp_jid=raw)
+
+
+@pytest.mark.parametrize(
+    "url", ["postgres://u:s3cret@[db:5432/x", "postgres://u:s3cret@h:99999/db", "postgres://u:s3cret@h:abc/db"]
+)
+def test_whatsapp_session_db_rejects_malformed_url(tmp_path: Path, url: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="is not a valid URL") as exc:
+        _wa_settings(tmp_path, whatsapp_session_db=url)
+    assert "s3cret" not in str(exc.value)
+
+
+def test_whatsapp_session_db_requires_a_host(tmp_path: Path) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="has no host"):
+        _wa_settings(tmp_path, whatsapp_session_db="postgres:///db")
+    url = "postgres:///db?host=/var/run/postgresql"
+    assert _wa_settings(tmp_path, whatsapp_session_db=url).whatsapp_session_db.get_secret_value() == url
+
+
+@pytest.mark.parametrize("url", ['"postgres://u:s3cret@h/db"', "u:s3cret@h:5432/db?x=http://y"])
+def test_whatsapp_session_db_never_echoes_a_malformed_scheme(tmp_path: Path, url: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="<invalid>") as exc:
+        _wa_settings(tmp_path, whatsapp_session_db=url)
+    assert "s3cret" not in str(exc.value)
+    assert "postgres" not in str(exc.value).split("got scheme")[-1]
 
 
 @pytest.mark.parametrize(

@@ -16,14 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   volume. Add `search_path=<schema>` to the URL to use a separate schema. Any
   other scheme is rejected at startup, and the URL is never logged. See
   [deployment](docs/getting-started/deployment.md#whatsapp-session-in-postgres).
-- `PINCER_WHATSAPP_JID` picks which stored account to use by phone number.
-  A number that isn't stored shows a QR code to pair it. Pincer logs an
-  error if a different phone pairs.
+- `PINCER_WHATSAPP_JID` picks which stored account to use by phone number,
+  in E.164 digits (no leading `00`, no trunk `0`). A number that isn't stored
+  shows a QR code to pair it. Pincer logs an error if a different phone pairs.
+  Several stored devices for one number log a warning, and the most recent
+  (highest device number) is used.
+- Alembic autogenerate ignores `whatsmeow_*` tables, so it never drops them.
+
+Always on, without setting anything:
+
 - A store or connect error (bad URL, missing schema, unwritable session file)
   now fails startup with the real error. Before, the channel waited 120
   seconds and then asked you to scan the QR code.
-- Alembic autogenerate ignores `whatsmeow_*` tables, so it never drops them.
-- `pincer doctor` warns when the SQLite session file's data dir isn't writable.
+- `pincer doctor` warns when the SQLite session file's data dir isn't
+  writable, naming the uid it checked as; run as root, it warns when the data
+  dir is owned by root.
+- The default SQLite session keeps its session key, so an already-paired
+  session resumes without re-pairing.
 
 ### Changed
 

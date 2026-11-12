@@ -1382,25 +1382,48 @@ class SecurityDoctor:
             return CheckResult(name, CheckStatus.PASS, "WhatsApp session stored in Postgres", category="filesystem")
         data_dir = Path(cfg.data_dir)
         session_file = data_dir / WHATSAPP_SQLITE_FILE
+        # os.access answers for whoever runs `pincer doctor`; name them, so a
+        # check run as root (always writable) is recognisable.
+        euid = os.geteuid() if hasattr(os, "geteuid") else None
+        who = f"euid={euid}" if euid is not None else "current user"
         if session_file.exists():
-            target, writable = session_file, os.access(session_file, os.W_OK) and os.access(data_dir, os.W_OK)
+            target, owner_path = session_file, session_file
+            writable = os.access(session_file, os.W_OK) and os.access(data_dir, os.W_OK | os.X_OK)
         elif data_dir.is_dir():
-            target, writable = data_dir, os.access(data_dir, os.W_OK | os.X_OK)
+            target, owner_path = data_dir, data_dir
+            writable = os.access(data_dir, os.W_OK | os.X_OK)
         else:
             parent = next((p for p in data_dir.parents if p.exists()), data_dir.parent)
-            target, writable = data_dir, os.access(parent, os.W_OK | os.X_OK)
+            target, owner_path = data_dir, parent
+            writable = os.access(parent, os.W_OK | os.X_OK)
+        fix_hint = (
+            "Make the data dir writable by the user Pincer runs as (e.g. chown the volume), "
+            "or keep the session in Postgres with PINCER_WHATSAPP_SESSION_DB"
+        )
+        if euid == 0:
+            with contextlib.suppress(OSError):
+                if owner_path.stat().st_uid == 0:
+                    return CheckResult(
+                        name,
+                        CheckStatus.WARNING,
+                        f"{owner_path} is owned by root (checked as {who}). The image runs as `pincer` "
+                        "(Dockerfile USER pincer), so the service cannot write its WhatsApp session there",
+                        fix_hint=fix_hint,
+                        category="filesystem",
+                    )
         if writable:
+            note = " — checked as root; the service user may differ" if euid == 0 else ""
             return CheckResult(
-                name, CheckStatus.PASS, f"WhatsApp session file writable ({session_file})", category="filesystem"
+                name,
+                CheckStatus.PASS,
+                f"WhatsApp session file writable by {who} ({session_file}){note}",
+                category="filesystem",
             )
         return CheckResult(
             name,
             CheckStatus.WARNING,
-            f"{target} is not writable by the current user — WhatsApp cannot store its session",
-            fix_hint=(
-                "Make the data dir writable by the user Pincer runs as (e.g. chown the volume), "
-                "or keep the session in Postgres with PINCER_WHATSAPP_SESSION_DB"
-            ),
+            f"{target} is not writable by {who} — WhatsApp cannot store its session",
+            fix_hint=fix_hint,
             category="filesystem",
         )
 
