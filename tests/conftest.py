@@ -6,7 +6,7 @@ import inspect
 import logging
 import os
 import re
-import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -252,10 +252,11 @@ class _StallCapture(logging.Handler):
 # ── template database ────────────────────────────────────────────────
 # Every fresh test database used to run all Alembic migrations (~0.2 s each,
 # ~230 s a suite run). Instead, one database per session is migrated to head
-# and copied wherever a test asks for a new SQLite file at head. An empty file
-# counts as new: a connection opened before the schema exists (a lookup that
-# fails and falls back) leaves one behind. Upgrading a file with content (a
-# legacy schema, a partial one) still runs the real Alembic.
+# and copied wherever a test asks for a new SQLite file at head. A database
+# with no tables counts as new: a connection opened before the schema exists (a
+# lookup that fails and falls back) leaves one behind, 0 bytes or just a header.
+# Upgrading a database with tables (a legacy schema, a partial one) still runs
+# the real Alembic.
 # Tests about the migrations themselves opt out with `real_migrations`.
 
 
@@ -273,11 +274,24 @@ class _TemplateCommand:
         from pincer.db.engine import _database_file
 
         target = _database_file(config.get_main_option("sqlalchemy.url"))
-        fresh = target is not None and (not target.exists() or target.stat().st_size == 0)
-        if revision == "head" and not args and not kwargs and fresh:
-            shutil.copyfile(self._template, target)
+        if revision == "head" and not args and not kwargs and target is not None and _has_no_tables(target):
+            # Through SQLite, not a file copy: the target may be open elsewhere
+            # with a write-ahead log beside it, which a copied-over file would
+            # no longer match.
+            with (
+                contextlib.closing(sqlite3.connect(self._template)) as source,
+                contextlib.closing(sqlite3.connect(target)) as dest,
+            ):
+                source.backup(dest)
             return
         self._real.upgrade(config, revision, *args, **kwargs)
+
+
+def _has_no_tables(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return True
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        return conn.execute("SELECT count(*) FROM sqlite_master").fetchone() == (0,)
 
 
 def _head_revision() -> str:
@@ -293,8 +307,6 @@ def _head_revision() -> str:
 @pytest.fixture(scope="session")
 def _migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A SQLite database at head, migrated once per session (per xdist worker)."""
-    import sqlite3
-
     from alembic import command
 
     from pincer.db.engine import build_config
