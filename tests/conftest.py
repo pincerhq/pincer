@@ -252,8 +252,10 @@ class _StallCapture(logging.Handler):
 # ── template database ────────────────────────────────────────────────
 # Every fresh test database used to run all Alembic migrations (~0.2 s each,
 # ~230 s a suite run). Instead, one database per session is migrated to head
-# and copied wherever a test asks for a new SQLite file at head. Upgrading an
-# existing file (a legacy schema, a partial one) still runs the real Alembic.
+# and copied wherever a test asks for a new SQLite file at head. An empty file
+# counts as new: a connection opened before the schema exists (a lookup that
+# fails and falls back) leaves one behind. Upgrading a file with content (a
+# legacy schema, a partial one) still runs the real Alembic.
 # Tests about the migrations themselves opt out with `real_migrations`.
 
 
@@ -271,7 +273,8 @@ class _TemplateCommand:
         from pincer.db.engine import _database_file
 
         target = _database_file(config.get_main_option("sqlalchemy.url"))
-        if revision == "head" and not args and not kwargs and target is not None and not target.exists():
+        fresh = target is not None and (not target.exists() or target.stat().st_size == 0)
+        if revision == "head" and not args and not kwargs and fresh:
             shutil.copyfile(self._template, target)
             return
         self._real.upgrade(config, revision, *args, **kwargs)
@@ -332,7 +335,9 @@ def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
 
 _aiosqlite_in_flight: dict[asyncio.AbstractEventLoop, int] = {}
 _aiosqlite_lock = threading.Lock()
-_SETTLE_TIMEOUT_S = 2.0
+# Generous: a write waiting on a lock another connection holds can take
+# SQLite's 5 s busy timeout. Only a test that leaves work behind waits at all.
+_SETTLE_TIMEOUT_S = 10.0
 
 
 def _count_in_flight(loop: asyncio.AbstractEventLoop, delta: int) -> None:
@@ -393,7 +398,10 @@ async def _settle_aiosqlite() -> AsyncIterator[None]:
     deadline = time.monotonic() + _SETTLE_TIMEOUT_S
     while _aiosqlite_in_flight.get(loop) and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
-    await asyncio.sleep(0)  # the worker's call_soon_threadsafe follows its function
+    await asyncio.sleep(0)  # let the results already handed back run
+    # Fail here, in the test that left the query running, not in whichever test
+    # this worker runs next, where the closed loop would surface.
+    assert not _aiosqlite_in_flight.get(loop), f"aiosqlite queries still running after {_SETTLE_TIMEOUT_S:.0f} s"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
