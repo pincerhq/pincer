@@ -1,51 +1,153 @@
 # .github/workflows/ci.yml
+#
+# `changes` decides which test jobs run; the test jobs run in parallel, each
+# only when its code (or a shared file) changed; `checks` runs last, fails if
+# any test job failed, then runs format, lint, mypy and bandit on the whole
+# repo. `checks` and `dependency-audit` are the required status checks.
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a PR cancels that PR's older run. Pushes to dev/main each run to
+# the end, so every merged commit gets a full result: they are grouped by
+# commit, because a group keeps only its newest pending run even without
+# cancel-in-progress.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  pincer:
+  changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      pincer: ${{ steps.filter.outputs.pincer }}
+      postgres: ${{ steps.filter.outputs.postgres }}
+      ms365: ${{ steps.filter.outputs.ms365 }}
+      doctr: ${{ steps.filter.outputs.doctr }}
+      memory: ${{ steps.filter.outputs.memory }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+    steps:
+      - uses: actions/checkout@v7
+      # A manual run starts every job (see the job conditions), so no diff.
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          # A push compares with the branch's previous commit; without this a
+          # push to main would diff against the default branch (dev).
+          base: ${{ github.ref_name }}
+          filters: |
+            shared:
+              - pyproject.toml
+              - uv.lock
+              - .github/workflows/ci.yml
+              - tests/conftest.py
+              - tests/support.py
+            # Everything tests/ reads, not only what it imports: it scans all of
+            # src/ (tool approval allowlist, calendar export), loads scripts/
+            # (smoke_llm, calendar_smoke) and reads .env.example and pincer.toml.
+            pincer:
+              - src/**
+              - tests/**
+              - scripts/**
+              - skills/**
+              - main.py
+              - pincer.toml
+              - .env.example
+            # All of src/pincer: the services, repositories and models these
+            # tests use import from across the package, so no shorter list holds.
+            postgres:
+              - src/pincer/**
+              - pincer.toml
+              - tests/db/**
+              - tests/test_db_migrations.py
+              - tests/test_schema_drift.py
+            ms365:
+              - src/ms365-mcp/**
+            doctr:
+              - src/doctr-mcp/**
+            memory:
+              - src/sqlite-vec-memory-mcp/**
+            dashboard:
+              - dashboard/**
+
+  # tests/ split four ways (tests/suites.py) so the legs run in parallel. Each
+  # leg uploads its coverage data; the `coverage` job combines them and sends
+  # one report to Codecov. The matrix job's result is `failure` if any leg
+  # fails, which is what `checks` gates on.
+  pincer:
+    needs: changes
+    if: needs.changes.outputs.pincer == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, llm, voice, mcp-cli]
+    env:
+      COVERAGE_FILE: .coverage.${{ matrix.suite }}
+      # sys.monitoring-based measurement: far less overhead than the tracer.
+      COVERAGE_CORE: sysmon
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
 
+      # tests/db runs in the postgres job, on SQLite and Postgres. The voice
+      # harness runs in its own step below. One xdist worker per core, a whole
+      # file per worker (module fixtures stay on one); pytest-cov merges the
+      # workers' data into COVERAGE_FILE. Voice gets 2 workers: its tests time
+      # the event loop (audio ticks, drain windows), and four workers on four
+      # cores starved them of CPU.
       - name: Run tests with coverage
-        run: uv run pytest --cov=pincer --cov-report=xml tests/
+        run: >-
+          uv run pytest tests/ --ignore=tests/db --ignore=tests/voice_harness
+          --suite=${{ matrix.suite }} -n ${{ matrix.suite == 'voice' && '2' || 'auto' }} --dist loadfile
+          --cov=pincer --cov-report=
 
       # Sprint 10 (T10.5): the voice reliability + red-team harness is a
       # release-blocking gate now that voice is a stable-tier surface. Run it
       # as its own step so a harness failure is instantly distinguishable from
       # an unrelated unit-test failure in the log.
       - name: Voice harness (both languages, all personas incl. red-team)
-        run: uv run pytest tests/voice_harness/ -v --no-cov
+        if: matrix.suite == 'voice'
+        run: uv run pytest tests/voice_harness/ -v --cov=pincer --cov-append --cov-report=
 
-      - name: Run ms365-mcp tests
-        run: uv run pytest src/ms365-mcp/tests
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-${{ matrix.suite }}
+          path: .coverage.${{ matrix.suite }}
+          include-hidden-files: true
+          if-no-files-found: ignore
 
-      - name: Run doctr-mcp tests
-        run: uv run pytest src/doctr-mcp/tests
+  # Combines the pincer legs' coverage data into one report per commit.
+  # Codecov failures are non-fatal, so `checks` does not wait on this job.
+  coverage:
+    needs: [changes, pincer]
+    if: always() && needs.pincer.result != 'skipped' && needs.pincer.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-*
+          merge-multiple: true
 
-      - name: Type check
-        run: uv run mypy src/ --exclude '(ms365-mcp|doctr-mcp)'
-
-      - name: Type check ms365-mcp tests
-        run: uv run mypy src/ms365-mcp
-
-      - name: Type check doctr-mcp tests
-        run: uv run mypy src/doctr-mcp
-
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Format check
-        run: uv run ruff format --check .
-
-      - name: Security scan
-        run: uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
+      - name: Combine coverage
+        run: |
+          uvx --from 'coverage[toml]==7.13.5' coverage combine
+          uvx --from 'coverage[toml]==7.13.5' coverage xml
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
-        if: always()
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
@@ -54,6 +156,8 @@ jobs:
   # test parametrised by the `db_url` fixture runs its Postgres variant here
   # (they skip elsewhere); the set grows as each domain moves onto the engine.
   postgres:
+    needs: changes
+    if: needs.changes.outputs.postgres == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -77,29 +181,45 @@ jobs:
       - name: Database layer tests (SQLite + Postgres)
         run: uv run pytest tests/db tests/test_db_migrations.py tests/test_schema_drift.py -v --no-cov
 
-  # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
-  # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
-  # an owner and a review date.
-  dependency-audit:
+  ms365-mcp:
+    needs: changes
+    if: needs.changes.outputs.ms365 == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: dashboard/pnpm-lock.yaml
       - run: uv sync --all-extras
-      - run: pnpm install --frozen-lockfile
-        working-directory: dashboard
-      - name: Audit dependencies
-        run: scripts/audit-deps.sh
+
+      - name: Run ms365-mcp tests
+        run: uv run pytest src/ms365-mcp/tests
+
+  doctr-mcp:
+    needs: changes
+    if: needs.changes.outputs.doctr == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+
+      - name: Run doctr-mcp tests
+        run: uv run pytest src/doctr-mcp/tests
+
+  memory-mcp:
+    needs: changes
+    if: needs.changes.outputs.memory == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+
+      - name: Run sqlite-vec-memory-mcp tests
+        run: uv run pytest src/sqlite-vec-memory-mcp/tests
 
   dashboard:
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.shared == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -124,3 +244,62 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # The single required status check for the code. It runs after the chosen
+  # test jobs and always: with a plain `needs:` it would be *skipped* after a
+  # test failure, and branch protection treats skipped as passing. A skipped
+  # test job (its code did not change) is fine.
+  checks:
+    needs: [changes, pincer, postgres, ms365-mcp, doctr-mcp, memory-mcp, dashboard]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if a test job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "A needed job failed or was cancelled: ${{ toJSON(needs) }}"
+          exit 1
+
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --all-extras
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src/ --exclude '(ms365-mcp|doctr-mcp)'
+
+      - name: Type check ms365-mcp tests
+        run: uv run mypy src/ms365-mcp
+
+      - name: Type check doctr-mcp tests
+        run: uv run mypy src/doctr-mcp
+
+      - name: Security scan
+        run: uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
+
+  # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
+  # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
+  # an owner and a review date.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+      - run: uv sync --all-extras
+      - run: pnpm install --frozen-lockfile
+        working-directory: dashboard
+      - name: Audit dependencies
+        run: scripts/audit-deps.sh

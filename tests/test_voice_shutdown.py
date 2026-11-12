@@ -122,8 +122,9 @@ class TestGracefulShutdown:
         import time
 
         playout_s, calls = 0.3, 8
-        # Serially, 8 × 0.3 s cannot fit; side by side it is one goodbye.
-        monkeypatch.setattr("pincer.channels.phone_calls.SHUTDOWN_DRAIN_TIMEOUT_S", 1.0)
+        # Serially, 8 × 0.3 s cannot fit; side by side it is one goodbye. Room
+        # for a loaded runner, still short of a serial drain.
+        monkeypatch.setattr("pincer.channels.phone_calls.SHUTDOWN_DRAIN_TIMEOUT_S", 2.0)
         channel, engine = await _live_call("en", call_sid="CA_0")
         for n in range(1, calls):
             await engine.on_call_start(f"CA_{n}", "+4930123456", CallDirection.OUTBOUND, language="en")
@@ -156,7 +157,9 @@ class TestGracefulShutdown:
         assert [sid for sid in sids if engine.spoken[sid][-1:] != [goodbye]] == []
         assert hung_up_before_playout == []
         assert sorted(engine.ended) == sorted(sids)
-        assert elapsed < 2 * playout_s, f"{elapsed:.2f}s for {calls} goodbyes"
+        # Serially it is 8 × 0.3 s = 2.4 s, two at a time 1.2 s; the slack over
+        # one goodbye is for a loaded runner (xdist workers share the CPU).
+        assert elapsed < 3 * playout_s, f"{elapsed:.2f}s for {calls} goodbyes"
 
     async def test_one_failing_drain_does_not_stop_the_others(self, caplog):
         channel, engine = await _live_call("en", call_sid="CA_ok")

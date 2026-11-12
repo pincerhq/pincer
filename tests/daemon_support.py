@@ -117,6 +117,23 @@ def alive(pid: int) -> bool:
     return True
 
 
+def exited(pid: int, seconds: float = 5.0) -> bool:
+    """True once `pid` has exited, waiting up to `seconds` for it.
+
+    A daemon's lease is a `flock`, which the kernel releases while it closes a
+    dying process's files, a moment before the process is a zombie. So when
+    `stop()` sees the lease free and returns, `pid` may still be exiting, and
+    `alive()` (no zombie to reap yet, `kill(pid, 0)` still succeeding) reads it
+    as running. A loaded CI runner widens that window enough to fail on.
+    """
+    deadline = time.monotonic() + seconds
+    while alive(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
 def within[T](seconds: float, call: Callable[[], T]) -> T:
     """`call()`, failing (instead of hanging the suite) if it hasn't returned after `seconds`.
 

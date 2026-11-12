@@ -1,0 +1,11 @@
+# Codecov reports as soon as it has processed an upload.
+#
+# By default it first waits for every other check on the commit to finish. The
+# `coverage` job uploads while the `checks` job is still running, and once
+# `checks` finished Codecov never came back: `codecov/patch` stayed "in
+# progress" until the next push replaced it. Whether CI passed is the `checks`
+# job's call, not Codecov's.
+codecov:
+  require_ci_to_pass: false
+  notify:
+    wait_for_ci: false

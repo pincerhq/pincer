@@ -549,7 +549,8 @@ def test_google_export_token_falls_back_to_legacy_token(monkeypatch: pytest.Monk
     result = runner.invoke(app, ["google", "export-token"])
 
     assert result.exit_code == 0
-    assert "google_token.json" in result.output
+    # Rich wraps the path at 80 columns, mid-name when the tmp path is long.
+    assert "google_token.json" in "".join(result.output.split())
 
 
 def test_google_export_token_without_token_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]

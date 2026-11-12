@@ -244,6 +244,21 @@ def _clean():
     approvals._reset_for_tests()
 
 
+# The channels `_start` started in the current test; `_stop_channels` stops them.
+_started: list[VoiceChannel] = []
+
+
+@pytest.fixture(autouse=True)
+async def _stop_channels():
+    """Stop what `_start` started; `_settle_aiosqlite` (tests/conftest.py)
+    tears down after this and waits for the writes `stop()` itself starts."""
+    yield
+    channels = _started[:]
+    _started.clear()
+    for channel in channels:
+        await channel.stop()
+
+
 class Harness:
     def __init__(self, channel, engine, agent, state, calendar, owner_msgs):
         self.channel, self.engine, self.agent, self.state, self.calendar, self.owner_msgs = (
@@ -306,6 +321,7 @@ async def _start(
         return "Fallback."
 
     await channel.start(_blocking)
+    _started.append(channel)
     from pincer.voice.postcall import PostCallProcessor
 
     channel.set_post_call_processor(PostCallProcessor(settings, llm=None, memory=None, db_path=str(settings.db_path)))

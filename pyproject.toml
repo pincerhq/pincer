@@ -71,7 +71,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-browser = ["playwright>=1.40.0"]
+browser = ["playwright>=1.49.0"]  # --only-shell (tools/builtin/browser.py)
 memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
 pdfgen = ["fpdf2>=2.7.0"]
@@ -124,6 +124,7 @@ dev = [
     "types-qrcode>=8.0.0",
     "types-PyYAML>=6.0.0",
     "httpx>=0.27.0",
+    "pytest-xdist>=3.6.0",
 ]
 # Postgres runtime (asyncpg) and Alembic migrations (psycopg, sync).
 postgres = [
@@ -170,7 +171,19 @@ markers = [
     "perf: timing benchmark, runs only with PINCER_RUN_PERF=1",
     "embedding: runs the real tool-index embedding model (~240 MB download), only with PINCER_RUN_EMBEDDING=1",
     "allow_loop_stall: opt out of the event-loop stall guard on tests/test_voice*",
+    "real_migrations: run the real Alembic upgrade instead of copying the session's template database",
 ]
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # A thread calling back into a test's closed event loop (see the
+    # drain_voice_telemetry fixture in tests/conftest.py) fails the test.
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+]
+
+[tool.coverage.run]
+# CI combines the data of four runners (one per test suite); relative paths
+# make their files line up.
+relative_files = true
 
 [tool.ruff]
 # Deliberately behind `requires-python`. This setting governs the syntax the
@@ -194,6 +207,7 @@ extend-ignore = ["N814", "N818"]
 # Test files use pytest/stdlib imports in annotations at runtime — TC rules don't apply.
 "src/ms365-mcp/tests/**" = ["TC002", "TC003"]
 "src/doctr-mcp/tests/**" = ["TC002", "TC003"]
+"src/sqlite-vec-memory-mcp/tests/**" = ["TC002", "TC003"]
 "tests/**" = ["TC002", "TC003"]
 # SQLModel columns and FastAPI dependencies are resolved from annotations at
 # runtime, so their imports cannot move under TYPE_CHECKING.
@@ -270,7 +284,14 @@ skips = ["B101", "B104", "B310", "B608"]
 # (PYSEC-2026-1448, PYSEC-2026-3002; fixed in 1.6.2). Upstream lifted the cap to
 # `>=1.6.0,<1.7` in Rapptz/discord.py@5d74ed3 as a metadata-only change, but it
 # isn't released yet. Drop this override once a discord.py release includes it.
-override-dependencies = ["pynacl>=1.6.2,<1.7"]
+#
+# python-doctr depends on opencv-python, the GUI build, which links libxcb/libGL;
+# a server never opens a window. Drop it; doctr-mcp depends on
+# opencv-python-headless instead, which provides the same `cv2`.
+override-dependencies = [
+    "pynacl>=1.6.2,<1.7",
+    "opencv-python; sys_platform == 'never'",
+]
 
 [tool.uv.workspace]
 members = [

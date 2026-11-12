@@ -40,7 +40,7 @@ async def _ensure_browser() -> Any:
         _install_attempted = True
         try:
             subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
+                [sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"],
                 check=True,
                 capture_output=True,
                 timeout=120,

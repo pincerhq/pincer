@@ -88,11 +88,13 @@ def test_failed_sync_rolls_back_so_the_next_sync_re_embeds(
     assert stats["updated"] == 1  # the old hash survived, so the changed tool is re-embedded
 
 
-def test_search_with_other_version_is_stale(server: ModuleType, embedded: list[str]) -> None:
+def test_search_with_other_version_is_stale(
+    server: ModuleType, embedded: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     server.tool_index_sync(_TOOLS, "v1")
     assert server.tool_index_search("phone", 3, "v0") == {"stale": True, "results": []}
     # A fresh server (index lost on restart) is stale for any version.
-    server._tool_index_version = ""
+    monkeypatch.setattr(server, "_tool_index_version", "")
     assert server.tool_index_search("phone", 3, "v1")["stale"] is True
 
 

@@ -1,26 +1,32 @@
 """Shared test fixtures."""
 
 import asyncio
-import importlib.util
+import contextlib
+import inspect
 import logging
 import os
 import re
+import sqlite3
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+from queue import SimpleQueue
 from typing import Any
 from unittest.mock import AsyncMock
 
+import aiosqlite.core as aiosqlite_core
 import pytest
 import pytest_asyncio
+import suites
 
 # Set test env vars before importing config
 os.environ["PINCER_ANTHROPIC_API_KEY"] = "sk-ant-test-key"
 os.environ["PINCER_TELEGRAM_BOT_TOKEN"] = "123456:TEST"
-os.environ["PINCER_DATA_DIR"] = "/tmp/pincer-test"
+# One per xdist worker, so parallel workers never share files.
+os.environ["PINCER_DATA_DIR"] = f"/tmp/pincer-test-{os.environ.get('PYTEST_XDIST_WORKER', 'main')}"
 os.environ["PINCER_DAILY_BUDGET_USD"] = "100.0"
 # The API is default-deny. Tests that exercise a route rather than its auth run
 # with it switched off; the ones about auth use the `authed_app` fixture.
@@ -157,6 +163,21 @@ class _InMemoryAuditLogger(AuditLogger):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_voice_test_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give each test its own voice test database and data directory.
+
+    `apply_test_paths` and the harness runner default to one temp directory per
+    process; tests then saw each other's call rows (`VoiceChannel.start` closes
+    the open ones and logs it), depending on which tests ran first. Patched only
+    once imported, so other suites never load the voice channel for this; the
+    test that first imports one has no earlier test to share with.
+    """
+    for module, name in (("voice_harness.settings", "_TMP"), ("voice_harness.runner", "_HARNESS_TMP")):
+        if module in sys.modules:
+            monkeypatch.setattr(sys.modules[module], name, tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_audit_logger(tmp_path: Path) -> None:
     """Install the in-memory global audit logger for every test.
 
@@ -246,11 +267,201 @@ class _StallCapture(logging.Handler):
         ]
 
 
+# ── template database ────────────────────────────────────────────────
+# Every fresh test database used to run all Alembic migrations (~0.2 s each,
+# ~230 s a suite run). Instead, one database per session is migrated to head
+# and copied wherever a test asks for a new SQLite file at head. A database
+# with no tables counts as new: a connection opened before the schema exists (a
+# lookup that fails and falls back) leaves one behind, 0 bytes or just a header.
+# Upgrading a database with tables (a legacy schema, a partial one) still runs
+# the real Alembic.
+# Tests about the migrations themselves opt out with `real_migrations`.
+
+
+class _TemplateCommand:
+    """Stands in for `alembic.command` inside `pincer.db.engine`."""
+
+    def __init__(self, real: Any, template: Path) -> None:
+        self._real = real
+        self._template = template
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def upgrade(self, config: Any, revision: str, *args: Any, **kwargs: Any) -> None:
+        from pincer.db.engine import _database_file
+
+        target = _database_file(config.get_main_option("sqlalchemy.url"))
+        if revision == "head" and not args and not kwargs and target is not None and _has_no_tables(target):
+            # Through SQLite, not a file copy: the target may be open elsewhere
+            # with a write-ahead log beside it, which a copied-over file would
+            # no longer match.
+            with (
+                contextlib.closing(sqlite3.connect(self._template)) as source,
+                contextlib.closing(sqlite3.connect(target)) as dest,
+            ):
+                source.backup(dest)
+            return
+        self._real.upgrade(config, revision, *args, **kwargs)
+
+
+def _has_no_tables(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return True
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        return conn.execute("SELECT count(*) FROM sqlite_master").fetchone() == (0,)
+
+
+def _head_revision() -> str:
+    from alembic.script import ScriptDirectory
+
+    from pincer.db.engine import build_config
+
+    head = ScriptDirectory.from_config(build_config(Path("unused.db"))).get_current_head()
+    assert head is not None
+    return head
+
+
+@pytest.fixture(scope="session")
+def _migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A SQLite database at head, migrated once per session (per xdist worker)."""
+    from alembic import command
+
+    from pincer.db.engine import build_config
+
+    path = tmp_path_factory.mktemp("template") / "template.db"
+    # Directly by URL: PINCER_DATABASE_URL must not redirect the template.
+    command.upgrade(build_config(path, url=f"sqlite:///{path}"), "head")
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        (revision,) = conn.execute("SELECT version_num FROM pincer_alembic_version").fetchone()
+    assert revision == _head_revision(), "template database is not at head"
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.get_closest_marker("real_migrations"):
+        return
+    from pincer.db import engine
+
+    template = request.getfixturevalue("_migrated_template")
+    monkeypatch.setattr(engine, "command", _TemplateCommand(engine.command, template))
+
+
+# ── aiosqlite: let in-flight queries finish ──────────────────────────
+# Each aiosqlite connection runs its queries on a worker thread, which hands
+# the result back with `loop.call_soon_threadsafe`. A query still running when
+# pytest-asyncio closes the test's loop then raises "RuntimeError: Event loop
+# is closed" in that thread, and the next test fails on it. Such a query comes
+# from a fire-and-forget write (telemetry, call rows), from a task cancelled
+# mid-query (cancelling the task does not stop the thread), or from the cleanup
+# a task runs when pytest-asyncio cancels it just before closing the loop.
+#
+# So every queued query is counted, per loop, until its result is handed back; and
+# each async test ends with `_settle_aiosqlite` (added first by
+# pytest_collection_modifyitems, so it tears down last), which cancels the
+# leftover tasks itself and waits for the count to reach zero while the loop
+# can still take the results.
+
+_aiosqlite_in_flight: dict[asyncio.AbstractEventLoop, int] = {}
+_aiosqlite_lock = threading.Lock()
+# Generous: a write waiting on a lock another connection holds can take
+# SQLite's 5 s busy timeout. Only a test that leaves work behind waits at all.
+_SETTLE_TIMEOUT_S = 10.0
+
+
+def _count_in_flight(loop: asyncio.AbstractEventLoop, delta: int) -> None:
+    with _aiosqlite_lock:
+        count = _aiosqlite_in_flight.get(loop, 0) + delta
+        if count:
+            _aiosqlite_in_flight[loop] = count
+        else:
+            _aiosqlite_in_flight.pop(loop, None)
+
+
+class _CountingTxQueue(SimpleQueue):  # type: ignore[type-arg]
+    """aiosqlite's per-connection work queue, counting work not yet delivered."""
+
+    def put_nowait(self, item: Any) -> None:
+        future, _function = item
+        if future is not None:  # a stop sentinel without a loop: nobody waits on it
+            _count_in_flight(future.get_loop(), +1)
+        super().put_nowait(item)
+
+
+def _counting_worker_thread(tx: Any) -> None:
+    """aiosqlite's `_connection_worker_thread`, uncounting each item only once its
+    result has been handed to the loop. Uncounting when the function returns left
+    a window: the count read zero, the loop closed, and then the hand-off raised."""
+    while True:
+        future, function = tx.get()
+        try:
+            result = function()
+            if future:
+                future.get_loop().call_soon_threadsafe(aiosqlite_core.set_result, future, result)
+            if result is aiosqlite_core._STOP_RUNNING_SENTINEL:
+                break
+        except BaseException as e:
+            if future:
+                future.get_loop().call_soon_threadsafe(aiosqlite_core.set_exception, future, e)
+        finally:
+            if future:
+                _count_in_flight(future.get_loop(), -1)
+
+
+aiosqlite_core.SimpleQueue = _CountingTxQueue  # type: ignore[misc]
+aiosqlite_core._connection_worker_thread = _counting_worker_thread
+
+
+@pytest_asyncio.fixture
+async def _settle_aiosqlite() -> AsyncIterator[None]:
+    yield
+    from pincer.voice.telemetry.tracer import drain_pending
+
+    await drain_pending()  # telemetry writes: let them finish rather than cancel them
+    loop = asyncio.get_running_loop()
+    leftover = [task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and not task.done()]
+    for task in leftover:
+        task.cancel()
+    if leftover:
+        await asyncio.wait(leftover, timeout=_SETTLE_TIMEOUT_S)
+    deadline = time.monotonic() + _SETTLE_TIMEOUT_S
+    while _aiosqlite_in_flight.get(loop) and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0)  # let the results already handed back run
+    # Fail here, in the test that left the query running, not in whichever test
+    # this worker runs next, where the closed loop would surface.
+    assert not _aiosqlite_in_flight.get(loop), f"aiosqlite queries still running after {_SETTLE_TIMEOUT_S:.0f} s"
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--suite",
+        choices=suites.NAMES,
+        default=suites.ALL,
+        help="run one CI suite of tests/ (see tests/suites.py); default: all",
+    )
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Skip test files outside --suite before they are imported."""
+    suite = config.getoption("suite")
+    if suite == suites.ALL or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    try:
+        return suites.suite_of(collection_path) != suite or None
+    except ValueError:  # outside tests/, e.g. src/*/tests
+        return None
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         # fixture closures are computed by now; a usefixtures marker would be ignored
         if item.nodeid.startswith("tests/test_voice") and not item.get_closest_marker("allow_loop_stall"):
             item.fixturenames.insert(0, "_loop_stall_guard")
+        # first, so it tears down last: after every fixture that stops a channel
+        if isinstance(item, pytest.Function) and inspect.iscoroutinefunction(item.function):
+            item.fixturenames.insert(0, "_settle_aiosqlite")
 
 
 @pytest_asyncio.fixture
@@ -834,17 +1045,3 @@ def redis_url() -> str:
     if not url:
         pytest.skip("PINCER_TEST_REDIS_URL not set")
     return url
-
-
-_MEMORY_SERVER = Path(__file__).resolve().parents[1] / "src" / "sqlite-vec-memory-mcp" / "memory_server.py"
-
-
-@pytest.fixture(scope="session")
-def memory_server_module() -> ModuleType:
-    """src/sqlite-vec-memory-mcp/memory_server.py (a script, not a package), loaded once and
-    only for tests that ask for it. Tests that touch its tool index reset that state themselves."""
-    spec = importlib.util.spec_from_file_location("sqlite_vec_memory_server_under_test", _MEMORY_SERVER)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module

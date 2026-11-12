@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.autogenerate import compare_metadata, produce_migrations
@@ -25,6 +26,9 @@ from pincer.db.metadata import (
     is_sqlite_primary_key_nullability,
     metadata,
 )
+
+# Runs the real Alembic upgrade rather than copying the template database.
+pytestmark = pytest.mark.real_migrations
 
 _OPTS = {
     "include_object": include_object,
