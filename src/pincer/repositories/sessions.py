@@ -141,18 +141,24 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             return 0
         # Plain columns, not ORM objects: re-keying a row the session holds
         # would leave its identity map pointing at the old key.
-        stmt: Select[Any] = sa_select(
-            col(ChatSession.session_id),
-            col(ChatSession.messages),
-            col(ChatSession.session_metadata).label("session_metadata"),
-            col(ChatSession.created_at),
-            col(ChatSession.updated_at),
-        ).where(col(ChatSession.session_id).in_([*moves, *moves.values()]))
-        connection = await self.session.connection()
-        rows = {row.session_id: row._asdict() for row in await connection.execute(stmt)}
+        taken = select(ChatSession.session_id).where(col(ChatSession.session_id).in_(list(moves.values())))
+        existing = set((await self.session.exec(taken)).all())
+        collisions = {old: new for old, new in moves.items() if new in existing}
+        rows: dict[str, dict[str, Any]] = {}
+        if collisions:
+            # Only colliding rows' histories are read; a plain move needs none.
+            stmt: Select[Any] = sa_select(
+                col(ChatSession.session_id),
+                col(ChatSession.messages),
+                col(ChatSession.session_metadata).label("session_metadata"),
+                col(ChatSession.created_at),
+                col(ChatSession.updated_at),
+            ).where(col(ChatSession.session_id).in_([*collisions, *collisions.values()]))
+            connection = await self.session.connection()
+            rows = {row.session_id: row._asdict() for row in await connection.execute(stmt)}
         changed = 0
         for old_key, new_key in moves.items():
-            if new_key in rows:
+            if old_key in collisions:
                 merged = _merged_session(rows[old_key], rows[new_key])
                 target = update(ChatSession).where(col(ChatSession.session_id) == new_key).values(**merged)
                 changed += int((await self.session.exec(target)).rowcount)
@@ -170,10 +176,12 @@ def _merged_session(source: dict[str, Any], target: dict[str, Any]) -> dict[str,
     """One row's content from two that collide on a key during a merge.
 
     Messages carry no timestamps, so the conversations are joined whole: the
-    one created first goes first (the target on a tie). Each stored list ends
-    on a finished turn, so no tool call is split from its result. Metadata is
-    combined with the more recently updated row's keys winning (the target's
-    on a tie), and the times span both rows.
+    one created first goes first (the target on a tie). A list saved mid-turn
+    may end on a tool call with no result; the agent's tool-pair repair drops
+    it on the next turn wherever it now sits. Metadata is combined with the
+    more recently updated row's keys winning (the target's on a tie), so a
+    `memory_free` flag on either side stays: the joined conversation holds
+    what was said off the record. The times span both rows.
     """
     first, second = (source, target) if source["created_at"] < target["created_at"] else (target, source)
     older, newer = (target, source) if source["updated_at"] > target["updated_at"] else (source, target)

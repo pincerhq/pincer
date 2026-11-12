@@ -257,6 +257,9 @@ class SessionManager:
             )
 
         session._saved_hash = hash(_serialized(session))
+        # A row past the cap (two conversations joined by an identity merge,
+        # or a lowered cap) is cut now, not at the end of a turn that sent it whole.
+        self._trim(session)
         self._cache[key] = session
         await self._evict_overflow(keep=key)
         return session

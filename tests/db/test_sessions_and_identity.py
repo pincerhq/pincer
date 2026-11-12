@@ -17,7 +17,7 @@ from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
-from pincer.models.sessions import ChatSession
+from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
@@ -310,6 +310,35 @@ async def test_merging_combines_metadata_and_spans_both_times(url, source_newer)
     }
     assert row["created_at"] == 100.0
     assert row["updated_at"] == 400.0
+
+
+@pytest.mark.parametrize("memory_free_side", ["usr_hash", "alice"])
+async def test_merging_a_memory_free_conversation_keeps_it_memory_free(url, memory_free_side):
+    """What was said off the record stays off it, whichever side said it."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    async with session_scope(url) as session:
+        repo = SessionRepository(session)
+        for user_id, at in [("usr_hash", 100.0), ("alice", 200.0)]:
+            metadata = {MEMORY_FREE_KEY: "true"} if user_id == memory_free_side else {}
+            await repo.save(
+                {
+                    "session_id": f"web:{user_id}:{_CONVERSATION}",
+                    "user_id": user_id,
+                    "channel": "web",
+                    "messages": "[]",
+                    "metadata": json.dumps(metadata),
+                    "created_at": at,
+                    "updated_at": at,
+                }
+            )
+
+    await service.rename_identity("usr_hash", "alice")
+
+    row = await SessionService(url).load(f"web:alice:{_CONVERSATION}", user_id="", channel="", legacy_fallback=False)
+    assert row is not None
+    assert json.loads(row["metadata"]) == {MEMORY_FREE_KEY: "true"}
 
 
 async def test_merging_joins_main_and_nested_collisions_in_one_rename(url):

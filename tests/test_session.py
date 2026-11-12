@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -429,6 +430,25 @@ async def test_a_turn_keeps_its_history_whole_and_ends_by_dropping_thinking_and_
 
     assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
     assert all(not m.thinking_blocks and not m.images for m in session.messages)
+
+
+async def test_a_stored_session_past_the_cap_is_trimmed_when_loaded(session_manager, tmp_path: Path):
+    """An identity merge can join two histories into one row past the cap: the
+    first turn on it must not send both whole."""
+    messages = [LLMMessage(role=MessageRole.USER, content=f"m{i}").to_dict() for i in range(40)]
+    await (await SessionService.for_path(tmp_path / "test.db")).save(
+        session_id="test:user1",
+        user_id="user1",
+        channel="test",
+        messages=json.dumps(messages),
+        metadata="{}",
+        created_at=1.0,
+        updated_at=1.0,
+    )
+
+    session = await session_manager.get_or_create("user1", "test")
+
+    assert [m.content for m in session.messages] == [f"m{i}" for i in range(28, 40)]
 
 
 async def test_a_turn_that_fails_still_ends(session_manager):
