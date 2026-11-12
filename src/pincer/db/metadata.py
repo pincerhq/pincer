@@ -57,9 +57,11 @@ HAND_WRITTEN_COLUMNS = frozenset({("pincer_memories", "search_vector")})
 
 
 def include_object(obj: Any, name: str | None, type_: str, reflected: bool, compare_to: Any) -> bool:
-    """Alembic filter: leave hand-written and SQLite-internal objects alone."""
+    """Alembic filter: leave hand-written, SQLite-internal and whatsmeow objects alone."""
     if type_ == "table":
-        return name not in HAND_WRITTEN_TABLES and not (name or "").startswith("sqlite_")
+        # whatsmeow_*: the WhatsApp session (PINCER_WHATSAPP_SESSION_DB) may
+        # share Pincer's schema; whatsmeow manages those tables itself.
+        return name not in HAND_WRITTEN_TABLES and not (name or "").startswith(("sqlite_", "whatsmeow_"))
     if type_ == "index":
         return name not in HAND_WRITTEN_INDEXES
     if type_ == "column":

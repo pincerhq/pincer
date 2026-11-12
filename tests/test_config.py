@@ -341,3 +341,119 @@ def test_summary_effort_and_thinking_default_to_unset(tmp_path: Path, monkeypatc
     monkeypatch.delenv("PINCER_SUMMARY_THINKING", raising=False)
     s = _settings_from_env(tmp_path)
     assert (s.summary_reasoning_effort, s.summary_thinking) == ("", "")
+
+
+# ── WhatsApp session store / account ──────────────────────────────
+
+
+def _wa_settings(tmp_path: Path, **kw: object) -> Settings:
+    return Settings(anthropic_api_key="sk-test", data_dir=tmp_path, **kw)  # type: ignore[arg-type]
+
+
+def test_whatsapp_session_defaults_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PINCER_WHATSAPP_SESSION_DB", raising=False)
+    monkeypatch.delenv("PINCER_WHATSAPP_JID", raising=False)
+    s = _wa_settings(tmp_path, _env_file=None)
+    assert s.whatsapp_session_db.get_secret_value() == ""
+    assert s.whatsapp_jid == ""
+
+
+@pytest.mark.parametrize("url", ["postgres://u:p@h/db?search_path=wa", "postgresql://u:p@h/db"])
+def test_whatsapp_session_db_accepts_postgres(tmp_path: Path, url: str) -> None:
+    assert _wa_settings(tmp_path, whatsapp_session_db=url).whatsapp_session_db.get_secret_value() == url
+
+
+@pytest.mark.parametrize("url", ["sqlite:///data/wa.db", "/data/pincer-wa.db", "mysql://u:s3cret@h/db"])
+def test_whatsapp_session_db_rejects_other_schemes(tmp_path: Path, url: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="PINCER_WHATSAPP_SESSION_DB") as exc:
+        _wa_settings(tmp_path, whatsapp_session_db=url)
+    assert "s3cret" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("+49 151 2345-678", "491512345678"),
+        ("491512345678", "491512345678"),
+        ("+49 (0) 151 234567", "49151234567"),
+        ("", ""),
+    ],
+)
+def test_whatsapp_jid_normalised(tmp_path: Path, raw: str, expected: str) -> None:
+    assert _wa_settings(tmp_path, whatsapp_jid=raw).whatsapp_jid == expected
+
+
+@pytest.mark.parametrize("raw", ["491512345678@s.whatsapp.net", "٣٤٥٦٧٨", "49151²", "4915", "4" * 16])
+def test_whatsapp_jid_rejects_non_numbers(tmp_path: Path, raw: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="PINCER_WHATSAPP_JID"):
+        _wa_settings(tmp_path, whatsapp_jid=raw)
+
+
+@pytest.mark.parametrize("raw", ["0049151234567", "0151 234567"])
+def test_whatsapp_jid_rejects_00_and_trunk_zero(tmp_path: Path, raw: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="E.164"):
+        _wa_settings(tmp_path, whatsapp_jid=raw)
+
+
+@pytest.mark.parametrize(
+    "url", ["postgres://u:s3cret@[db:5432/x", "postgres://u:s3cret@h:99999/db", "postgres://u:s3cret@h:abc/db"]
+)
+def test_whatsapp_session_db_rejects_malformed_url(tmp_path: Path, url: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="is not a valid URL") as exc:
+        _wa_settings(tmp_path, whatsapp_session_db=url)
+    assert "s3cret" not in str(exc.value)
+
+
+def test_whatsapp_session_db_requires_a_host(tmp_path: Path) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="has no host"):
+        _wa_settings(tmp_path, whatsapp_session_db="postgres:///db")
+    url = "postgres:///db?host=/var/run/postgresql"
+    assert _wa_settings(tmp_path, whatsapp_session_db=url).whatsapp_session_db.get_secret_value() == url
+
+
+@pytest.mark.parametrize("url", ['"postgres://u:s3cret@h/db"', "u:s3cret@h:5432/db?x=http://y"])
+def test_whatsapp_session_db_never_echoes_a_malformed_scheme(tmp_path: Path, url: str) -> None:
+    from pincer.exceptions import ConfigError
+
+    with pytest.raises((ConfigError, ValidationError), match="<invalid>") as exc:
+        _wa_settings(tmp_path, whatsapp_session_db=url)
+    assert "s3cret" not in str(exc.value)
+    assert "postgres" not in str(exc.value).split("got scheme")[-1]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("POSTGRES://u:P@h/DB", "postgres://u:P@h/DB"),
+        ("PostgreSQL://u:p@h/db?search_path=WA", "postgresql://u:p@h/db?search_path=WA"),
+    ],
+)
+def test_whatsapp_session_db_lowercases_scheme_only(tmp_path: Path, url: str, expected: str) -> None:
+    assert _wa_settings(tmp_path, whatsapp_session_db=url).whatsapp_session_db.get_secret_value() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("postgres://h/db", True),
+        ("postgresql://h/db", True),
+        ("POSTGRES://h/db", True),
+        ("postgres:/h/db", False),
+        ("sqlite:///x.db", False),
+        ("", False),
+    ],
+)
+def test_is_postgres_url(value: str, expected: bool) -> None:
+    from pincer.config.channels import is_postgres_url
+
+    assert is_postgres_url(value) is expected

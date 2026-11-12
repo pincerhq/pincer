@@ -34,7 +34,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
-    assert len(report.checks) == 71
+    # + 1 WhatsApp session store
+    assert len(report.checks) == 72
 
     assert 0 <= report.score <= 100
 
@@ -2202,3 +2203,142 @@ def test_llm_compaction_warns_about_a_summary_threshold_still_set(update, status
     result = SecurityDoctor()._check_llm_compaction(_llm_cfg(**update))
 
     assert (result.status, result.message, result.category) == (status, message, "llm")
+
+
+# ── WhatsApp session store ──────────────────────────────────────────
+
+
+def _wa_store_cfg(tmp_path, *, enabled=True, session_db=""):
+    from pydantic import SecretStr
+
+    return SimpleNamespace(
+        whatsapp_enabled=enabled, whatsapp_session_db=SecretStr(session_db), data_dir=tmp_path / "data"
+    )
+
+
+def test_whatsapp_session_store_skipped_when_disabled(tmp_path):
+    result = SecurityDoctor()._check_whatsapp_session_store(_wa_store_cfg(tmp_path, enabled=False))
+    assert result.status == CheckStatus.SKIPPED
+
+
+def test_whatsapp_session_store_postgres_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path, session_db="postgres://u:p@h/db")
+    assert SecurityDoctor()._check_whatsapp_session_store(cfg).status == CheckStatus.PASS
+
+
+def test_whatsapp_session_store_writable_data_dir_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    assert SecurityDoctor()._check_whatsapp_session_store(cfg).status == CheckStatus.PASS
+
+
+def test_whatsapp_session_store_unwritable_data_dir_warns(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    monkeypatch.setattr(os, "access", lambda *a, **kw: False)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_WHATSAPP_SESSION_DB" in result.fix_hint
+
+
+def test_whatsapp_session_store_existing_file_writable_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    (cfg.data_dir / "pincer-wa.db").touch()
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "pincer-wa.db" in result.message
+
+
+def test_whatsapp_session_store_existing_file_unwritable_warns(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    session_file = cfg.data_dir / "pincer-wa.db"
+    session_file.touch()
+    monkeypatch.setattr(os, "access", lambda path, mode: path != session_file)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert str(session_file) in result.message
+
+
+def test_whatsapp_session_store_missing_data_dir_writable_parent_passes(tmp_path):
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir = tmp_path / "not" / "yet" / "data"
+    assert SecurityDoctor()._check_whatsapp_session_store(cfg).status == CheckStatus.PASS
+
+
+def test_whatsapp_session_store_missing_data_dir_unwritable_parent_warns(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    monkeypatch.setattr(os, "access", lambda path, mode: path != tmp_path)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert str(cfg.data_dir) in result.message
+
+
+def test_whatsapp_session_store_names_the_euid(tmp_path):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert f"euid={os.geteuid()}" in result.message
+
+
+def test_whatsapp_session_store_existing_file_needs_dir_search(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    (cfg.data_dir / "pincer-wa.db").touch()
+    modes = []
+
+    def access(path, mode):
+        modes.append((path, mode))
+        return not (path == cfg.data_dir and mode & os.X_OK)
+
+    monkeypatch.setattr(os, "access", access)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert (cfg.data_dir, os.W_OK | os.X_OK) in modes
+
+
+def test_whatsapp_session_store_root_owned_dir_warns_when_run_as_root(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    from pathlib import Path
+
+    real_stat = Path.stat
+
+    def stat(self, *a, **kw):
+        st = real_stat(self, *a, **kw)
+        if self == cfg.data_dir:
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 0, 0, *tuple(st)[6:10]))
+        return st
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(Path, "stat", stat)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "euid=0" in result.message
+    assert "owned by root" in result.message
+    assert "USER pincer" in result.message
+
+
+def test_whatsapp_session_store_run_as_root_other_owner_passes_with_note(tmp_path, monkeypatch):
+    import os
+
+    cfg = _wa_store_cfg(tmp_path)
+    cfg.data_dir.mkdir()
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    result = SecurityDoctor()._check_whatsapp_session_store(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "euid=0" in result.message
+    assert "checked as root" in result.message

@@ -4,8 +4,8 @@ The point of the repository layer is that the runtime does not speak to one
 database directly. Anything outside this list that reaches for a SQLite driver
 has gone around it — and will not run on Postgres.
 
-Both drivers count. `sqlite3` is the synchronous one and nothing under `src`
-imports it today, so it is banned outright rather than exempted anywhere.
+Both drivers count. `sqlite3` is the synchronous one; its only exemption is
+the WhatsApp session file, which belongs to whatsmeow, not to Pincer.
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ ALLOWED = {
     "voice/retention.py": "ensure_schema_for_connection() takes a caller's connection (a test seam)",
     "observability/call_costs.py": "ensure_call_costs_table() is the same seam",
     "voice/safety_gates.py": "ensure_outbound_tables() is the same seam",
+    "channels/whatsapp_store.py": (
+        "reads whatsmeow_device via sqlite3 or psycopg from whatsmeow's own session store, not Pincer's database"
+    ),
 }
 
 

@@ -14,6 +14,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import io
 import logging
@@ -22,6 +23,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -54,6 +56,7 @@ except ImportError:
     ChatPresenceMedia = None  # type: ignore[assignment,misc]
     _NEONIZE_VERSION = "not installed"
 
+from pincer.channels import whatsapp_store
 from pincer.channels.approval_text import norm_emoji, parse_yes_no
 from pincer.channels.base import (
     BaseChannel,
@@ -62,6 +65,7 @@ from pincer.channels.base import (
     MessageHandler,
 )
 from pincer.channels.group_trigger import matches_group_trigger, strip_group_triggers
+from pincer.config.channels import WHATSAPP_SQLITE_FILE, is_postgres_url
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -127,6 +131,12 @@ _WA_CONNECT_FAILURE_REMEDIATION: dict[int, tuple[str, str]] = {
     6: ("client_outdated", _WA_CLIENT_OUTDATED_ACTION),
     7: ("bad_user_agent", _WA_BAD_USER_AGENT_ACTION),
 }
+
+
+_WA_CONNECT_TIMEOUT = 120
+# How long to wait for a LoggedOut/ConnectFailure handler (scheduled with
+# call_soon_threadsafe) after the connect task has already ended.
+_WA_LOGIN_ERROR_GRACE = 1.0
 
 
 def _split_whatsapp_message(text: str, max_len: int = MAX_WHATSAPP_MESSAGE_LENGTH) -> list[str]:
@@ -620,7 +630,35 @@ class WhatsAppChannel(BaseChannel):
             WhatsAppChannel._loop_started = True
             logger.debug("Started neonize event_global_loop in daemon thread")
 
-        self._client = NewAClient(name=str(self._settings.data_dir / "pincer-wa.db"))
+        store = self._settings.whatsapp_session_db.get_secret_value() or str(
+            self._settings.data_dir / WHATSAPP_SQLITE_FILE
+        )
+        logger.info("WhatsApp session store: %s", whatsapp_store.describe_store(store))
+        client_kwargs: dict[str, Any] = {"name": store}
+        if is_postgres_url(store):
+            # A SQLite store keeps neonize's default key (its path), so an
+            # already-paired session resumes unchanged.
+            client_kwargs["uuid"] = whatsapp_store.WA_SESSION_UUID
+        phone = self._settings.whatsapp_jid
+        if phone:
+            # whatsmeow's GetDevice returns nil for an unknown JID, and
+            # NewClient(nil) crashes the process in Go, so look it up first.
+            try:
+                device_jid = await asyncio.to_thread(whatsapp_store.stored_device_jid, store, phone)
+            except Exception as e:
+                raise RuntimeError(
+                    f"WhatsApp store/connect failed: {whatsapp_store.redact_store(str(e), store)}"
+                ) from None
+            if device_jid:
+                logger.info("WhatsApp: resuming stored account %s", phone)
+                client_kwargs["jid"] = whatsapp_store.parse_device_jid(device_jid)
+            else:
+                logger.warning(
+                    "WhatsApp: no stored session for %s — scan the QR code with that phone to pair it",
+                    phone,
+                )
+                client_kwargs["new_device"] = True
+        self._client = NewAClient(**client_kwargs)
 
         self._client.event.qr(self._on_qr)
 
@@ -649,7 +687,7 @@ class WhatsAppChannel(BaseChannel):
         self._client.event.execute = _safe_execute  # type: ignore[assignment]
 
         logger.info("Connecting to WhatsApp...")
-        await self._client.connect()
+        connect_task = await self._client.connect()
 
         # connect() assigns neonize's event_global_loop to the running loop.
         # If a separate loop is running in our daemon thread (older neonize),
@@ -658,10 +696,7 @@ class WhatsAppChannel(BaseChannel):
         if loop is not None and loop is not asyncio.get_running_loop():
             loop.call_soon_threadsafe(lambda: None)
 
-        try:
-            await asyncio.wait_for(self._connected.wait(), timeout=120)
-        except TimeoutError:
-            raise RuntimeError("WhatsApp connection timed out. Did you scan the QR code?") from None
+        await self._wait_connected(connect_task, store)
 
         # Login-failure handlers set _login_error AND wake _connected so we
         # don't hang to the timeout. Surface the reason here instead.
@@ -674,6 +709,52 @@ class WhatsAppChannel(BaseChannel):
                 loop.is_running(),
                 loop.is_closed(),
             )
+
+    async def _wait_connected(self, connect_task: Any, store: str) -> None:
+        """Wait for Connected (or a login failure), failing fast if neonize's
+        connect task dies first — that is how Go reports a bad store URL, an
+        unwritable session file or a missing schema."""
+        waiter = asyncio.ensure_future(self._connected.wait())
+        watched: set[asyncio.Future[Any]] = {waiter}
+        if isinstance(connect_task, asyncio.Future):
+            watched.add(connect_task)
+        try:
+            done, _ = await asyncio.wait(watched, timeout=_WA_CONNECT_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+        if waiter in done:
+            self._watch_connect_task(connect_task, store)
+            return
+        if connect_task in done:
+            exc = None if connect_task.cancelled() else connect_task.exception()
+            if exc is None:
+                # A clean exit may be a login failure whose LoggedOut /
+                # ConnectFailure handler is still queued via
+                # call_soon_threadsafe; give it a moment to record the reason.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._connected.wait(), timeout=_WA_LOGIN_ERROR_GRACE)
+                if self._login_error:
+                    return  # start() raises "WhatsApp login failed: …"
+            reason = whatsapp_store.redact_store(str(exc), store) if exc else "the client stopped before connecting"
+            if is_postgres_url(store) and '"whatsmeow_version" does not exist' in reason:
+                # What a missing (or unusable) search_path schema looks like.
+                schema = whatsapp_store.search_path_of(store) or "public"
+                reason += f" (does schema {schema!r} exist, and may this role use and create in it?)"
+            raise RuntimeError(f"WhatsApp store/connect failed: {reason}") from None
+        # Still running: log a later failure (redacted) instead of letting
+        # asyncio report "exception never retrieved" with the raw URL.
+        self._watch_connect_task(connect_task, store)
+        raise RuntimeError("WhatsApp connection timed out. Did you scan the QR code?")
+
+    def _watch_connect_task(self, connect_task: Any, store: str) -> None:
+        if isinstance(connect_task, asyncio.Future):
+            connect_task.add_done_callback(lambda t: self._log_connect_task_end(t, store))
+
+    @staticmethod
+    def _log_connect_task_end(task: asyncio.Future[Any], store: str) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("WhatsApp client stopped: %s", whatsapp_store.redact_store(str(task.exception()), store))
 
     async def stop(self) -> None:
         if self._client:
@@ -770,7 +851,6 @@ class WhatsAppChannel(BaseChannel):
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
         import mimetypes
-        from pathlib import Path
 
         p = Path(file_path)
         filename = p.name
@@ -841,6 +921,19 @@ class WhatsAppChannel(BaseChannel):
         # before the owner has sent anything; outgoing messages stay a fallback.
         if me.HasField("LID") and me.LID.User:
             self._own_lid = me.LID.User
+        expected = self._settings.whatsapp_jid
+        if expected and self._own_jid != expected:
+            logger.error(
+                "WhatsApp: PINCER_WHATSAPP_JID is %s but the paired account is %s — "
+                "the QR code was scanned with a different phone",
+                expected,
+                self._own_jid,
+            )
+            # Set before waking _connected so start() sees it and fails.
+            self._login_error = (
+                f"paired account {self._own_jid} but PINCER_WHATSAPP_JID is {expected} — "
+                "unlink the device in WhatsApp → Linked devices and re-pair with the right phone"
+            )
         self._connected.set()
         logger.info(
             "WhatsApp connected — own_jid=%r  full_jid=%s  own_lid=%r",
