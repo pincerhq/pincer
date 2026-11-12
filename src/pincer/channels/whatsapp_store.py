@@ -51,8 +51,8 @@ _LIBPQ_KEYWORDS_FALLBACK = frozenset(
 )  # fmt: skip
 _libpq_keywords_cache: frozenset[str] | None = None
 
-# Passwords shorter than this are not replaced literally: `54` would garble
-# the `5432` port. The URL-shaped and `password=` regexes still catch them.
+# A password shorter than this is replaced only as a whole token (not inside
+# a longer run of word characters), so `54` never garbles the `5432` port.
 _MIN_LITERAL_SECRET_LEN = 6
 _URL_USERINFO_RE = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
 _PASSWORD_PARAM_RE = re.compile(r"(?i)\bpassword=[^&\s]*")
@@ -122,7 +122,7 @@ def search_path_of(store: str) -> str | None:
 
 
 def _url_secrets(store: str) -> set[str]:
-    """Every form of the password in `store`, long enough to replace literally."""
+    """Every form of the password in `store` (raw, percent-decoded, query value)."""
     parts = urlsplit(store)
     secrets: set[str] = set()
     if parts.password:
@@ -131,7 +131,14 @@ def _url_secrets(store: str) -> set[str]:
         key, sep, raw = pair.partition("=")
         if sep and unquote(key).lower() == "password" and raw:
             secrets |= {raw, unquote(raw), unquote(raw.replace("+", " "))}
-    return {s for s in secrets if len(s) >= _MIN_LITERAL_SECRET_LEN}
+    return {s for s in secrets if s}
+
+
+def _replace_secret(text: str, secret: str) -> str:
+    if len(secret) >= _MIN_LITERAL_SECRET_LEN:
+        return text.replace(secret, "***")
+    # Short: only where it stands alone, e.g. `pq: password p@ss rejected`.
+    return re.sub(rf"(?<![\w%]){re.escape(secret)}(?![\w%])", "***", text)
 
 
 def redact_store(text: str, store: str) -> str:
@@ -149,7 +156,7 @@ def redact_store(text: str, store: str) -> str:
         text = text.replace(url, _STORE_PLACEHOLDER)
     # Longest first so one form never leaves part of another behind.
     for secret in sorted(secrets, key=len, reverse=True):
-        text = text.replace(secret, "***")
+        text = _replace_secret(text, secret)
     text = _URL_USERINFO_RE.sub(r"\1***@", text)
     return _PASSWORD_PARAM_RE.sub("password=***", text)
 

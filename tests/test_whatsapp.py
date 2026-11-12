@@ -1253,6 +1253,15 @@ class TestReviewHardening:
         assert "db:5432: refused" in out
         assert "postgres://u:***@db:5432/other" in out
 
+    def test_short_decoded_password_redacted_as_a_whole_token(self):
+        from pincer.channels.whatsapp_store import redact_store
+
+        store = "postgres://u:p%40ss@h:5432/db"
+        assert redact_store("pq: password p@ss rejected", store) == "pq: password *** rejected"
+        assert redact_store("raw p%40ss here", store) == "raw *** here"
+        # Inside a longer token it is left alone.
+        assert redact_store("user xp@ssy", store) == "user xp@ssy"
+
     def test_unknown_param_moves_into_options(self):
         from pincer.channels.whatsapp_store import libpq_conninfo
 
