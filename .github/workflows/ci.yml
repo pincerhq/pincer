@@ -102,11 +102,14 @@ jobs:
       # tests/db runs in the postgres job, on SQLite and Postgres. The voice
       # harness runs in its own step below. One xdist worker per core, a whole
       # file per worker (module fixtures stay on one); pytest-cov merges the
-      # workers' data into COVERAGE_FILE.
+      # workers' data into COVERAGE_FILE. Voice gets 2 workers: its tests time
+      # the event loop (audio ticks, drain windows), and four workers on four
+      # cores starved them of CPU.
       - name: Run tests with coverage
         run: >-
           uv run pytest tests/ --ignore=tests/db --ignore=tests/voice_harness
-          --suite=${{ matrix.suite }} -n auto --dist loadfile --cov=pincer --cov-report=
+          --suite=${{ matrix.suite }} -n ${{ matrix.suite == 'voice' && '2' || 'auto' }} --dist loadfile
+          --cov=pincer --cov-report=
 
       # Sprint 10 (T10.5): the voice reliability + red-team harness is a
       # release-blocking gate now that voice is a stable-tier surface. Run it
