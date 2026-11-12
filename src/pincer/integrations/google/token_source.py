@@ -20,12 +20,10 @@ import binascii
 import json
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 from pincer.core.log_once import LogOncePerKey
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +115,25 @@ def searched_paths(settings: Any, oauth_dir: Path | None = None) -> list[Path]:
     return [oauth_dir / name for name in TOKEN_FILES]
 
 
+def credentials_path(settings: Any, oauth_dir: Path | None = None) -> Path:
+    """``google_credentials.json`` as found by ``Settings.google_credentials_path`` — the OAuth dir
+    first, then the other candidate directories — or, for settings without that method (test
+    doubles), the one in the OAuth dir. The path may not exist."""
+    oauth_dir = oauth_dir if oauth_dir is not None else settings.google_oauth_dir()
+    lookup = getattr(type(settings), "google_credentials_path", None)
+    path = lookup(settings, oauth_dir) if callable(lookup) else None
+    return path if isinstance(path, Path) else oauth_dir / CREDENTIALS_FILE
+
+
+def client_file_paths(settings: Any, oauth_dir: Path | None = None) -> list[Path]:
+    """Every ``google_credentials.json`` :func:`credentials_path` looks at, in order (for messages)."""
+    oauth_dir = oauth_dir if oauth_dir is not None else settings.google_oauth_dir()
+    candidates = getattr(type(settings), "google_oauth_candidates", None)
+    dirs = candidates(settings) if callable(candidates) else []
+    others = [d for d in dirs if isinstance(d, Path) and d != oauth_dir] if isinstance(dirs, list) else []
+    return [directory / CREDENTIALS_FILE for directory in dict.fromkeys([oauth_dir, *others])]
+
+
 @dataclass(frozen=True)
 class OAuthClient:
     """An OAuth client JSON (``{"installed": {...}}`` or ``{"web": {...}}``) and where it came from."""
@@ -156,13 +173,13 @@ def _client_section(data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def oauth_clients(settings: Any, oauth_dir: Path | None = None) -> list[OAuthClient]:
-    """Every usable OAuth client, in priority order: ``google_credentials.json`` in
-    ``settings.google_oauth_dir()``, then ``PINCER_GOOGLE_CREDENTIALS_JSON``. A source
+    """Every usable OAuth client, in priority order: ``google_credentials.json`` (see
+    :func:`credentials_path`), then ``PINCER_GOOGLE_CREDENTIALS_JSON``. A source
     without an ``installed``/``web`` client holding ``client_id`` and ``client_secret``
     is logged and skipped. Pass *oauth_dir* when the caller already resolved it.
     """
     clients: list[OAuthClient] = []
-    path = (oauth_dir if oauth_dir is not None else settings.google_oauth_dir()) / CREDENTIALS_FILE
+    path = credentials_path(settings, oauth_dir)
     if path.exists():
         try:
             data: Any = json.loads(path.read_text())
@@ -192,8 +209,10 @@ def client_config(settings: Any, oauth_dir: Path | None = None) -> OAuthClient |
     return clients[0] if clients else None
 
 
-def _client_locations(oauth_dir: Path) -> str:
-    return f"{oauth_dir / CREDENTIALS_FILE} or {CREDENTIALS_ENV}"
+def client_locations(settings: Any, oauth_dir: Path | None = None) -> str:
+    """Where an OAuth client is looked for, for messages: every client file, then the env var."""
+    files = ", ".join(str(p) for p in client_file_paths(settings, oauth_dir))
+    return f"{files} or {CREDENTIALS_ENV}"
 
 
 def _env_location(settings: Any, token_info: dict[str, Any]) -> dict[str, Any] | None:
@@ -238,7 +257,7 @@ def _env_location(settings: Any, token_info: dict[str, Any]) -> dict[str, Any] |
             "env-token-without-client",
             "Google Workspace tools off: %s lacks client_id/client_secret and no matching OAuth client found in %s",
             TOKEN_ENV,
-            _client_locations(oauth_dir),
+            client_locations(settings, oauth_dir),
         )
         return None
     for key in keys:
@@ -271,8 +290,8 @@ def locate_token(settings: Any) -> dict[str, Any] | None:
             error,
             oauth_dir,
         )
-    credentials_path = oauth_dir / CREDENTIALS_FILE
     for token_path in searched_paths(settings, oauth_dir):
         if token_path.exists():
-            return {"credentials_path": str(credentials_path), "token_path": str(token_path)}
+            client_file = credentials_path(settings, oauth_dir)
+            return {"credentials_path": str(client_file), "token_path": str(token_path)}
     return None

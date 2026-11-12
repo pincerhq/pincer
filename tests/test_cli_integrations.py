@@ -333,7 +333,7 @@ def test_google_setup_missing_credentials(monkeypatch: pytest.MonkeyPatch, tmp_p
     result = runner.invoke(app, ["google", "setup"])
 
     assert result.exit_code == 1
-    assert "Missing:" in result.output
+    assert "No OAuth client found" in result.output
 
 
 def test_google_setup_declines_reauth(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]

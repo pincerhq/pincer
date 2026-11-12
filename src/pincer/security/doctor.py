@@ -2195,7 +2195,7 @@ class SecurityDoctor:
                 name,
                 CheckStatus.WARNING,
                 f"{token_source.TOKEN_ENV} is set but unusable: no client_id/client_secret and no matching "
-                f"OAuth client in {oauth_dir} or {token_source.CREDENTIALS_ENV}",
+                f"OAuth client in {token_source.client_locations(settings, oauth_dir)}",
                 fix_hint=f"Run `pincer google setup --print-env` and update {token_source.TOKEN_ENV}",
                 category="google",
             )

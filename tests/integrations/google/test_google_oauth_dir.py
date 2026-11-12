@@ -371,3 +371,181 @@ def test_an_undecodable_client_env_is_logged_without_leaking(dirs, monkeypatch, 
         assert client_config(_settings()) is None
     assert "Ignoring PINCER_GOOGLE_CREDENTIALS_JSON" in caplog.text
     assert "secret-client-garbage" not in caplog.text
+
+
+# ── google_credentials.json is looked up apart from the token (#368 review) ──
+
+
+def test_a_client_file_in_data_dir_is_found_when_a_legacy_token_selects_cwd_data(dirs, caplog):
+    """A leftover token in ./data picks the OAuth dir; the client file in data_dir is still used."""
+    from pincer.integrations.google.token_source import credentials_path
+
+    data_dir, cwd = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_token.json").write_text(json.dumps(TRIMMED_TOKEN))
+    settings = _settings()
+    assert settings.google_oauth_dir() == cwd / "data"
+    assert credentials_path(settings) == data_dir / "google_credentials.json"
+    client = client_config(settings)
+    assert client is not None
+    assert client.source == f"file:{data_dir / 'google_credentials.json'}"
+    assert locate_token(settings)["credentials_path"] == str(data_dir / "google_credentials.json")
+
+
+def test_a_client_file_next_to_the_token_wins_over_one_in_another_dir(dirs):
+    data_dir, cwd = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_token.json").write_text(json.dumps(TRIMMED_TOKEN))
+    (cwd / "data" / "google_credentials.json").write_text(json.dumps(ENV_CLIENT))
+    assert client_config(_settings()).client_id == "env-cid"
+
+
+def test_a_client_file_only_in_cwd_data_is_used_with_a_deprecation_warning(dirs, caplog):
+    data_dir, cwd = dirs
+    (data_dir / "google_workspace_token.json").write_text(json.dumps(TRIMMED_TOKEN))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    with caplog.at_level(logging.WARNING, logger="pincer.config.main"):
+        settings = _settings()
+        assert settings.google_oauth_dir() == data_dir
+        assert client_config(settings).client_id == "file-cid"
+    [warning] = _legacy_warnings(caplog)
+    assert str(cwd / "data") in warning.getMessage()
+
+
+def test_the_explicit_dir_is_the_only_place_for_the_client_file(dirs, tmp_path, monkeypatch):
+    from pincer.integrations.google.token_source import client_file_paths
+
+    data_dir, _ = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", str(explicit))
+    settings = _settings()
+    assert client_config(settings) is None
+    assert client_file_paths(settings) == [explicit / "google_credentials.json"]
+
+
+def test_the_no_client_message_names_every_client_file_searched(dirs, monkeypatch, caplog):
+    data_dir, cwd = dirs
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_token.json").write_text("{}")
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob({"refresh_token": "r"}))
+    with caplog.at_level(logging.WARNING):
+        assert locate_token(_settings()) is None
+    [message] = [r.getMessage() for r in caplog.records if "Google Workspace tools off" in r.getMessage()]
+    assert str(cwd / "data" / "google_credentials.json") in message
+    assert str(data_dir / "google_credentials.json") in message
+    assert "PINCER_GOOGLE_CREDENTIALS_JSON" in message
+
+
+def test_google_setup_finds_the_client_file_in_data_dir_from_a_cwd_with_a_legacy_token(dirs, monkeypatch):
+    """The review repro: setup must not say the client is missing."""
+    from typer.testing import CliRunner
+
+    from pincer.cli import app
+
+    data_dir, cwd = dirs
+    (data_dir / "google_credentials.json").write_text(json.dumps(FILE_CLIENT))
+    (cwd / "data").mkdir()
+    (cwd / "data" / "google_token.json").write_text(json.dumps(TRIMMED_TOKEN))
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", _settings)
+    result = CliRunner().invoke(app, ["google", "setup"], input="n\n")
+    assert "No OAuth client found" not in result.output
+    assert str(data_dir / "google_credentials.json").replace("\n", "") in result.output.replace("\n", "")
+
+
+# ── onboarding uses the runtime lookup (#368 review) ──────────────────────
+
+
+@pytest.fixture
+def google_enabled(monkeypatch):
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.config.load_config",
+        lambda: GoogleIntegrationConfig(enabled=True, services=["calendar"]),
+    )
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_onboarding_ignores_a_token_outside_the_explicit_dir(dirs, tmp_path, monkeypatch):
+    """The review repro: a token in ~/.pincer is not used when PINCER_GOOGLE_OAUTH_DIR points elsewhere."""
+    from pincer.onboarding import StepStatus, _check_calendar
+
+    data_dir, _ = dirs
+    (data_dir / "google_workspace_token.json").write_text(json.dumps(_full_token()))
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    monkeypatch.setenv("PINCER_GOOGLE_OAUTH_DIR", str(explicit))
+    settings = _settings()
+    assert locate_token(settings) is None
+    status, message = _check_calendar(settings)
+    assert status is StepStatus.MISSING
+    assert str(explicit / "google_workspace_token.json") in message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_onboarding_is_ready_for_the_token_the_runtime_uses(dirs):
+    from pincer.onboarding import StepStatus, _check_calendar
+
+    data_dir, _ = dirs
+    (data_dir / "google_workspace_token.json").write_text(json.dumps(_full_token()))
+    status, message = _check_calendar(_settings())
+    assert status is StepStatus.READY
+    assert str(data_dir / "google_workspace_token.json") in message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_onboarding_rejects_an_env_token_without_a_client(dirs, monkeypatch):
+    from pincer.onboarding import StepStatus, _check_calendar
+
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob(TRIMMED_TOKEN))
+    status, message = _check_calendar(_settings())
+    assert status is StepStatus.MISSING
+    assert "client_id/client_secret" in message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_onboarding_is_ready_for_a_complete_env_token(dirs, monkeypatch):
+    from pincer.onboarding import StepStatus, _check_calendar
+
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", encode_json_blob(_full_token()))
+    status, message = _check_calendar(_settings())
+    assert status is StepStatus.READY
+    assert "PINCER_GOOGLE_TOKEN_JSON" in message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_onboarding_rejects_a_token_without_calendar_scopes(dirs):
+    from pincer.integrations.google.auth import SERVICE_SCOPES
+    from pincer.onboarding import StepStatus, _check_calendar
+
+    data_dir, _ = dirs
+    token = {**_full_token(), "scopes": SERVICE_SCOPES["gmail"]}
+    (data_dir / "google_workspace_token.json").write_text(json.dumps(token))
+    status, message = _check_calendar(_settings())
+    assert status is StepStatus.MISSING
+    assert "Calendar" in message
+
+
+def test_onboarding_reports_a_disabled_integration(dirs, monkeypatch):
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+    from pincer.onboarding import StepStatus, _check_calendar
+
+    monkeypatch.setattr("pincer.integrations.google.config.load_config", lambda: GoogleIntegrationConfig(enabled=False))
+    status, message = _check_calendar(_settings())
+    assert status is StepStatus.MISSING
+    assert "disabled" in message
+
+
+def test_cwd_data_that_is_the_data_dir_is_searched_once(tmp_path, monkeypatch):
+    from pincer.integrations.google.token_source import client_file_paths
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DATA_DIR", "data")
+    settings = _settings()
+    assert settings.google_oauth_candidates() == [settings.data_dir]
+    assert client_file_paths(settings) == [settings.data_dir / "google_credentials.json"]

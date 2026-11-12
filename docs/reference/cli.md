@@ -312,6 +312,8 @@ The OAuth directory does not depend on the directory Pincer is started from:
 4. otherwise the first of them that holds `google_credentials.json`;
 5. otherwise the data directory (where `pincer google setup` writes).
 
+`google_credentials.json` is looked up on its own: in the OAuth directory first, then in the other of the data directory and `./data` (with `PINCER_GOOGLE_OAUTH_DIR` set, only there). So a leftover token in `./data` does not hide a client file in the data directory.
+
 `./data` in the working directory is **deprecated**: it is only used when it holds one of those files, with a warning at startup — move them to the data directory or set `PINCER_GOOGLE_OAUTH_DIR`.
 
 The token and the OAuth client can each come from a file or an env var:
@@ -324,7 +326,7 @@ The token and the OAuth client can each come from a file or an env var:
 | `PINCER_GOOGLE_TOKEN_JSON` with `client_id` but no `client_secret` | the file or `PINCER_GOOGLE_CREDENTIALS_JSON` | The secret comes from whichever of the two holds a client with that id |
 | `PINCER_GOOGLE_TOKEN_JSON` without `client_id`/`client_secret` | `PINCER_GOOGLE_CREDENTIALS_JSON` | The client is filled in from the env var (the file wins when both are set) |
 
-An OAuth client counts only with both `client_id` and `client_secret`. `PINCER_GOOGLE_TOKEN_JSON` wins over the token files. If it cannot be decoded, a warning says so and the token files are used. A token without a client and no client anywhere turns the Google tools off at startup with a warning. `pincer doctor` (check `google_workspace_token`) shows the directory it looked in and where the token and client came from.
+An OAuth client counts only with both `client_id` and `client_secret`. `PINCER_GOOGLE_TOKEN_JSON` wins over the token files. If it cannot be decoded, a warning says so and the token files are used. A token without a client and no client anywhere turns the Google tools off at startup with a warning. `pincer doctor` (check `google_workspace_token`) and the onboarding calendar step use the same lookup as the runtime: they show the directory it looked in and where the token and client came from.
 
 ### Getting `google_credentials.json`
 
