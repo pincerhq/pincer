@@ -54,6 +54,79 @@ def test_storage_root_setting_keeps_uris() -> None:
     assert _RelaxedSettings(storage_root="").storage_root is None  # type: ignore[call-arg]
 
 
+@pytest.mark.parametrize("field", ["storage_root", "skills_dir"])
+@pytest.mark.parametrize("uri", ["gcs://b/", "s3a://b/", "abfs://b/"])
+def test_unsupported_uri_schemes_are_rejected(field: str, uri: str) -> None:
+    scheme = uri.split("://")[0]
+    with pytest.raises(ValidationError, match=rf"{field}: unsupported URI scheme '{scheme}'.*s3://, az:// or gs://"):
+        _RelaxedSettings(**{field: uri})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["storage_root", "skills_dir"])
+@pytest.mark.parametrize("value", ["s3://b/x", "az://c/x", "gs://b/x"])
+def test_supported_uris_are_kept(field: str, value: str) -> None:
+    assert getattr(_RelaxedSettings(**{field: value}), field) == value  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["storage_root", "skills_dir"])
+def test_plain_paths_are_accepted(field: str, tmp_path: Path) -> None:
+    assert getattr(_RelaxedSettings(**{field: str(tmp_path / "x")}), field) == tmp_path / "x"  # type: ignore[arg-type]
+
+
+# ── Skills default: <storage root>/skills ────────────────────────────────────
+
+
+def test_skills_dir_defaults_under_a_cloud_root(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, storage_root="s3://b/")
+    assert settings.skills_dir == "s3://b/skills"
+    assert settings.skills_dir_defaulted
+
+
+def test_skills_dir_defaults_under_a_prefixed_cloud_root(tmp_path: Path) -> None:
+    assert _settings(tmp_path, storage_root="az://box/shared/").skills_dir == "az://box/shared/skills"
+
+
+def test_skills_dir_defaults_under_data_dir_storage_without_a_root(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    assert settings.skills_dir == tmp_path / "storage" / "skills"
+    assert settings.skills_dir_defaulted
+
+
+def test_skills_dir_defaults_under_a_local_root(tmp_path: Path) -> None:
+    assert (
+        _settings(tmp_path / "data", storage_root=str(tmp_path / "files")).skills_dir == tmp_path / "files" / "skills"
+    )
+
+
+@pytest.mark.parametrize("explicit", ["s3://other/team", "/srv/skills"])
+def test_an_explicit_skills_dir_wins(tmp_path: Path, explicit: str) -> None:
+    settings = _settings(tmp_path, storage_root="s3://b/", skills_dir=explicit)
+    assert str(settings.skills_dir) == explicit
+    assert not settings.skills_dir_defaulted
+
+
+def test_an_explicit_skills_dir_from_the_environment_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_SKILLS_DIR", "gs://env-bucket/skills")
+    assert _settings(tmp_path).skills_dir == "gs://env-bucket/skills"
+
+
+def test_default_skills_are_protected_and_the_workspace_is_not(
+    tmp_path: Path, mock_cloud_client: Callable[..., Any]
+) -> None:
+    with patch("pincer.storage.clients.build_client", return_value=mock_cloud_client("s3")):
+        root, protected = resolve_storage_root(_settings(tmp_path, storage_root="s3://b/"))
+    assert protected == ["skills"]
+    browser = StorageBrowser(root, protected, 900, b"k" * 32)
+    assert browser.is_protected("skills/x/SKILL.md")
+    assert not browser.is_protected("workspace/uploads/a.pdf")
+
+
+def test_default_local_skills_are_protected(tmp_path: Path) -> None:
+    root, protected = resolve_storage_root(_settings(tmp_path))
+    assert root == (tmp_path / "storage").resolve()
+    assert protected == ["skills"]
+
+
 # ── Root resolution ──────────────────────────────────────────────────────────
 
 

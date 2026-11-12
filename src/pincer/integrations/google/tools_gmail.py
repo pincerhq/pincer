@@ -8,6 +8,7 @@ Registration helpers wire them into Pincer's ToolRegistry with the
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -298,22 +299,10 @@ async def google__get_attachment(
     if not filename:
         filename = "attachment"
 
-    # 4. Save to disk
-    download_dir = os.path.expanduser("~/.pincer/downloads")
-    os.makedirs(download_dir, exist_ok=True)
+    # 4. Save to the workspace's downloads/ folder
+    from pincer.integrations.google import workspace_files
 
-    save_path = os.path.join(download_dir, filename)
-
-    # Handle duplicate filenames
-    if os.path.exists(save_path):
-        name, ext = os.path.splitext(filename)
-        counter = 1
-        while os.path.exists(save_path):
-            save_path = os.path.join(download_dir, f"{name}_{counter}{ext}")
-            counter += 1
-
-    with open(save_path, "wb") as f:
-        f.write(file_bytes)
+    save_path = await asyncio.to_thread(workspace_files.save_download, filename, file_bytes)
 
     size_kb = len(file_bytes) / 1024
     size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"

@@ -188,6 +188,21 @@ def open_cloud_uri(
         raise error(f"Cannot open {what} {uri}: {type(e).__name__}: {e}. {STORAGE_HINTS.get(scheme, '')}") from e
 
 
+def cached_copy(path: CloudPath) -> Path:
+    """Refresh cloudpathlib's cached copy of the object `path` and return its local path."""
+    from pathlib import Path
+
+    from cloudpathlib.exceptions import OverwriteDirtyFileError, OverwriteNewerLocalError
+
+    try:
+        return Path(path.fspath)
+    except (OverwriteNewerLocalError, OverwriteDirtyFileError):
+        # Something (e.g. an unsandboxed script) modified the cached copy. The
+        # bucket is the source of truth: drop the local edit and fetch again.
+        path._local.unlink(missing_ok=True)
+        return Path(path.fspath)
+
+
 def confine_cloud_path(base: CloudPath, requested: str, label: str = "directory") -> CloudPath:
     """Resolve `requested` within the cloud path `base`, raising SandboxDenied if it would escape.
 

@@ -70,7 +70,22 @@ Tools are classified at registration time:
 
 #### File access policy: workspace-only, by design
 
-`file_read`, `file_write` and `file_list` can only reach `<data_dir>/workspace` (`PINCER_DATA_DIR`, default `~/.pincer`, so `~/.pincer/workspace`). This is deliberate: there is no allowlist of extra read roots, and moving the workspace means moving `PINCER_DATA_DIR`. Every path is resolved (including `..` and symlinks) and checked by `confine_path()` in `src/pincer/tools/path_sandbox.py`. A path outside the workspace raises `SandboxDenied`, which the agent logs as a single WARNING line and returns to the model as a denial message rather than treating it as a tool failure.
+`file_read`, `file_write` and `file_list` can only reach the **workspace**, `<storage root>/workspace`. The storage root is `PINCER_STORAGE_ROOT`; unset, it is the bucket of a cloud `PINCER_SKILLS_DIR`, else `<data_dir>/storage`. This is deliberate: there is no allowlist of extra read roots, and moving the workspace means moving the storage root. Pincer owns exactly two folders under the root, `skills/` and `workspace/`; everything else there belongs to other services and Pincer never writes to it:
+
+```
+<storage root>/
+├── skills/          user skills (the default skills_dir)
+├── workspace/       everything the agent reads and writes
+│   ├── uploads/     chat attachments
+│   ├── downloads/   Google Drive / Gmail downloads
+│   ├── exec_output/ python_exec output
+│   └── screenshots/ browser screenshots
+└── <anything else>  other services
+```
+
+For a cloud root the **bucket is the source of truth**. Tools that need a real file (python_exec's working directory, OCR, `send_file`, the paths named in the prompt) see a local cache of the workspace under `<data_dir>/cache/workspace`, which is refreshed from the bucket before a read and uploaded after a write; it can be deleted at any time. So a file a user uploads in Documents under `workspace/` is readable by `file_read`. A local storage root that contains the data dir is refused at startup: the agent must never reach the JWT secret or the database. The folders are created at startup if missing.
+
+Every path is resolved (including `..` and symlinks) and checked by `confine_path()` in `src/pincer/tools/path_sandbox.py`. A path outside the workspace raises `SandboxDenied`, which the agent logs as a single WARNING line and returns to the model as a denial message rather than treating it as a tool failure.
 
 `shell_exec` and `python_exec` do **not** follow this policy. Both run a plain subprocess with no path confinement and no resource limits (the rlimits in Layer 3 apply to `run_skill_script` only):
 
@@ -91,7 +106,7 @@ PINCER_SKIP_APPROVAL=gmail_send,google__create_event
 
 ### Layer 3: Skill Sandboxing
 
-Skills are `SKILL.md` directories, discovered from the filesystem (`src/pincer/skills/` bundled, `~/.pincer/skills/` user) or, for the user root only, from an S3 / Azure Blob / GCS prefix — see the [Skills Guide](../guides/skills-guide.md). The markdown instructions a skill provides carry no execution risk by themselves — `load_skill`/`load_skill_reference` are plain reads. The risk surface is scripts a skill ships, invoked via `run_skill_script`:
+Skills are `SKILL.md` directories, discovered from the filesystem (`src/pincer/skills/` bundled, `<storage root>/skills/` user by default) or, for the user root only, from an S3 / Azure Blob / GCS prefix — see the [Skills Guide](../guides/skills-guide.md). The markdown instructions a skill provides carry no execution risk by themselves — `load_skill`/`load_skill_reference` are plain reads. The risk surface is scripts a skill ships, invoked via `run_skill_script`:
 
 - **Requires approval when an approval callback is configured** — `run_skill_script` is approval-gated at the tool registry level regardless of config, but the gate only has an effect if `agent._approval_callback` is actually wired up, which happens when a chat channel (Telegram/WhatsApp/Teams) is bridged. Running the console REPL (`pincer chat`) or the standalone MCP export server with no chat channel configured currently **auto-approves** every gated tool call, logging a warning instead of blocking. Don't rely on this gate alone in those modes.
 - **Resource limits** — CPU time (10s default), memory (256MB default) via subprocess rlimits. This is the one layer enforced at the OS level, and the one actually load-bearing against a resource-exhaustion attack.
@@ -214,7 +229,7 @@ Summary: 22 passed, 3 warnings, 0 critical
 ## Best Practices
 
 1. **Keep your allowlist tight** — only add your own user IDs
-2. **Review a skill's SKILL.md and scripts** before dropping it into `~/.pincer/skills/` — treat third-party skills like any other code you'd run
+2. **Review a skill's SKILL.md and scripts** before dropping it into your skills dir (`<storage root>/skills/` by default) — treat third-party skills like any other code you'd run
 3. **Set a reasonable daily budget** — $5 is plenty for personal use
 4. **Run `pincer doctor` weekly** — catch configuration drift early
 5. **Review the audit log** — especially after installing new skills

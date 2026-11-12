@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pincer.config import Settings
+from pincer.config.main import _RelaxedSettings
 from pincer.core.agent import (
     _CALL_PLACED_THEN_FAILED_TEXT,
     _HEADLESS_LLM_ERROR_TEXT,
@@ -1417,7 +1418,8 @@ async def test_execute_tool_sandbox_denied_logs_warning_not_error(
 
     Uses the real file_read so the whole file_read → _sandbox_path → confine_path chain is exercised.
     """
-    monkeypatch.setattr(files, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    ws_settings = _RelaxedSettings(data_dir=tmp_path)  # type: ignore[call-arg]
+    monkeypatch.setattr(files, "get_settings", lambda: ws_settings)
     registry = ToolRegistry()
     registry.register(
         name="file_read",

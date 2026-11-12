@@ -81,18 +81,17 @@ def resolve_storage_root(settings: Settings) -> tuple[StoragePath, list[str]]:
     - `storage_root` set: that location. The skills dir is protected when it lies under it.
     - Unset, with a cloud `skills_dir`: the root of that bucket / container, with
       the skills prefix protected.
-    - Unset, with a local `skills_dir`: `<data_dir>/storage`. The skills dir is
-      not under it, so nothing is protected.
+    - Unset otherwise: `<data_dir>/storage`. The skills dir is protected when it
+      lies under it, as the default `<root>/skills` does.
+
+    See `pincer.storage.layout` for the folders Pincer keeps under the root.
 
     A local root that contains the data dir is refused (see `data_dir_conflict`).
     """
+    from pincer.storage.layout import storage_root_for
+
     skills_dir = settings.skills_dir
-    if settings.storage_root:
-        root = open_location(settings.storage_root, settings)
-    elif clients.is_remote_uri(skills_dir):
-        root = open_location(clients.bucket_root(str(skills_dir)), settings)
-    else:
-        root = open_location(settings.data_dir / "storage", settings)
+    root = open_location(storage_root_for(settings), settings)
     if isinstance(root, Path):
         problem = data_dir_conflict(root, Path(settings.data_dir).expanduser().resolve())
         if problem:

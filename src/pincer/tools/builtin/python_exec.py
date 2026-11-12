@@ -4,7 +4,7 @@ Sandboxed Python code execution tool.
 Runs user-provided Python code in an isolated subprocess with:
 - Configurable timeout (default 30s, max 120s)
 - Capped output (8000 chars)
-- Temporary working directory
+- The workspace's exec_output/ folder as working directory (new files are uploaded to it)
 - Matplotlib plot capture (auto-saves figures instead of showing)
 """
 
@@ -15,9 +15,17 @@ import logging
 import os
 import sys
 import tempfile
-from pathlib import Path
+import weakref
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from pincer.storage.keys import is_hidden
 from pincer.tools.sandbox import scrubbed_env
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pincer.storage.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +72,117 @@ except (ImportError, NameError):
     pass
 """
 
+# Held across sync → run → publish on a cloud root: a run's sync prunes cached files
+# that have no object yet, which would delete what a concurrent run just wrote.
+# One per event loop (an asyncio.Lock is bound to the loop it first waits on).
+_cloud_run_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
 
-def _get_output_dir() -> Path:
-    """Return the persistent workspace output directory for generated files."""
-    output_dir = Path.home() / ".pincer" / "workspace" / "exec_output"
+
+def _cloud_run_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _cloud_run_locks.get(loop)
+    if lock is None:
+        lock = _cloud_run_locks[loop] = asyncio.Lock()
+    return lock
+
+
+def _workspace() -> Workspace:
+    from pincer.config import get_settings
+    from pincer.storage.workspace import get_workspace
+
+    return get_workspace(get_settings())
+
+
+def _prepare_output_dir() -> tuple[Path, dict[Path, float]]:
+    """The workspace's `exec_output/` folder (its local side), synced from the bucket
+    first so the script sees files uploaded there, and a snapshot of it. Blocking.
+
+    A sync that fails (bucket unreachable) is logged; the script then runs on the
+    cached copy.
+    """
+    ws = _workspace()
+    try:
+        ws.retry_pending("exec_output")
+    except Exception:
+        logger.warning("Could not retry the pending uploads of exec_output/", exc_info=True)
+    try:
+        ws.sync("exec_output")
+    except Exception:
+        logger.warning("Could not sync exec_output/ from the workspace; using the cached copy", exc_info=True)
+    output_dir = ws.local / "exec_output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+    return output_dir, _snapshot(output_dir)
+
+
+def _snapshot(output_dir: Path) -> dict[Path, float]:
+    """Every file under `output_dir` with its mtime."""
+    files: dict[Path, float] = {}
+    for dirpath, _dirnames, filenames in output_dir.walk():
+        for name in filenames:
+            path = dirpath / name
+            try:
+                if path.is_file() and not path.is_symlink():
+                    files[path] = path.stat().st_mtime
+            except OSError:
+                continue
+    return files
+
+
+@dataclass
+class _Published:
+    """What `_publish_changes` did: new files uploaded, and the files whose upload
+    or delete failed (kept as pending, retried on the next run)."""
+
+    saved: list[Path] = field(default_factory=list)
+    not_uploaded: list[Path] = field(default_factory=list)
+    not_deleted: list[Path] = field(default_factory=list)
+
+    def report(self) -> list[str]:
+        return [
+            *(f"[File saved: {path}]" for path in self.saved),
+            *(f"[File NOT uploaded: {path} (kept locally, retried on the next run)]" for path in self.not_uploaded),
+            *(
+                f"[File NOT deleted: {path} (still in the workspace, retried on the next run)]"
+                for path in self.not_deleted
+            ),
+        ]
+
+
+def _publish_changes(output_dir: Path, before: dict[Path, float]) -> _Published:
+    """Upload the files the run created or changed under `output_dir` and delete the
+    objects of the files it removed (folder markers and other hidden names are never
+    deleted).
+
+    On a local storage root nothing is uploaded or deleted. On a cloud root a failed
+    upload or delete is recorded as pending in the workspace (see `Workspace.pending`)
+    and retried on the next run.
+    """
+    after = _snapshot(output_dir)
+    changed = [path for path, mtime in after.items() if before.get(path) != mtime]
+    ws = _workspace()
+    if not ws.is_cloud:
+        return _Published(saved=sorted(path for path in changed if path not in before))
+    result = _Published()
+    for path in sorted(changed):
+        try:
+            ws.publish(path)
+        except Exception:
+            logger.warning("Could not upload %s to the workspace", path, exc_info=True)
+            ws.mark_pending(path)
+            result.not_uploaded.append(path)
+        else:
+            if path not in before:
+                result.saved.append(path)
+    for path in sorted(set(before) - set(after)):
+        if is_hidden(path.name):
+            continue
+        try:
+            ws.remove(path)
+        except Exception:
+            logger.warning("Could not delete %s from the workspace", path, exc_info=True)
+            ws.mark_delete_pending(path)
+            result.not_deleted.append(path)
+    return result
 
 
 async def python_exec(code: str = "", timeout: int = 30) -> str:
@@ -84,19 +197,56 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
 
     timeout = min(max(timeout, 1), MAX_TIMEOUT)
 
-    output_dir = _get_output_dir()
-    existing_files = set(output_dir.iterdir())
+    if _workspace().is_cloud:
+        async with _cloud_run_lock():
+            outcome, published = await _run_in_workspace(code, timeout)
+    else:
+        outcome, published = await _run_in_workspace(code, timeout)
+    if isinstance(outcome, str):
+        return "\n".join([outcome, *published.report()])
+    stdout, stderr, returncode = outcome
 
+    output_parts: list[str] = []
+    if stdout.strip():
+        output_parts.append(stdout.strip())
+    if stderr.strip():
+        output_parts.append(f"[stderr]\n{stderr.strip()}")
+    output_parts += published.report()
+
+    if returncode != 0 and not stderr.strip():
+        output_parts.append(f"[Process exited with code {returncode}]")
+
+    result = "\n".join(output_parts) if output_parts else "(no output)"
+
+    if len(result) > MAX_OUTPUT_LENGTH:
+        result = result[:MAX_OUTPUT_LENGTH] + "\n...[output truncated]"
+
+    return result
+
+
+async def _run_in_workspace(code: str, timeout: int) -> tuple[tuple[str, str, int | None] | str, _Published]:
+    """Sync exec_output/, run `code` there, publish what changed: (outcome, what was published)."""
+    output_dir, existing_files = await asyncio.to_thread(_prepare_output_dir)
+    try:
+        outcome = await _run(code, timeout, output_dir)
+    finally:
+        # Upload what the run created or changed, even when it timed out or failed:
+        # files it wrote are in the workspace's local copy either way.
+        published = await asyncio.to_thread(_publish_changes, output_dir, existing_files)
+    return outcome, published
+
+
+async def _run(code: str, timeout: int, output_dir: Path) -> tuple[str, str, int | None] | str:
+    """Run `code` with `output_dir` as working directory: (stdout, stderr, exit code),
+    or an error message when it timed out or could not start."""
     with tempfile.TemporaryDirectory(prefix="pincer_exec_") as tmpdir:
-        plot_dir = str(output_dir)
-
         full_code = _MATPLOTLIB_WRAPPER + code + _MATPLOTLIB_FOOTER
         script_path = os.path.join(tmpdir, "script.py")
         with open(script_path, "w") as f:
             f.write(full_code)
 
         env = scrubbed_env()
-        env["_PINCER_PLOT_DIR"] = plot_dir
+        env["_PINCER_PLOT_DIR"] = str(output_dir)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -118,27 +268,4 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
         except Exception as e:
             return f"Error starting subprocess: {type(e).__name__}: {e}"
 
-        stdout = stdout_bytes.decode(errors="replace")
-        stderr = stderr_bytes.decode(errors="replace")
-
-        output_parts: list[str] = []
-        if stdout.strip():
-            output_parts.append(stdout.strip())
-        if stderr.strip():
-            output_parts.append(f"[stderr]\n{stderr.strip()}")
-
-        # Report all newly created files in the output directory
-        new_files = sorted(set(output_dir.iterdir()) - existing_files)
-        for nf in new_files:
-            if nf.is_file():
-                output_parts.append(f"[File saved: {nf}]")
-
-        if proc.returncode != 0 and not stderr.strip():
-            output_parts.append(f"[Process exited with code {proc.returncode}]")
-
-        result = "\n".join(output_parts) if output_parts else "(no output)"
-
-        if len(result) > MAX_OUTPUT_LENGTH:
-            result = result[:MAX_OUTPUT_LENGTH] + "\n...[output truncated]"
-
-        return result
+        return stdout_bytes.decode(errors="replace"), stderr_bytes.decode(errors="replace"), proc.returncode

@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import BaseModel, Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic.networks import AnyHttpUrl
 
 from pincer.storage.limits import DEFAULT_UPLOAD_MAX_BYTES
@@ -29,9 +29,12 @@ class CoreSettings(BaseModel):
         default=Path.home() / ".pincer",
         description="Data directory for database, logs, etc.",
     )
-    skills_dir: str | Path = Field(
-        default=Path.home() / ".pincer/skills",
-        description="User skills root (SKILL.md subdirectories): a local path or an s3://, az:// or gs:// URI",
+    # Always set after validation: unset means `<storage root>/skills` (see pincer.storage.layout).
+    skills_dir: str | Path = Field(  # type: ignore[assignment]
+        default=None,
+        validate_default=False,
+        description="User skills root (SKILL.md subdirectories): a local path or an s3://, az:// or gs:// URI. "
+        "Unset = <storage root>/skills",
     )
     skills_max_loaded_per_root: int = Field(
         default=100,
@@ -85,8 +88,9 @@ class CoreSettings(BaseModel):
     # ── Storage browser (/api/storage) ──
     storage_root: str | Path | None = Field(
         default=None,
-        description="Root the storage browser serves: a local path or an s3://, az:// or gs:// URI. "
-        "Unset = the bucket/container of a cloud skills_dir, else <data_dir>/storage",
+        description="Storage root: a local path or an s3://, az:// or gs:// URI. Pincer keeps its skills/ and "
+        "workspace/ folders here and the storage browser serves it; everything else under it belongs to other "
+        "services. Unset = the bucket/container of a cloud skills_dir, else <data_dir>/storage",
     )
     storage_presign_ttl: int = Field(
         default=900,
@@ -109,6 +113,8 @@ class CoreSettings(BaseModel):
 
     # ── Logging ───────────────────────────────────────────
     log_level: LogLevel = LogLevel.INFO
+
+    _skills_dir_defaulted: bool = PrivateAttr(default=False)
 
     # ── Cost Controls ─────────────────────────────────────
     daily_budget_usd: float = Field(
@@ -135,13 +141,20 @@ class CoreSettings(BaseModel):
     @field_validator("skills_dir", "storage_root", mode="before")
     @classmethod
     def _keep_remote_storage_uri(cls, value: Any, info: ValidationInfo) -> Any:
-        """Keep cloud URIs as strings: Path coercion would collapse `s3://` into `s3:/`."""
-        from pincer.storage.clients import is_remote_uri
+        """Keep cloud URIs as strings: Path coercion would collapse `s3://` into `s3:/`.
+        A URI with any other scheme is refused rather than taken for a relative path."""
+        from pincer.storage.clients import ANY_SCHEME_RE, is_remote_uri
 
         if info.field_name == "storage_root" and value in (None, ""):
             return None
         if isinstance(value, str) and is_remote_uri(value):
             return value
+        if isinstance(value, str) and (match := ANY_SCHEME_RE.match(value)):
+            scheme = match.group(0).removesuffix("://")
+            raise ValueError(
+                f"{info.field_name}: unsupported URI scheme {scheme!r} in {value!r}; "
+                "use a local path or an s3://, az:// or gs:// URI"
+            )
         return Path(value).expanduser()
 
     @field_validator("storage_upload_file_max_size", mode="before")
@@ -170,6 +183,26 @@ class CoreSettings(BaseModel):
                 "only skills_dir can point at object storage"
             )
         return Path(value).expanduser()
+
+    @model_validator(mode="after")
+    def _default_skills_dir(self) -> Self:
+        """Unset skills_dir is `<storage root>/skills`: a URI for a cloud root, a Path for a local one.
+
+        The root falls back to the bucket of a cloud skills_dir only when one is
+        set explicitly, so this never depends on its own result.
+        """
+        if self.skills_dir is None:
+            from pincer.storage import layout
+
+            location = layout.storage_root_location(self, None)
+            self.skills_dir = layout.join(location, layout.SKILLS)
+            self._skills_dir_defaulted = True
+        return self
+
+    @property
+    def skills_dir_defaulted(self) -> bool:
+        """True when skills_dir was not configured and is `<storage root>/skills`."""
+        return self._skills_dir_defaulted
 
     @model_validator(mode="after")
     def _default_skills_cache_dir(self) -> Self:

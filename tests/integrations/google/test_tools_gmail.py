@@ -159,10 +159,6 @@ async def test_get_attachment_saves_to_disk(mock_factory, mock_gmail_service, tm
         },
     }
 
-    # Redirect downloads to tmp_path
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
-
     result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
 
     # Response is short metadata, NOT base64
@@ -202,9 +198,6 @@ async def test_get_attachment_short_response(mock_factory, mock_gmail_service, t
         },
     }
 
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
-
     result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
 
     assert len(result) < 500
@@ -232,9 +225,6 @@ async def test_get_attachment_duplicate_filename(mock_factory, mock_gmail_servic
             ]
         },
     }
-
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
     result1 = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
     result2 = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
@@ -264,9 +254,6 @@ async def test_get_attachment_with_filename_param(mock_factory, mock_gmail_servi
         "data": b64mod.urlsafe_b64encode(content).decode(),
         "size": len(content),
     }
-
-    download_dir = str(tmp_path / "downloads")
-    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
     result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1", filename="cv.pdf")
 

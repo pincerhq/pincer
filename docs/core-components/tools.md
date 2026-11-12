@@ -12,7 +12,7 @@ This is the complete, authoritative catalog of every tool Pincer can call. It is
 | **Microsoft 365** | 69 | `src/ms365-mcp/ms365/` | `ms365-mcp-setup` |
 | **Slack (native)** | 71 | `src/pincer/integrations/slack/` | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP servers (external)** | unlimited | `src/pincer/mcp/` | `pincer.toml` `[[mcp.servers]]` |
-| **Custom skills** | unlimited | `~/.pincer/skills/` (SKILL.md) | No install step — filesystem discovery |
+| **Custom skills** | unlimited | `<storage root>/skills/` (SKILL.md) | No install step — filesystem discovery |
 | **Native tools (first-party)** | **~276** | — | — |
 | **Available out of the box with popular MCP servers** | **550+** | — | — |
 
@@ -50,7 +50,7 @@ Registered in `src/pincer/cli/run.py::_run_agent()`. These are always available.
 | `load_skill_reference` | No | Read a file referenced by a skill, by relative path |
 | `run_skill_script` | **Yes** | Run a script bundled with a skill in a sandboxed subprocess |
 
-> File tools are confined to `<data_dir>/workspace` (default `~/.pincer/workspace`) by design, with no allowlist. `shell_exec` and `python_exec` have no path confinement (only approval and a timeout, plus a command denylist for `shell_exec`). See [Security Model](security-model.md#file-access-policy-workspace-only-by-design).
+> File tools are confined to the workspace, `<storage root>/workspace` (default `<data_dir>/storage/workspace`), by design, with no allowlist. For a cloud storage root the bucket is the source of truth and tools work on a local cache under `<data_dir>/cache/workspace`. Chat uploads go to `workspace/uploads/`, Drive / Gmail downloads to `workspace/downloads/`, `python_exec` output to `workspace/exec_output/` and browser screenshots to `workspace/screenshots/`. `shell_exec` and `python_exec` have no path confinement (only approval and a timeout, plus a command denylist for `shell_exec`). See [Security Model](security-model.md#file-access-policy-workspace-only-by-design).
 
 ---
 
@@ -222,7 +222,7 @@ Pincer exposes its **own** tools to MCP clients via an embedded OAuth 2.0 Author
 
 ## Custom skills (unlimited)
 
-Any directory containing a `SKILL.md` file under `src/pincer/skills/` (bundled, shipped inside the package) or `~/.pincer/skills/` (user) is discovered at startup — no install step, no CLI. Any script a skill ships runs via `run_skill_script` in a subprocess sandbox (resource limits + best-effort network domain allowlisting — see [Security Model](security-model.md)) and is approval-gated whenever an approval callback is configured. See the [Skills Guide](../guides/skills-guide.md).
+Any directory containing a `SKILL.md` file under `src/pincer/skills/` (bundled, shipped inside the package) or the user skills dir (`skills_dir`, default `<storage root>/skills/`) is discovered at startup — no install step, no CLI. Any script a skill ships runs via `run_skill_script` in a subprocess sandbox (resource limits + best-effort network domain allowlisting — see [Security Model](security-model.md)) and is approval-gated whenever an approval callback is configured. See the [Skills Guide](../guides/skills-guide.md).
 
 ---
 

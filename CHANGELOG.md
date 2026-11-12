@@ -36,6 +36,41 @@ Always on, without setting anything:
 
 ### Changed
 
+#### One storage root, with `skills/` and `workspace/` under it
+
+- Everything the agent reads and writes now lives in `<storage root>/workspace`:
+  chat attachments in `uploads/`, Google Drive / Gmail downloads in
+  `downloads/`, `python_exec` output in `exec_output/` and browser screenshots
+  in `screenshots/`. The storage root is `PINCER_STORAGE_ROOT`; unset, it is the
+  bucket of an explicit cloud `PINCER_SKILLS_DIR`, else `<data_dir>/storage`.
+  Before, several tools wrote to `~/.pincer/workspace` and `~/.pincer/downloads`,
+  which in Docker is `/home/pincer`: not on the data volume, so those files
+  were lost on restart.
+- For a cloud root the bucket is the source of truth. Files go through
+  cloudpathlib; tools that need a real path use a local cache under
+  `<data_dir>/cache/workspace`. A file uploaded in Documents under
+  `workspace/` is readable by `file_read`.
+- **`PINCER_SKILLS_DIR` now defaults to `<storage root>/skills`** (it was
+  `~/.pincer/skills`). An explicit value still wins.
+- Pincer owns exactly `skills/` and `workspace/`; everything else under the
+  root belongs to other services and is never written. The folders are created
+  at startup (`.keep` markers on a cloud root), and `pincer run` fails fast
+  when the root can't be reached or is a local folder that contains the data dir.
+- **One-time migration at startup:** `<data_dir>/workspace`, `<data_dir>/downloads`,
+  `~/.pincer/workspace` and `~/.pincer/downloads` are copied into the workspace,
+  and `~/.pincer/skills` into `<storage root>/skills` (only when
+  `PINCER_SKILLS_DIR` is unset and the target has no skills yet). Existing keys
+  are never overwritten. Each migrated source is recorded in
+  `<data_dir>/storage-migration.json` and renamed to `<name>.migrated`; a recorded
+  source is not copied again even when it can't be renamed (a mount point), so
+  files deleted since don't come back. Delete the old folders once you've
+  checked the result. `pincer run tasks` creates the folders but leaves the
+  migration to the main process.
+- With a cloud root, a chat attachment that can't be stored (the bucket is
+  unreachable) is still described to the agent, without a path, instead of
+  failing the whole message. `python_exec` uploads its output even when the run
+  times out, and sees files uploaded to `workspace/exec_output/`.
+
 #### Daily budget checked before each LLM call; web chat refusals are 402/503 (#357)
 
 - `PINCER_DAILY_BUDGET_USD` is checked **before** every LLM request, tool

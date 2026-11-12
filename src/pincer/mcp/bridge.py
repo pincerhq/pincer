@@ -10,6 +10,7 @@ For each tool discovered on an MCP server, creates an async callable that:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import fnmatch
 import logging
@@ -20,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 from pincer.mcp.config import MCPTransport
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.mcp.audit import MCPAuditLogger
     from pincer.mcp.client import MCPClientSession
     from pincer.mcp.security import MCPSecurityGate
@@ -107,6 +110,29 @@ def _format_result(result: Any) -> str:
     return "\n".join(parts) if parts else "(empty response)"
 
 
+def _refresh_local_file_paths(value: Any, upload_root: Path, fetch: Callable[[Path], Path]) -> None:
+    """Bring every ``file_path`` argument under ``upload_root`` up to date with the
+    workspace bucket (``fetch``, see ``Workspace.fetch``) before the tool reads it.
+
+    The upload root is the local cache of the workspace's uploads/ folder for a
+    cloud storage root; this makes a file a user uploaded or replaced in
+    Documents visible to the server, and drops one deleted there. Blocking.
+    """
+    if isinstance(value, dict):
+        if isinstance(value.get("file_path"), str):
+            candidate = Path(value["file_path"])
+            try:
+                if candidate.resolve().is_relative_to(upload_root.resolve()):
+                    fetch(candidate)
+            except Exception:
+                logger.warning("Could not refresh %s from the workspace", candidate, exc_info=True)
+        for v in value.values():
+            _refresh_local_file_paths(v, upload_root, fetch)
+    elif isinstance(value, list):
+        for v in value:
+            _refresh_local_file_paths(v, upload_root, fetch)
+
+
 def _inline_local_file_paths(value: Any, upload_root: Path) -> Any:
     """Recursively replace ``file_path`` arguments pointing inside our own
     local upload cache with inline ``image_b64`` content.
@@ -158,16 +184,20 @@ class MCPToolBridge:
         prefix: bool = True,
         security_gate: MCPSecurityGate | None = None,
         local_upload_root: Path | None = None,
+        local_file_fetch: Callable[[Path], Path] | None = None,
     ) -> None:
         self.session = session
         self.tool_registry = tool_registry
         self.audit_logger = audit_logger
         self.prefix = prefix
         self.security_gate = security_gate
-        # Pincer's own local attachment cache (settings.data_dir/workspace/uploads).
+        # The local side of the workspace's uploads/ folder, where chat attachments
+        # are saved (a cache of the bucket for a cloud storage root).
         # Used to inline file_path arguments as base64 for HTTP-transport
         # servers — see _inline_local_file_paths.
         self.local_upload_root = local_upload_root
+        # Refreshes a file under local_upload_root from the workspace bucket.
+        self.local_file_fetch = local_file_fetch
         self._registered_names: list[str] = []
 
     def register_tools(self) -> int:
@@ -247,6 +277,7 @@ class MCPToolBridge:
         audit = self.audit_logger
         security = self.security_gate
         upload_root = self.local_upload_root
+        fetch = self.local_file_fetch
 
         async def handler(context: dict[str, Any] | None = None, **kwargs: Any) -> str:
             identity = (context or {}).get("user_id")
@@ -255,6 +286,8 @@ class MCPToolBridge:
             if security and not security.check_rate_limit(session.name, mcp_name):
                 return f"[RateLimited] Too many calls to {session.name}::{mcp_name} — slow down"
 
+            if upload_root is not None and fetch is not None:
+                await asyncio.to_thread(_refresh_local_file_paths, kwargs, upload_root, fetch)
             if upload_root is not None and session.config.transport == MCPTransport.STREAMABLE_HTTP:
                 kwargs = _inline_local_file_paths(kwargs, upload_root)
 

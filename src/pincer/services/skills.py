@@ -286,14 +286,22 @@ class SkillService:
         """Write `stamp` (a new random one by default) and return it. Without a
         cache dir nothing is written, but the generation is still returned."""
         stamp = stamp or _new_generation()
-        if self._stamp_path is None:
+        if self._cache_dir is None:
             return stamp
-        self._stamp_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._stamp_path.with_name(f".{_STAMP_FILENAME}.{os.getpid()}.tmp")
-        tmp.write_text(stamp, encoding="utf-8")
-        os.replace(tmp, self._stamp_path)
-        logger.debug("Skill index generation is now %s", stamp)
-        return stamp
+        return announce_index_change(self._cache_dir, stamp)
+
+
+def announce_index_change(cache_dir: Path, stamp: str | None = None) -> str:
+    """Write a new generation stamp (or `stamp`) to the skills cache dir and return it,
+    so every process sharing that dir rescans its skill index."""
+    stamp = stamp or _new_generation()
+    stamp_path = cache_dir / _STAMP_FILENAME
+    stamp_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = stamp_path.with_name(f".{_STAMP_FILENAME}.{os.getpid()}.tmp")
+    tmp.write_text(stamp, encoding="utf-8")
+    os.replace(tmp, stamp_path)
+    logger.debug("Skill index generation is now %s", stamp)
+    return stamp
 
 
 class SkillIndexWatcher:

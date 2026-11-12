@@ -161,19 +161,6 @@ def walk_files(skill_dir: SkillPath) -> list[str]:
     return sorted(f for f in _walk_relative(skill_dir) if posixpath.basename(f) != "SKILL.md")
 
 
-def _cached_copy(path: CloudPath) -> Path:
-    """Refresh cloudpathlib's cached copy of `path` and return its local path."""
-    from cloudpathlib.exceptions import OverwriteDirtyFileError, OverwriteNewerLocalError
-
-    try:
-        return Path(path.fspath)
-    except (OverwriteNewerLocalError, OverwriteDirtyFileError):
-        # Something (e.g. an unsandboxed script) modified the cached copy. The
-        # bucket is the source of truth: drop the local edit and fetch again.
-        path._local.unlink(missing_ok=True)
-        return Path(path.fspath)
-
-
 def localize_skill_dir(skill_dir: SkillPath) -> Path:
     """Return a local directory with the current contents of `skill_dir`.
 
@@ -186,9 +173,9 @@ def localize_skill_dir(skill_dir: SkillPath) -> Path:
         return skill_dir
 
     remote_files = _walk_relative(skill_dir)
-    local_dir = _cached_copy(skill_dir / "SKILL.md").parent
+    local_dir = clients.cached_copy(skill_dir / "SKILL.md").parent
     for rel in remote_files:
-        _cached_copy(skill_dir / rel)
+        clients.cached_copy(skill_dir / rel)
 
     keep = set(remote_files)
     for dirpath, _dirnames, filenames in local_dir.walk(top_down=False):

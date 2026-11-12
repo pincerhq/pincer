@@ -87,6 +87,24 @@ def _reset_skill_service() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_workspace() -> Iterator[None]:
+    """The workspace is cached per settings object; drop it between tests."""
+    from pincer.storage.workspace import reset_workspace
+
+    reset_workspace()
+    yield
+    reset_workspace()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_legacy_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one-time migration copies (and renames) `~/.pincer/{workspace,downloads,skills}`;
+    no test may touch the developer's real ones. Tests that need legacy content patch these."""
+    fake_home = tmp_path_factory.mktemp("legacy-home") / ".pincer"
+    monkeypatch.setattr("pincer.storage.workspace.legacy_home_dir", lambda: fake_home)
+
+
+@pytest.fixture(autouse=True)
 def _reset_onboarding_cache() -> Iterator[None]:
     """The completed-onboarding cache is process-wide; a test must not see
     another test's users as onboarded (Postgres tests share one database)."""

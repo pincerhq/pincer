@@ -7,19 +7,13 @@ import contextlib
 import logging
 import os
 import sys
-import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
 
-from pincer.cli._attachments import (
-    _IMAGE_EXTENSIONS,
-    _format_image_attachment,
-    _format_pdf_attachment,
-    _safe_upload_path,
-)
+from pincer.cli._attachments import describe_file_attachments, describe_image_attachments
 from pincer.cli._shared import (
     _create_memory_backend,
     _port_in_use,
@@ -38,6 +32,7 @@ from pincer.cli.daemon import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from pathlib import Path
 
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
@@ -53,6 +48,7 @@ if TYPE_CHECKING:
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
     from pincer.services.skills import SkillService
+    from pincer.storage.workspace import Workspace
     from pincer.tools.registry import ToolRegistry
     from pincer.voice.postcall import PostCallProcessor
 
@@ -159,7 +155,9 @@ async def run(
     console.print(f"   Model: {settings.default_model}")
     console.print(f"   Budget: ${settings.daily_budget_usd:.2f}/day")
     console.print(f"   Data: {settings.data_dir}")
+    console.print(f"   Storage root: {_storage_root_label(settings)}")
     console.print(f"   Skills dir: {settings.skills_dir}")
+    console.print(f"   Workspace: {_storage_root_label(settings, 'workspace')}")
     console.print()
 
     if not daemon_child:
@@ -192,6 +190,44 @@ class CoreComponents:
     skill_service: SkillService
     mcp_manager: MCPClientManager | None
     agent: Agent
+
+
+def _storage_root_label(settings: Settings, folder: str = "") -> str:
+    """Where the storage root (or a folder Pincer keeps under it) is, for the banner.
+    Locations are URIs or paths; credentials live in other settings and never show."""
+    from pincer.storage import layout
+
+    location = layout.storage_root_for(settings)
+    return str(layout.join(location, folder) if folder else location)
+
+
+async def _prepare_storage_or_exit(settings: Settings, *, migrate: bool) -> Workspace:
+    """Create Pincer's folders under the storage root (and, with `migrate`, move legacy
+    content in); exit with a clear message when the root is unreachable or refused.
+    Must run before `_build_core`, which uses the workspace."""
+    from pincer.storage.errors import StorageUnavailable
+    from pincer.storage.workspace import prepare_storage
+
+    try:
+        return await asyncio.to_thread(prepare_storage, settings, migrate=migrate)
+    except StorageUnavailable as e:
+        console.print(f"[bold red]Storage root unavailable:[/bold red] {e}")
+        raise typer.Exit(1) from e
+
+
+def _workspace_local(settings: Settings) -> Path:
+    """The workspace's local directory (a cache of the bucket for a cloud root)."""
+    from pincer.storage.workspace import get_workspace
+
+    return get_workspace(settings).local
+
+
+def _workspace_fetch(settings: Settings) -> Callable[[Path], Path]:
+    """Refreshes a workspace file's local copy from the bucket (see `Workspace.fetch`)."""
+    from pincer.storage.workspace import get_workspace
+
+    workspace = get_workspace(settings)
+    return lambda path: workspace.fetch(path)
 
 
 def _refuse_legacy_identity_map() -> None:
@@ -604,7 +640,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
                 config=mcp_cfg,
                 tool_registry=tools,
                 audit_logger=audit_logger,
-                local_upload_root=settings.data_dir / "workspace" / "uploads",
+                local_upload_root=_workspace_local(settings) / "uploads",
+                local_file_fetch=_workspace_fetch(settings),
             )
             connection_results = await mcp_manager.start()
             for server_name, ok in connection_results.items():
@@ -721,7 +758,14 @@ def _register_channel_bound_tools(tools: ToolRegistry, channel_map: dict[str, Ba
         """
         from pathlib import Path as _P
 
+        from pincer.config import get_settings
+        from pincer.storage.workspace import get_workspace
+
         file_path = _P(path)
+        workspace = get_workspace(get_settings())
+        if workspace.contains(file_path):
+            # The bucket is the source of truth for a cloud root: bring the copy up to date.
+            file_path = await asyncio.to_thread(workspace.fetch, file_path)
         if not file_path.is_file():
             return f"Error: File not found: {path}"
 
@@ -1045,6 +1089,9 @@ def _stop_channels_on_shutdown(shutdown: _Shutdown, router: Any) -> None:
 async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: _Shutdown) -> bool:
     """Bring the agent up, registering each part's stop with `shutdown` as soon as it is up; False
     if there is nothing to serve (no channel configured)."""
+    # Pincer's folders under the storage root, and the one-time move of legacy
+    # content, come before anything that reads skills or saves files.
+    workspace = await _prepare_storage_or_exit(settings, migrate=True)
     core = await _build_core(settings)
     _stop_core_on_shutdown(shutdown, core)
     if settings.skills_index_watch_interval_seconds > 0:
@@ -1143,118 +1190,15 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             if not text or text.startswith("["):
                 return text or "[Could not transcribe voice note]"
 
-        # Handle file attachments — decode text files, save all to workspace
+        # Handle file attachments — decode text files, save all to the workspace's uploads/
         if incoming.has_files:
-            text_extensions = {
-                ".txt",
-                ".py",
-                ".js",
-                ".ts",
-                ".json",
-                ".csv",
-                ".md",
-                ".log",
-                ".xml",
-                ".html",
-                ".css",
-                ".yaml",
-                ".yml",
-                ".toml",
-                ".ini",
-                ".cfg",
-                ".sh",
-                ".bash",
-                ".sql",
-                ".rs",
-                ".go",
-                ".java",
-                ".c",
-                ".cpp",
-                ".h",
-                ".rb",
-                ".php",
-                ".swift",
-                ".kt",
-                ".env",
-                ".gitignore",
-            }
-            uploads_dir = settings.data_dir / "workspace" / "uploads"
-            uploads_dir.mkdir(parents=True, exist_ok=True)
-
-            file_parts: list[str] = []
-            for raw_bytes, mime, filename in incoming.files:
-                try:
-                    save_path = _safe_upload_path(uploads_dir, filename)
-                except ValueError:
-                    logger.warning("Rejected unsafe attachment filename: %r", filename)
-                    file_parts.append(f"[File: {filename}] rejected — unsafe filename")
-                    continue
-                save_path.write_bytes(raw_bytes)
-                abs_path = str(save_path)
-
-                ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-                is_text = (
-                    mime.startswith("text/")
-                    or mime in ("application/json", "application/xml", "application/x-yaml")
-                    or ext in text_extensions
-                )
-                if is_text:
-                    try:
-                        content = raw_bytes.decode("utf-8", errors="replace")
-                        max_chars = 30_000
-                        if len(content) > max_chars:
-                            content = content[:max_chars] + f"\n... [truncated, {len(raw_bytes)} bytes total]"
-                        file_parts.append(f"[File: {filename}]\n```\n{content}\n```")
-                    except Exception:
-                        file_parts.append(
-                            f"[File: {filename}] saved to {abs_path} (binary, {len(raw_bytes)} bytes, {mime})"
-                        )
-                elif ext == ".pdf":
-                    try:
-                        import pymupdf
-
-                        doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
-                        pages = [page.get_text() for page in doc]
-                        doc.close()
-                        file_parts.append(_format_pdf_attachment(pages, filename, abs_path))
-                    except ImportError:
-                        file_parts.append(
-                            f"[File: {filename}] saved to {abs_path} "
-                            f"({len(raw_bytes)} bytes, {mime}). "
-                            f"PDF text extraction unavailable (install pymupdf)."
-                        )
-                    except Exception as exc:
-                        file_parts.append(
-                            f"[File: {filename}] saved to {abs_path} "
-                            f"({len(raw_bytes)} bytes, {mime}). "
-                            f"PDF extraction failed: {exc}"
-                        )
-                else:
-                    file_parts.append(
-                        f"[File: {filename}] saved to {abs_path} "
-                        f"({len(raw_bytes)} bytes, {mime}). "
-                        f"Use shell_exec to process it with the absolute path above."
-                    )
-
-            file_context = "\n\n".join(file_parts)
+            file_context = "\n\n".join(await asyncio.to_thread(describe_file_attachments, workspace, incoming.files))
             text = f"{file_context}\n\n{text}" if text else file_context
 
-        # Handle image attachments — save to disk so an OCR-capable tool can
-        # be given a concrete file_path (mirrors the file-attachment saving
-        # above; images arrive without a filename, so one is generated).
+        # Handle image attachments — save them so an OCR-capable tool can be given
+        # a concrete file_path (images arrive without a filename; one is generated).
         if incoming.images:
-            uploads_dir = settings.data_dir / "workspace" / "uploads"
-            uploads_dir.mkdir(parents=True, exist_ok=True)
-
-            image_parts: list[str] = []
-            for raw_bytes, media_type in incoming.images:
-                ext = _IMAGE_EXTENSIONS.get(media_type, ".bin")
-                filename = f"image_{uuid.uuid4().hex[:8]}{ext}"
-                save_path = _safe_upload_path(uploads_dir, filename)
-                save_path.write_bytes(raw_bytes)
-                image_parts.append(_format_image_attachment(filename, str(save_path), len(raw_bytes), media_type))
-
-            image_context = "\n\n".join(image_parts)
+            image_context = "\n\n".join(await asyncio.to_thread(describe_image_attachments, workspace, incoming.images))
             text = f"{image_context}\n\n{text}" if text else image_context
 
         # The raw ID already on this message is the channel-native ID for
@@ -2042,6 +1986,9 @@ async def _run_tasks_worker(settings: Settings) -> None:
     from pincer.tasks.context import set_context
     from pincer.tasks.delivery import TASK_RESULTS_CHANNEL, ResultEmitter, create_delivery_backend
 
+    # The folders, not the legacy migration: that belongs to the main process, so
+    # two processes never copy the same folders at once.
+    await _prepare_storage_or_exit(settings, migrate=False)
     core = await _build_core(settings)
     if core.agent.tool_selector is not None:
         core.agent.tool_selector.start_sync(core.tools.get_schemas())
