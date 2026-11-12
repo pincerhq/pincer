@@ -324,7 +324,7 @@ def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
 # mid-query (cancelling the task does not stop the thread), or from the cleanup
 # a task runs when pytest-asyncio cancels it just before closing the loop.
 #
-# So every queued query is counted, per loop, until its function has run; and
+# So every queued query is counted, per loop, until its result is handed back; and
 # each async test ends with `_settle_aiosqlite` (added first by
 # pytest_collection_modifyitems, so it tears down last), which cancels the
 # leftover tasks itself and waits for the count to reach zero while the loop
@@ -345,26 +345,37 @@ def _count_in_flight(loop: asyncio.AbstractEventLoop, delta: int) -> None:
 
 
 class _CountingTxQueue(SimpleQueue):  # type: ignore[type-arg]
-    """aiosqlite's per-connection work queue, counting work not yet done."""
+    """aiosqlite's per-connection work queue, counting work not yet delivered."""
 
     def put_nowait(self, item: Any) -> None:
-        future, function = item
-        if future is None:  # the stop sentinel: nobody waits on it
-            super().put_nowait(item)
-            return
-        loop = future.get_loop()
+        future, _function = item
+        if future is not None:  # a stop sentinel without a loop: nobody waits on it
+            _count_in_flight(future.get_loop(), +1)
+        super().put_nowait(item)
 
-        def counted() -> Any:
-            try:
-                return function()
-            finally:
-                _count_in_flight(loop, -1)
 
-        _count_in_flight(loop, +1)
-        super().put_nowait((future, counted))
+def _counting_worker_thread(tx: Any) -> None:
+    """aiosqlite's `_connection_worker_thread`, uncounting each item only once its
+    result has been handed to the loop. Uncounting when the function returns left
+    a window: the count read zero, the loop closed, and then the hand-off raised."""
+    while True:
+        future, function = tx.get()
+        try:
+            result = function()
+            if future:
+                future.get_loop().call_soon_threadsafe(aiosqlite_core.set_result, future, result)
+            if result is aiosqlite_core._STOP_RUNNING_SENTINEL:
+                break
+        except BaseException as e:
+            if future:
+                future.get_loop().call_soon_threadsafe(aiosqlite_core.set_exception, future, e)
+        finally:
+            if future:
+                _count_in_flight(future.get_loop(), -1)
 
 
 aiosqlite_core.SimpleQueue = _CountingTxQueue  # type: ignore[misc]
+aiosqlite_core._connection_worker_thread = _counting_worker_thread
 
 
 @pytest_asyncio.fixture
