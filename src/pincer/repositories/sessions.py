@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import Select, func, or_, update
+from sqlalchemy import select as sa_select
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, json_text_field, upsert
@@ -117,9 +119,9 @@ class SessionRepository(BaseRepository[ChatSession, str]):
     async def rewrite_session_ids(self, old_user_id: str, new_user_id: str) -> int:
         """Re-key the old id's sessions to the new id (`rekeyed_session_id`).
 
-        When a merge finds the target key taken, the more recently updated
-        conversation is kept (the target's on a tie) and the other dropped.
-        Returns the number of rows changed or removed.
+        When a merge finds the target key taken, the two conversations are
+        joined into the target (`_merged_session`) and the old row removed, so
+        no history is lost. Returns the number of rows changed or removed.
         """
         suffix = f":{old_user_id}"
         keys = select(ChatSession.session_id).where(
@@ -139,20 +141,51 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             return 0
         # Plain columns, not ORM objects: re-keying a row the session holds
         # would leave its identity map pointing at the old key.
-        stmt = select(ChatSession.session_id, ChatSession.updated_at).where(
-            col(ChatSession.session_id).in_([*moves, *moves.values()])
-        )
-        updated = dict((await self.session.exec(stmt)).all())
+        stmt: Select[Any] = sa_select(
+            col(ChatSession.session_id),
+            col(ChatSession.messages),
+            col(ChatSession.session_metadata).label("session_metadata"),
+            col(ChatSession.created_at),
+            col(ChatSession.updated_at),
+        ).where(col(ChatSession.session_id).in_([*moves, *moves.values()]))
+        connection = await self.session.connection()
+        rows = {row.session_id: row._asdict() for row in await connection.execute(stmt)}
         changed = 0
         for old_key, new_key in moves.items():
-            if new_key in updated:
-                if updated[new_key] >= updated[old_key]:
-                    changed += await self.delete_where(col(ChatSession.session_id) == old_key)
-                    continue
-                changed += await self.delete_where(col(ChatSession.session_id) == new_key)
+            if new_key in rows:
+                merged = _merged_session(rows[old_key], rows[new_key])
+                target = update(ChatSession).where(col(ChatSession.session_id) == new_key).values(**merged)
+                changed += int((await self.session.exec(target)).rowcount)
+                changed += await self.delete_where(col(ChatSession.session_id) == old_key)
+                continue
             rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
             changed += int((await self.session.exec(rekey)).rowcount)
         return changed
 
     async def ids(self) -> Sequence[str]:
         return (await self.session.exec(select(ChatSession.session_id))).all()
+
+
+def _merged_session(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    """One row's content from two that collide on a key during a merge.
+
+    Messages carry no timestamps, so the conversations are joined whole: the
+    one created first goes first (the target on a tie). Each stored list ends
+    on a finished turn, so no tool call is split from its result. Metadata is
+    combined with the more recently updated row's keys winning (the target's
+    on a tie), and the times span both rows.
+    """
+    first, second = (source, target) if source["created_at"] < target["created_at"] else (target, source)
+    older, newer = (target, source) if source["updated_at"] > target["updated_at"] else (source, target)
+    return {
+        "messages": json.dumps(_loads(first["messages"], []) + _loads(second["messages"], [])),
+        "session_metadata": json.dumps(
+            {**_loads(older["session_metadata"], {}), **_loads(newer["session_metadata"], {})}
+        ),
+        "created_at": min(source["created_at"], target["created_at"]),
+        "updated_at": max(source["updated_at"], target["updated_at"]),
+    }
+
+
+def _loads(text: str | None, default: Any) -> Any:
+    return json.loads(text) if text else default
