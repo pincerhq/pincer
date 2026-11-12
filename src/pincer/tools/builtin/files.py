@@ -24,9 +24,7 @@ MAX_READ_SIZE = 100_000  # 100KB
 
 
 def _workspace() -> Workspace:
-    ws = get_workspace(get_settings())
-    ws.local.mkdir(parents=True, exist_ok=True)
-    return ws
+    return get_workspace(get_settings())
 
 
 def _sandbox_path(path_str: str) -> Path:
@@ -46,16 +44,18 @@ def _format_size(size: int) -> str:
 
 
 def _read(target: Path) -> str:
+    # One stat, then the download (skipped when the cached copy is current);
+    # the folder check only runs on a miss.
     ws = _workspace()
-    if not ws.is_file(target):
+    size = ws.file_size(target)
+    if size is None:
         if ws.is_dir(target):
             return f"Error: Not a file: {target}"
         return f"Error: File not found: {target}"
-    size = ws.size(target)
     if size > MAX_READ_SIZE:
         return f"Error: File too large ({size} bytes, max {MAX_READ_SIZE})"
     try:
-        content = ws.fetch(target).read_text(encoding="utf-8", errors="replace")
+        content = ws.fetch(target, known_file=True).read_text(encoding="utf-8", errors="replace")
         return f"File: {target.name} ({len(content)} chars)\n\n{content}"
     except Exception as e:
         return f"Error reading file: {e}"
@@ -88,14 +88,14 @@ async def file_write(path: str, content: str) -> str:
 
 def _list(target: Path) -> str:
     ws = _workspace()
-    if not ws.is_dir(target):
-        if ws.is_file(target):
-            return f"Error: Not a directory: {target}"
-        return f"Error: Directory not found: {target}"
     try:
-        children = ws.list(target)
+        children = ws.list(target) if ws.is_dir(target) else None
     except PermissionError:
         return f"Error: Permission denied for {target}"
+    if children is None:
+        if ws.file_size(target) is not None:
+            return f"Error: Not a directory: {target}"
+        return f"Error: Directory not found: {target}"
     entries = [
         f"  {entry.name}/" if entry.is_dir else f"  {entry.name} ({_format_size(entry.size)})"
         for entry in children

@@ -49,6 +49,13 @@ def storage_root_location(settings: CoreSettings, skills_dir: str | Path | None)
     return settings.data_dir / "storage"
 
 
+def storage_root_for(settings: CoreSettings) -> str | Path:
+    """Where the storage root of `settings` is: `storage_root_location` with only
+    an explicitly configured skills dir taken into account."""
+    explicit_skills = None if settings.skills_dir_defaulted else settings.skills_dir
+    return storage_root_location(settings, explicit_skills)
+
+
 def join(location: str | Path, name: str) -> str | Path:
     """`location/name`: a URI string for a cloud location, a Path for a local one."""
     if isinstance(location, str) and clients.is_remote_uri(location):

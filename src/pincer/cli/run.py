@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
     from pincer.services.skills import SkillService
+    from pincer.storage.workspace import Workspace
     from pincer.tools.registry import ToolRegistry
     from pincer.voice.postcall import PostCallProcessor
 
@@ -196,9 +197,22 @@ def _storage_root_label(settings: Settings, folder: str = "") -> str:
     Locations are URIs or paths; credentials live in other settings and never show."""
     from pincer.storage import layout
 
-    explicit_skills = None if settings.skills_dir_defaulted else settings.skills_dir
-    location = layout.storage_root_location(settings, explicit_skills)
+    location = layout.storage_root_for(settings)
     return str(layout.join(location, folder) if folder else location)
+
+
+async def _prepare_storage_or_exit(settings: Settings, *, migrate: bool) -> Workspace:
+    """Create Pincer's folders under the storage root (and, with `migrate`, move legacy
+    content in); exit with a clear message when the root is unreachable or refused.
+    Must run before `_build_core`, which uses the workspace."""
+    from pincer.storage.errors import StorageUnavailable
+    from pincer.storage.workspace import prepare_storage
+
+    try:
+        return await asyncio.to_thread(prepare_storage, settings, migrate=migrate)
+    except StorageUnavailable as e:
+        console.print(f"[bold red]Storage root unavailable:[/bold red] {e}")
+        raise typer.Exit(1) from e
 
 
 def _workspace_local(settings: Settings) -> Path:
@@ -206,6 +220,14 @@ def _workspace_local(settings: Settings) -> Path:
     from pincer.storage.workspace import get_workspace
 
     return get_workspace(settings).local
+
+
+def _workspace_fetch(settings: Settings) -> Callable[[Path], Path]:
+    """Refreshes a workspace file's local copy from the bucket (see `Workspace.fetch`)."""
+    from pincer.storage.workspace import get_workspace
+
+    workspace = get_workspace(settings)
+    return lambda path: workspace.fetch(path)
 
 
 def _refuse_legacy_identity_map() -> None:
@@ -619,6 +641,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
                 tool_registry=tools,
                 audit_logger=audit_logger,
                 local_upload_root=_workspace_local(settings) / "uploads",
+                local_file_fetch=_workspace_fetch(settings),
             )
             connection_results = await mcp_manager.start()
             for server_name, ok in connection_results.items():
@@ -1068,14 +1091,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     if there is nothing to serve (no channel configured)."""
     # Pincer's folders under the storage root, and the one-time move of legacy
     # content, come before anything that reads skills or saves files.
-    from pincer.storage.errors import StorageUnavailable
-    from pincer.storage.workspace import prepare_storage
-
-    try:
-        workspace = await asyncio.to_thread(prepare_storage, settings)
-    except StorageUnavailable as e:
-        console.print(f"[bold red]Storage root unavailable:[/bold red] {e}")
-        raise typer.Exit(1) from e
+    workspace = await _prepare_storage_or_exit(settings, migrate=True)
     core = await _build_core(settings)
     _stop_core_on_shutdown(shutdown, core)
     if settings.skills_index_watch_interval_seconds > 0:
@@ -1970,6 +1986,9 @@ async def _run_tasks_worker(settings: Settings) -> None:
     from pincer.tasks.context import set_context
     from pincer.tasks.delivery import TASK_RESULTS_CHANNEL, ResultEmitter, create_delivery_backend
 
+    # The folders, not the legacy migration: that belongs to the main process, so
+    # two processes never copy the same folders at once.
+    await _prepare_storage_or_exit(settings, migrate=False)
     core = await _build_core(settings)
     if core.agent.tool_selector is not None:
         core.agent.tool_selector.start_sync(core.tools.get_schemas())

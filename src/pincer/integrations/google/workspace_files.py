@@ -78,14 +78,6 @@ def list_files(pattern: str = "") -> list[tuple[str, int]]:
     """Files in the workspace (relative path, size), optionally filtered by a
     case-insensitive substring of the filename."""
     ws = _workspace()
-    found: list[tuple[str, int]] = []
-    for rel, _local in ws.files():
-        name = rel.rsplit("/", 1)[-1]
-        if pattern and pattern.lower() not in name.lower():
-            continue
-        try:
-            size = ws.size(rel)
-        except OSError:
-            size = 0
-        found.append((rel, size))
-    return found
+    needle = pattern.lower()
+    rels = [rel for rel, _local in ws.files() if not needle or needle in rel.rsplit("/", 1)[-1].lower()]
+    return list(zip(rels, ws.sizes(rels), strict=True))

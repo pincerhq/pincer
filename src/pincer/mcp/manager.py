@@ -55,6 +55,7 @@ class MCPClientManager:
         audit_logger: AuditLogger | None = None,
         security_gate: MCPSecurityGate | None = None,
         local_upload_root: Path | None = None,
+        local_file_fetch: Callable[[Path], Path] | None = None,
     ) -> None:
         self.config = config
         self.tool_registry = tool_registry
@@ -63,6 +64,7 @@ class MCPClientManager:
         # Passed through to every MCPToolBridge — lets HTTP-transport servers
         # receive local attachments as inline base64 (see bridge.py).
         self._local_upload_root = local_upload_root
+        self._local_file_fetch = local_file_fetch
         self._sessions: dict[str, MCPClientSession] = {}
         self._bridges: dict[str, MCPToolBridge] = {}
         self._task_group: anyio.abc.TaskGroup | None = None
@@ -127,6 +129,7 @@ class MCPClientManager:
                 prefix=self.config.tool_prefix,
                 security_gate=self._security_gate,
                 local_upload_root=self._local_upload_root,
+                local_file_fetch=self._local_file_fetch,
             )
             bridge.register_tools()
             self._bridges[srv_config.name] = bridge
@@ -276,6 +279,7 @@ class MCPClientManager:
                     prefix=self.config.tool_prefix,
                     security_gate=self._security_gate,
                     local_upload_root=self._local_upload_root,
+                    local_file_fetch=self._local_file_fetch,
                 )
                 bridge.register_tools()
                 self._bridges[name] = bridge

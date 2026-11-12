@@ -77,11 +77,21 @@ def _workspace() -> Workspace:
     return get_workspace(get_settings())
 
 
-def _get_output_dir() -> Path:
-    """Return the workspace's `exec_output/` folder (its local side) for generated files."""
-    output_dir = _workspace().local / "exec_output"
+def _prepare_output_dir() -> tuple[Path, dict[Path, float]]:
+    """The workspace's `exec_output/` folder (its local side), synced from the bucket
+    first so the script sees files uploaded there, and a snapshot of it. Blocking.
+
+    A sync that fails (bucket unreachable) is logged; the script then runs on the
+    cached copy.
+    """
+    ws = _workspace()
+    try:
+        ws.sync("exec_output")
+    except Exception:
+        logger.warning("Could not sync exec_output/ from the workspace; using the cached copy", exc_info=True)
+    output_dir = ws.local / "exec_output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+    return output_dir, _snapshot(output_dir)
 
 
 def _snapshot(output_dir: Path) -> dict[Path, float]:
@@ -127,19 +137,48 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
 
     timeout = min(max(timeout, 1), MAX_TIMEOUT)
 
-    output_dir = _get_output_dir()
-    existing_files = _snapshot(output_dir)
+    output_dir, existing_files = await asyncio.to_thread(_prepare_output_dir)
 
+    try:
+        outcome = await _run(code, timeout, output_dir)
+    finally:
+        # Upload what the run created or changed, even when it timed out or failed:
+        # files it wrote are in the workspace's local copy either way.
+        new_files = await asyncio.to_thread(_publish_changes, output_dir, existing_files)
+    if isinstance(outcome, str):
+        return outcome
+    stdout, stderr, returncode = outcome
+
+    output_parts: list[str] = []
+    if stdout.strip():
+        output_parts.append(stdout.strip())
+    if stderr.strip():
+        output_parts.append(f"[stderr]\n{stderr.strip()}")
+    for nf in new_files:
+        output_parts.append(f"[File saved: {nf}]")
+
+    if returncode != 0 and not stderr.strip():
+        output_parts.append(f"[Process exited with code {returncode}]")
+
+    result = "\n".join(output_parts) if output_parts else "(no output)"
+
+    if len(result) > MAX_OUTPUT_LENGTH:
+        result = result[:MAX_OUTPUT_LENGTH] + "\n...[output truncated]"
+
+    return result
+
+
+async def _run(code: str, timeout: int, output_dir: Path) -> tuple[str, str, int | None] | str:
+    """Run `code` with `output_dir` as working directory: (stdout, stderr, exit code),
+    or an error message when it timed out or could not start."""
     with tempfile.TemporaryDirectory(prefix="pincer_exec_") as tmpdir:
-        plot_dir = str(output_dir)
-
         full_code = _MATPLOTLIB_WRAPPER + code + _MATPLOTLIB_FOOTER
         script_path = os.path.join(tmpdir, "script.py")
         with open(script_path, "w") as f:
             f.write(full_code)
 
         env = scrubbed_env()
-        env["_PINCER_PLOT_DIR"] = plot_dir
+        env["_PINCER_PLOT_DIR"] = str(output_dir)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -161,26 +200,4 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
         except Exception as e:
             return f"Error starting subprocess: {type(e).__name__}: {e}"
 
-        stdout = stdout_bytes.decode(errors="replace")
-        stderr = stderr_bytes.decode(errors="replace")
-
-        output_parts: list[str] = []
-        if stdout.strip():
-            output_parts.append(stdout.strip())
-        if stderr.strip():
-            output_parts.append(f"[stderr]\n{stderr.strip()}")
-
-        # Upload what the run created or changed; report the new files
-        new_files = await asyncio.to_thread(_publish_changes, output_dir, existing_files)
-        for nf in new_files:
-            output_parts.append(f"[File saved: {nf}]")
-
-        if proc.returncode != 0 and not stderr.strip():
-            output_parts.append(f"[Process exited with code {proc.returncode}]")
-
-        result = "\n".join(output_parts) if output_parts else "(no output)"
-
-        if len(result) > MAX_OUTPUT_LENGTH:
-            result = result[:MAX_OUTPUT_LENGTH] + "\n...[output truncated]"
-
-        return result
+        return stdout_bytes.decode(errors="replace"), stderr_bytes.decode(errors="replace"), proc.returncode

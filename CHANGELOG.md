@@ -29,13 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root belongs to other services and is never written. The folders are created
   at startup (`.keep` markers on a cloud root), and `pincer run` fails fast
   when the root can't be reached or is a local folder that contains the data dir.
-- **One-time migration at startup:** `<data_dir>/workspace` and
-  `<data_dir>/downloads` are copied into the workspace, and `~/.pincer/skills`
-  into `<storage root>/skills` (only when `PINCER_SKILLS_DIR` is unset and the
-  target has no skills yet). Existing keys are never overwritten. Each source is
-  then renamed to `<name>.migrated`; delete it once you've checked the result.
-  When the data dir is not `~/.pincer`, files tools wrote to `~/.pincer/workspace`
-  or `~/.pincer/downloads` are not migrated: copy what you need by hand.
+- **One-time migration at startup:** `<data_dir>/workspace`, `<data_dir>/downloads`,
+  `~/.pincer/workspace` and `~/.pincer/downloads` are copied into the workspace,
+  and `~/.pincer/skills` into `<storage root>/skills` (only when
+  `PINCER_SKILLS_DIR` is unset and the target has no skills yet). Existing keys
+  are never overwritten. Each migrated source is recorded in
+  `<data_dir>/storage-migration.json` and renamed to `<name>.migrated`; a recorded
+  source is not copied again even when it can't be renamed (a mount point), so
+  files deleted since don't come back. Delete the old folders once you've
+  checked the result. `pincer run tasks` creates the folders but leaves the
+  migration to the main process.
+- With a cloud root, a chat attachment that can't be stored (the bucket is
+  unreachable) is still described to the agent, without a path, instead of
+  failing the whole message. `python_exec` uploads its output even when the run
+  times out, and sees files uploaded to `workspace/exec_output/`.
 
 #### Daily budget checked before each LLM call; web chat refusals are 402/503 (#357)
 

@@ -88,11 +88,10 @@ def resolve_storage_root(settings: Settings) -> tuple[StoragePath, list[str]]:
 
     A local root that contains the data dir is refused (see `data_dir_conflict`).
     """
-    from pincer.storage.layout import storage_root_location
+    from pincer.storage.layout import storage_root_for
 
     skills_dir = settings.skills_dir
-    explicit_skills = None if settings.skills_dir_defaulted else skills_dir
-    root = open_location(storage_root_location(settings, explicit_skills), settings)
+    root = open_location(storage_root_for(settings), settings)
     if isinstance(root, Path):
         problem = data_dir_conflict(root, Path(settings.data_dir).expanduser().resolve())
         if problem:

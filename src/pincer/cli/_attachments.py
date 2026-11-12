@@ -89,28 +89,42 @@ def describe_file_attachments(ws: Workspace, files: Iterable[tuple[bytes, str, s
     """Save each `(raw bytes, mime type, filename)` to `uploads/` and describe it for the prompt.
 
     Text files are inlined, PDFs have their text extracted, anything else is
-    named by its local path. An unsafe filename is rejected, never saved.
+    named by its local path. An unsafe filename is rejected, never saved. A
+    file that can't be stored (the bucket is unreachable) is still described,
+    without a path, so one storage error never drops the whole message.
     Blocking (a cloud root uploads each file).
     """
     parts: list[str] = []
     for raw_bytes, mime, filename in files:
         try:
-            save_path = ws.save(UPLOADS, filename, raw_bytes)
+            save_path: str | None = str(ws.save(UPLOADS, filename, raw_bytes))
         except ValueError:
             logger.warning("Rejected unsafe attachment filename: %r", filename)
             parts.append(f"[File: {filename}] rejected — unsafe filename")
             continue
-        parts.append(_describe_file(raw_bytes, mime, filename, str(save_path)))
+        except Exception:
+            logger.warning("Could not save attachment %r to the workspace", filename, exc_info=True)
+            save_path = None
+        parts.append(_describe_file(raw_bytes, mime, filename, save_path))
     return parts
 
 
-def _describe_file(raw_bytes: bytes, mime: str, filename: str, abs_path: str) -> str:
+def _not_saved(filename: str, raw_bytes: bytes, mime: str) -> str:
+    return (
+        f"[File: {filename}] ({len(raw_bytes)} bytes, {mime}) could not be saved to the workspace "
+        "(storage unavailable), so there is no file path for it. Tell the user and ask them to send it again later."
+    )
+
+
+def _describe_file(raw_bytes: bytes, mime: str, filename: str, abs_path: str | None) -> str:
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if mime.startswith("text/") or mime in _TEXT_MIME_TYPES or ext in _TEXT_EXTENSIONS:
         content = raw_bytes.decode("utf-8", errors="replace")
         if len(content) > _MAX_TEXT_CHARS:
             content = content[:_MAX_TEXT_CHARS] + f"\n... [truncated, {len(raw_bytes)} bytes total]"
         return f"[File: {filename}]\n```\n{content}\n```"
+    if abs_path is None:
+        return _not_saved(filename, raw_bytes, mime)
     if ext == ".pdf":
         try:
             import pymupdf
@@ -136,10 +150,16 @@ def _describe_file(raw_bytes: bytes, mime: str, filename: str, abs_path: str) ->
 
 def describe_image_attachments(ws: Workspace, images: Iterable[tuple[bytes, str]]) -> list[str]:
     """Save each `(raw bytes, media type)` to `uploads/` under a generated name and
-    describe it for the prompt. Blocking (a cloud root uploads each image)."""
+    describe it for the prompt. An image that can't be stored is described
+    without a path. Blocking (a cloud root uploads each image)."""
     parts: list[str] = []
     for raw_bytes, media_type in images:
         filename = f"image_{uuid.uuid4().hex[:8]}{_IMAGE_EXTENSIONS.get(media_type, '.bin')}"
-        save_path = ws.save(UPLOADS, filename, raw_bytes)
+        try:
+            save_path = ws.save(UPLOADS, filename, raw_bytes)
+        except Exception:
+            logger.warning("Could not save image %s to the workspace", filename, exc_info=True)
+            parts.append(_not_saved(f"Image {filename}", raw_bytes, media_type))
+            continue
         parts.append(_format_image_attachment(filename, str(save_path), len(raw_bytes), media_type))
     return parts

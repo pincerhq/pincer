@@ -17,10 +17,12 @@ methods here, which are plain `Path` operations for a local root.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,7 +34,8 @@ from pincer.storage.root import data_dir_conflict, open_location
 from pincer.tools.path_sandbox import confine_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    import builtins
+    from collections.abc import Callable, Iterator
 
     from pincer.config import Settings
     from pincer.storage.root import StoragePath
@@ -83,8 +86,7 @@ class Workspace:
         opened on a client of its own, whose cache is `<data_dir>/cache/workspace`.
         Raises StorageUnavailable.
         """
-        explicit_skills = None if settings.skills_dir_defaulted else settings.skills_dir
-        location = layout.storage_root_location(settings, explicit_skills)
+        location = layout.storage_root_for(settings)
         if clients.is_remote_uri(location):
             remote = clients.open_cloud_uri(
                 str(layout.join(location, layout.WORKSPACE)),
@@ -172,17 +174,60 @@ class Workspace:
         remote.write_text(content, encoding="utf-8")
         return target
 
-    def fetch(self, local_path: str | Path) -> Path:
-        """`local_path`, with the cached copy refreshed from the bucket when the object exists.
+    def fetch(self, local_path: str | Path, *, known_file: bool = False) -> Path:
+        """`local_path`, with the cached copy brought in line with the bucket.
 
-        On a local root this is the path itself. A cached copy changed locally
-        is replaced: the bucket is the source of truth.
+        On a local root this is the path itself. On a cloud root the bucket is
+        the source of truth: a cached copy changed locally is replaced, and one
+        whose object is gone is removed, so the returned path does not exist.
+        `known_file` skips the existence check when the caller just made it.
         """
         target = self.confine(local_path)
         remote = self.to_remote(target)
-        if not isinstance(remote, Path) and remote.is_file():
+        if isinstance(remote, Path):
+            return target
+        if known_file or remote.is_file():
             return clients.cached_copy(remote)
+        if target.is_file():
+            logger.debug("Dropping the cached copy of %s: the object is gone", remote)
+            target.unlink(missing_ok=True)
         return target
+
+    def file_size(self, local_path: str | Path) -> int | None:
+        """The size of the file at `local_path` in the workspace, or None when there is
+        no file there. One request on a cloud root."""
+        remote = self.to_remote(local_path)
+        if isinstance(remote, Path):
+            return remote.stat().st_size if remote.is_file() else None
+        from cloudpathlib.exceptions import NoStatError
+
+        try:
+            return remote.stat().st_size
+        except (NoStatError, FileNotFoundError, IsADirectoryError):
+            return None  # what a real bucket answers for a missing key or a folder prefix
+
+    def sync(self, subdir: str) -> None:
+        """Bring the local copy of `<subdir>/` in line with the bucket: objects newer
+        than their cached copy are downloaded, cached files whose object is gone
+        are removed. A no-op on a local root. One listing, then one request per file
+        (run in parallel)."""
+        if isinstance(self.remote, Path):
+            return
+        remote_dir, local_dir = self.remote / subdir, self.local / subdir
+        base_depth = len(remote_dir.parts)
+        rels = [
+            "/".join((*dirpath.parts[base_depth:], name))
+            for dirpath, _dirnames, filenames in remote_dir.walk()
+            for name in filenames
+        ]
+        _parallel(lambda rel: clients.cached_copy(remote_dir / rel), rels)
+        keep = set(rels)
+        if local_dir.is_dir():
+            for dirpath, _dirnames, filenames in local_dir.walk():
+                for name in filenames:
+                    path = dirpath / name
+                    if path.relative_to(local_dir).as_posix() not in keep:
+                        path.unlink(missing_ok=True)
 
     def is_file(self, local_path: str | Path) -> bool:
         """Whether a file exists at `local_path` in the workspace (in the bucket, for a cloud root)."""
@@ -207,18 +252,34 @@ class Workspace:
         os.utime(source, times=(mtime, mtime))
 
     def list(self, local_dir: str | Path = "") -> list[Entry]:
-        """The children of a workspace folder, listed from the bucket for a cloud root.
-        Markers and upload temp files are hidden."""
+        """The children of a workspace folder, listed from the bucket for a cloud root
+        (one listing, then the file sizes in parallel). Markers and upload temp
+        files are hidden."""
         remote = self.to_remote(local_dir or ".")
-        entries: list[Entry] = []
-        for child in remote.iterdir():
-            if is_hidden(child.name):
-                continue
-            if child.is_dir():
-                entries.append(Entry(child.name, True))
-            else:
-                entries.append(Entry(child.name, False, child.stat().st_size))
+        if isinstance(remote, Path):
+            entries = [
+                Entry(child.name, True) if child.is_dir() else Entry(child.name, False, child.stat().st_size)
+                for child in remote.iterdir()
+                if not is_hidden(child.name)
+            ]
+            return sorted(entries, key=lambda e: e.name)
+        _top, dirnames, filenames = next(remote.walk(lazy=True), (remote, [], []))
+        names = [name for name in filenames if not is_hidden(name)]
+        sizes = _parallel(lambda name: (remote / name).stat().st_size, names)
+        entries = [Entry(name, True) for name in dirnames if not is_hidden(name)]
+        entries += [Entry(name, False, size) for name, size in zip(names, sizes, strict=True)]
         return sorted(entries, key=lambda e: e.name)
+
+    def sizes(self, rels: builtins.list[str]) -> builtins.list[int]:
+        """The sizes of the workspace files `rels` (0 for one that can't be read), in parallel."""
+
+        def size(rel: str) -> int:
+            try:
+                return self.to_remote(rel).stat().st_size
+            except Exception:
+                return 0
+
+        return _parallel(size, rels)
 
     def files(self) -> Iterator[tuple[str, Path]]:
         """Every file in the workspace, recursively: (relative POSIX path, local path).
@@ -242,6 +303,17 @@ class Workspace:
                 yield rel, self.local / rel
 
 
+_PARALLEL_REQUESTS = 16
+
+
+def _parallel[T, R](fn: Callable[[T], R], items: list[T]) -> list[R]:
+    """`fn` over `items` in order, with up to 16 at a time (bucket round trips)."""
+    if len(items) <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=min(_PARALLEL_REQUESTS, len(items))) as pool:
+        return list(pool.map(fn, items))
+
+
 def _ensure_marker(folder: Any) -> None:
     marker = folder / FOLDER_MARKER
     if not marker.exists():
@@ -256,7 +328,9 @@ def get_workspace(settings: Settings) -> Workspace:
     client is not free to build). Raises StorageUnavailable."""
     global _workspace
     if _workspace is None or _workspace[0] is not settings:
-        _workspace = (settings, Workspace.from_settings(settings))
+        ws = Workspace.from_settings(settings)
+        ws.local.mkdir(parents=True, exist_ok=True)
+        _workspace = (settings, ws)
     return _workspace[1]
 
 
@@ -269,11 +343,14 @@ def reset_workspace() -> None:
 # ── Boot ─────────────────────────────────────────────────────────────
 
 
-def prepare_storage(settings: Settings) -> Workspace:
-    """Create Pincer's folders under the storage root and migrate legacy content once.
+def prepare_storage(settings: Settings, *, migrate: bool = True) -> Workspace:
+    """Create Pincer's folders under the storage root and, with `migrate`, move
+    legacy content in once.
 
-    Runs at boot, before the skills service and the channels. Raises
-    StorageUnavailable when the root can't be reached or is refused.
+    Runs at boot, before the skills service and the channels. The main process
+    migrates; a tasks worker passes `migrate=False`, so two processes never
+    copy the same folders at once. Raises StorageUnavailable when the root
+    can't be reached or is refused.
     """
     ws = get_workspace(settings)
     try:
@@ -284,48 +361,75 @@ def prepare_storage(settings: Settings) -> Workspace:
         raise
     except Exception as e:
         raise StorageUnavailable(f"Cannot prepare the storage root {ws.remote.parent}: {type(e).__name__}: {e}") from e
-    migrate_legacy(settings, ws)
+    if migrate:
+        migrate_legacy(settings, ws)
     return ws
+
+
+def legacy_home_dir() -> Path:
+    """`~/.pincer`, where tools wrote files (and user skills lived) before the storage root."""
+    return Path.home() / ".pincer"
 
 
 def legacy_skills_dir() -> Path:
     """Where user skills lived before they defaulted to `<storage root>/skills`."""
-    return Path.home() / ".pincer" / "skills"
+    return legacy_home_dir() / "skills"
+
+
+_MIGRATION_STATE = "storage-migration.json"
 
 
 def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
     """Copy content from the pre-storage-root locations, once.
 
-    - `<data_dir>/workspace/**` → `workspace/`
-    - `<data_dir>/downloads/**` → `workspace/downloads/`
+    - `<data_dir>/workspace/**` and `~/.pincer/workspace/**` → `workspace/`
+    - `<data_dir>/downloads/**` and `~/.pincer/downloads/**` → `workspace/downloads/`
     - `~/.pincer/skills/**` → `<root>/skills/`, only when PINCER_SKILLS_DIR is
       unset and the target holds no skills yet.
 
-    Keys that already exist are skipped. A source is then renamed to
-    `<name>.migrated`, so it is not copied again; one that fails to copy is
-    left in place and retried at the next start. Returns the copied counts.
+    Keys that already exist are skipped. A migrated source is recorded in
+    `<data_dir>/storage-migration.json` and renamed to `<name>.migrated`; a
+    recorded one is never copied again, even when the rename failed (a mount
+    point, a read-only folder), so files deleted since are not brought back.
+    A source that fails to copy is not recorded and is retried at the next
+    start. Returns the copied counts per label.
     """
     data_dir = Path(settings.data_dir).expanduser()
+    home = legacy_home_dir()
     plan: list[tuple[str, Path, StoragePath]] = [
         ("workspace", data_dir / "workspace", ws.remote),
         ("downloads", data_dir / "downloads", ws.remote / "downloads"),
+        ("workspace", home / "workspace", ws.remote),
+        ("downloads", home / "downloads", ws.remote / "downloads"),
     ]
     if settings.skills_dir_defaulted:
         skills_target = ws.remote.parent / layout.SKILLS
         if not _has_skills(skills_target):
             plan.append(("skills", legacy_skills_dir(), skills_target))
 
+    state_path = data_dir / _MIGRATION_STATE
+    done = _read_state(state_path)
+    seen: set[str] = set()
     copied: dict[str, int] = {}
     for label, source, target in plan:
         if not source.is_dir() or _same_place(source, target):
             continue
+        key = str(source.resolve())
+        if key in seen or key in done:
+            continue
+        seen.add(key)
         try:
             n_copied, n_skipped = _copy_tree(source, target)
-            moved = _mark_migrated(source)
         except Exception:
             logger.warning("Could not migrate %s from %s; will retry at the next start", label, source, exc_info=True)
             continue
-        copied[label] = n_copied
+        done.add(key)
+        _write_state(state_path, done)
+        try:
+            moved: Path | str = _mark_migrated(source)
+        except OSError as e:
+            moved = f"left in place ({type(e).__name__}: {e}); recorded in {state_path}, so it is not copied again"
+        copied[label] = copied.get(label, 0) + n_copied
         logger.info(
             "Migrated %s: %d file(s) copied from %s to %s, %d already there; the old folder is now %s",
             label,
@@ -341,6 +445,23 @@ def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
         if settings.skills_cache_dir is not None:
             announce_index_change(settings.skills_cache_dir)
     return copied
+
+
+def _read_state(path: Path) -> set[str]:
+    try:
+        return set(json.loads(path.read_text(encoding="utf-8")).get("migrated", []))
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError, AttributeError):
+        logger.warning("Ignoring an unreadable %s", path, exc_info=True)
+        return set()
+
+
+def _write_state(path: Path, done: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"migrated": sorted(done)}, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _has_skills(folder: StoragePath) -> bool:

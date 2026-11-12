@@ -278,3 +278,144 @@ def test_skills_are_not_migrated_with_an_explicit_skills_dir(tmp_path: Path) -> 
         copied = migrate_legacy(settings, Workspace.from_settings(settings))
     assert set(copied) == {"workspace", "downloads"}
     assert legacy_skills.is_dir()
+
+
+# ── Review fixes ─────────────────────────────────────────────────────────────
+
+
+async def test_python_exec_publishes_output_of_a_run_that_times_out(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.tools.builtin import python_exec as module
+
+    monkeypatch.setattr(module, "_workspace", lambda: env.ws)
+    code = "import time\nopen('partial.csv', 'w').write('1')\ntime.sleep(30)"
+    result = await module.python_exec(code, timeout=2)
+    assert "timed out" in result
+    assert env.external("workspace/exec_output/partial.csv").read_text() == "1"
+
+
+async def test_python_exec_sees_files_uploaded_to_exec_output(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.tools.builtin import python_exec as module
+
+    monkeypatch.setattr(module, "_workspace", lambda: env.ws)
+    env.ws.ensure()
+    _put(env.external("workspace/exec_output/input.csv"), b"a,b")
+    result = await module.python_exec("print(open('input.csv').read())")
+    assert "a,b" in result
+
+
+def test_sync_drops_cached_files_whose_object_is_gone(env: Env) -> None:
+    local = env.ws.save("exec_output", "old.png", b"P")
+    env.external("workspace/exec_output/old.png").unlink()
+    env.ws.sync("exec_output")
+    assert not local.exists()
+
+
+def test_fetch_drops_a_cached_copy_whose_object_is_gone(env: Env) -> None:
+    local = env.ws.save("uploads", "gone.pdf", b"%PDF")
+    env.external("workspace/uploads/gone.pdf").unlink()
+    assert not env.ws.fetch(local).exists()
+
+
+def test_file_size(env: Env) -> None:
+    env.ws.save("uploads", "a.bin", b"12345")
+    assert env.ws.file_size("uploads/a.bin") == 5
+    assert env.ws.file_size("uploads/missing.bin") is None
+    if not env.ws.is_cloud:
+        # A real bucket answers a folder prefix with NoStatError (None here); cloudpathlib's
+        # local mocks stat it like a directory on disk, so only the local root is checked.
+        assert env.ws.file_size("uploads") is None
+
+
+class _BrokenWorkspace:
+    def save(self, *_args: Any) -> Path:
+        raise OSError("bucket unreachable")
+
+
+def test_a_storage_error_does_not_drop_the_message() -> None:
+    ws: Any = _BrokenWorkspace()
+    [text, binary] = describe_file_attachments(
+        ws, [(b"hello", "text/plain", "hi.txt"), (b"\x00", "application/zip", "a.zip")]
+    )
+    assert "hello" in text  # text is still inlined
+    assert "could not be saved" in binary
+    [image] = describe_image_attachments(ws, [(b"PNG", "image/png")])
+    assert "could not be saved" in image
+
+
+def test_migration_covers_the_legacy_home_folders(env: Env, tmp_path: Path) -> None:
+    home = tmp_path / "home" / ".pincer"
+    (home / "workspace" / "exec_output").mkdir(parents=True)
+    (home / "workspace" / "exec_output" / "plot.png").write_bytes(b"P")
+    (home / "downloads").mkdir()
+    (home / "downloads" / "drive.pdf").write_bytes(b"D")
+    with patch("pincer.storage.workspace.legacy_home_dir", return_value=home):
+        copied = migrate_legacy(env.settings, env.ws)
+    assert copied == {"workspace": 1, "downloads": 1}
+    assert env.external("workspace/exec_output/plot.png").read_bytes() == b"P"
+    assert env.external("workspace/downloads/drive.pdf").read_bytes() == b"D"
+    assert (home / "workspace.migrated").is_dir()
+
+
+def test_the_legacy_home_is_not_migrated_twice_when_it_is_the_data_dir(tmp_path: Path) -> None:
+    data_dir = tmp_path / ".pincer"
+    (data_dir / "downloads").mkdir(parents=True)
+    (data_dir / "downloads" / "r.pdf").write_bytes(b"R")
+    settings = _RelaxedSettings(data_dir=data_dir, storage_root=str(tmp_path / "root"))  # type: ignore[call-arg]
+    with patch("pincer.storage.workspace.legacy_home_dir", return_value=data_dir):
+        assert migrate_legacy(settings, Workspace.from_settings(settings)) == {"downloads": 1}
+
+
+def test_a_source_that_cannot_be_renamed_is_not_copied_again(env: Env) -> None:
+    data_dir = Path(env.settings.data_dir)
+    (data_dir / "downloads").mkdir(parents=True)
+    (data_dir / "downloads" / "r.pdf").write_bytes(b"R")
+    with patch("pincer.storage.workspace._mark_migrated", side_effect=OSError(16, "Device or resource busy")):
+        assert migrate_legacy(env.settings, env.ws) == {"downloads": 1}
+        # The user deletes the migrated file; the next start must not bring it back.
+        env.external("workspace/downloads/r.pdf").unlink()
+        assert migrate_legacy(env.settings, env.ws) == {}
+    assert not env.external("workspace/downloads/r.pdf").exists()
+    assert (data_dir / "storage-migration.json").is_file()
+
+
+def test_prepare_storage_without_migration(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "downloads").mkdir(parents=True)
+    (data_dir / "downloads" / "r.pdf").write_bytes(b"R")
+    settings = _RelaxedSettings(data_dir=data_dir, storage_root=str(tmp_path / "root"))  # type: ignore[call-arg]
+    prepare_storage(settings, migrate=False)
+    assert (tmp_path / "root" / "workspace" / "downloads").is_dir()
+    assert (data_dir / "downloads" / "r.pdf").is_file()
+    assert not (tmp_path / "root" / "workspace" / "downloads" / "r.pdf").exists()
+
+
+async def test_an_unavailable_root_exits_with_a_message(tmp_path: Path) -> None:
+    import typer
+
+    from pincer.cli.run import _prepare_storage_or_exit
+
+    settings = _RelaxedSettings(data_dir=tmp_path / "data", storage_root=str(tmp_path))  # type: ignore[call-arg]
+    with pytest.raises(typer.Exit):
+        await _prepare_storage_or_exit(settings, migrate=False)
+
+
+def test_mcp_file_paths_under_uploads_are_refreshed(env: Env) -> None:
+    from pincer.mcp.bridge import _refresh_local_file_paths
+
+    local = env.ws.save("uploads", "scan.png", b"old")
+    later = local.stat().st_mtime + 5
+    target = env.external("workspace/uploads/scan.png")
+    _put(target, b"new")
+    if isinstance(target, Path):
+        os.utime(target, (later, later))
+    args = {"file_path": str(local), "nested": [{"file_path": "/etc/hosts"}]}
+    _refresh_local_file_paths(args, env.ws.local / "uploads", env.ws.fetch)
+    assert local.read_bytes() == b"new"
+
+
+def test_storage_root_for(tmp_path: Path) -> None:
+    from pincer.storage.layout import storage_root_for
+
+    assert storage_root_for(_RelaxedSettings(data_dir=tmp_path, storage_root="s3://b/")) == "s3://b/"  # type: ignore[call-arg]
+    assert storage_root_for(_RelaxedSettings(data_dir=tmp_path, skills_dir="gs://g/team")) == "gs://g/"  # type: ignore[call-arg]
+    assert storage_root_for(_RelaxedSettings(data_dir=tmp_path)) == tmp_path / "storage"  # type: ignore[call-arg]
