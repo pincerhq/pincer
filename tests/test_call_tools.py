@@ -411,3 +411,64 @@ async def test_call_tools_use_the_provisional_owner_before_tracking(settings):
     assert status_notify.get_call_info("CA_fast") is None
     status_notify.clear_call("CA_fast")
     assert status_notify.owner_id_for_call("CA_fast") == ""
+
+
+class _RoundTripMem(_SearchMem):
+    """Stores like a real backend: a stored note is searchable by its user_id."""
+
+    def __init__(self):
+        super().__init__([])
+
+    async def store_memory(self, **kwargs):
+        self.stored.append(kwargs)
+        self.rows.append(_memory(kwargs["user_id"], kwargs["content"]))
+        return "m1"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "channel", "pincer_user_id"),
+    [
+        ("website-demo", "web", ""),
+        ("dashboard", "web", ""),
+        ("pincer-canary", "canary", "pincer-canary"),
+    ],
+)
+async def test_synthetic_initiator_calls_share_no_memory(settings, user_id, channel, pincer_user_id):
+    """PR #369 review: a note taken on one demo visitor's call must not be
+    readable on another visitor's call, since both calls have the same
+    synthetic initiator. Without a real identity there is no owner memory:
+    call_memory_search refuses, and nothing is searched."""
+    mem = _RoundTripMem()
+    for sid in ("CA_A", "CA_B"):
+        status_notify.register_outbound_call(sid, user_id=user_id, channel=channel, pincer_user_id=pincer_user_id)
+    registry = ToolRegistry()
+    register_call_tools(registry, settings, memory=mem)
+    with call_context("CA_A"):
+        stored = await registry.execute(
+            "memory_note", {"note": "Visitor A: Maria Schmidt, tel 0151 111, wants dentist appointment"}
+        )
+    assert stored == "Note stored."
+    with call_context("CA_B"):
+        result = await registry.execute("call_memory_search", {"query": "Maria"})
+    assert result.startswith("Error") and "Maria" not in result
+    assert mem.queries == []
+    assert status_notify.owner_id_for_call("CA_A") == ""
+
+
+async def test_owner_memory_is_keyed_by_the_real_identity_only(settings):
+    status_notify.register_outbound_call("CA9", user_id="12345", channel="telegram", pincer_user_id="owner-1")
+    status_notify.register_outbound_call("CA10", user_id="12345", channel="telegram")
+    assert status_notify.owner_id_for_call("CA9") == "owner-1"
+    # No identity: no owner memory key (the channel-native id is not one).
+    assert status_notify.owner_id_for_call("CA10") == ""
+
+
+def test_synthetic_owner_ids_match_their_sources():
+    """The literals in tool_policy must track the ids the surfaces really use."""
+    from pincer.api import voice as api_voice
+    from pincer.observability.canary import CANARY_USER_ID
+    from pincer.voice.tool_policy import SYNTHETIC_OWNER_IDS, is_owner_identity
+
+    assert {CANARY_USER_ID, api_voice._DASHBOARD_USER, "website-demo", "unknown"} <= SYNTHETIC_OWNER_IDS
+    assert not is_owner_identity("") and not is_owner_identity(None) and not is_owner_identity("  ")
+    assert is_owner_identity("owner-1")

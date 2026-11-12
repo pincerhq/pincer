@@ -21,7 +21,7 @@ from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, trunca
 from pincer.voice.twilio_rest import DialOutcomeUnknown
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
 TOOL_NAME = "make_phone_call"
 # The line a placed call's result names it on. Only a placed call's result has
@@ -352,7 +352,7 @@ async def make_phone_call(
     # Issue #252: the owner's per-call grants, validated against the in-call
     # tier table before anything is dialled. A rejected name is an error the
     # agent sees, never silently dropped (it would believe the call can do it).
-    from pincer.voice.tool_policy import validate_tool_grants
+    from pincer.voice.tool_policy import is_owner_identity, validate_tool_grants
 
     try:
         tool_grants, rejected_tools = validate_tool_grants(allow_tools)
@@ -391,6 +391,13 @@ async def make_phone_call(
 
     ctx = context or {}
     user_id = ctx.get("user_id", "unknown")
+    # Issue #252: grants are owner authority, and only a real Pincer identity
+    # holds it (demo, dashboard, canary and context-less calls stay `remote`,
+    # where a grant would be silently ignored) — so refuse instead of dropping.
+    owner_identity = str(ctx.get("pincer_user_id") or "")
+    if tool_grants and not is_owner_identity(owner_identity):
+        logger.info("make_phone_call aborted: allow_tools without an owner identity (user %s)", user_id)
+        return "Error: allow_tools needs a signed-in Pincer user. Place the call without it."
 
     if not _check_daily_limit(user_id, settings.voice_outbound_max_daily):
         logger.info("make_phone_call aborted: per-user daily limit reached for user %s", user_id)
@@ -477,12 +484,12 @@ async def make_phone_call(
             )
 
             owner_meta: dict[str, Any] = {}
-            if user_id and user_id != "unknown":
+            if user_id and user_id != "unknown" and is_owner_identity(owner_identity):
                 owner_meta = {
                     META_OWNER_USER: user_id,
                     META_OWNER_CHANNEL: str(ctx.get("channel", "") or ""),
                     META_OWNER_GRANTS: tool_grants,
-                    META_OWNER_PINCER_ID: str(ctx.get("pincer_user_id") or ""),
+                    META_OWNER_PINCER_ID: owner_identity,
                     META_OWNER_SESSION: str(ctx.get("session_key") or ""),
                 }
             pre_state = await engine.register_pending_outbound(
@@ -682,3 +689,27 @@ async def make_phone_call(
         logger.warning("make_phone_call failed: %s", err_msg)
         logger.exception("Twilio exception details")
         return err_msg
+
+
+def make_chat_phone_call(
+    registered_tools: Callable[[], Iterable[str]],
+) -> Callable[..., Awaitable[str]]:
+    """The chat-tool handler for ``make_phone_call``.
+
+    The only difference from the API path is the briefing's ``source``; both
+    go through `make_phone_call`. ``context`` is a NAMED parameter on purpose:
+    `ToolRegistry.execute` injects it only into handlers whose signature
+    declares it, and a call placed without it has no owner (#252).
+    ``registered_tools`` is always this process's registry, read at dial time
+    (late MCP tools count) — the model can never supply it.
+    """
+
+    async def _make_phone_call_from_chat(context: dict | None = None, **kwargs: Any) -> str:
+        from pincer.voice.briefing import SOURCE_CHAT
+
+        kwargs.setdefault("source", SOURCE_CHAT)
+        kwargs["context"] = context
+        kwargs["registered_tools"] = registered_tools
+        return await make_phone_call(**kwargs)
+
+    return _make_phone_call_from_chat

@@ -236,14 +236,18 @@ def owner_info_for_call(call_sid: str) -> _OutboundCallInfo | None:
 
 
 def owner_id_for_call(call_sid: str) -> str:
-    """The canonical id of the user who placed a call ("" if none).
+    """The Pincer identity of the user who placed a call ("" if none).
 
-    The Pincer identity when known, else the channel-native id — the key the
-    owner's chat recall searches memory under."""
+    The key the owner's chat recall searches memory under. Only a real
+    identity counts: a call with none (or a shared synthetic initiator such
+    as the website demo, the dashboard or the canary) has no owner memory, so
+    nothing keyed by it is readable on another call of the same surface."""
+    from pincer.voice.tool_policy import is_owner_identity
+
     info = owner_info_for_call(call_sid)
-    if info is None:
+    if info is None or not is_owner_identity(info.pincer_user_id):
         return ""
-    return info.pincer_user_id or info.user_id
+    return info.pincer_user_id
 
 
 def get_call_info(call_sid: str) -> _OutboundCallInfo | None:
@@ -391,7 +395,8 @@ async def append_to_session(call_sid: str, text: str, *, wait_s: float | None = 
     if info is None or not info.session_key or _session_reporter is None:
         return APPEND_NONE
     reporter = _session_reporter
-    owner, channel, session_key = owner_id_for_call(call_sid), info.channel, info.session_key
+    # Session routing, like the final report (_report_to_session) — not a memory key.
+    owner, channel, session_key = info.pincer_user_id or info.user_id, info.channel, info.session_key
 
     async def _append() -> str:
         try:

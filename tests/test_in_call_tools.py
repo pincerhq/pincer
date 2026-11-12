@@ -83,12 +83,13 @@ async def _start(
     tools=None,
     owner=True,
     grants=(),
-    owner_identity="",
+    owner_identity="owner-1",
 ):
     """``owner=False`` places the outbound call with no tracked initiating
     user, so it stays on the remote party's authority (#252).
-    ``owner_identity`` is the placing user's Pincer identity; with the
-    ``owner_phone`` fixture, ``"owner"`` makes the callee the owner themselves."""
+    ``owner_identity`` is the placing user's Pincer identity (owner authority
+    needs a real one); with the ``owner_phone`` fixture, ``"owner"`` makes the
+    callee the owner themselves."""
     settings = settings or _settings()
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
@@ -704,11 +705,39 @@ async def test_owner_answering_their_own_phone_keeps_the_full_scope(owner_phone)
     await channel.stop()
 
 
-async def test_owner_call_without_an_identity_never_matches_the_callee(owner_phone):
-    """No placing identity (an API call with no Pincer user) fails closed."""
-    channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
+async def test_call_without_an_identity_never_matches_the_callee(owner_phone):
+    """No placing identity (an API call with no Pincer user): no owner
+    authority, so the callee's identity is never matched as the owner. The
+    call stays on the remote party's authority — a registered callee keeps
+    their own #299 scope, exactly as before #252."""
+    channel, engine, state = await _start(ToolAgent([]), tools=_Registry(), owner_identity="")
+    assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_REMOTE
     assert state.metadata[tp.META_REMOTE_IS_OWNER] is False
+    assert state.metadata[tp.META_OWNER_GRANTS] == frozenset()
+    await channel.stop()
+
+
+@pytest.mark.parametrize("initiator", ["website-demo", "dashboard", "pincer-canary", "unknown"])
+async def test_synthetic_initiators_never_get_owner_authority(initiator):
+    """PR #369 review: the demo, dashboard and canary ids are shared by every
+    call they place. Even tracked with that id as the "identity", the call is
+    `remote`: the callee confirms writes out loud and grants are ignored."""
+    channel, engine, state = await _start(ToolAgent([]), owner_identity=initiator, grants=("google__create_event",))
+    assert state.metadata[tp.META_PRINCIPAL] == tp.PRINCIPAL_REMOTE
+    assert state.metadata[tp.META_OWNER_GRANTS] == frozenset()
     assert "google__create_event" not in state.metadata["allowed_tools"]
+    decision = tp.decide("send_owner_message", state, _settings(), {"text": "x"})
+    assert decision.action == "need_verbal"
+    await channel.stop()
+
+
+async def test_tracked_call_without_identity_ignores_a_pre_dial_owner():
+    """Once tracked, the tracking decides: a pre-dial owner on the state
+    cannot lift a tracked call with no identity to owner authority."""
+    channel, engine, state = await _start(ToolAgent([]), owner_identity="")
+    state.metadata[tp.META_OWNER_USER] = "12345"
+    state.metadata[tp.META_OWNER_PINCER_ID] = "owner-1"
+    assert channel._resolve_principal(CALL, state, "generic") == tp.PRINCIPAL_REMOTE
     await channel.stop()
 
 

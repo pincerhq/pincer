@@ -349,7 +349,8 @@ class VoiceChannel(BaseChannel):
         known initiating user — make_phone_call's tracking, or the owner it
         recorded on the pre-registered state for a call answered before the
         tracking landed (that owner is then handed to the call tools as the
-        call's provisional owner). Everything else is ``remote``. Always
+        call's provisional owner) — and only when that user is a real Pincer
+        identity (`is_owner_identity`). Everything else is ``remote``. Always
         overwritten here, so no earlier value of the keys survives.
         """
         from pincer.voice import status_notify
@@ -364,6 +365,7 @@ class VoiceChannel(BaseChannel):
             META_REMOTE_USER,
             PRINCIPAL_OWNER,
             PRINCIPAL_REMOTE,
+            is_owner_identity,
         )
 
         principal = PRINCIPAL_REMOTE
@@ -372,11 +374,15 @@ class VoiceChannel(BaseChannel):
         if kind == "generic" and state.direction == CallDirection.OUTBOUND:
             info = status_notify.get_call_info(call_sid)
             pending_owner = str(state.metadata.get(META_OWNER_USER) or "")
-            if info is not None and info.user_id and info.user_id != "unknown":
+            # A real identity is required: a synthetic initiator (website
+            # demo, dashboard, canary) is shared by every call it places, so
+            # its calls stay `remote`. Once tracked, the tracking decides —
+            # the pre-dial owner is only the fallback for an untracked call.
+            if info is not None and info.user_id and is_owner_identity(info.pincer_user_id):
                 principal = PRINCIPAL_OWNER
                 grants = frozenset(info.tool_grants)
                 owner_identity = info.pincer_user_id
-            elif pending_owner and pending_owner != "unknown":
+            elif info is None and pending_owner and is_owner_identity(state.metadata.get(META_OWNER_PINCER_ID)):
                 principal = PRINCIPAL_OWNER
                 grants = frozenset(state.metadata.get(META_OWNER_GRANTS) or ())
                 owner_identity = str(state.metadata.get(META_OWNER_PINCER_ID) or "")

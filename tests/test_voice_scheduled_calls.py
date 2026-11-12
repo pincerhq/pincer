@@ -184,6 +184,9 @@ async def test_firing_places_the_call_through_the_normal_path(monkeypatch):
     assert seen["thread_id"] == "th_1"
     # Marked as the scheduler's, so the briefing records where it came from.
     assert seen["source"] == "scheduler"
+    # The schedule's owner rides as the Pincer identity (#252); a synthetic
+    # one such as "dashboard" is then refused owner authority downstream.
+    assert seen["context"] == {"user_id": "dashboard", "channel": "web", "pincer_user_id": "dashboard"}
     assert "Placing the scheduled call" in message
 
 

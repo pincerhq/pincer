@@ -509,9 +509,9 @@ phones = ["+4915112345678"]
 
 #### Calls you placed: the agent acts for you
 
-On an outbound call you asked for (`make_phone_call` from a chat, or any
-generic outbound call with a known initiating user), the agent works **on
-your authority**, whoever answers. The restaurant you order a pizza from is
+On an outbound call you asked for (`make_phone_call` from a chat, a call
+you scheduled, or any generic outbound call placed by a known Pincer
+identity), the agent works **on your authority**, whoever answers. The restaurant you order a pizza from is
 a guest on the line, but it is never asked to approve what the agent does for
 you:
 
@@ -530,6 +530,12 @@ with an error before anything is dialled, and so is a tool this setup does
 not have (granting `google__create_event` without Google Calendar connected),
 so the agent never believes a call can do something it cannot. Grants never apply to inbound calls, appointment
 calls or the receptionist, and the write budget still applies.
+
+Owner authority needs a real Pincer identity. Calls placed by a shared
+surface — the public website demo, the dashboard, the canary — or with no
+identity at all stay on the callee's authority (the rules above), keep
+nothing in owner memory, and refuse `allow_tools`: one demo visitor's call
+can never read what another visitor's call noted.
 
 Inbound calls, appointment calls and the receptionist are unaffected: there
 the rules above (registered user / guest) decide.

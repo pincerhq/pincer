@@ -111,6 +111,22 @@ CALLER_GUEST = "guest"
 PRINCIPAL_OWNER = "owner"
 PRINCIPAL_REMOTE = "remote"
 
+# Initiator ids that name a surface, not a person: the public website demo
+# (its callee is an anonymous visitor), the dashboard, the canary and the
+# no-context fallback. They are shared by every call they place, so they never
+# carry owner authority and never key owner memory (one demo visitor's note
+# must not be readable on another visitor's call). Kept as literals so this
+# module stays import-light; tests pin them to the constants at their sources.
+SYNTHETIC_OWNER_IDS: frozenset[str] = frozenset({"unknown", "website-demo", "dashboard", "pincer-canary"})
+
+
+def is_owner_identity(pincer_user_id: object) -> bool:
+    """True only for a real Pincer identity: a non-empty id that is not one of
+    the shared synthetic initiators. Owner authority and owner memory need it."""
+    value = str(pincer_user_id or "").strip()
+    return bool(value) and value not in SYNTHETIC_OWNER_IDS
+
+
 # Owner-addressed writes that need no approval on an owner call: the message
 # goes to the very person who would answer the approval card, so the card
 # would only ask the owner whether to tell them something.
@@ -565,6 +581,7 @@ __all__ = [
     "OWNER_SELF_TOOLS",
     "PRINCIPAL_OWNER",
     "PRINCIPAL_REMOTE",
+    "SYNTHETIC_OWNER_IDS",
     "META_PENDING_ARGS",
     "META_TURN_NO",
     "META_VERBAL_CONFIRMED",
@@ -583,6 +600,7 @@ __all__ = [
     "callable_tools",
     "caller_class_of",
     "canonical_json",
+    "is_owner_identity",
     "clear_verbal_confirmation",
     "decide",
     "match_tool_patterns",

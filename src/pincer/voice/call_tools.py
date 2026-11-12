@@ -145,8 +145,19 @@ def make_memory_note(settings: Any, memory: BaseMemoryBackend | None) -> Any:
         if not body:
             return "Error: empty note."
 
-        # The owner's canonical id: the key their chat recall searches under.
-        user_id = _owner_id(call_sid) or str((context or {}).get("pincer_user_id") or "") or "voice"
+        # The owner's Pincer identity: the key their chat recall searches
+        # under. A call without one keeps the pre-#252 key (the routing user,
+        # else the turn's user) — no canonical-id note, and call_memory_search
+        # never reads it back.
+        from pincer.voice import status_notify
+
+        info = status_notify.owner_info_for_call(call_sid)
+        user_id = (
+            _owner_id(call_sid)
+            or (info.user_id if info else "")
+            or str((context or {}).get("pincer_user_id") or "")
+            or "voice"
+        )
         tags = ["source:voice_call", f"call:{call_sid}", "in_call_note", *await _call_link_tags(call_sid, settings)]
         try:
             await memory.store_memory(

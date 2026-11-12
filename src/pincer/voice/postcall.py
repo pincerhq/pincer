@@ -33,6 +33,7 @@ from pincer.voice.outcome import (
     render_not_connected_report,
     render_report,
 )
+from pincer.voice.tool_policy import is_owner_identity
 from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
@@ -96,7 +97,9 @@ class PostCallProcessor:
         user_id = (info.user_id if info else "") or state.pincer_user_id or state.caller_number
         # Memory is keyed by the canonical id the owner's chat recall searches
         # under (#252), not the channel-native id the status push uses.
-        memory_user_id = (info.pincer_user_id if info else "") or user_id
+        # A synthetic initiator (demo, dashboard, canary) is no identity:
+        # those calls keep the pre-#252 key.
+        memory_user_id = info.pincer_user_id if info and is_owner_identity(info.pincer_user_id) else user_id
         target_label = state.target_name or state.target_number or state.caller_number or "unknown"
 
         # Sprint 12: receptionist calls report to the OWNER with the §12 template
