@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 _PARALLEL_REQUESTS = 16
 _MIGRATION_STATE = "storage-migration.json"
+# Where a cloud workspace records the changes in its cache the bucket hasn't got yet.
+_PENDING_STATE = "workspace-pending.json"
+# How many skipped paths a migration warning names.
+_NAMED_MAX = 20
 _workspace: tuple[Any, Workspace] | None = None
 
 
@@ -74,13 +78,18 @@ class Entry:
 class Workspace:
     """`<storage root>/workspace`, and the local directory tools see (see the module docstring)."""
 
-    def __init__(self, remote: StoragePath, local: Path) -> None:
+    def __init__(self, remote: StoragePath, local: Path, state_file: Path | None = None) -> None:
         self.remote = remote
         self.local = local
-        # Relative keys of files written into `local` whose upload failed: `sync` and
-        # `fetch` leave them alone until `publish` (or `retry_pending`) gets them up.
+        # Relative keys of files written into `local` whose upload failed, and of files
+        # removed from `local` whose object could not be deleted. `sync` and `fetch`
+        # leave both alone until `retry_pending` (or `publish`/`remove`) gets them done.
+        # Kept in `state_file` (a cloud root only), so they survive a restart.
         self.pending: set[str] = set()
+        self.pending_deletes: set[str] = set()
         self._pending_lock = threading.Lock()
+        self._state_file = state_file
+        self._load_pending()
 
     @property
     def is_cloud(self) -> bool:
@@ -104,7 +113,7 @@ class Workspace:
                 error=StorageUnavailable,
                 what="workspace",
             )
-            return cls(remote, remote._local)
+            return cls(remote, remote._local, Path(settings.data_dir).expanduser() / "cache" / _PENDING_STATE)
         root = open_location(location, settings)
         assert isinstance(root, Path)
         problem = data_dir_conflict(root, Path(settings.data_dir).expanduser().resolve())
@@ -195,9 +204,13 @@ class Workspace:
         remote = self.to_remote(target)
         if isinstance(remote, Path):
             return target
+        rel = self.relative(target)
+        with self._pending_lock:
+            if rel in self.pending or rel in self.pending_deletes:
+                return target  # the local side is newer than the bucket
         if known_file or remote.is_file():
             return clients.cached_copy(remote)
-        if target.is_file() and not self.is_pending(target):
+        if target.is_file():
             logger.debug("Dropping the cached copy of %s: the object is gone", remote)
             target.unlink(missing_ok=True)
         return target
@@ -218,14 +231,20 @@ class Workspace:
     def sync(self, subdir: str) -> None:
         """Bring the local copy of `<subdir>/` in line with the bucket: objects newer
         than their cached copy are downloaded, cached files whose object is gone
-        are removed. A no-op on a local root. One listing, then one request per file
-        (run in parallel)."""
+        are removed. Pending changes (see `pending`) are left alone. A no-op on a local
+        root. One listing, then one request per file (run in parallel).
+
+        Only the workspace's own methods and `python_exec` (which publishes what it
+        writes) put files in `local` on a cloud root; anything else written there
+        is cache and is pruned when it has no object.
+        """
         if isinstance(self.remote, Path):
             return
         remote_dir, local_dir = self.remote / subdir, self.local / subdir
         prefix = f"{subdir.strip('/')}/" if subdir.strip("/") else ""
         with self._pending_lock:
             pending = {rel.removeprefix(prefix) for rel in self.pending if rel.startswith(prefix)}
+            deleted = {rel.removeprefix(prefix) for rel in self.pending_deletes if rel.startswith(prefix)}
         base_depth = len(remote_dir.parts)
         rels = [
             "/".join((*dirpath.parts[base_depth:], name))
@@ -233,7 +252,11 @@ class Workspace:
             for name in filenames
         ]
         # A pending file is newer than its object (or has none): never overwrite or prune it.
-        _parallel(lambda rel: clients.cached_copy(remote_dir / rel), [rel for rel in rels if rel not in pending])
+        # An object whose delete is pending is not brought back.
+        _parallel(
+            lambda rel: clients.cached_copy(remote_dir / rel),
+            [rel for rel in rels if rel not in pending and rel not in deleted],
+        )
         keep = set(rels) | pending
         if local_dir.is_dir():
             for dirpath, _dirnames, filenames in local_dir.walk():
@@ -260,51 +283,112 @@ class Workspace:
         # take it for a local edit (cloudpathlib refuses to overwrite a newer copy).
         mtime = remote.stat().st_mtime
         os.utime(source, times=(mtime, mtime))
-        with self._pending_lock:
-            self.pending.discard(self.relative(source))
-
-    def mark_pending(self, local_path: str | Path) -> None:
-        """Record that the file at `local_path` failed to upload: it is kept locally
-        (not pruned or overwritten by `sync`/`fetch`) until `retry_pending` gets it up."""
-        rel = self.relative(local_path)
-        with self._pending_lock:
-            self.pending.add(rel)
-
-    def is_pending(self, local_path: str | Path) -> bool:
-        rel = self.relative(local_path)
-        with self._pending_lock:
-            return rel in self.pending
-
-    def retry_pending(self, subdir: str) -> builtins.list[Path]:
-        """Upload again the pending files under `subdir`. Ones gone locally are dropped
-        from `pending`; returns the local paths that still fail."""
-        prefix = f"{subdir.strip('/')}/" if subdir.strip("/") else ""
-        with self._pending_lock:
-            rels = sorted(rel for rel in self.pending if rel.startswith(prefix))
-        failed: builtins.list[Path] = []
-        for rel in rels:
-            path = self.local / rel
-            if not path.is_file():
-                with self._pending_lock:
-                    self.pending.discard(rel)
-                continue
-            try:
-                self.publish(path)
-            except Exception:
-                logger.warning("Could not upload %s to the workspace (pending)", path, exc_info=True)
-                failed.append(path)
-        return failed
+        self._settle(self.relative(source))
 
     def remove(self, local_path: str | Path) -> None:
         """Delete the workspace object at `local_path` (a file a tool removed from
         `local`). A no-op on a local root, where the file is already gone."""
         target = self.confine(local_path)
         remote = self.to_remote(target)
+        if not isinstance(remote, Path):
+            remote.unlink(missing_ok=True)
+        self._settle(self.relative(target))
+
+    # ── Pending changes (cloud root) ─────────────────────────────────
+
+    def mark_pending(self, local_path: str | Path) -> None:
+        """Record that the file at `local_path` failed to upload: it is kept locally
+        (not pruned or overwritten by `sync`/`fetch`) until `retry_pending` gets it up."""
+        self._mark(self.relative(local_path), upload=True)
+
+    def mark_delete_pending(self, local_path: str | Path) -> None:
+        """Record that the object at `local_path` failed to delete: `sync`/`fetch` don't
+        bring it back, and `retry_pending` deletes it."""
+        self._mark(self.relative(local_path), upload=False)
+
+    def is_pending(self, local_path: str | Path) -> bool:
+        rel = self.relative(local_path)
         with self._pending_lock:
-            self.pending.discard(self.relative(target))
-        if isinstance(remote, Path):
+            return rel in self.pending or rel in self.pending_deletes
+
+    def retry_pending(self, subdir: str) -> builtins.list[Path]:
+        """Upload the pending files and delete the pending objects under `subdir`.
+        A pending upload whose file is gone locally is dropped. Returns the local
+        paths that still fail."""
+        prefix = f"{subdir.strip('/')}/" if subdir.strip("/") else ""
+        with self._pending_lock:
+            uploads = sorted(rel for rel in self.pending if rel.startswith(prefix))
+            deletes = sorted(rel for rel in self.pending_deletes if rel.startswith(prefix))
+        failed: builtins.list[Path] = []
+        for rel in uploads:
+            path = self.local / rel
+            if not path.is_file():
+                self._settle(rel)
+                continue
+            try:
+                self.publish(path)
+            except Exception:
+                logger.warning("Could not upload %s to the workspace (pending)", path, exc_info=True)
+                failed.append(path)
+        for rel in deletes:
+            path = self.local / rel
+            try:
+                self.remove(path)
+            except Exception:
+                logger.warning("Could not delete %s from the workspace (pending)", path, exc_info=True)
+                failed.append(path)
+        return failed
+
+    def _mark(self, rel: str, *, upload: bool) -> None:
+        with self._pending_lock:
+            (self.pending if upload else self.pending_deletes).add(rel)
+            (self.pending_deletes if upload else self.pending).discard(rel)
+            self._save_pending()
+
+    def _settle(self, rel: str) -> None:
+        with self._pending_lock:
+            if rel in self.pending or rel in self.pending_deletes:
+                self.pending.discard(rel)
+                self.pending_deletes.discard(rel)
+                self._save_pending()
+
+    def _load_pending(self) -> None:
+        if self._state_file is None:
             return
-        remote.unlink(missing_ok=True)
+        try:
+            state = json.loads(self._state_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            logger.warning("Ignoring an unreadable %s", self._state_file, exc_info=True)
+            return
+        entry = state.get(str(self.remote)) if isinstance(state, dict) else None
+        if isinstance(entry, dict):
+            self.pending = {rel for rel in entry.get("upload", []) if isinstance(rel, str)}
+            self.pending_deletes = {rel for rel in entry.get("delete", []) if isinstance(rel, str)}
+
+    def _save_pending(self) -> None:
+        """Write the pending changes to the state file, keyed by the workspace URI. Called with the lock held."""
+        if self._state_file is None:
+            return
+        try:
+            try:
+                state = json.loads(self._state_file.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    state = {}
+            except (OSError, ValueError):
+                state = {}
+            key = str(self.remote)
+            if self.pending or self.pending_deletes:
+                state[key] = {"upload": sorted(self.pending), "delete": sorted(self.pending_deletes)}
+            else:
+                state.pop(key, None)
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_file.with_name(f".{self._state_file.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            os.replace(tmp, self._state_file)
+        except OSError:
+            logger.warning("Could not record the pending workspace changes in %s", self._state_file, exc_info=True)
 
     def list(self, local_dir: str | Path = "") -> list[Entry]:
         """The children of a workspace folder, listed from the bucket for a cloud root
@@ -466,7 +550,7 @@ def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
             continue
         seen.add(key)
         try:
-            n_copied, n_skipped, not_copied = _copy_tree(source, target)
+            n_copied, n_skipped, not_copied, failed = _copy_tree(source, target)
         except Exception:
             logger.warning("Could not migrate %s from %s; will retry at the next start", label, source, exc_info=True)
             continue
@@ -479,15 +563,24 @@ def migrate_legacy(settings: Settings, ws: Workspace) -> dict[str, int]:
         copied[label] = copied.get(label, 0) + n_copied
         logger.info(
             "Migrated %s: %d file(s) copied from %s to %s, %d already there, %d not copied "
-            "(symlinks or special files); the old folder is now %s",
+            "(symlinks or special files), %d failed; the old folder is now %s",
             label,
             n_copied,
             source,
             target,
             n_skipped,
             len(not_copied),
+            len(failed),
             moved,
         )
+        if failed:
+            logger.warning(
+                "Migration of %s could not copy %d file(s); they stay in %s: %s",
+                label,
+                len(failed),
+                moved,
+                _name_some(failed),
+            )
         if not_copied:
             logger.warning(
                 "Migration of %s did not copy %d symlink(s) or special file(s); they stay in %s: %s",
@@ -535,9 +628,6 @@ def _same_place(source: Path, target: StoragePath) -> bool:
     return source == target or target.is_relative_to(source) or source.is_relative_to(target)
 
 
-_NAMED_MAX = 20
-
-
 def _name_some(rels: list[str]) -> str:
     """`rels` joined for a log line, capped at `_NAMED_MAX` names."""
     shown = ", ".join(rels[:_NAMED_MAX])
@@ -545,16 +635,24 @@ def _name_some(rels: list[str]) -> str:
     return f"{shown} and {rest} more" if rest > 0 else shown
 
 
-def _copy_tree(source: Path, target: StoragePath) -> tuple[int, int, list[str]]:
+def _copy_tree(source: Path, target: StoragePath) -> tuple[int, int, list[str], list[str]]:
     """Copy every regular file under `source` to the same relative key under
     `target`, skipping keys that exist. Symlinks (to files or folders) and special
-    files are not copied. Returns (copied, skipped, relative paths not copied).
+    files are not copied. Returns (copied, skipped, relative paths not copied,
+    relative paths that failed to copy).
 
-    A local copy goes through a `.part` file renamed into place, so an interrupted
-    copy never leaves a truncated file that the retry would take as done.
+    A file that fails to copy (a name the target refuses, say) is logged and
+    reported, and the rest of the tree is still copied. When files were tried and
+    none could be copied, the target is taken for unreachable and the first error
+    is raised, so the source is retried at the next start.
+
+    A local copy goes through a uniquely named temp file renamed into place, so an
+    interrupted copy never leaves a truncated file that the retry would take as done.
     """
     copied = skipped = 0
     not_copied: list[str] = []
+    failed: list[str] = []
+    first_error: Exception | None = None
     for dirpath, dirnames, filenames in source.walk():
         # walk() does not descend into a symlinked folder; it still lists it here.
         not_copied += [(dirpath / d).relative_to(source).as_posix() for d in dirnames if (dirpath / d).is_symlink()]
@@ -568,18 +666,31 @@ def _copy_tree(source: Path, target: StoragePath) -> tuple[int, int, list[str]]:
             if dest.exists():
                 skipped += 1
                 continue
-            if isinstance(dest, Path):
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                part = dest.with_name(f".{dest.name}.part")
-                try:
-                    shutil.copy2(path, part)
-                    os.replace(part, dest)
-                finally:
-                    part.unlink(missing_ok=True)
-            else:
-                dest.upload_from(path, force_overwrite_to_cloud=True)
+            try:
+                _copy_file(path, dest)
+            except Exception as e:
+                logger.debug("Could not copy %s to %s", path, dest, exc_info=True)
+                first_error = first_error or e
+                failed.append(rel)
+                continue
             copied += 1
-    return copied, skipped, sorted(not_copied)
+    if failed and not copied and first_error is not None:
+        raise first_error
+    return copied, skipped, sorted(not_copied), sorted(failed)
+
+
+def _copy_file(path: Path, dest: StoragePath) -> None:
+    if not isinstance(dest, Path):
+        dest.upload_from(path, force_overwrite_to_cloud=True)
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Short and unique: `.<name>.part` could exceed NAME_MAX or clash with a real file.
+    part = dest.with_name(f".{uuid.uuid4().hex[:12]}.part")
+    try:
+        shutil.copy2(path, part)
+        os.replace(part, dest)
+    finally:
+        part.unlink(missing_ok=True)
 
 
 def _mark_migrated(source: Path) -> Path:

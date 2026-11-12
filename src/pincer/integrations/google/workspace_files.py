@@ -22,6 +22,9 @@ if TYPE_CHECKING:
 DOWNLOADS = "downloads"
 # Searched in this order for a bare filename, before a walk of the whole workspace.
 _SEARCH_DIRS = (DOWNLOADS, "", "exec_output", "uploads", "screenshots")
+# A saved name stays under NAME_MAX (255 bytes) with room for a `_<n>` suffix.
+_MAX_STEM_BYTES = 200
+_MAX_EXT_BYTES = 32
 # Picking a free name and saving under it must not interleave between threads,
 # or two downloads of the same name both pick it and one overwrites the other.
 _save_lock = threading.Lock()
@@ -35,13 +38,23 @@ def _workspace() -> Workspace:
 
 
 def _clean_filename(filename: str) -> str:
-    """The last component of `filename` without control characters (NUL included);
-    `attachment_<id>` when nothing usable is left (empty, `.`, `..`)."""
+    """The last component of `filename` without control characters (NUL included),
+    its stem cut to `_MAX_STEM_BYTES` of UTF-8 (the extension is kept unless it is
+    itself too long); `attachment_<id>` when nothing usable is left (empty, `.`, `..`)."""
     base = os.path.basename(filename)
     base = "".join(c for c in base if not unicodedata.category(c).startswith("C")).strip()
     if base in ("", ".", ".."):
         return f"attachment_{uuid.uuid4().hex[:8]}"
-    return base
+    stem, ext = os.path.splitext(base)
+    if len(ext.encode()) > _MAX_EXT_BYTES:
+        stem, ext = base, ""
+    stem = _truncate_utf8(stem, _MAX_STEM_BYTES)
+    return f"{stem}{ext}" if stem else f"attachment_{uuid.uuid4().hex[:8]}{ext}"
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """`text` cut to at most `max_bytes` of UTF-8, never inside a character."""
+    return text.encode()[:max_bytes].decode(errors="ignore")
 
 
 def save_download(filename: str, data: bytes) -> str:

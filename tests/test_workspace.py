@@ -616,14 +616,74 @@ async def test_a_file_deleted_by_a_script_is_removed_from_the_workspace(env: Env
     assert "False" in result
 
 
-async def test_a_failed_delete_is_logged(
-    env: Env, py: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_a_failed_delete_is_reported_and_retried(env: Env, py: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not env.ws.is_cloud:
+        pytest.skip("nothing is deleted from a local root")
     await py.python_exec("open('gone.txt', 'w').write('1')")
-    monkeypatch.setattr(env.ws, "remove", lambda _p: (_ for _ in ()).throw(OSError("offline")))
-    await py.python_exec("import os\nos.remove('gone.txt')")
-    if env.ws.is_cloud:
-        assert "Could not delete" in caplog.text
+    local = env.ws.local / "exec_output" / "gone.txt"
+    with monkeypatch.context() as m:
+        m.setattr(env.ws, "remove", lambda _p: (_ for _ in ()).throw(OSError("offline")))
+        result = await py.python_exec("import os\nos.remove('gone.txt')")
+        assert f"[File NOT deleted: {local} (still in the workspace, retried on the next run)]" in result
+        # The object is still there, but the next sync doesn't bring the file back.
+        assert env.external("workspace/exec_output/gone.txt").exists()
+        env.ws.sync("exec_output")
+        assert not local.exists()
+        assert not env.ws.fetch(local).exists()
+    await py.python_exec("print('hi')")
+    assert not env.external("workspace/exec_output/gone.txt").exists()
+    assert not env.ws.pending_deletes
+
+
+async def test_deleting_everything_keeps_the_folder_marker(env: Env, py: Any) -> None:
+    if not env.ws.is_cloud:
+        pytest.skip("markers exist on a cloud root only")
+    env.ws.ensure()
+    await py.python_exec("open('b.txt', 'w').write('1')")
+    result = await py.python_exec("import os\nfor f in os.listdir('.'):\n    os.remove(f)")
+    assert "NOT deleted" not in result
+    assert not env.external("workspace/exec_output/b.txt").exists()
+    assert env.external(f"workspace/exec_output/{FOLDER_MARKER}").exists()
+
+
+async def test_pending_uploads_survive_a_restart(env: Env, py: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not env.ws.is_cloud:
+        pytest.skip("nothing is uploaded on a local root")
+    with monkeypatch.context() as m:
+        m.setattr(env.ws, "publish", lambda _p: (_ for _ in ()).throw(ConnectionError("offline")))
+        result = await py.python_exec("open('report.csv', 'w').write('a,b')")
+    assert "NOT uploaded" in result
+    # A new process: a fresh workspace over the same cache and data dir.
+    restarted = Workspace.from_settings(env.settings)
+    assert restarted.pending == {"exec_output/report.csv"}
+    monkeypatch.setattr(py, "_workspace", lambda: restarted)
+    await py.python_exec("print('hi')")
+    assert env.external("workspace/exec_output/report.csv").read_text() == "a,b"
+    assert not restarted.pending
+    assert not Workspace.from_settings(env.settings).pending
+
+
+def test_an_unreadable_pending_state_is_ignored(env: Env) -> None:
+    if not env.ws.is_cloud:
+        pytest.skip("cloud root only")
+    state = Path(env.settings.data_dir) / "cache" / "workspace-pending.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{not json")
+    ws = Workspace.from_settings(env.settings)
+    assert not ws.pending
+    ws.mark_pending(ws.local / "exec_output" / "x.txt")
+    assert Workspace.from_settings(env.settings).pending == {"exec_output/x.txt"}
+
+
+def test_fetch_keeps_a_pending_edit_of_an_existing_object(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not env.ws.is_cloud:
+        pytest.skip("cloud root only")
+    path = env.ws.save("exec_output", "r.csv", b"v1")
+    path.write_text("v2-edited")
+    env.ws.mark_pending(path)
+    assert env.ws.fetch(path).read_text() == "v2-edited"
+    assert env.ws.retry_pending("exec_output") == []
+    assert env.external("workspace/exec_output/r.csv").read_text() == "v2-edited"
 
 
 def test_sync_and_fetch_keep_pending_files(env: Env) -> None:
@@ -911,7 +971,7 @@ def test_copy_tree_leaves_no_truncated_file(tmp_path: Path, monkeypatch: pytest.
     assert not (target / "big.bin").exists()
     assert list(target.iterdir()) == []
     monkeypatch.undo()
-    assert _copy_tree(source, target) == (1, 0, [])
+    assert _copy_tree(source, target) == (1, 0, [], [])
     assert (target / "big.bin").read_bytes() == b"x" * 1000
 
 
@@ -975,3 +1035,64 @@ def test_concurrent_downloads_of_one_name_get_distinct_paths(env: Env, monkeypat
     assert len(set(paths)) == 8
     contents = {env.external(f"workspace/downloads/{Path(p).name}").read_bytes() for p in paths}
     assert contents == {str(i).encode() for i in range(8)}
+
+
+# ── Third review ─────────────────────────────────────────────────────────────
+
+
+def test_copy_tree_handles_long_names_and_real_part_files(tmp_path: Path) -> None:
+    from pincer.storage.workspace import _copy_tree
+
+    source, target = tmp_path / "src", tmp_path / "dst"
+    source.mkdir()
+    long_name = "n" * 250 + ".pdf"
+    (source / long_name).write_bytes(b"L")
+    (source / "foo").write_bytes(b"F")
+    (source / ".foo.part").write_bytes(b"P")
+    assert _copy_tree(source, target) == (3, 0, [], [])
+    assert (target / long_name).read_bytes() == b"L"
+    assert (target / "foo").read_bytes() == b"F"
+    assert (target / ".foo.part").read_bytes() == b"P"
+    assert sorted(p.name for p in target.iterdir()) == sorted([long_name, "foo", ".foo.part"])
+
+
+def test_a_file_that_fails_to_copy_does_not_stop_the_migration(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from pincer.storage import workspace as module
+
+    data_dir = Path(env.settings.data_dir)
+    (data_dir / "downloads").mkdir(parents=True)
+    (data_dir / "downloads" / "bad.pdf").write_bytes(b"B")
+    (data_dir / "downloads" / "good.pdf").write_bytes(b"G")
+    real = module._copy_file
+
+    def copy(path: Path, dest: Any) -> None:
+        if path.name == "bad.pdf":
+            raise OSError(63, "File name too long")
+        real(path, dest)
+
+    monkeypatch.setattr(module, "_copy_file", copy)
+    with caplog.at_level("INFO", logger="pincer.storage.workspace"):
+        assert migrate_legacy(env.settings, env.ws) == {"downloads": 1}
+    assert env.external("workspace/downloads/good.pdf").read_bytes() == b"G"
+    warning = next(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert "could not copy 1 file(s)" in warning
+    assert "bad.pdf" in warning
+    assert (data_dir / "downloads.migrated" / "bad.pdf").is_file()
+
+
+@pytest.mark.parametrize("name", ["x" * 300, "é" * 300 + ".txt", "a" * 260 + "." + "b" * 40])
+def test_save_download_bounds_long_names(env: Env, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    from pincer.integrations.google import workspace_files
+
+    monkeypatch.setattr(workspace_files, "_workspace", lambda: env.ws)
+    first = Path(workspace_files.save_download(name, b"1"))
+    second = Path(workspace_files.save_download(name, b"2"))  # takes a `_1` suffix
+    assert first != second
+    for path in (first, second):
+        assert len(path.name.encode()) <= 255
+        assert path.parent == env.ws.local / "downloads"
+    if name.endswith(".txt"):
+        assert first.suffix == ".txt"
+    assert env.external(f"workspace/downloads/{second.name}").read_bytes() == b"2"
