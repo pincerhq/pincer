@@ -175,8 +175,9 @@ markers = [
 ]
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
-    # A thread calling back into a test's closed event loop (see the
-    # drain_voice_telemetry fixture in tests/conftest.py) fails the test.
+    # An exception escaping a thread fails the test. aiosqlite's worker threads
+    # never let one escape: see "aiosqlite: let in-flight queries finish" in
+    # tests/conftest.py.
     "error::pytest.PytestUnhandledThreadExceptionWarning",
 ]
 

@@ -361,10 +361,24 @@ def _template_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
 # each async test ends with `_settle_aiosqlite` (added first by
 # pytest_collection_modifyitems, so it tears down last), which cancels the
 # leftover tasks itself and waits for the count to reach zero while the loop
-# can still take the results.
+# can still take the results. It repeats that until a pass finds nothing left:
+# cancelling a task can start new work (from its `finally`, a done callback, or
+# a connection SQLAlchemy terminates), which a single pass would leave to
+# pytest-asyncio to cancel mid-query just before it closes the loop.
+#
+# A result can still arrive after its loop closed. If its future is already
+# done (the awaiting task was cancelled) or it is a connection's stop sentinel,
+# nobody can receive it and it is dropped. Anything else is a query a test left
+# running: it is reported, naming the test that queued it, at the next test
+# boundary. The worker thread survives either way, so the connection's
+# remaining work and its stop still run.
 
 _aiosqlite_in_flight: dict[asyncio.AbstractEventLoop, int] = {}
 _aiosqlite_lock = threading.Lock()
+# Results handed back after their loop closed, which a test was still awaiting.
+_aiosqlite_late: list[str] = []
+# The test running now, recorded with each query so a late one names its culprit.
+_current_test: str = "<no test>"
 # Generous: a write waiting on a lock another connection holds can take
 # SQLite's 5 s busy timeout. Only a test that leaves work behind waits at all.
 _SETTLE_TIMEOUT_S = 10.0
@@ -380,13 +394,32 @@ def _count_in_flight(loop: asyncio.AbstractEventLoop, delta: int) -> None:
 
 
 class _CountingTxQueue(SimpleQueue):  # type: ignore[type-arg]
-    """aiosqlite's per-connection work queue, counting work not yet delivered."""
+    """aiosqlite's per-connection work queue, counting work not yet delivered.
+
+    Items go in as aiosqlite's `(future, function)` and come out, for
+    `_counting_worker_thread` only, as `(future, function, queued_by)`."""
 
     def put_nowait(self, item: Any) -> None:
-        future, _function = item
+        future, function = item
         if future is not None:  # a stop sentinel without a loop: nobody waits on it
             _count_in_flight(future.get_loop(), +1)
-        super().put_nowait(item)
+        super().put_nowait((future, function, _current_test))
+
+
+def _hand_off(future: asyncio.Future[Any], setter: Any, value: Any, function: Any, queued_by: str) -> None:
+    """Hand a result to its loop, tolerating a loop that has closed meanwhile."""
+    loop = future.get_loop()
+    try:
+        loop.call_soon_threadsafe(setter, future, value)
+    except RuntimeError:
+        if not loop.is_closed():
+            raise
+        # The loop closed only after cancelling every task, so a done future's
+        # awaiter is gone, and a stop sentinel's future is awaited by no one.
+        if future.done() or value is aiosqlite_core._STOP_RUNNING_SENTINEL:
+            return
+        with _aiosqlite_lock:
+            _aiosqlite_late.append(f"{queued_by}: {function!r}")
 
 
 def _counting_worker_thread(tx: Any) -> None:
@@ -394,19 +427,56 @@ def _counting_worker_thread(tx: Any) -> None:
     result has been handed to the loop. Uncounting when the function returns left
     a window: the count read zero, the loop closed, and then the hand-off raised."""
     while True:
-        future, function = tx.get()
+        future, function, queued_by = tx.get()
+        result: Any = None
         try:
-            result = function()
-            if future:
-                future.get_loop().call_soon_threadsafe(aiosqlite_core.set_result, future, result)
-            if result is aiosqlite_core._STOP_RUNNING_SENTINEL:
-                break
-        except BaseException as e:
-            if future:
-                future.get_loop().call_soon_threadsafe(aiosqlite_core.set_exception, future, e)
+            try:
+                result = function()
+            except BaseException as e:
+                if future:
+                    _hand_off(future, aiosqlite_core.set_exception, e, function, queued_by)
+            else:
+                if future:
+                    _hand_off(future, aiosqlite_core.set_result, result, function, queued_by)
         finally:
             if future:
                 _count_in_flight(future.get_loop(), -1)
+        if result is aiosqlite_core._STOP_RUNNING_SENTINEL:
+            break
+
+
+def _raise_late_aiosqlite_results() -> None:
+    with _aiosqlite_lock:
+        late = _aiosqlite_late[:]
+        _aiosqlite_late.clear()
+    if late:
+        raise RuntimeError(
+            "aiosqlite queries finished after their test's event loop closed; a test left them running:\n  "
+            + "\n  ".join(late)
+        )
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
+    global _current_test
+    _current_test = item.nodeid
+    try:
+        return (yield)
+    finally:
+        _current_test = "<between tests>"
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item: pytest.Item) -> Any:
+    _raise_late_aiosqlite_results()  # left by an earlier test, whose id it names
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
+    result = yield
+    _raise_late_aiosqlite_results()
+    return result
 
 
 aiosqlite_core.SimpleQueue = _CountingTxQueue  # type: ignore[misc]
@@ -418,17 +488,22 @@ async def _settle_aiosqlite() -> AsyncIterator[None]:
     yield
     from pincer.voice.telemetry.tracer import drain_pending
 
-    await drain_pending()  # telemetry writes: let them finish rather than cancel them
     loop = asyncio.get_running_loop()
-    leftover = [task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and not task.done()]
-    for task in leftover:
-        task.cancel()
-    if leftover:
-        await asyncio.wait(leftover, timeout=_SETTLE_TIMEOUT_S)
     deadline = time.monotonic() + _SETTLE_TIMEOUT_S
-    while _aiosqlite_in_flight.get(loop) and time.monotonic() < deadline:
-        await asyncio.sleep(0.01)
-    await asyncio.sleep(0)  # let the results already handed back run
+    # Until one pass finds no task and no query: cancelling a task can start more.
+    while True:
+        await drain_pending()  # telemetry writes: let them finish rather than cancel them
+        leftover = [task for task in asyncio.all_tasks(loop) if task is not asyncio.current_task() and not task.done()]
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            await asyncio.wait(leftover, timeout=max(0.0, deadline - time.monotonic()))
+        busy = bool(_aiosqlite_in_flight.get(loop))
+        while _aiosqlite_in_flight.get(loop) and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0)  # let the results already handed back run
+        if (not leftover and not busy) or time.monotonic() >= deadline:
+            break
     # Fail here, in the test that left the query running, not in whichever test
     # this worker runs next, where the closed loop would surface.
     assert not _aiosqlite_in_flight.get(loop), f"aiosqlite queries still running after {_SETTLE_TIMEOUT_S:.0f} s"
