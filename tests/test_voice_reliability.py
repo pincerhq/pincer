@@ -430,21 +430,28 @@ class TestCallReportPersistence:
 
         sent: list[str] = []
         pushing = asyncio.Event()
+        release = asyncio.Event()
 
-        async def slow_notifier(user_id, channel, text):
+        # Held until the test releases it, so the reconcile timeout always fires
+        # while the finalization is still in flight, however slow the runner.
+        async def held_notifier(user_id, channel, text):
             pushing.set()
-            await asyncio.sleep(0.2)
+            await release.wait()
             sent.append(text)
             return True
 
-        status_notify.set_status_notifier(slow_notifier)
+        status_notify.set_status_notifier(held_notifier)
         await status_notify.track_outbound_call("CA1", "123", channel="telegram", target_name="Dentist")
 
         async def busy(_sid):
             return "busy"
 
         await status_notify.reconcile(["CA1"], busy, lambda _sid: False, timeout=0.05)
-        assert pushing.is_set() and sent == []
+        # The timeout cancelled reconcile, not the shielded finalization: it
+        # still claims the report and reaches the notifier.
+        await asyncio.wait_for(pushing.wait(), 5)
+        assert sent == []
+        release.set()
         await status_notify.drain()
         assert len(sent) == 1 and "Couldn't reach Dentist" in sent[0]
         row = await (await self._service(store)).get_call_origin("CA1")
