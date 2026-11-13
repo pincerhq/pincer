@@ -46,7 +46,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config import Settings
@@ -57,12 +57,14 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
-    ThinkingBlock,
     ToolCall,
+    holds_thinking,
     strip_thinking,
 )
-from pincer.llm.model_params import DropReason, ReasoningParams, ReasoningWire, resolve_reasoning
+from pincer.llm.capabilities import endpoint_capabilities
+from pincer.llm.model_params import DropReason, ReasoningParams, ReasoningWire, resolve_reasoning, thinking_is_bound
 from pincer.llm.openai_common import OpenAICompatibleProvider
+from pincer.llm.replay import wire_tag
 from pincer.llm.router import (
     is_openai_wire,
     provider_default_model,
@@ -310,12 +312,19 @@ class DryRunProvider(BaseLLMProvider):  # type: ignore[misc]  # plain mypy can't
             self._settings.thinking if thinking is None else thinking,
         )
         sent_effort = params.fragment.get("output_config", {}).get("effort") or params.fragment.get("reasoning_effort")
+        sent_thinking = params.fragment.get("thinking", {}).get("type", "-")
+        if (
+            self._wire is ReasoningWire.ANTHROPIC
+            and endpoint_capabilities(self._settings, self._name).drop_block
+            and thinking_is_bound(model, params)
+        ):
+            sent_thinking = "adaptive"  # the binding controls ride on adaptive thinking (issue #358)
         self._add(
             model,
             max_tokens,
             _with_dropped(sent_effort or "-", params, "reasoning_effort"),
-            _with_dropped(params.fragment.get("thinking", {}).get("type", "-"), params, "thinking"),
-            any(m.thinking_blocks for m in messages),
+            _with_dropped(sent_thinking, params, "thinking"),
+            any(holds_thinking(m) for m in messages),
         )
         return LLMResponse(
             content="pong",
@@ -323,7 +332,8 @@ class DryRunProvider(BaseLLMProvider):  # type: ignore[misc]  # plain mypy can't
             model=model,
             provider=self._name,
             stop_reason=STOP_REASON_MAX_TOKENS if max_tokens <= CUTOFF_MAX_TOKENS else "end_turn",
-            thinking_blocks=[ThinkingBlock("thinking", thinking="", signature="ZHJ5LXJ1bg==")],
+            raw=[{"type": "thinking", "thinking": "", "signature": "ZHJ5LXJ1bg=="}],
+            wire=wire_tag(self._name, model),
         )
 
     def _add(self, model: str, max_tokens: int, effort: str, thinking: str, replays: bool) -> None:
@@ -406,9 +416,17 @@ async def check_effort_low(t: VoiceTarget) -> Outcome:
     return Outcome("PASS", f"{reply.content.strip()[:40]!r} ({reply.output_tokens} tokens out)")
 
 
-def _thinking_summary(blocks: list[ThinkingBlock]) -> str:
+def _thinking_blocks(reply: LLMResponse) -> list[dict[str, Any]]:
+    """The thinking blocks of a reply's raw output, in order."""
+    return [b for b in reply.raw if b["type"] in ("thinking", "redacted_thinking")]
+
+
+def _thinking_summary(blocks: list[dict[str, Any]]) -> str:
     """How many thinking blocks came back and whether each is signed — never their content."""
-    marks = ["redacted" if b.kind == "redacted_thinking" else "signed" if b.signature else "UNSIGNED" for b in blocks]
+    marks = [
+        "redacted" if b["type"] == "redacted_thinking" else "signed" if b.get("signature") else "UNSIGNED"
+        for b in blocks
+    ]
     return f"{len(blocks)} thinking block(s) returned ({', '.join(marks) or 'none'})"
 
 
@@ -420,8 +438,8 @@ async def check_thinking_disabled(t: VoiceTarget) -> Outcome:
     if "thinking" not in params.fragment:
         return Outcome("SKIP", f"{t.model} does not think by default; nothing to check")
     reply = await _turn(t.provider, t.model, _pong(), thinking="disabled")
-    if reply.thinking_blocks:
-        return Outcome("FAIL", _thinking_summary(reply.thinking_blocks))
+    if _thinking_blocks(reply):
+        return Outcome("FAIL", _thinking_summary(_thinking_blocks(reply)))
     if not reply.content.strip():
         return Outcome("FAIL", f"empty reply (stop_reason={reply.stop_reason}, out={reply.output_tokens})")
     return Outcome("PASS", f"{reply.content.strip()[:40]!r}, no thinking returned")
@@ -437,16 +455,9 @@ async def _tool_step(
     first = await _turn(t.provider, t.model, messages, tools=tools)
     if not first.tool_calls:
         raise AssertionError(f"no tool call (stop_reason={first.stop_reason})")
-    if not first.thinking_blocks:
+    if not _thinking_blocks(first):
         raise AssertionError(f"no thinking returned; replay unproven (stop_reason={first.stop_reason})")
-    messages.append(
-        LLMMessage(
-            role=MessageRole.ASSISTANT,
-            content=first.content,
-            tool_calls=first.tool_calls,
-            thinking_blocks=first.thinking_blocks,
-        )
-    )
+    messages.append(LLMMessage.from_response(first))
     for call in first.tool_calls:
         messages.append(LLMMessage(role=MessageRole.TOOL_RESULT, content="12C, light rain", tool_call_id=call.id))
     return messages, first
@@ -462,7 +473,8 @@ def _answered(reply: LLMResponse) -> str:
 async def check_tool_loop_thinking(t: VoiceTarget) -> Outcome:
     messages, first = await _tool_step(t)
     final = await _turn(t.provider, t.model, messages, tools=WEATHER_TOOL)
-    return Outcome("PASS", f"{_thinking_summary(first.thinking_blocks)}, sent back and accepted -> {_answered(final)}")
+    summary = _thinking_summary(_thinking_blocks(first))
+    return Outcome("PASS", f"{summary}, sent back and accepted -> {_answered(final)}")
 
 
 def http_status(exc: BaseException) -> int | None:
@@ -488,21 +500,22 @@ async def _expect_400(t: VoiceTarget, messages: list[LLMMessage], what: str) -> 
     return Outcome("FAIL", f"{what} was accepted; expected a 400")
 
 
-def _tampered(blocks: list[ThinkingBlock]) -> list[ThinkingBlock]:
-    """`blocks` with one character in the middle of the first signature changed (still base64)."""
-    out = list(blocks)
-    for i, block in enumerate(out):
-        if block.signature:
-            mid = len(block.signature) // 2
-            swap = "B" if block.signature[mid] == "A" else "A"
-            out[i] = replace(block, signature=block.signature[:mid] + swap + block.signature[mid + 1 :])
+def _tampered(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`raw` with one character in the middle of the first thinking signature changed (still base64)."""
+    out = deepcopy(raw)
+    for block in out:
+        signature = block.get("signature")
+        if block["type"] == "thinking" and signature:
+            mid = len(signature) // 2
+            swap = "B" if signature[mid] == "A" else "A"
+            block["signature"] = signature[:mid] + swap + signature[mid + 1 :]
             return out
     raise AssertionError("no signed thinking block to tamper with")
 
 
 async def check_signature_tamper(t: VoiceTarget) -> Outcome:
     messages, first = await _tool_step(t)
-    messages[1].thinking_blocks = _tampered(first.thinking_blocks)
+    messages[1].raw = _tampered(first.raw)
     return await _expect_400(t, messages, "tampered signature")
 
 
@@ -519,18 +532,22 @@ async def check_stripped_continuation(t: VoiceTarget) -> Outcome:
     messages, first = await _tool_step(t)
     strip_thinking(messages)
     final = await _turn(t.provider, t.model, messages, tools=WEATHER_TOOL, thinking="adaptive")
-    return Outcome("PASS", f"{_thinking_summary(first.thinking_blocks)}, stripped, accepted -> {_answered(final)}")
+    return Outcome("PASS", f"{_thinking_summary(_thinking_blocks(first))}, stripped, accepted -> {_answered(final)}")
 
 
 async def check_model_switch(t: VoiceTarget) -> Outcome:
-    """Q3c: a turn that changes model passes its thinking through unchanged; the API drops
-    what the new model can't read."""
+    """Q3c: thinking sent unchanged to another model; the API drops what the new model can't read.
+    Pincer itself never does this (a message from another wire is rebuilt without its thinking, D9):
+    the history's wire is set to the switch model's here, to probe the API's own behaviour."""
     if t.switch is None:
         return Outcome("SKIP", "no --switch-model given")
-    _, switch_model, switch_provider = t.switch
+    switch_name, switch_model, switch_provider = t.switch
     messages, first = await _tool_step(t)
+    for message in messages:
+        if message.raw:
+            message.wire = wire_tag(switch_name, switch_model)
     final = await _turn(switch_provider, switch_model, messages, tools=WEATHER_TOOL)
-    summary = _thinking_summary(first.thinking_blocks)
+    summary = _thinking_summary(_thinking_blocks(first))
     return Outcome("PASS", f"{summary}, sent unchanged to {switch_model}, accepted -> {_answered(final)}")
 
 
@@ -539,9 +556,7 @@ async def check_cache_reads(t: VoiceTarget) -> Outcome:
     kept) and after the end-of-turn strip. Recorded, never judged: 0 is a finding."""
     messages, first = await _tool_step(t, CACHE_TOOLS)
     answer = await _turn(t.provider, t.model, messages, tools=CACHE_TOOLS)
-    messages.append(
-        LLMMessage(role=MessageRole.ASSISTANT, content=answer.content, thinking_blocks=answer.thinking_blocks)
-    )
+    messages.append(LLMMessage.from_response(answer))
     messages.append(LLMMessage(role=MessageRole.USER, content="And Lviv? Answer from what you know, no tool."))
     stripped = deepcopy(messages)
     strip_thinking(stripped)

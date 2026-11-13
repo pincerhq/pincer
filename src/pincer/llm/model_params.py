@@ -431,6 +431,22 @@ def model_thinks(wire: ReasoningWire, model: str, params: ReasoningParams) -> bo
     return sent not in _CLAUDE_THINKING_OFF_TYPES
 
 
+def thinking_is_bound(model: str, params: ReasoningParams) -> bool:
+    """Whether a Claude request carrying `params` sends thinking that Anthropic binds to the
+    conversation (`thinking.block_binding`, issue #358): the model is one that thinks by default
+    and takes adaptive thinking (the 5.x generation), and the request thinks, whether it asks
+    for it or sends no thinking setting to a model that thinks unless told otherwise.
+
+    Restrictive side: an earlier model that takes `adaptive` (Opus/Sonnet 4.6) or a model that
+    isn't recognised is not listed, since the setting could be rejected there.
+    """
+    version = _claude_version(model)
+    rule = _claude_reasoning_rule(version) if version else None
+    if rule is None or not (rule.adaptive and rule.thinks_by_default):
+        return False
+    return model_thinks(ReasoningWire.ANTHROPIC, model, params) is True
+
+
 def _resolve_openai(
     model: str, effort: ReasoningEffort, thinking: ThinkingMode, *, with_tools: bool = False
 ) -> ReasoningParams:

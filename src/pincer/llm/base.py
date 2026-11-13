@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, Self, TypedDict
 
 from pincer.config.pricing import TokenUsage
 
@@ -117,17 +117,12 @@ class ImageContent:
 
 
 @dataclass(frozen=True, slots=True)
-class ThinkingBlock:
-    """One thinking or redacted-thinking block of a response, verbatim.
+class ThinkingDrop:
+    """One thinking block the provider dropped from a request (an Anthropic ``input_transformations``
+    entry): where it sat in the request, and why. Never the block's content."""
 
-    Kept only within the agent turn that produced it, and never saved, shown
-    or logged: the content fields stay out of the repr.
-    """
-
-    kind: Literal["thinking", "redacted_thinking"]
-    thinking: str = field(default="", repr=False)  # kind == "thinking"
-    signature: str = field(default="", repr=False)  # kind == "thinking"
-    data: str = field(default="", repr=False)  # kind == "redacted_thinking" (encrypted)
+    path: str  # e.g. "messages.1.content.0"
+    reason: str  # e.g. "prefix_binding_mismatch"
 
 
 @dataclass(slots=True)
@@ -139,12 +134,12 @@ class LLMMessage:
     images: list[ImageContent] = field(default_factory=list)
     tool_call_id: str | None = None  # For tool_result messages
     tool_calls: list[ToolCall] = field(default_factory=list)  # From assistant
-    # The response's thinking, sent back on the turn's later requests; never in to_dict
-    thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
-    # The response's content blocks as the API sent them, in order (thinking, text, tool_use
-    # interleaved). Set only when the response had thinking, so the next request can replay it
-    # as it was; never in to_dict.
-    content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # An assistant message's provider output verbatim (Anthropic: the whole `content` array, thinking
+    # included), replayed on later requests while `wire` matches the target (see `llm.replay`). Saved
+    # with the session; never in a repr or a log.
+    raw: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # "<provider name>:<model>" that produced `raw`; "" when there is none
+    wire: str = ""
     # Pincer's per-turn context for a user message (recalled memories, the current time), kept out
     # of the system prompt so that stays identical for the whole conversation. Sent as its own text
     # block before the user's words, saved with the session and replayed as it was; never shown
@@ -160,7 +155,24 @@ class LLMMessage:
             d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
         if self.context:
             d["context"] = self.context
+        if self.raw:
+            d["raw"] = self.raw
+        if self.wire:
+            d["wire"] = self.wire
         return d
+
+    @classmethod
+    def from_response(cls, response: LLMResponse, *, content: str | None = None) -> LLMMessage:
+        """The assistant message a response becomes in the history: its text and tool calls, and the
+        provider's output verbatim (`raw`) with the wire that produced it. ``content`` replaces the
+        response's text where the saved reply differs from it."""
+        return cls(
+            role=MessageRole.ASSISTANT,
+            content=response.content if content is None else content,
+            tool_calls=list(response.tool_calls),
+            raw=list(response.raw),
+            wire=response.wire,
+        )
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> LLMMessage:
@@ -170,6 +182,8 @@ class LLMMessage:
             content=d.get("content", ""),
             tool_call_id=d.get("tool_call_id"),
             tool_calls=tool_calls,
+            raw=list(d.get("raw", [])),
+            wire=d.get("wire", ""),
             context=d.get("context", ""),
         )
 
@@ -227,9 +241,12 @@ class LLMResponse:
     cache_read_tokens: int = 0
     cache_write_5m_tokens: int = 0
     cache_write_1h_tokens: int = 0
-    thinking_blocks: list[ThinkingBlock] = field(default_factory=list, repr=False)
-    # Every content block in the order the API sent them; filled only when there is thinking
-    content_blocks: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # The provider's output verbatim, in order (Anthropic: the `content` array), and the
+    # "<provider name>:<model>" wire that produced it; see LLMMessage.raw
+    raw: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    wire: str = ""
+    # Thinking blocks the provider dropped from this request, for the caller to log
+    thinking_dropped: list[ThinkingDrop] = field(default_factory=list)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -263,12 +280,21 @@ def rate_limit_backoff(retry_after: float, attempt: int) -> float:
     return min(retry_after * 2.0**attempt, _RATE_LIMIT_MAX_WAIT_S)
 
 
+# Output block types that are a model's reasoning (Anthropic)
+_THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
+def holds_thinking(message: LLMMessage) -> bool:
+    """True when the message's raw output holds a thinking block."""
+    return any(block.get("type") in _THINKING_TYPES for block in message.raw)
+
+
 def strip_thinking(messages: list[LLMMessage]) -> None:
-    """Drop every message's thinking blocks, in place (end of an agent turn)."""
+    """Drop the thinking of every message that holds some, in place: its raw output goes, so the
+    message is rebuilt from its text and tool calls when sent."""
     for message in messages:
-        if message.thinking_blocks:
-            message.thinking_blocks = []
-            message.content_blocks = []
+        if holds_thinking(message):
+            message.raw = []
 
 
 @dataclass(frozen=True, slots=True)

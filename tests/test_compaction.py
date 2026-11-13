@@ -18,7 +18,7 @@ from pydantic import SecretStr
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.compaction import Compactor, LastRequest, choose_cut
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ThinkingBlock, ToolCall
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.tools.registry import ToolRegistry
 
@@ -634,12 +634,12 @@ async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_
 
 
 def test_the_rate_counts_the_thinking_a_request_replayed():
-    """Within a turn, a tool-loop request resends the turn's thinking: its tokens are in the
-    prompt, so its characters must be in the calibration (end_turn strips them afterwards)."""
-    thought = ThinkingBlock("thinking", thinking="t" * 3_000, signature="sig")
+    """A request resends the thinking the history keeps: its tokens are in the prompt, so its
+    characters must be in the calibration."""
+    thought = {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"}
     sent = [
         LLMMessage(role=MessageRole.USER, content="u" * 1_000),
-        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, thinking_blocks=[thought]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, raw=[thought], wire="anthropic:x"),
     ]
 
     last = LastRequest.measure(5_000, sent, overhead_chars=0)

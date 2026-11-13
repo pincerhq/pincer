@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from pincer.llm.base import LLMMessage, MessageRole, strip_thinking
+from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import SessionService
@@ -285,12 +285,11 @@ class SessionManager:
 
     async def end_turn(self, session: Session) -> None:
         """An agent turn ended (however it ended): drop what lives only within a turn
-        (thinking blocks, images), then trim to the cap and save if trimming cut anything.
+        (images), then trim to the cap and save if trimming cut anything.
 
         A failed save is logged, not raised, so it never hides the turn's own error;
         the trimmed session stays cached and the next save writes it.
         """
-        strip_thinking(session.messages)
         for message in session.messages:
             if message.images:
                 message.images = []

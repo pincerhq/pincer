@@ -659,6 +659,25 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     return clean if changed else messages
 
 
+def _log_thinking_dropped(session_id: str, response: LLMResponse) -> None:
+    """One WARNING per thinking block the API dropped from the request: the session and the block's
+    place in the request, never its content (reasoning is not logged)."""
+    for drop in response.thinking_dropped:
+        logger.warning(
+            "Thinking block dropped by the API: session=%s path=%s reason=%s", session_id, drop.path, drop.reason
+        )
+
+
+def _reply_message(text: str, response: LLMResponse | None) -> LLMMessage:
+    """The assistant message that saves a reply: ``text`` as the user got it, with the model's
+    output verbatim when it came from ``response`` (see `LLMMessage.from_response`)."""
+    if response is None:
+        return LLMMessage(role=MessageRole.ASSISTANT, content=text)
+    message = LLMMessage.from_response(response, content=text)
+    message.tool_calls = []  # a reply is the turn's last message: its response had no tool calls
+    return message
+
+
 @dataclass(frozen=True)
 class _Turn:
     """One chat turn's tool context: a UUID7 for log tracing (and calendar
@@ -780,6 +799,7 @@ class Agent:
         session: Session, response: LLMResponse, system: str | None, tools: list[dict[str, Any]] | None
     ) -> None:
         """Remember what the request `response` answers sent: the turn's last one decides compaction."""
+        _log_thinking_dropped(session.session_id, response)
         overhead = len(system or "") + (len(json.dumps(tools)) if tools else 0)
         session.last_request = LastRequest.measure(response.usage.prompt_tokens, session.messages, overhead)
 
@@ -971,6 +991,7 @@ class Agent:
         final_text = ""
         budget_stop: _BudgetStop | None = None
         last_response: LLMResponse | None = None
+        reply_response: LLMResponse | None = None  # the response whose text is the final answer
         consecutive_errors = 0
         sanitize_attempts = 0
         repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
@@ -1043,13 +1064,7 @@ class Agent:
                     [tc.name for tc in response.tool_calls],
                 )
                 # Save the assistant's tool-call message
-                assistant_msg = LLMMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    thinking_blocks=list(response.thinking_blocks),
-                    content_blocks=list(response.content_blocks),
-                )
+                assistant_msg = LLMMessage.from_response(response)
                 await self._sessions.add_message(session, assistant_msg)
 
                 # Execute each tool
@@ -1128,6 +1143,7 @@ class Agent:
 
             # No tool calls — we have the final answer
             final_text = response.content
+            reply_response = response
             break
         else:
             # Loop exhausted
@@ -1146,7 +1162,9 @@ class Agent:
                 session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
             )
         else:
-            final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
+            final_text = await self._save_reply(
+                session, onboarding, user_id, channel, final_text, streamed=False, response=reply_response
+            )
             reply = final_text
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
@@ -1243,6 +1261,7 @@ class Agent:
                 logger.exception("run_headless: LLM call failed")
                 return _HEADLESS_LLM_ERROR_TEXT
 
+            _log_thinking_dropped("headless", response)
             await self._record_cost(response, None)
 
             try:
@@ -1252,15 +1271,7 @@ class Agent:
                 return _HEADLESS_LLM_ERROR_TEXT
 
             if response.has_tool_calls:
-                messages.append(
-                    LLMMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=response.content,
-                        tool_calls=response.tool_calls,
-                        thinking_blocks=list(response.thinking_blocks),
-                        content_blocks=list(response.content_blocks),
-                    )
-                )
+                messages.append(LLMMessage.from_response(response))
 
                 iteration_had_error = False
                 skills_loaded: list[str] = []
@@ -1464,6 +1475,7 @@ class Agent:
 
         full_text = ""  # everything the client received this turn
         reply = ""  # the reply: saved as the turn's final assistant message
+        reply_response: LLMResponse | None = None  # the response `reply` came from, when it came whole
         step_text = ""  # what the current step streamed
         ending: str | None = None  # no request answers the turn's last tools
         budget_stop: _BudgetStop | None = None
@@ -1529,19 +1541,14 @@ class Agent:
                         # the placed-call text when a call is ringing
                         raise LLMError("the reply step completed with no text")
                     reply = step_text
+                    reply_response = response
                     break
 
                 logger.info(
                     "LLM requested tools: %s",
                     [tc.name for tc in response.tool_calls],
                 )
-                assistant_msg = LLMMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    thinking_blocks=list(response.thinking_blocks),
-                    content_blocks=list(response.content_blocks),
-                )
+                assistant_msg = LLMMessage.from_response(response)
                 await self._sessions.add_message(session, assistant_msg)
                 step_text = ""  # saved with its tool calls
 
@@ -1642,7 +1649,9 @@ class Agent:
         # Saved and recorded before the client sees the question: a disconnect
         # while it streams still leaves the user asked. The reply only: text
         # streamed before a tool call is saved with that call.
-        saved = await self._save_reply(session, onboarding, user_id, channel, reply, streamed=True)
+        saved = await self._save_reply(
+            session, onboarding, user_id, channel, reply, streamed=True, response=reply_response
+        )
         if saved != reply:
             tail = saved[len(reply) :]
             full_text += tail
@@ -1815,6 +1824,7 @@ class Agent:
             turn_trace.stamp(_TelemetryEvent.AGENT_PREP_DONE)
 
         full_text = ""
+        ended_turn: LLMResponse | None = None  # the response that ended the turn with text
         consecutive_errors = 0
         sanitize_attempts = 0
         repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
@@ -1946,15 +1956,10 @@ class Agent:
             assert response is not None  # the request loop leaves with a response or raises
 
             if not response.has_tool_calls:
+                ended_turn = None if response.truncated else response
                 break
 
-            assistant_msg = LLMMessage(
-                role=MessageRole.ASSISTANT,
-                content=response.content,
-                tool_calls=response.tool_calls,
-                thinking_blocks=list(response.thinking_blocks),
-                content_blocks=list(response.content_blocks),
-            )
+            assistant_msg = LLMMessage.from_response(response)
             await self._sessions.add_message(session, assistant_msg)
 
             iteration_had_error = False
@@ -2038,7 +2043,8 @@ class Agent:
         if turn_trace is not None:
             turn_trace.stamp(_TelemetryEvent.LLM_DONE, characters=len(full_text))
         if full_text:
-            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
+            # The turn's text, as spoken. Its model output is the last step's, when that ended the turn.
+            await self._sessions.add_message(session, _reply_message(full_text, ended_turn))
         yield StreamChunk(StreamEventType.DONE, full_text)
 
     async def _select_tools(
@@ -2388,10 +2394,14 @@ class Agent:
         text: str,
         *,
         streamed: bool,
+        response: LLMResponse | None = None,
     ) -> str:
         """Save the turn's reply, with the onboarding question appended when
         this turn asks it, and return the saved text. A streamed turn sends
         the part after `text` only once this returns.
+
+        ``response`` is the model response `text` came from: the saved message keeps its output
+        verbatim (thinking included) unless the onboarding question changed the text.
 
         The question is claimed before the save, and the claim undone if the
         save fails, so a recorded question is one the history holds. A turn
@@ -2400,7 +2410,7 @@ class Agent:
         if not text:
             return text
         if not await self._reserve_onboarding_prompt(onboarding, user_id, channel):
-            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+            await self._sessions.add_message(session, _reply_message(text, response))
             return text
         claimed: bool | None = None  # None: claim_prompt raised, and its insert may have committed
         try:
@@ -2410,7 +2420,8 @@ class Agent:
                 )
                 if claimed:
                     text = _with_onboarding_question(text, streamed=streamed)
-                await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+                    response = None  # the saved text is no longer the model's output
+                await self._sessions.add_message(session, _reply_message(text, response))
             except BaseException:
                 if claimed is not False:
                     await self._release_onboarding_prompt(session, user_id, channel)

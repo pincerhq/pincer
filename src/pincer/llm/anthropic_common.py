@@ -13,14 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 import anthropic
 from anthropic import AsyncAnthropic
-from anthropic.types import (
-    Message,
-    TextBlock,
-    ToolUseBlock,
-    Usage,
-)
-from anthropic.types import RedactedThinkingBlock as SDKRedactedThinkingBlock
-from anthropic.types import ThinkingBlock as SDKThinkingBlock
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
@@ -30,17 +22,22 @@ from pincer.llm.base import (
     MessageRole,
     RequestClients,
     StreamTurnEvent,
-    ThinkingBlock,
+    ThinkingDrop,
     TokenCounts,
     ToolCall,
     rate_limit_attempts,
     rate_limit_backoff,
     transient_status,
 )
-from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn
+from pincer.llm.capabilities import endpoint_capabilities
+from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn, thinking_is_bound
+from pincer.llm.replay import replayable_raw, wire_tag
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from anthropic.types import Message, Usage
+    from anthropic.types.beta import BetaMessage, BetaUsage
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
@@ -53,6 +50,8 @@ _THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
 # minutes apart reuse them; the conversation uses top-level automatic caching (5 minutes)
 _ONE_HOUR: dict[str, str] = {"type": "ephemeral", "ttl": "1h"}
 _AUTOMATIC: dict[str, str] = {"type": "ephemeral"}
+# Anthropic's thinking-block binding controls (issue #358): `thinking.block_binding` is accepted with this beta
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -125,7 +124,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens or self._default_max_tokens,
-            "messages": self._convert_messages(messages),
+            "messages": self._convert_messages(messages, model),
         }
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
         reasoning = resolve_and_warn(
@@ -143,6 +142,17 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
         kwargs.update(self._cached(tools, system))
         kwargs.update(reasoning.fragment)
+        if endpoint_capabilities(self._settings, self._provider_name).drop_block and thinking_is_bound(
+            model, reasoning
+        ):
+            # Earlier thinking goes back to the model, and a block that no longer fits its history is
+            # dropped by the API instead of failing the request (the strict flag makes it fail, for tests)
+            behavior = "error" if self._settings.strict_thinking_binding else "drop_block"
+            kwargs["thinking"] = {
+                **kwargs.get("thinking", {"type": "adaptive"}),
+                "block_binding": {"prefix_mismatch_behavior": behavior},
+            }
+            kwargs["betas"] = [_THINKING_BINDING_BETA]
         return kwargs
 
     async def complete(
@@ -172,6 +182,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result = self._parse_response(response)
         result.provider = self._provider_name
         result.request_model = kwargs["model"]
+        result.wire = wire_tag(self._provider_name, kwargs["model"])
         return result
 
     async def stream_turn(
@@ -197,7 +208,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         for attempt in range(attempts):
             started = False
             try:
-                async with self._request_clients.pick(self._client).messages.stream(**kwargs) as stream:
+                async with self._messages_api(kwargs).stream(**kwargs) as stream:
                     async for text in stream.text_stream:
                         started = True
                         yield StreamTurnEvent(text=text)
@@ -219,12 +230,18 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result = self._parse_response(final)
         result.provider = self._provider_name
         result.request_model = kwargs["model"]
+        result.wire = wire_tag(self._provider_name, kwargs["model"])
         yield StreamTurnEvent(response=result)
 
     async def close(self) -> None:
         await self._client.close()
 
     # ── Internal ─────────────────────────────────────────
+
+    def _messages_api(self, kwargs: dict[str, Any]) -> Any:
+        """The SDK's Messages namespace for a request: the beta one when it carries betas."""
+        client = self._request_clients.pick(self._client)
+        return client.beta.messages if "betas" in kwargs else client.messages
 
     async def _call_with_retry(self, kwargs: dict[str, Any]) -> Message:
         """Call API with exponential backoff on rate limits.
@@ -237,7 +254,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                async with self._request_clients.pick(self._client).messages.stream(**kwargs) as stream:
+                async with self._messages_api(kwargs).stream(**kwargs) as stream:
                     result: Message = await stream.get_final_message()
                 return result
             except anthropic.RateLimitError as e:
@@ -249,8 +266,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 await asyncio.sleep(wait)
         raise LLMError("Exhausted retries")  # unreachable but satisfies type checker
 
-    def _convert_messages(self, messages: list[LLMMessage]) -> list[dict[str, Any]]:
-        """Convert unified messages to Anthropic API format."""
+    def _convert_messages(self, messages: list[LLMMessage], model: str) -> list[dict[str, Any]]:
+        """Convert unified messages to Anthropic API format.
+
+        An assistant message goes back as the provider's own output (thinking included) while it
+        was produced by this provider and model (see `llm.replay`); any other is rebuilt from its
+        text and tool calls.
+        """
+        wire = wire_tag(self._provider_name, model)
         result: list[dict[str, Any]] = []
         for msg in messages:
             if msg.role == MessageRole.SYSTEM:
@@ -274,13 +297,17 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 )
                 continue
 
-            if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                content_blocks = self._replayed_blocks(msg)
-                if content_blocks is None:
-                    # Rebuilt: thinking first, then text, then tool_use. Only a message
-                    # edited since its response (or built without the recorded order)
-                    # gets here; a response's own order is never changed.
-                    content_blocks = [self._thinking_to_api(b) for b in msg.thinking_blocks]
+            if msg.role == MessageRole.ASSISTANT:
+                replayed = replayable_raw(msg, wire)
+                if replayed is not None and _tool_use_ids(replayed) != [tc.id for tc in msg.tool_calls]:
+                    replayed = None  # edited since its response (pair repair dropped a call): rebuilt instead
+                # Thinking with nothing after it is not sent: an assistant message holding
+                # only thinking is never valid
+                if replayed is not None and not all(_is_thinking(b) for b in replayed):
+                    result.append({"role": "assistant", "content": replayed})
+                    continue
+                if msg.tool_calls:
+                    content_blocks: list[dict[str, Any]] = []
                     if msg.content:
                         content_blocks.append({"type": "text", "text": msg.content})
                     for tc in msg.tool_calls:
@@ -292,18 +319,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                                 "input": tc.arguments,
                             }
                         )
-                result.append({"role": "assistant", "content": content_blocks})
-                continue
-
-            # Thinking with no text after it is not sent: an assistant message
-            # holding only thinking is never valid.
-            if msg.role == MessageRole.ASSISTANT and msg.thinking_blocks and msg.content:
-                replayed = self._replayed_blocks(msg)
-                if replayed is None:
-                    thinking_first = [self._thinking_to_api(b) for b in msg.thinking_blocks]
-                    replayed = [*thinking_first, {"type": "text", "text": msg.content}]
-                result.append({"role": "assistant", "content": replayed})
-                continue
+                    result.append({"role": "assistant", "content": content_blocks})
+                    continue
 
             # Standard text or text+image, after Pincer's context block when there is one
             if msg.images or msg.context:
@@ -328,30 +345,6 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 result.append({"role": msg.role.value, "content": msg.content})
 
         return self._validate_api_messages(result)
-
-    @staticmethod
-    def _replayed_blocks(msg: LLMMessage) -> list[dict[str, Any]] | None:
-        """The message's content blocks in the order its response generated them, or None.
-
-        The recorded order is used only while it still describes the message: the same
-        tool calls and the same text. A message edited since (a tool call dropped by pair
-        repair) is rebuilt instead.
-        """
-        blocks = msg.content_blocks
-        if not (blocks and msg.thinking_blocks):
-            return None
-        tool_ids = [b["id"] for b in blocks if b["type"] == "tool_use"]
-        text = "\n".join(b["text"] for b in blocks if b["type"] == "text")
-        if tool_ids != [tc.id for tc in msg.tool_calls] or text != msg.content:
-            return None
-        return [dict(b) for b in blocks]
-
-    @staticmethod
-    def _thinking_to_api(block: ThinkingBlock) -> dict[str, Any]:
-        """A thinking block exactly as the response carried it."""
-        if block.kind == "redacted_thinking":
-            return {"type": "redacted_thinking", "data": block.data}
-        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
 
     @staticmethod
     def _validate_api_messages(
@@ -449,31 +442,30 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
         return merged
 
-    def _parse_response(self, response: Message) -> LLMResponse:
-        """Parse Anthropic Message into unified LLMResponse."""
+    def _parse_response(self, response: Message | BetaMessage) -> LLMResponse:
+        """Parse an Anthropic Message (or beta Message) into unified LLMResponse."""
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
-        thinking_blocks: list[ThinkingBlock] = []
+        raw: list[dict[str, Any]] = []
 
-        ordered: list[dict[str, Any]] = []
         for block in response.content:
-            if isinstance(block, TextBlock):
+            if block.type == "text":
                 text_parts.append(block.text)
-                ordered.append({"type": "text", "text": block.text})
-            elif isinstance(block, SDKThinkingBlock):
-                thinking_blocks.append(ThinkingBlock("thinking", thinking=block.thinking, signature=block.signature))
-                ordered.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
-            elif isinstance(block, SDKRedactedThinkingBlock):
-                thinking_blocks.append(ThinkingBlock("redacted_thinking", data=block.data))
-                ordered.append({"type": "redacted_thinking", "data": block.data})
-            elif isinstance(block, ToolUseBlock):
+                raw.append({"type": "text", "text": block.text})
+            elif block.type == "thinking":
+                raw.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+            elif block.type == "redacted_thinking":
+                raw.append({"type": "redacted_thinking", "data": block.data})
+            elif block.type == "tool_use":
                 call = ToolCall(
                     id=block.id,
                     name=block.name,
                     arguments=dict(block.input) if isinstance(block.input, dict) else {},
                 )
                 tool_calls.append(call)
-                ordered.append({"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments})
+                raw.append({"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments})
+            else:  # a block type Pincer does not read, kept as the API sent it
+                raw.append(block.model_dump(mode="json", exclude_none=True))
 
         return LLMResponse(
             content="\n".join(text_parts),
@@ -481,13 +473,24 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             model=response.model,
             stop_reason=response.stop_reason or "",
             **_usage_counts(response.usage),
-            thinking_blocks=thinking_blocks,
-            # The order matters only to the thinking the next request returns
-            content_blocks=ordered if thinking_blocks else [],
+            raw=raw,
+            thinking_dropped=_thinking_dropped(response),
         )
 
 
-def _usage_counts(usage: Usage) -> TokenCounts:
+def _thinking_dropped(response: Message | BetaMessage) -> list[ThinkingDrop]:
+    """The thinking blocks the API reports it dropped from the request (`input_transformations`,
+    an extra field of the beta Message). Entries of another type are not Pincer's to read."""
+    extra = response.model_extra
+    entries = (extra.get("input_transformations") if isinstance(extra, dict) else None) or []
+    return [
+        ThinkingDrop(path=str(entry.get("path", "")), reason=str(entry.get("reason", "")))
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("type") == "thinking_dropped"
+    ]
+
+
+def _usage_counts(usage: Usage | BetaUsage) -> TokenCounts:
     """The token counts of an Anthropic `usage`: `input_tokens` is already
     uncached input. Cache writes are split by TTL; an endpoint that reports only their
     total (no `cache_creation`) wrote at the default TTL, 5 minutes."""
@@ -500,6 +503,10 @@ def _usage_counts(usage: Usage) -> TokenCounts:
         cache_read_tokens=usage.cache_read_input_tokens or 0,
         output_tokens=usage.output_tokens,
     )
+
+
+def _tool_use_ids(blocks: list[dict[str, Any]]) -> list[str]:
+    return [b["id"] for b in blocks if b.get("type") == "tool_use"]
 
 
 def _is_thinking(block: Any) -> bool:

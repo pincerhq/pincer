@@ -204,7 +204,7 @@ async def test_summary_sends_its_own_effort_and_thinking(memory_store: MemorySto
 
     assert body["model"] == "claude-haiku-5-5"
     assert body["output_config"] == {"effort": "low"}
-    assert body["thinking"] == {"type": "adaptive"}
+    assert body["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 
 
 @pytest.mark.asyncio
@@ -214,7 +214,7 @@ async def test_summary_without_its_own_values_sends_the_global_ones(memory_store
     body = await _summary_request(settings, memory_store, session_manager)
 
     assert body["output_config"] == {"effort": "medium"}
-    assert body["thinking"] == {"type": "adaptive"}
+    assert body["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 
 
 @pytest.mark.asyncio

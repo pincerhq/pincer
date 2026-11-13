@@ -51,13 +51,10 @@ _MIN_CUT = 2
 
 
 def _chars(message: LLMMessage) -> int:
+    """The characters a request carries for `message`: its text, tool calls and the thinking it keeps."""
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
-    return len(message.context) + len(message.content) + len(calls)
-
-
-def _sent_chars(message: LLMMessage) -> int:
-    """The characters a request carried for `message`: within its turn, its thinking too."""
-    return _chars(message) + sum(len(block.thinking) + len(block.data) for block in message.thinking_blocks)
+    thinking = sum(len(block.get("thinking", "")) + len(block.get("data", "")) for block in message.raw)
+    return len(message.context) + len(message.content) + len(calls) + thinking
 
 
 @dataclass(frozen=True)
@@ -72,12 +69,12 @@ class LastRequest:
     @classmethod
     def measure(cls, prompt_tokens: int, sent: list[LLMMessage], overhead_chars: int) -> LastRequest:
         """Calibrate on the messages the request sent, as they were sent: end_turn later trims
-        the session and strips thinking and images, so they cannot be counted afterwards (PR #366).
+        the session and drops images, so they cannot be counted afterwards (PR #366).
 
         Images carry prompt tokens but no characters, so the turn that sent one gets a higher
         rate and may summarize a little more; they are dropped when the turn ends.
         """
-        sent_chars = overhead_chars + sum(_sent_chars(m) for m in sent)
+        sent_chars = overhead_chars + sum(_chars(m) for m in sent)
         return cls(prompt_tokens, prompt_tokens / max(1, sent_chars), overhead_chars)
 
 

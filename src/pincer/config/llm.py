@@ -134,11 +134,34 @@ class LLMSettings(BaseModel):
         default="", description="Model for the Anthropic-wire compatible endpoint (defaults to default_model)"
     )
 
+    server_compaction_providers: Annotated[list[str] | None, NoDecode] = Field(
+        default=None,
+        description="Anthropic-wire providers that take Anthropic's beta features (thinking-binding controls "
+        "now, server-side compaction later), comma-separated names. Unset = 'anthropic' and the configured "
+        "Anthropic-compatible name; 'none' (or an empty list in pincer.toml) = no endpoint, for a proxy that "
+        "rejects the betas (issue #358)",
+    )
+    strict_thinking_binding: bool = Field(
+        default=False,
+        description="Test instrument: send prefix_mismatch_behavior 'error' instead of 'drop_block', so a thinking "
+        "block that fails Anthropic's prefix check fails the request instead of being dropped (issue #358)",
+    )
+
     @field_validator("fallback_providers", "prompt_cache_key_providers", mode="before")
     @classmethod
     def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             return split_csv(v)
+        return v
+
+    @field_validator("server_compaction_providers", mode="before")
+    @classmethod
+    def parse_server_compaction_providers(cls, v: str | list[str] | None) -> list[str] | None:
+        """Comma-separated names. An empty environment variable is ignored by the settings loader,
+        so "none" is how the environment turns the list off."""
+        if isinstance(v, str):
+            names = split_csv(v)
+            return [] if [n.lower() for n in names] == ["none"] else names
         return v
 
     default_model: str = Field(

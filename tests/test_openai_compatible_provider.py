@@ -659,31 +659,32 @@ class TestStreamTurn:
         assert kwargs["stream"] is True and kwargs["stream_options"] == {"include_usage": True}
 
 
-def test_history_conversion_ignores_thinking_blocks():
-    """Thinking blocks are Anthropic's; an OpenAI-wire request carries none of them (issue #345)."""
-    from pincer.llm.base import ThinkingBlock, ToolCall
+def test_history_conversion_ignores_the_raw_output_of_another_provider():
+    """Raw output (thinking included) is Anthropic's; an OpenAI-wire request carries none of it (#345, #358)."""
+    from pincer.llm.base import ToolCall
     from pincer.llm.openai_common import convert_messages_to_openai
 
-    def history(thinking_blocks: list[ThinkingBlock]) -> list[LLMMessage]:
+    def history(raw: list[dict], wire: str) -> list[LLMMessage]:
         return [
             LLMMessage(role=MessageRole.USER, content="hi"),
             LLMMessage(
                 role=MessageRole.ASSISTANT,
                 content="Checking.",
                 tool_calls=[ToolCall(id="call_1", name="t", arguments={})],
-                thinking_blocks=thinking_blocks,
+                raw=raw,
+                wire=wire,
             ),
             LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="call_1"),
-            LLMMessage(role=MessageRole.ASSISTANT, content="Done.", thinking_blocks=thinking_blocks),
+            LLMMessage(role=MessageRole.ASSISTANT, content="Done.", raw=raw, wire=wire),
         ]
 
-    blocks = [
-        ThinkingBlock("thinking", thinking="SECRET-THOUGHT-7f3a", signature="SIG-7f3a"),
-        ThinkingBlock("redacted_thinking", data="REDACTED-7f3a"),
+    raw = [
+        {"type": "thinking", "thinking": "SECRET-THOUGHT-7f3a", "signature": "SIG-7f3a"},
+        {"type": "redacted_thinking", "data": "REDACTED-7f3a"},
     ]
-    converted = convert_messages_to_openai(history(blocks), system="sys")
+    converted = convert_messages_to_openai(history(raw, "anthropic:claude-haiku-5-5"), system="sys")
 
-    assert converted == convert_messages_to_openai(history([]), system="sys")
+    assert converted == convert_messages_to_openai(history([], ""), system="sys")
     assert "7f3a" not in repr(converted)
 
 

@@ -473,7 +473,8 @@ async def test_effort_and_thinking_reach_the_primary_and_the_failover(settings, 
     sent = [*primary.requests, *failover.requests]
     assert [body["model"] for body in sent] == ["claude-haiku-5-5", "claude-opus-5"]
     assert [body["output_config"] for body in sent] == [{"effort": "low"}] * 2
-    assert [body["thinking"] for body in sent] == [{"type": "adaptive"}] * 2
+    drop_block = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+    assert [body["thinking"] for body in sent] == [drop_block] * 2  # both are 5.x models on 'anthropic' (issue #358)
 
 
 async def test_failover_off_sonnet_5_5_resolves_disabled_for_its_own_model(settings):

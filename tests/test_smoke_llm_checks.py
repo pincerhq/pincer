@@ -206,7 +206,9 @@ def test_tool_loop_sends_the_thinking_back_unchanged(smoke, capsys):
     assert "PASS  tool-loop-thinking: 1 thinking block(s) returned (signed)" in out
     assert _SIG not in out and "weighing" not in out
     first, second = build.requests()
-    assert "thinking" not in first and "output_config" not in first  # production's default: nothing sent
+    # production's default: no effort, and the adaptive thinking a 5.x model has anyway, with its binding controls
+    assert first["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+    assert "output_config" not in first
     blocks = _assistant_blocks(second)
     assert blocks[0] == {"type": "thinking", "thinking": "weighing the cities", "signature": _SIG}
     assert blocks[1]["type"] == "tool_use"
@@ -299,8 +301,9 @@ def test_stripped_continuation_with_adaptive_thinking_passes(smoke, capsys):
     assert "PASS  stripped-continuation: 1 thinking block(s) returned (signed), stripped" in out
     first, second = build.requests()
     assert [b["type"] for b in _assistant_blocks(second)] == ["tool_use"]
-    assert second["thinking"] == {"type": "adaptive"}
-    assert "thinking" not in first
+    drop_block = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+    assert second["thinking"] == drop_block
+    assert first["thinking"] == drop_block  # a 5.x model thinks adaptively either way (issue #358)
 
 
 def test_stripped_continuation_rejected_fails(smoke, capsys):
@@ -507,12 +510,13 @@ def test_dry_run_lists_every_request_and_sends_nothing(smoke, capsys, monkeypatc
     assert code == 0
     lines = [line for line in out.splitlines() if line.startswith(_AZURE)]
     assert len(lines) == 19  # 4 basic + 15 voice (model-switch skipped); no OpenAI key: none
+    # a 5.x model on an endpoint with the binding controls thinks adaptively whatever is set (issue #358)
     assert sum("check=forced-cutoff " in line for line in lines) == 1
-    assert "check=forced-cutoff max_tokens=32 effort=- thinking=- replay=no" in out
-    assert "check=effort-low max_tokens=1024 effort=low thinking=- replay=no" in out
+    assert "check=forced-cutoff max_tokens=32 effort=- thinking=adaptive replay=no" in out
+    assert "check=effort-low max_tokens=1024 effort=low thinking=adaptive replay=no" in out
     assert "check=thinking-disabled max_tokens=1024 effort=- thinking=disabled replay=no" in out
     assert "check=stripped-continuation max_tokens=1024 effort=- thinking=adaptive replay=no" in out
-    assert "check=signature-tamper max_tokens=1024 effort=- thinking=- replay=yes" in out
+    assert "check=signature-tamper max_tokens=1024 effort=- thinking=adaptive replay=yes" in out
     assert "19 requests, largest max_tokens 1024" in out
     assert f"cache check tools prefix ~{smoke.CACHE_PREFIX_TOKENS} tokens" in out
     assert "bound: 40 requests" in out
