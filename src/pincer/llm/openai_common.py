@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import openai
 from openai import AsyncOpenAI
 
+from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
     STOP_REASON_COMPACTION,
@@ -33,8 +34,14 @@ from pincer.llm.base import (
     rate_limit_backoff,
     transient_status,
 )
-from pincer.llm.capabilities import endpoint_capabilities
-from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
+from pincer.llm.capabilities import SWITCHES, Feature, endpoint_capabilities, learn_from_error
+from pincer.llm.model_params import (
+    ReasoningWire,
+    openai_is_reasoning_model,
+    openai_tools_need_off,
+    openai_tools_unusable,
+    resolve_and_warn,
+)
 from pincer.llm.openai_responses import (
     convert_messages_to_responses,
     convert_tools_to_responses,
@@ -52,6 +59,9 @@ if TYPE_CHECKING:
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
+
+# A request refused because its model cannot use tools on the Chat Completions an endpoint fell back to
+_FALLBACK_REFUSED = LogOncePerKey(logger, logging.WARNING)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -313,13 +323,19 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
         self._request_clients = RequestClients[AsyncOpenAI]()
         # Chat Completions (today's code) or the Responses API for this endpoint, read once
-        self._responses_api = endpoint_capabilities(settings, provider).responses_api
+        self._settings = settings
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
         # Read once: every request of a turn sends the same effort/thinking
         self._reasoning_effort = settings.reasoning_effort
         self._thinking = settings.thinking
+
+    @property
+    def _responses_api(self) -> bool:
+        """Whether this endpoint is called on the Responses API now: listed, and not switched off by an
+        error (read at every call, so a switch takes effect at once)."""
+        return endpoint_capabilities(self._settings, self._provider_name).responses_api
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
@@ -423,34 +439,88 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        build = self._build_responses_kwargs if self._responses_api else self._build_kwargs
-        kwargs = build(
-            messages,
-            tools,
-            model,
-            max_tokens,
-            temperature,
-            system,
-            reasoning_effort=reasoning_effort,
-            thinking=thinking,
-            pinned=pinned,
-        )
+        for attempt in range(2):
+            caps = endpoint_capabilities(self._settings, self._provider_name)
+            responses = caps.responses_api
+            build = self._build_responses_kwargs if responses else self._build_kwargs
+            effort, think = reasoning_effort, thinking
+            if not responses:
+                effort, think = self._chat_fallback_reasoning(model, tools, effort, think)
+            kwargs = build(
+                messages,
+                tools,
+                model,
+                max_tokens,
+                temperature,
+                system,
+                reasoning_effort=effort,
+                thinking=think,
+                pinned=pinned,
+            )
+            try:
+                response = await self._call_with_retry(kwargs, responses=responses)
+            except openai.APIStatusError as e:
+                if attempt == 0 and responses and learn_from_error(self._settings, self._provider_name, e, caps):
+                    continue  # the endpoint has no /responses: the same request goes to Chat Completions
+                message = f"{self._provider_name} API error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+            except openai.APIConnectionError as e:
+                raise LLMError(f"{self._provider_name} connection error: {e}") from e
+            break
 
-        try:
-            response = await self._call_with_retry(kwargs, responses=self._responses_api)
-        except openai.APIStatusError as e:
-            message = f"{self._provider_name} API error: {e.status_code} {e.message}"
-            raise LLMError(message, retryable=transient_status(e.status_code)) from e
-        except openai.APIConnectionError as e:
-            raise LLMError(f"{self._provider_name} connection error: {e}") from e
-
-        if self._responses_api:
-            result = self._parse_responses(response, kwargs["model"])
-        else:
-            result = parse_openai_response(response)
+        result = self._parse_responses(response, kwargs["model"]) if responses else parse_openai_response(response)
         result.provider = self._provider_name
         result.request_model = kwargs["model"]
         return result
+
+    def _chat_fallback_reasoning(
+        self,
+        model: str | None,
+        tools: list[dict[str, Any]] | None,
+        effort: ReasoningEffort | None,
+        thinking: ThinkingMode | None,
+    ) -> tuple[ReasoningEffort | None, ThinkingMode | None]:
+        """The reasoning settings of a Chat Completions request that fell back from the Responses API (D11).
+
+        Chat Completions takes a gpt-6 model's tools only with reasoning off: a model that has no off level
+        (astra, 6.1-sol) cannot be used with tools there, so the request fails with a clear error and sends
+        nothing; the others get no effort and no thinking setting, which sends `none`, whatever the
+        operator set for the Responses API. Anything else is unchanged.
+        """
+        name = model or self._default_model
+        if (
+            not tools
+            or self._provider_name not in self._settings.responses_api_providers
+            or not (SWITCHES.is_off(self._provider_name, Feature.RESPONSES_API))
+        ):
+            return effort, thinking
+        if openai_tools_unusable(name):
+            message = (
+                f"{self._provider_name}: {name} needs the Responses API to use tools, and this endpoint has no "
+                f"/responses (HTTP {self._switch_status()})"
+            )
+            _FALLBACK_REFUSED.log(
+                f"{self._provider_name}|{name}",
+                "Endpoint %s has no /responses (HTTP %d) and %s cannot use tools on Chat Completions: its "
+                "requests with tools fail until restart",
+                self._provider_name,
+                self._switch_status(),
+                name,
+            )
+            raise LLMError(message)
+        if openai_tools_need_off(name):
+            return "", ""
+        return effort, thinking
+
+    def _switch_status(self) -> int:
+        return next(
+            (
+                s.status
+                for s in SWITCHES.listed()
+                if s.endpoint == self._provider_name and s.feature is Feature.RESPONSES_API
+            ),
+            0,
+        )
 
     async def compact(self, messages: list[LLMMessage], *, model: str | None = None) -> LLMResponse:
         """Ask the server to compact `messages` (`/responses/compact`), the input a turn sent.
@@ -463,9 +533,12 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         model = model or self._default_model
         wire = wire_tag(self._provider_name, model)
         kwargs: dict[str, Any] = {"model": model, "input": convert_messages_to_responses(messages, wire)}
+        caps = endpoint_capabilities(self._settings, self._provider_name)
         try:
             response = await self._request_clients.pick(self._client).responses.compact(**kwargs)
         except openai.APIStatusError as e:
+            # A 404 here switches the endpoint's compaction off (the Compactor then uses the summary model)
+            learn_from_error(self._settings, self._provider_name, e, caps)
             message = f"{self._provider_name} API error: {e.status_code} {e.message}"
             raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except openai.APIConnectionError as e:
@@ -533,7 +606,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         text has been yielded nothing is retried, since the caller already has it.
         A listed endpoint streams on the Responses API (``_stream_responses``) and gives the
         caller the same events."""
-        if self._responses_api:
+        caps = endpoint_capabilities(self._settings, self._provider_name)
+        if caps.responses_api:
             kwargs = self._build_responses_kwargs(
                 messages,
                 tools,
@@ -545,11 +619,27 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 thinking=thinking,
             )
             kwargs["stream"] = True
-            # aclosing: a caller that stops reading closes the request's stream too, at once
-            async with aclosing(self._stream_responses(kwargs)) as events:
-                async for event in events:
-                    yield event
+            started = False
+            try:
+                # aclosing: a caller that stops reading closes the request's stream too, at once
+                async with aclosing(self._stream_responses(kwargs)) as events:
+                    async for event in events:
+                        started = True
+                        yield event
+                return
+            except LLMError as e:
+                # An endpoint without /responses answers before any event: the same turn streams on Chat Completions
+                cause = e.__cause__
+                if started or not isinstance(cause, openai.APIStatusError):
+                    raise
+                if not learn_from_error(self._settings, self._provider_name, cause, caps):
+                    raise
+            async for event in self.stream_turn(
+                messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking
+            ):
+                yield event
             return
+        reasoning_effort, thinking = self._chat_fallback_reasoning(model, tools, reasoning_effort, thinking)
         kwargs = self._build_kwargs(
             messages,
             tools,

@@ -29,7 +29,7 @@ from pincer.llm.base import (
     rate_limit_backoff,
     transient_status,
 )
-from pincer.llm.capabilities import endpoint_capabilities
+from pincer.llm.capabilities import endpoint_capabilities, learn_from_error
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn, thinking_is_bound
 from pincer.llm.replay import replayable_raw, wire_tag
 
@@ -173,17 +173,21 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(
-            messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking, pinned
-        )
-
-        try:
-            response: Message = await self._call_with_retry(kwargs)
-        except anthropic.APIStatusError as e:
-            message = f"Anthropic API error: {e.status_code} {e.message}"
-            raise LLMError(message, retryable=transient_status(e.status_code)) from e
-        except anthropic.APIConnectionError as e:
-            raise LLMError(f"Anthropic connection error: {e}") from e
+        for attempt in range(2):
+            caps = endpoint_capabilities(self._settings, self._provider_name)
+            kwargs = self._build_kwargs(
+                messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking, pinned
+            )
+            try:
+                response: Message = await self._call_with_retry(kwargs)
+            except anthropic.APIStatusError as e:
+                if attempt == 0 and learn_from_error(self._settings, self._provider_name, e, caps):
+                    continue  # the endpoint rejected a beta: the same request goes without it
+                message = f"Anthropic API error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+            except anthropic.APIConnectionError as e:
+                raise LLMError(f"Anthropic connection error: {e}") from e
+            break
 
         result = self._parse_response(response)
         result.provider = self._provider_name
@@ -208,10 +212,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 
         A 429 before the first event is retried as `complete()` retries it; once
         text has been yielded nothing is retried, since the caller already has it."""
-        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking)
-
         attempts = rate_limit_attempts()
-        for attempt in range(attempts):
+        learned = False  # a rejected beta is learned from once, before any event
+        attempt = 0
+        while attempt < attempts:
+            caps = endpoint_capabilities(self._settings, self._provider_name)
+            kwargs = self._build_kwargs(
+                messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking
+            )
             started = False
             try:
                 async with self._messages_api(kwargs).stream(**kwargs) as stream:
@@ -227,7 +235,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 wait = rate_limit_backoff(retry_after, attempt)
                 logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
                 await asyncio.sleep(wait)
+                attempt += 1
             except anthropic.APIStatusError as e:
+                if not started and not learned and learn_from_error(self._settings, self._provider_name, e, caps):
+                    learned = True
+                    continue  # the endpoint rejected a beta: the same turn streams without it
                 message = f"Anthropic stream error: {e.status_code} {e.message}"
                 raise LLMError(message, retryable=transient_status(e.status_code)) from e
             except anthropic.APIConnectionError as e:
@@ -259,9 +271,12 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         kwargs = self._build_kwargs(messages, tools, model, None, None, system, reasoning_effort, thinking)
         kwargs["betas"] = [_COMPACTION_BETA, *(b for b in kwargs.get("betas", []) if b != _COMPACTION_BETA)]
         kwargs["extra_body"] = dict(_COMPACTION_PARAMETER)
+        caps = endpoint_capabilities(self._settings, self._provider_name)
         try:
             response: Message = await self._call_with_retry(kwargs)
         except anthropic.APIStatusError as e:
+            # A rejected beta switches the endpoint's compaction off (the Compactor then uses the summary model)
+            learn_from_error(self._settings, self._provider_name, e, caps)
             message = f"Anthropic API error: {e.status_code} {e.message}"
             raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except anthropic.APIConnectionError as e:
@@ -313,6 +328,11 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 await asyncio.sleep(wait)
         raise LLMError("Exhausted retries")  # unreachable but satisfies type checker
 
+    def _takes_compaction(self) -> bool:
+        """Whether the endpoint takes the compaction beta now (listed, and not switched off by an error). A
+        stored compaction block is sent as its summary text when it does not."""
+        return endpoint_capabilities(self._settings, self._provider_name).server_compaction
+
     def _convert_messages(self, messages: list[LLMMessage], model: str) -> list[dict[str, Any]]:
         """Convert unified messages to Anthropic API format.
 
@@ -326,7 +346,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             if msg.role == MessageRole.SYSTEM:
                 # A server compaction's block goes back as the API returned it, as an assistant message of
                 # its own, while this wire produced it
-                replayed = replayable_raw(msg, wire)
+                replayed = replayable_raw(msg, wire) if self._takes_compaction() else None
                 if replayed is not None:
                     result.append({"role": "assistant", "content": replayed})
                     continue

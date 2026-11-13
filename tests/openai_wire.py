@@ -348,6 +348,16 @@ class Compaction:
     gate: asyncio.Event | None = None
 
 
+@dataclass
+class Status:
+    """An HTTP error reply with a body of its own; with a ``gate`` it is held until the test sets it, so
+    several requests can be in flight when the first answer arrives."""
+
+    code: int
+    body: dict[str, Any] | None = None
+    gate: asyncio.Event | None = None
+
+
 def compaction_item(item_id: str = "cmp_1", encrypted: str = "ENC-CMP-1", **extra: Any) -> dict[str, Any]:
     return {"id": item_id, "type": "compaction", "encrypted_content": encrypted, **extra}
 
@@ -384,6 +394,7 @@ Reply = (
     | Turn
     | RawStream
     | Compaction
+    | Status
 )
 
 
@@ -426,7 +437,7 @@ class ScriptedOpenAI:
         """`_handle`, then a held `Compaction` reply waits for its gate."""
         pending = self._replies[0] if self._replies else None
         response = self._handle(request)
-        if isinstance(pending, Compaction) and pending.gate is not None:
+        if isinstance(pending, Compaction | Status) and pending.gate is not None:
             await pending.gate.wait()
         return response
 
@@ -459,6 +470,9 @@ class ScriptedOpenAI:
             return httpx.Response(reply, json={"error": {"message": f"scripted {reply}", "type": "scripted"}})
         if isinstance(reply, RawStream):
             return self._stream(_sse(reply.events), reply.hang)
+        if isinstance(reply, Status):
+            error = reply.body or {"error": {"message": f"scripted {reply.code}", "type": "scripted"}}
+            return httpx.Response(reply.code, json=error)
         if isinstance(reply, Compaction):
             assert request.url.path.endswith("/responses/compact"), f"a compaction served to {request.url.path}"
             return httpx.Response(200, json=compacted_body(reply.items, reply.usage))

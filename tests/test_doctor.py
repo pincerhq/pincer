@@ -34,8 +34,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
-    # + 1 WhatsApp session store + 1 LLM endpoints (issue #358)
-    assert len(report.checks) == 73
+    # + 1 WhatsApp session store + 1 LLM endpoints + 1 LLM features switched off (issue #358)
+    assert len(report.checks) == 74
 
     assert 0 <= report.score <= 100
 
@@ -2279,6 +2279,41 @@ def test_llm_endpoints_lists_the_api_of_every_endpoint_with_credentials():
 
 def test_llm_endpoints_is_part_of_the_run(doctor_env):
     assert "llm_endpoints" in {c.name for c in doctor_env.run_all().checks}
+
+
+def test_llm_features_says_none_is_switched_off_by_default():
+    from pincer.security.doctor import CheckStatus
+
+    result = SecurityDoctor()._check_llm_features()
+
+    assert (result.status, result.message) == (CheckStatus.PASS, "LLM features: none switched off")
+
+
+def test_llm_features_lists_what_endpoints_lost_at_runtime():
+    from pincer.llm.capabilities import SWITCHES, Feature
+    from pincer.security.doctor import CheckStatus
+
+    SWITCHES.switch_off("openai", Feature.RESPONSES_API, 404)
+    SWITCHES.switch_off("azure", Feature.RESPONSES_COMPACT, 404)
+    SWITCHES.switch_off("foundry", Feature.SERVER_COMPACTION, 400)
+    SWITCHES.switch_off("foundry", Feature.DROP_BLOCK, 400)
+    result = SecurityDoctor()._check_llm_features()
+
+    assert result.status is CheckStatus.WARNING
+    assert result.message == (
+        "LLM features switched off at runtime: azure: /responses/compact (HTTP 404) -> summary model; "
+        "foundry: drop_block (HTTP 400) -> off; foundry: server compaction (HTTP 400) -> summary model; "
+        "openai: Responses API (HTTP 404) -> Chat Completions"
+    )
+    assert result.fix_hint == (
+        "Remove the endpoint from PINCER_RESPONSES_API_PROVIDERS / PINCER_SERVER_COMPACTION_PROVIDERS, or fix it, "
+        "then restart to try again. This list is visible in /api/doctor of the running agent; `pincer doctor` "
+        "runs in its own process and always shows none"
+    )
+
+
+def test_llm_features_is_part_of_the_run(doctor_env):
+    assert "llm_features" in {c.name for c in doctor_env.run_all().checks}
 
 
 _SUMMARY_THRESHOLD_WARNING = (

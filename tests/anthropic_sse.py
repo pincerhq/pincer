@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -18,6 +19,15 @@ from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 if TYPE_CHECKING:
     from pincer.config import Settings
 
+
+@dataclass
+class Reject:
+    """An HTTP error whose `error.message` is this text (Anthropic's own wording of a rejected beta, say)."""
+
+    status: int
+    message: str
+
+
 # One scripted response: streamed blocks + stop reason (+ usage), an HTTP error status, or an
 # exception the transport raises (e.g. httpx.ReadTimeout)
 Scripted = (
@@ -25,6 +35,7 @@ Scripted = (
     | tuple[list[dict[str, Any]], str, dict[str, Any]]
     | tuple[list[dict[str, Any]], str, dict[str, Any], dict[str, Any]]
     | int
+    | Reject
     | Exception
 )
 
@@ -155,6 +166,9 @@ class ScriptedAnthropic:
         scripted = self._responses.pop(0)
         if isinstance(scripted, Exception):
             raise scripted
+        if isinstance(scripted, Reject):
+            error = {"type": "error", "error": {"type": "invalid_request_error", "message": scripted.message}}
+            return httpx.Response(scripted.status, json=error)
         if isinstance(scripted, int):  # an HTTP error status (4xx is not retried by the SDK, except 429)
             error = {"type": "error", "error": {"type": "invalid_request_error", "message": "scripted failure"}}
             # A 429 asks for no wait: the SDK's own retries take 1 ms, the provider's retry 0 s

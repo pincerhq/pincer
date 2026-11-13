@@ -680,12 +680,11 @@ async def test_compacting_again_sends_the_old_block_first_and_replaces_it(
     assert session.messages[0].raw == [second]
 
 
-async def test_documents_today_a_stored_block_still_goes_out_when_the_endpoint_leaves_the_list(
+async def test_a_stored_block_goes_out_as_its_summary_text_when_the_endpoint_leaves_the_list(
     settings, session_manager, cost_tracker, registry
 ):
-    """Handed to slice 10 (see the plan): the block replays whenever its wire matches and carries the compact beta
-    whatever `server_compaction_providers` says. An owner who removes the endpoint from the list while a block is
-    stored sends a block to an endpoint told not to use betas."""
+    """Slice 10: an owner who removes the endpoint from `server_compaction_providers` while a block is stored sends
+    no beta to it: the block goes as its summary text (it was a block replayed with the compact beta before)."""
     settings.default_model = _HAIKU
     await _seed(session_manager, "user1", "test")
     script = [_reply("Reply 1", 100_000), _COMPACTED, _reply("Reply 2", 1)]
@@ -698,8 +697,12 @@ async def test_documents_today_a_stored_block_still_goes_out_when_the_endpoint_l
 
     request = llm.requests[2]
     assert "block_binding" not in json.dumps(request.get("thinking"))  # precondition: the endpoint is off the list
-    assert request["messages"][0] == {"role": "assistant", "content": [dict(_BLOCK)]}
-    assert llm.headers[2]["anthropic-beta"] == "compact-2026-09-04"
+    assert request["messages"][0] == {
+        "role": "user",
+        "content": [{"type": "text", "text": f"[Previous conversation summary]\n{_SUMMARY}"}],
+    }
+    assert "anthropic-beta" not in llm.headers[2]
+    assert llm.urls[2].params.get("beta") is None
 
 
 class _Router:

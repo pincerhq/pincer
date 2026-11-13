@@ -50,6 +50,7 @@ SUITES: dict[str, list[str]] = {
         "test_interrupted_tool_calls",
         "test_message_raw_output",
         "test_endpoint_capabilities",
+        "test_endpoint_fallback",
         "test_reasoning*",
         "test_model_params",
         "test_structured_call_pins",

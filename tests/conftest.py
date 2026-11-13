@@ -82,6 +82,16 @@ def _test_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_feature_switches() -> Iterator[None]:
+    """A feature an endpoint lost in one test (issue #358, slice 10) must not leak into the next."""
+    from pincer.llm.capabilities import SWITCHES
+
+    SWITCHES.reset()
+    yield
+    SWITCHES.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_skill_service() -> Iterator[None]:
     """The SkillService is a per-process singleton built from the first settings
     that ask for it; a test's mocked settings must not leak into the next test."""

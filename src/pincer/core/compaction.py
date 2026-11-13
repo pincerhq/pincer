@@ -220,7 +220,7 @@ def pick_strategy(settings: Settings, provider: str, leaf: BaseLLMProvider | Non
     capabilities = endpoint_capabilities(settings, provider)
     if capabilities.server_compaction and isinstance(leaf, AnthropicCompatibleProvider):
         return CompactionStrategy.ANTHROPIC_SERVER
-    if capabilities.responses_api and isinstance(leaf, OpenAICompatibleProvider):
+    if capabilities.responses_compact and isinstance(leaf, OpenAICompatibleProvider):
         return CompactionStrategy.OPENAI_SERVER
     return CompactionStrategy.CLIENT_SUMMARY
 
@@ -353,6 +353,9 @@ class Compactor:
             ),
         )
         if response is None:
+            if not endpoint_capabilities(server.settings, request.provider).server_compaction:
+                # The endpoint just rejected the compaction beta: the summary model compacts this time
+                return await self._compact_by_summary(session, last)
             return CompactionOutcome.FAILED
         block = response.raw[0] if response.raw and response.raw[0].get("type") == "compaction" else None
         summary = block.get("content") if block is not None else None
@@ -394,6 +397,9 @@ class Compactor:
             session, request, server, lambda: leaf.compact(prefix, model=request.model)
         )
         if response is None:
+            if not endpoint_capabilities(server.settings, request.provider).responses_compact:
+                # The endpoint just proved it has no /responses/compact: the summary model compacts this time
+                return await self._compact_by_summary(session, last)
             return CompactionOutcome.FAILED
         if response.stop_reason != STOP_REASON_COMPACTION:
             # A short provider problem must never erase history (Q22): the next turn over the limit retries

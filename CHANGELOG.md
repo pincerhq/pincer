@@ -81,6 +81,27 @@ Always on, without setting anything:
   later turn. To keep an endpoint on the summary model, remove its name from
   `PINCER_RESPONSES_API_PROVIDERS` (it then also leaves the Responses API).
 
+#### Endpoints that lack a feature are detected, not configured (#358)
+
+- No startup probe: the first real request finds out. An endpoint that answers 404, 405 or 501 on
+  `/responses` is retried on Chat Completions in the same turn; a 404 on `/responses/compact` makes
+  the summary model compact its conversations (at once, and from then on); a Claude proxy that
+  rejects the compaction beta or the thinking-binding beta (Anthropic's `Unexpected value(s) ... for
+  the anthropic-beta header` or `<field>: Extra inputs are not permitted` 400) is retried without
+  it, its stored compaction blocks are sent as their summary text, and the summary model compacts.
+  Nothing else switches a feature off: a 429, a 5xx, any other 400, and a 404 that names a missing
+  model or deployment leave it alone.
+- The switch is remembered per endpoint until the process restarts and logged once as a warning
+  (`Endpoint <name> answered 404 on /responses: ...`). It is listed by `pincer doctor` only in the
+  running agent: open `/api/doctor` of the agent (the `pincer doctor` command runs in its own
+  process and always reports none). Restart to try the feature again.
+- A gpt-6 model with no reasoning-off level (`gpt-6-astra`, `gpt-6.1-sol`) cannot use tools on Chat
+  Completions: when its endpoint falls back, a request with tools fails with a clear error naming the
+  endpoint and the missing `/responses`. The other gpt-6 models fall back with reasoning off for tools.
+- Removing an endpoint from `PINCER_SERVER_COMPACTION_PROVIDERS` while a compaction block is stored now
+  sends the block as its summary text and no beta header (it used to keep sending the block and the
+  beta).
+
 #### gpt-6 on OpenAI and Azure now reasons with tools (#358)
 
 - On the Responses API a tool turn is no longer sent `reasoning_effort: none` for gpt-6. With

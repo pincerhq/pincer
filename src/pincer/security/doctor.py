@@ -213,6 +213,7 @@ class SecurityDoctor:
         report.checks.append(self._check_llm_pricing(settings))
         report.checks.append(self._check_llm_compaction(settings))
         report.checks.append(self._check_llm_endpoints(settings))
+        report.checks.append(self._check_llm_features())
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2278,6 +2279,24 @@ class SecurityDoctor:
         ]
         message = f"LLM endpoints: {'; '.join(listed)}" if listed else "No LLM endpoint has credentials"
         return CheckResult("llm_endpoints", CheckStatus.PASS, message, category="llm")
+
+    def _check_llm_features(self) -> CheckResult:
+        """The features endpoints proved they lack by an error (issue #358, slice 10). The switches live in the
+        process that made the requests: `/api/doctor` of the running agent shows them, a CLI run does not."""
+        from pincer.llm.capabilities import SWITCHES
+
+        switched = SWITCHES.listed()
+        if not switched:
+            return CheckResult("llm_features", CheckStatus.PASS, "LLM features: none switched off", category="llm")
+        return CheckResult(
+            "llm_features",
+            CheckStatus.WARNING,
+            f"LLM features switched off at runtime: {'; '.join(s.label for s in switched)}",
+            fix_hint="Remove the endpoint from PINCER_RESPONSES_API_PROVIDERS / PINCER_SERVER_COMPACTION_PROVIDERS, "
+            "or fix it, then restart to try again. This list is visible in /api/doctor of the running agent; "
+            "`pincer doctor` runs in its own process and always shows none",
+            category="llm",
+        )
 
     def _check_llm_pricing(self, cfg: Settings | None = None) -> CheckResult:
         """Every model Pincer will call has a valid `[pricing]` entry (issue #357); the same
