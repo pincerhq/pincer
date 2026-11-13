@@ -134,17 +134,19 @@ def unsupported_features(error: BaseException) -> frozenset[Feature]:
     """The features an API error proves the endpoint lacks; empty for every other error (a 429, a 5xx, any
     other 400 or 404). Only these shapes count:
 
-    - OpenAI wire: 404, 405 or 501 on `/responses` (not a 404 that names a missing model or deployment);
-      404 on `/responses/compact`;
+    - OpenAI wire: 404, 405 or 501 on `/responses`; 404 on `/responses/compact`; in neither case a 404 whose
+      body code names a missing model or deployment (`model_not_found`, `DeploymentNotFound`);
     - Anthropic wire, a 400 whose message is Anthropic's unknown-beta text naming a beta, or
       `<field>: Extra inputs are not permitted` for `block_binding` or `compaction`.
     """
     if isinstance(error, openai.APIStatusError):
+        if _error_code(error) in _MISSING_MODEL_CODES:
+            return frozenset()  # the model or deployment is missing, not the endpoint's feature
         path = error.response.request.url.path.rstrip("/")
         if path.endswith("/responses/compact"):
             return frozenset({Feature.RESPONSES_COMPACT}) if error.status_code == 404 else frozenset()
         if path.endswith("/responses") and error.status_code in _MISSING_ENDPOINT_STATUSES:
-            return frozenset() if _error_code(error) in _MISSING_MODEL_CODES else frozenset({Feature.RESPONSES_API})
+            return frozenset({Feature.RESPONSES_API})
         return frozenset()
     if isinstance(error, anthropic.APIStatusError) and error.status_code == 400:
         message = _anthropic_message(error)

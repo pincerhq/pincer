@@ -30,6 +30,15 @@ _PREFIX_CHECK = (
 )
 
 
+# The reply Azure gives for a deployment that does not exist (measured live): the body the SDK keeps is the inner object
+_AZURE_NO_DEPLOYMENT = {
+    "type": "invalid_request_error",
+    "code": "DeploymentNotFound",
+    "message": "The API deployment for this resource does not exist. If you created the deployment within the "
+    "last 5 minutes, please wait a moment and try again.",
+}
+
+
 def _openai(status: int, path: str, body: object = None) -> openai.APIStatusError:
     request = httpx.Request("POST", f"{_BASE}{path}")
     return openai.APIStatusError(f"{status}", response=httpx.Response(status, request=request), body=body)
@@ -62,6 +71,16 @@ _ROWS: list[tuple[str, BaseException, frozenset[Feature]]] = [
     ("404 on /chat/completions", _openai(404, "/chat/completions"), _NOTHING),
     ("404 model_not_found", _openai(404, "/responses", {"code": "model_not_found", "message": "no model"}), _NOTHING),
     ("404 DeploymentNotFound", _openai(404, "/responses", {"code": "DeploymentNotFound"}), _NOTHING),
+    (
+        "404 DeploymentNotFound on /responses/compact",
+        _openai(404, "/responses/compact", _AZURE_NO_DEPLOYMENT),
+        _NOTHING,
+    ),
+    (
+        "404 model_not_found on /responses/compact",
+        _openai(404, "/responses/compact", {"code": "model_not_found"}),
+        _NOTHING,
+    ),
     ("openai 429 on /responses", _openai(429, "/responses"), _NOTHING),
     ("openai 500 on /responses", _openai(500, "/responses"), _NOTHING),
     ("openai 503 on /responses", _openai(503, "/responses"), _NOTHING),
@@ -508,3 +527,46 @@ def test_a_switch_is_logged_once_per_endpoint_and_feature_and_touches_only_that_
     ]
     SWITCHES.reset()
     assert endpoint_capabilities(settings, "foundry").drop_block and SWITCHES.listed() == []
+
+
+# ── a missing deployment is not a missing feature ────────────────────────────
+
+_AZURE_BODY = {"error": _AZURE_NO_DEPLOYMENT}  # the whole reply, through the real SDK client
+
+
+async def test_a_missing_deployment_on_responses_compact_switches_nothing_off(openai_settings, caplog):
+    caplog.set_level(logging.WARNING, logger="pincer.llm.capabilities")
+    llm = ScriptedOpenAI(openai_settings, [Status(404, _AZURE_BODY)])
+    with pytest.raises(LLMError):
+        await llm.provider.compact(_hi())
+
+    assert llm.paths == ["/v1/responses/compact"]  # precondition: the 404 reached the provider
+    assert endpoint_capabilities(openai_settings, "openai").responses_compact
+    assert SWITCHES.listed() == [] and _switch_logs(caplog) == []
+
+
+async def test_a_missing_compaction_deployment_fails_the_compaction_and_asks_the_endpoint_again_later(
+    openai_settings, session_manager, cost_tracker
+):
+    from pincer.core.compaction import CompactionOutcome
+
+    llm = ScriptedOpenAI(openai_settings, [Status(404, _AZURE_BODY), Status(404, _AZURE_BODY)])
+    summarizer = _Summarizer()
+    compactor = _compactor_for(openai_settings, llm, summarizer, cost_tracker, session_manager)
+    session, sent = await _long_session(session_manager, "user1")
+    before = list(session.messages)
+
+    assert await compactor.compact(session, _last(sent)) is CompactionOutcome.FAILED
+    assert await compactor.compact(session, _last(sent)) is CompactionOutcome.FAILED
+
+    assert llm.paths == ["/v1/responses/compact"] * 2  # asked again, not switched to the summary model
+    assert summarizer.calls == 0 and session.messages == before
+
+
+async def test_a_missing_deployment_on_responses_is_not_retried_on_chat_completions(openai_settings):
+    llm = ScriptedOpenAI(openai_settings, [Status(404, _AZURE_BODY)])
+    with pytest.raises(LLMError):
+        await llm.provider.complete(_hi())
+
+    assert llm.paths == ["/v1/responses"]
+    assert endpoint_capabilities(openai_settings, "openai").responses_api and SWITCHES.listed() == []
