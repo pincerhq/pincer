@@ -8,6 +8,7 @@ Stores message history, supports trimming, and provides context for the agent.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -16,10 +17,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from pincer.llm.base import LLMMessage, MessageRole
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.services.onboarding import OnboardingService
-from pincer.services.sessions import SessionService
+from pincer.services.sessions import ImageSet, SessionService, StoredImage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -89,6 +90,9 @@ class Session:
     # Set while an agent turn runs on the session: its history must not change
     # under the turn's thinking blocks, so add_message does not trim until the turn ends.
     _turn_open: bool = field(default=False, init=False, repr=False, compare=False)
+    # The hashes of the photos the image store holds for this session, as last saved or loaded;
+    # `_persist` brings the store to the photos the messages hold now.
+    _synced_images: frozenset[str] = field(default=frozenset(), init=False, repr=False, compare=False)
     # What the latest LLM request of the session's turn sent, for compaction; never saved
     last_request: LastRequest | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -140,7 +144,7 @@ class SessionManager:
             try:
                 yield session
             finally:
-                # However the turn ended: drop its thinking and images, trim, save
+                # However the turn ended: close it, trim, save
                 await self.end_turn(session)
 
     @asynccontextmanager
@@ -237,7 +241,17 @@ class SessionManager:
         row = await self._store.load(key, user_id=user_id, channel=channel, legacy_fallback=not session_key)
 
         if row:
-            messages = [LLMMessage.from_dict(m) for m in json.loads(row["messages"])]
+            photos = {
+                photo.sha256: ImageContent(
+                    data=base64.b64encode(photo.data).decode(), media_type=photo.media_type, sha256=photo.sha256
+                )
+                for photo in row["images"]
+            }
+            stored = json.loads(row["messages"])
+            missing = {ref["sha256"] for m in stored for ref in m.get("images", [])} - photos.keys()
+            if missing:
+                logger.warning("Session %s refers to %d photo(s) its image store lacks; left out", key, len(missing))
+            messages = [LLMMessage.from_dict(m, photos) for m in stored]
             session = Session(
                 session_id=key,
                 user_id=user_id,
@@ -257,6 +271,8 @@ class SessionManager:
             )
 
         session._saved_hash = hash(_serialized(session))
+        if row and row["session_id"] == key:  # a session left under the old key stores its photos anew
+            session._synced_images = frozenset(photo.sha256 for photo in row["images"])
         self._cache[key] = session
         await self._evict_overflow(keep=key)
         return session
@@ -284,15 +300,11 @@ class SessionManager:
         session._turn_open = True
 
     async def end_turn(self, session: Session) -> None:
-        """An agent turn ended (however it ended): drop what lives only within a turn
-        (images), then trim to the cap and save if trimming cut anything.
+        """An agent turn ended (however it ended): trim to the cap and save if trimming cut anything.
 
         A failed save is logged, not raised, so it never hides the turn's own error;
         the trimmed session stays cached and the next save writes it.
         """
-        for message in session.messages:
-            if message.images:
-                message.images = []
         session._turn_open = False
         if not self._trim(session):
             return
@@ -329,7 +341,7 @@ class SessionManager:
         """Clear all messages from a session."""
         session.messages.clear()
         session.updated_at = time.time()
-        await self._persist(session)
+        await self._persist(session, force_images=True)
 
     async def evict(self, key: str) -> None:
         """Persist and drop one session from the cache (a phone call's, at
@@ -389,13 +401,19 @@ class SessionManager:
             ):
                 del self._cache[key]
 
-    async def _persist(self, session: Session, *, only_if_changed: bool = False) -> None:
+    async def _persist(self, session: Session, *, only_if_changed: bool = False, force_images: bool = False) -> None:
         """Write the session out (with ``only_if_changed``, only when its
-        messages or metadata differ from what was last saved or loaded)."""
+        messages or metadata differ from what was last saved or loaded).
+
+        Its photos follow its messages: new ones are stored, and the ones no message holds any
+        more are deleted, whichever code removed those messages. ``force_images`` also deletes
+        what an earlier session of this process left behind (a clear).
+        """
         state = _serialized(session)
         if only_if_changed and hash(state) == session._saved_hash:
             return
         messages, metadata = state
+        images = _image_set(session, force=force_images)
         await self._store.save(
             session_id=session.session_id,
             user_id=session.user_id,
@@ -404,13 +422,34 @@ class SessionManager:
             metadata=metadata,
             created_at=session.created_at,
             updated_at=session.updated_at,
+            images=images,
         )
         session._saved_hash = hash(state)
+        if images is not None:
+            session._synced_images = images.keep
 
 
 def _serialized(session: Session) -> tuple[str, str]:
     """The session's messages and metadata as they are stored."""
     return json.dumps([m.to_dict() for m in session.messages]), json.dumps(session.metadata)
+
+
+def _image_set(session: Session, *, force: bool) -> ImageSet | None:
+    """The photos the session's messages hold, if they differ from what its image store holds."""
+    held: dict[str, ImageContent] = {}
+    for message in session.messages:
+        for image in message.images:
+            if image.sha256:
+                held.setdefault(image.sha256, image)
+    keep = frozenset(held)
+    if keep == session._synced_images and not force:
+        return None
+    add = tuple(
+        StoredImage(sha, image.media_type, base64.b64decode(image.data))
+        for sha, image in held.items()
+        if sha not in session._synced_images
+    )
+    return ImageSet(keep, add)
 
 
 def _changed(session: Session) -> bool:

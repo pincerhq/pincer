@@ -69,10 +69,11 @@ class LastRequest:
     @classmethod
     def measure(cls, prompt_tokens: int, sent: list[LLMMessage], overhead_chars: int) -> LastRequest:
         """Calibrate on the messages the request sent, as they were sent: end_turn later trims
-        the session and drops images, so they cannot be counted afterwards (PR #366).
+        the session, so they cannot be counted afterwards (PR #366).
 
-        Images carry prompt tokens but no characters, so the turn that sent one gets a higher
-        rate and may summarize a little more; they are dropped when the turn ends.
+        Images carry prompt tokens but no characters, so a request that sent one gets a higher
+        rate and may summarize a little more. Photos now stay in the history, so every later
+        request of the conversation carries them too (issue #358).
         """
         sent_chars = overhead_chars + sum(_chars(m) for m in sent)
         return cls(prompt_tokens, prompt_tokens / max(1, sent_chars), overhead_chars)

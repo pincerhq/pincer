@@ -373,7 +373,7 @@ def test_a_call_report_after_the_reply_serializes_for_the_next_turn():
 
 
 async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, caplog):
-    """The trimmed session stays cached; what lives only within a turn (images) is gone even when the save fails."""
+    """The trimmed session stays cached, photos and thinking kept, even when the save fails."""
     session = await session_manager.get_or_create("user1", "test")
     session_manager.begin_turn(session)
     for index in range(25):  # past the fixture's cap of 20: nothing is trimmed within the turn
@@ -397,7 +397,7 @@ async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, ca
 
     assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
     assert session._turn_open is False
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo (D3)
     assert all(m.raw for m in session.messages if m.role is MessageRole.ASSISTANT)  # thinking is kept (D2)
     warnings = [r for r in caplog.records if r.name == "pincer.core.session" and r.levelno == logging.WARNING]
     assert len(warnings) == 1
@@ -423,15 +423,15 @@ async def _fill_past_the_cap(session_manager: SessionManager, session) -> None:
         )
 
 
-async def test_a_turn_keeps_its_history_whole_and_ends_by_dropping_images_and_trimming(session_manager):
-    """The turn's end no longer drops thinking (D2, slice 1); images and the trim stay until slices 3 and 5."""
+async def test_a_turn_keeps_its_history_whole_and_ends_by_trimming(session_manager):
+    """The turn's end no longer drops thinking (D2, slice 1) or photos (D3, slice 3); the trim stays until slice 5."""
     async with session_manager.turn("user1", "test") as session:
         await _fill_past_the_cap(session_manager, session)
         assert len(session.messages) == 25  # nothing is trimmed while the turn runs
         assert any(m.raw for m in session.messages)
 
     assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo
     assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)
 
 
@@ -442,7 +442,7 @@ async def test_a_turn_that_fails_still_ends(session_manager):
             raise RuntimeError("boom")
 
     assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo
     assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)
     assert session._turn_open is False
 
@@ -468,7 +468,7 @@ async def test_a_cancelled_turn_still_ends(session_manager):
 
     session = holder[0]
     assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo
     assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)
 
 

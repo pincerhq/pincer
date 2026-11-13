@@ -530,7 +530,7 @@ async def test_chat_turn_keeps_its_images_on_every_request(settings, session_man
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "test")
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # the turn's end keeps it (slice 3)
 
 
 async def test_streaming_chat_turn_keeps_its_images_on_every_request(settings, session_manager, cost_tracker, tools):
@@ -543,7 +543,7 @@ async def test_streaming_chat_turn_keeps_its_images_on_every_request(settings, s
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "web")
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # the turn's end keeps it (slice 3)
 
 
 _TOOL_THEN_TEXT_NO_THINKING = [
@@ -563,7 +563,7 @@ async def test_chat_turn_without_thinking_keeps_its_image_through_a_tool_call(
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     assert len(_image_blocks(llm.requests[1])) == 1  # the step after the tool call still sees it
     session = await session_manager.get_or_create("user1", "test")
-    assert all(not m.images for m in session.messages)  # end_turn dropped it
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # end_turn keeps it (slice 3)
 
 
 async def test_streaming_chat_turn_without_thinking_keeps_its_image_through_a_tool_call(
@@ -581,7 +581,7 @@ async def test_streaming_chat_turn_without_thinking_keeps_its_image_through_a_to
     assert len(llm.requests) == 2
     assert [len(_image_blocks(r)) for r in llm.requests] == [1, 1]  # the step after the tool call still sees it
     session = await session_manager.get_or_create("user1", "web")
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # the turn's end keeps it (slice 3)
 
 
 async def test_streaming_chat_turn_with_a_text_only_reply_sends_its_image(

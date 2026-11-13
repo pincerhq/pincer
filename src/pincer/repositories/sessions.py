@@ -13,11 +13,11 @@ from sqlalchemy import func, or_, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, json_text_field, upsert
-from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession
+from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
 
 def rekeyed_session_id(session_id: str, old_user_id: str, new_user_id: str) -> str | None:
@@ -143,16 +143,64 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             col(ChatSession.session_id).in_([*moves, *moves.values()])
         )
         updated = dict((await self.session.exec(stmt)).all())
+        images = SessionImageRepository(self.session)
         changed = 0
         for old_key, new_key in moves.items():
             if new_key in updated:
                 if updated[new_key] >= updated[old_key]:
+                    # A dropped session's photos go with it: SQLite does not cascade
+                    await images.delete_for_session(old_key)
                     changed += await self.delete_where(col(ChatSession.session_id) == old_key)
                     continue
+                await images.delete_for_session(new_key)
                 changed += await self.delete_where(col(ChatSession.session_id) == new_key)
             rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
             changed += int((await self.session.exec(rekey)).rowcount)
+            # After the session's own row: Postgres has already moved the photos (ON UPDATE
+            # CASCADE) and this finds none; SQLite, with foreign keys off, needs it
+            await images.rekey(old_key, new_key)
         return changed
 
     async def ids(self) -> Sequence[str]:
         return (await self.session.exec(select(ChatSession.session_id))).all()
+
+
+class SessionImageRepository(BaseRepository[SessionImage, tuple[str, str]]):
+    model = SessionImage
+
+    async def for_session(self, session_id: str) -> Sequence[SessionImage]:
+        return await self.list(col(SessionImage.session_id) == session_id, order_by=[col(SessionImage.created_at)])
+
+    async def sync(self, session_id: str, keep: Collection[str], add: Sequence[SessionImage]) -> None:
+        """Make the session's photos exactly `keep`: store the ones in `add` that are not there yet
+        (never overwriting a stored one), then delete every other row of the session."""
+        if add:
+            await self.session.exec(
+                upsert(
+                    dialect_of(self.session),
+                    SessionImage,
+                    [
+                        {
+                            "session_id": image.session_id,
+                            "sha256": image.sha256,
+                            "media_type": image.media_type,
+                            "data": image.data,
+                            "created_at": image.created_at,
+                        }
+                        for image in add
+                    ],
+                    index_elements=["session_id", "sha256"],
+                )
+            )
+        if keep:
+            await self.delete_where(col(SessionImage.session_id) == session_id, col(SessionImage.sha256).notin_(keep))
+        else:
+            await self.delete_for_session(session_id)
+
+    async def delete_for_session(self, session_id: str) -> int:
+        return await self.delete_where(col(SessionImage.session_id) == session_id)
+
+    async def rekey(self, old_session_id: str, new_session_id: str) -> int:
+        """Move the photos of `old_session_id` to its new key, once the session row has moved."""
+        stmt = update(SessionImage).where(col(SessionImage.session_id) == old_session_id)
+        return int((await self.session.exec(stmt.values(session_id=new_session_id))).rowcount)

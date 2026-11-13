@@ -8,6 +8,8 @@ never depends on Anthropic/OpenAI specifics.
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol, Self, TypedDict
 from pincer.config.pricing import TokenUsage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
@@ -108,12 +110,28 @@ class MessageRole(StrEnum):
 class ImageContent:
     """Base64-encoded image to send to the LLM."""
 
-    data: str  # base64 string
+    # Never in a repr or a log: a photo is megabytes
+    data: str = field(repr=False)  # base64 string
     media_type: str  # e.g. "image/jpeg"
+    # SHA-256 (hex) of the decoded bytes: the key the session's image store files it under.
+    # Filled from `data` when not given; left empty when `data` is not valid base64.
+    sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.sha256:
+            try:
+                digest = hashlib.sha256(base64.b64decode(self.data, validate=True)).hexdigest()
+            except (binascii.Error, ValueError):
+                return
+            object.__setattr__(self, "sha256", digest)
 
     @classmethod
     def from_bytes(cls, raw: bytes, media_type: str) -> ImageContent:
-        return cls(data=base64.b64encode(raw).decode(), media_type=media_type)
+        return cls(data=base64.b64encode(raw).decode(), media_type=media_type, sha256=hashlib.sha256(raw).hexdigest())
+
+    def to_ref(self) -> dict[str, str]:
+        """What a stored message keeps of the image: where its bytes are filed, not the bytes."""
+        return {"sha256": self.sha256, "media_type": self.media_type}
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +176,8 @@ class LLMMessage:
             d["is_error"] = True
         if self.tool_calls:
             d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
+        if any(image.sha256 for image in self.images):
+            d["images"] = [image.to_ref() for image in self.images if image.sha256]
         if self.context:
             d["context"] = self.context
         if self.raw:
@@ -180,11 +200,15 @@ class LLMMessage:
         )
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> LLMMessage:
+    def from_dict(cls, d: dict[str, Any], images: Mapping[str, ImageContent] | None = None) -> LLMMessage:
+        """A stored message. Its image refs are resolved from `images` (the session's image store,
+        by sha256); a ref the store has no bytes for is left out."""
         tool_calls = [ToolCall.from_dict(tc) for tc in d.get("tool_calls", [])]
+        found = images or {}
         return cls(
             role=MessageRole(d["role"]),
             content=d.get("content", ""),
+            images=[found[ref["sha256"]] for ref in d.get("images", []) if ref.get("sha256") in found],
             tool_call_id=d.get("tool_call_id"),
             is_error=bool(d.get("is_error", False)),
             tool_calls=tool_calls,

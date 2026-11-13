@@ -16,7 +16,7 @@ from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
-from pincer.models.sessions import ChatSession
+from pincer.models.sessions import ChatSession, SessionImage
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
@@ -34,6 +34,7 @@ _TABLES = [
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
+    SessionImage.__table__,
     Onboarding.__table__,
 ]
 

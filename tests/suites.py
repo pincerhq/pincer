@@ -66,6 +66,8 @@ SUITES: dict[str, list[str]] = {
         "test_output_truncation",
         "test_agent",
         "test_image_gen_tool",
+        "test_photos_stay*",
+        "test_prepare_image",
         "test_tool_selection",
         "test_tool_index_multilingual",
     ],

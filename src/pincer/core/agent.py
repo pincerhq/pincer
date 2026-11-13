@@ -47,6 +47,7 @@ from pincer.llm.base import (
     prompt_cache_session,
 )
 from pincer.llm.cost_tracker import record_response
+from pincer.llm.images import prepare_image
 from pincer.llm.model_params import model_max_output_tokens
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
@@ -682,6 +683,13 @@ def _interrupted_results(messages: list[LLMMessage]) -> list[LLMMessage]:
     ]
 
 
+async def _image_contents(images: list[tuple[bytes, str]] | None) -> list[ImageContent]:
+    """The photos a user sent, as the conversation keeps them from now on: prepared once (see
+    `prepare_image`; the original already went to the workspace's uploads), off the event loop."""
+    prepared = [await asyncio.to_thread(prepare_image, raw, media_type) for raw, media_type in images or []]
+    return [ImageContent.from_bytes(photo.data, photo.media_type) for photo in prepared]
+
+
 def _log_thinking_dropped(session_id: str, response: LLMResponse) -> None:
     """One WARNING per thinking block the API dropped from the request: the session and the block's
     place in the request, never its content (reasoning is not logged)."""
@@ -962,10 +970,7 @@ class Agent:
         )
 
         # Build user message
-        img_contents: list[ImageContent] = []
-        if images:
-            for raw, media_type in images:
-                img_contents.append(ImageContent.from_bytes(raw, media_type))
+        img_contents = await _image_contents(images)
 
         turn = await self._begin_turn(user_id, session_key=session.session_id)
         read_language = memory and (channel_name or channel) != "voice"
@@ -1044,9 +1049,8 @@ class Agent:
                 )
                 last_response = response
                 self._note_request(session, response, system_prompt, tool_schemas)
-                # The image stays on every request of the turn: dropping it
-                # would change the history under the turn's thinking blocks.
-                # end_turn drops it (images are never persisted).
+                # The image stays in the history for good (see `_image_contents`): dropping
+                # it would change the history under the turn's thinking blocks.
             except LLMError as e:
                 recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
                 if recovery is _PairRecovery.RETRY:
@@ -1463,10 +1467,7 @@ class Agent:
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
         )
 
-        img_contents: list[ImageContent] = []
-        if images:
-            for raw, media_type in images:
-                img_contents.append(ImageContent.from_bytes(raw, media_type))
+        img_contents = await _image_contents(images)
 
         turn = await self._begin_turn(user_id, session_key=session.session_id)
         # Both are memory round trips: run them together (the language goes in the system prompt)
