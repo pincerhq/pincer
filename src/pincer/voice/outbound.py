@@ -11,7 +11,7 @@ import asyncio
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pincer.core.phone import normalize_e164
@@ -19,6 +19,9 @@ from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_boun
 from pincer.voice.engine import CLAIMED_SID_KEY
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
 from pincer.voice.twilio_rest import DialOutcomeUnknown
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable
 
 TOOL_NAME = "make_phone_call"
 # What every surface gets back when the daily budget is reached (Q12). The
@@ -41,7 +44,6 @@ def placed_call_sid(result: str) -> str:
 
 
 logger = logging.getLogger(__name__)
-
 
 #: SGR/CSI sequences. `TwilioRestException.__str__` colours its output whenever
 #: stderr is a tty, and its own source notes the hazard: "someone might catch
@@ -303,6 +305,8 @@ async def make_phone_call(
     thread_kind: str = "",
     thread_subject: str = "",
     source: str = "",
+    allow_tools: list[str] | None = None,
+    registered_tools: Callable[[], Iterable[str]] | None = None,
 ) -> str:
     """Place a phone call to a number on behalf of the user.
 
@@ -317,6 +321,14 @@ async def make_phone_call(
         that pass a thread_id but no kind get `followup`
     thread_subject: Internal — title for the thread created when thread_id is empty
     source: Internal — which surface asked for the call (dashboard | chat | api | scheduler)
+    allow_tools: Extra in-call tools you grant for THIS call (e.g. ["google__create_event",
+        "google__update_event"] to book or move an event in the user's calendar, or
+        ["websearch__search"]). The call always has calendar reads, contact lookup, the user's memory,
+        and messages/notes to the user; grant writes only when the task needs them. Each write still
+        waits for the user's approval unless their approval policy allows it. Only call-safe tools
+        can be granted: anything else is rejected and the call is not placed.
+    registered_tools: Internal — the registry's tool names (the chat tool wires
+        it); `allow_tools` must name tools this setup has. None checks by tier only.
 
     purpose and instructions are the agent's briefing for the call: purpose is
     the reason and goal the agent opens the call with, and it is REQUIRED.
@@ -360,6 +372,37 @@ async def make_phone_call(
         logger.info("make_phone_call aborted: %s", e)
         return f"Error: {e}"
 
+    # Issue #252: the owner's per-call grants, validated against the in-call
+    # tier table before anything is dialled. A rejected name is an error the
+    # agent sees, never silently dropped (it would believe the call can do it).
+    from pincer.voice.tool_policy import is_owner_identity, validate_tool_grants
+
+    try:
+        tool_grants, rejected_tools = validate_tool_grants(allow_tools)
+    except TypeError:
+        logger.info("make_phone_call aborted: allow_tools is a %s", type(allow_tools).__name__)
+        return 'Error: allow_tools must be a list of tool names, e.g. ["google__create_event"].'
+    if rejected_tools:
+        logger.info("make_phone_call aborted: tools not grantable on a call: %s", rejected_tools)
+        return (
+            f"Error: these tools cannot be used on a phone call: {', '.join(rejected_tools)}. "
+            "Grant only call-safe tools (calendar, web search), or leave allow_tools empty."
+        )
+    if tool_grants and registered_tools is not None:
+        try:
+            registered = frozenset(registered_tools())
+        except Exception:
+            logger.warning("Registered tools unavailable — checking allow_tools by tier only", exc_info=True)
+            registered = None
+        if registered is not None:
+            tool_grants, missing_tools = validate_tool_grants(allow_tools, available=registered)
+            if missing_tools:
+                logger.info("make_phone_call aborted: granted tools not available here: %s", missing_tools)
+                return (
+                    f"Error: these tools are not available in this setup: {', '.join(missing_tools)} "
+                    "(the integration is not connected). Place the call without them, or tell the user."
+                )
+
     thread_id = str(thread_id or "").strip()
     attach_kind = str(thread_kind or "").strip() or (KIND_FOLLOWUP if thread_id else KIND_ORIGIN)
     if thread_id:
@@ -371,6 +414,13 @@ async def make_phone_call(
 
     ctx = context or {}
     user_id = ctx.get("user_id", "unknown")
+    # Issue #252: grants are owner authority, and only a real Pincer identity
+    # holds it (demo, dashboard, canary and context-less calls stay `remote`,
+    # where a grant would be silently ignored) — so refuse instead of dropping.
+    owner_identity = str(ctx.get("pincer_user_id") or "")
+    if tool_grants and not is_owner_identity(owner_identity):
+        logger.info("make_phone_call aborted: allow_tools without an owner identity (user %s)", user_id)
+        return "Error: allow_tools needs a signed-in Pincer user. Place the call without it."
 
     # Q12: over the daily budget a new call may not start. Checked before the
     # daily limit and the outbound gate, so a refusal uses neither.
@@ -462,8 +512,25 @@ async def make_phone_call(
         engine = _voice_engine()
         pre_state = None
         if engine is not None:
+            from pincer.voice.tool_policy import (
+                META_OWNER_CHANNEL,
+                META_OWNER_GRANTS,
+                META_OWNER_PINCER_ID,
+                META_OWNER_SESSION,
+                META_OWNER_USER,
+            )
+
+            owner_meta: dict[str, Any] = {}
+            if user_id and user_id != "unknown" and is_owner_identity(owner_identity):
+                owner_meta = {
+                    META_OWNER_USER: user_id,
+                    META_OWNER_CHANNEL: str(ctx.get("channel", "") or ""),
+                    META_OWNER_GRANTS: tool_grants,
+                    META_OWNER_PINCER_ID: owner_identity,
+                    META_OWNER_SESSION: str(ctx.get("session_key") or ""),
+                }
             pre_state = await engine.register_pending_outbound(
-                briefing, validated, language=call_language, instructions=briefing.instructions
+                briefing, validated, language=call_language, instructions=briefing.instructions, metadata=owner_meta
             )
 
         # Telephony telemetry starts BEFORE the dial: an outbound call that
@@ -621,6 +688,7 @@ async def make_phone_call(
             instructions=str(instructions or "").strip(),
             pincer_user_id=str(ctx.get("pincer_user_id") or ""),
             session_key=str(ctx.get("session_key") or ""),
+            tool_grants=tool_grants,
         )
         if finished:
             logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)
@@ -658,3 +726,27 @@ async def make_phone_call(
         logger.warning("make_phone_call failed: %s", err_msg)
         logger.exception("Twilio exception details")
         return err_msg
+
+
+def make_chat_phone_call(
+    registered_tools: Callable[[], Iterable[str]],
+) -> Callable[..., Awaitable[str]]:
+    """The chat-tool handler for ``make_phone_call``.
+
+    The only difference from the API path is the briefing's ``source``; both
+    go through `make_phone_call`. ``context`` is a NAMED parameter on purpose:
+    `ToolRegistry.execute` injects it only into handlers whose signature
+    declares it, and a call placed without it has no owner (#252).
+    ``registered_tools`` is always this process's registry, read at dial time
+    (late MCP tools count) — the model can never supply it.
+    """
+
+    async def _make_phone_call_from_chat(context: dict | None = None, **kwargs: Any) -> str:
+        from pincer.voice.briefing import SOURCE_CHAT
+
+        kwargs.setdefault("source", SOURCE_CHAT)
+        kwargs["context"] = context
+        kwargs["registered_tools"] = registered_tools
+        return await make_phone_call(**kwargs)
+
+    return _make_phone_call_from_chat

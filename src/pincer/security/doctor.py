@@ -790,6 +790,8 @@ class SecurityDoctor:
         from pincer.voice.tool_policy import (
             CALLER_GUEST,
             CALLER_USER,
+            PRINCIPAL_OWNER,
+            PRINCIPAL_REMOTE,
             TIER_X,
             TIERS,
             allowed_tools_for_call,
@@ -815,12 +817,23 @@ class SecurityDoctor:
             for direction in ("outbound", "inbound")
         ]
         leaks: list[str] = []
+        # Issue #252: an owner call, with every probe name "granted" — owner
+        # grants must never admit a Tier X or unlisted tool either.
+        all_grants = frozenset(probe_names)
         for kind, direction, caller in probes:
-            allowed = allowed_tools_for_call(settings, kind=kind, direction=direction, caller_class=caller)
-            visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
-            for name in sorted(visible):
-                if TIERS.get(name, TIER_X) == TIER_X:
-                    leaks.append(f"{name} ({kind}/{direction}/{caller})")
+            for principal, grants in ((PRINCIPAL_REMOTE, frozenset()), (PRINCIPAL_OWNER, all_grants)):
+                allowed = allowed_tools_for_call(
+                    settings,
+                    kind=kind,
+                    direction=direction,
+                    caller_class=caller,
+                    principal=principal,
+                    owner_grants=grants,
+                )
+                visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
+                for name in sorted(visible):
+                    if TIERS.get(name, TIER_X) == TIER_X:
+                        leaks.append(f"{name} ({kind}/{direction}/{caller}/{principal})")
         if leaks:
             return CheckResult(
                 name="voice_tier_x_reachable",
@@ -843,7 +856,7 @@ class SecurityDoctor:
         return CheckResult(
             name="voice_tier_x_reachable",
             status=CheckStatus.PASS,
-            message="Call-context tool schemas contain no Tier X tool (all call kinds)",
+            message="Call-context tool schemas contain no Tier X tool (all call kinds, owner grants included)",
             category="voice",
         )
 

@@ -11,6 +11,10 @@ Three tiers, no exceptions:
   standard tool approval policy (``PINCER_APPROVAL_POLICY``): a tool that
   needs approval is confirmed out loud, any other runs directly. Trusted code
   may pin a mode per call (the receptionist's booking approval).
+- **Principal** (issue #252): on an outbound call the owner placed, the
+  agent acts on the OWNER's authority. Its writes are approved by the owner
+  (approval card) or by the owner's approval policy — never by the person on
+  the phone — and the owner may grant extra R/W tools for that one call.
 - **X** is never callable from call context. Not via
   ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED``, not by any configuration. Anything
   not listed in :data:`TIERS` is X — unknown means denied.
@@ -54,9 +58,11 @@ TIERS: dict[str, str] = {
     "google__list_events": TIER_R,
     "google__check_freebusy": TIER_R,
     "contact_lookup": TIER_R,  # phone_contacts read
-    # NOTE: outbound calls only; the inbound receptionist (Sprint 12 §9)
-    # excludes it — enforced by allowed_tools_for_call (§5.3).
-    "memory_search": TIER_R,
+    # The owner's memory (voice/call_tools.py). NOT `memory_search`: that name
+    # is the MCP export's, and a call-only tool under it would be exported as
+    # an always-failing `pincer_memory_search` (#252). Outbound calls only; the
+    # inbound receptionist (Sprint 12 §9) excludes it — allowed_tools_for_call.
+    "call_memory_search": TIER_R,
     "business_profile_lookup": TIER_R,
     # Web search (issue #300): not in the guest default, see CALL_OPT_IN_TOOLS.
     "websearch__search": TIER_R,
@@ -98,6 +104,34 @@ MODE_POLICY = "policy"
 CALLER_USER = "user"
 CALLER_GUEST = "guest"
 
+# On whose authority the agent acts (CallState.metadata[META_PRINCIPAL]).
+# "owner" is set only by trusted code (`_resolve_principal`) for an outbound
+# generic call with a tracked initiating user; anything else, a missing or
+# forged value included, is "remote" (fail closed).
+PRINCIPAL_OWNER = "owner"
+PRINCIPAL_REMOTE = "remote"
+
+# Initiator ids that name a surface, not a person: the public website demo
+# (its callee is an anonymous visitor), the dashboard, the canary and the
+# no-context fallback. They are shared by every call they place, so they never
+# carry owner authority and never key owner memory (one demo visitor's note
+# must not be readable on another visitor's call). Kept as literals so this
+# module stays import-light; tests pin them to the constants at their sources.
+SYNTHETIC_OWNER_IDS: frozenset[str] = frozenset({"unknown", "website-demo", "dashboard", "pincer-canary"})
+
+
+def is_owner_identity(pincer_user_id: object) -> bool:
+    """True only for a real Pincer identity: a non-empty id that is not one of
+    the shared synthetic initiators. Owner authority and owner memory need it."""
+    value = str(pincer_user_id or "").strip()
+    return bool(value) and value not in SYNTHETIC_OWNER_IDS
+
+
+# Owner-addressed writes that need no approval on an owner call: the message
+# goes to the very person who would answer the approval card, so the card
+# would only ask the owner whether to tell them something.
+OWNER_SELF_TOOLS: frozenset[str] = frozenset({"send_owner_message"})
+
 # Deny reason codes (§5.2) — stable strings: logged, persisted, metric labels.
 REASON_TIER_X = "tier_x"
 REASON_NOT_IN_SCOPE = "not_in_call_scope"
@@ -138,13 +172,13 @@ GENERIC_CALL_WRITE_TOOLS: frozenset[str] = frozenset({"send_owner_message", "mem
 # them, a guest only when PINCER_VOICE_GUESTS_TOOLS_ALLOWED lists them.
 CALL_OPT_IN_TOOLS: frozenset[str] = frozenset({"websearch__search"})
 # Sprint 12 §9: the inbound receptionist's EXACT tool set. Explicitly absent
-# vs outbound: memory_search, contact_lookup, google__list_events (event
+# vs outbound: call_memory_search, contact_lookup, google__list_events (event
 # contents must be unreachable — free/busy returns windows only).
 INBOUND_RECEPTIONIST_TOOLS: frozenset[str] = frozenset(
     {"google__check_freebusy", "business_profile_lookup", "google__create_event", "send_owner_message"}
 )
 # Tools an inbound (receptionist) call never gets, even though their tier is R.
-INBOUND_EXCLUDED_TOOLS: frozenset[str] = frozenset({"memory_search"})
+INBOUND_EXCLUDED_TOOLS: frozenset[str] = frozenset({"call_memory_search"})
 
 # Metadata keys on CallState.metadata used by the policy
 META_ALLOWED_TOOLS = "allowed_tools"
@@ -155,6 +189,22 @@ META_PENDING_ARGS = "pending_args"
 # Per-call mode overrides (tool -> mode) set by trusted code, e.g. the Sprint 12
 # receptionist maps PINCER_RECEPTIONIST_BOOKING_APPROVAL onto google__create_event.
 META_MODE_OVERRIDES = "mode_overrides"
+# Issue #252: whose authority the call acts on (PRINCIPAL_*), and the tools the
+# owner granted for this call at dial time (make_phone_call allow_tools).
+META_PRINCIPAL = "principal"
+META_OWNER_GRANTS = "owner_tool_grants"
+# The initiating owner, recorded on the pre-registered outbound state by
+# make_phone_call (trusted code), for a relay setup that beats call tracking.
+META_OWNER_USER = "owner_user_id"
+META_OWNER_CHANNEL = "owner_channel"
+META_OWNER_PINCER_ID = "owner_pincer_user_id"
+META_OWNER_SESSION = "owner_session_key"
+# The callee's identity on an outbound call (a confirmed phone), and whether
+# it is the identity that placed the call: the owner calling their own phone
+# keeps the full R/W scope; any other registered callee gets the owner's
+# default set + grants (#252).
+META_REMOTE_USER = "remote_pincer_user_id"
+META_REMOTE_IS_OWNER = "remote_is_owner"
 
 
 # Modes the inbound receptionist may pin onto google__create_event. "verbal"
@@ -231,6 +281,55 @@ def unmatched_guest_tool_entries(raw: str) -> list[str]:
     return [entry for entry in _guest_entries(raw) if not _entry_matches(entry)]
 
 
+def validate_tool_grants(
+    names: object, available: frozenset[str] | set[str] | None = None
+) -> tuple[frozenset[str], list[str]]:
+    """Split owner-requested tool grants into (granted, rejected).
+
+    Each entry must be an exact tool name (no patterns: ``*`` would grant
+    every R/W tool at once) that the tier table classes R or W. Tier X,
+    unknown and MCP-only names are rejected — the caller reports them, never
+    drops them silently. With ``available`` (the registered tools), a grant
+    must also name a tool this deployment actually has: granting a calendar
+    write without the calendar connected would let the agent promise a
+    booking it cannot make.
+
+    ``names`` is a list/tuple of names or a CSV string; ``None`` means no
+    grants. Any other type raises ``TypeError`` — a mapping or a bare ``True``
+    must never pass as "no grants" while the agent believes it granted one.
+    """
+    if names is None:
+        entries: list[str] = []
+    elif isinstance(names, str):
+        entries = split_csv(names)
+    elif isinstance(names, (list, tuple)):
+        entries = [s for n in names if (s := str(n or "").strip())]
+    else:
+        raise TypeError(f"tool grants must be a list of tool names, not {type(names).__name__}")
+    granted: set[str] = set()
+    rejected: list[str] = []
+    for entry in entries:
+        grantable = TIERS.get(entry) in (TIER_R, TIER_W) and (available is None or entry in available)
+        if grantable:
+            granted.add(entry)
+        else:
+            rejected.append(entry)
+    return frozenset(granted), rejected
+
+
+def principal_of(state: CallState) -> str:
+    """``owner`` only when trusted code set it; anything else is ``remote``."""
+    return PRINCIPAL_OWNER if state.metadata.get(META_PRINCIPAL) == PRINCIPAL_OWNER else PRINCIPAL_REMOTE
+
+
+def owner_grants_of(state: CallState) -> frozenset[str]:
+    """The owner's per-call grants, re-filtered against the tier table."""
+    raw = state.metadata.get(META_OWNER_GRANTS)
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(str(n) for n in raw if tier_of(str(n)) != TIER_X)
+
+
 def caller_class_of(state: CallState) -> str:
     """``user`` for a registered caller, else ``guest`` (fail closed)."""
     return CALLER_USER if state.metadata.get(META_CALLER_CLASS) == CALLER_USER else CALLER_GUEST
@@ -252,6 +351,9 @@ def allowed_tools_for_call(
     kind: str = "generic",
     direction: str = "outbound",
     caller_class: str = CALLER_GUEST,
+    principal: str = PRINCIPAL_REMOTE,
+    owner_grants: frozenset[str] | set[str] = frozenset(),
+    remote_is_owner: bool = False,
 ) -> frozenset[str]:
     """The call's tool scope, computed once at call creation.
 
@@ -261,12 +363,31 @@ def allowed_tools_for_call(
     registered ``user`` gets every R+W tool; a guest gets the default generic
     set (without ``CALL_OPT_IN_TOOLS``), or — when ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` is set — exactly the
     R/W tools it matches, minus the inbound exclusions.
+
+    An outbound generic call the owner placed (``principal="owner"``) gets
+    the default guest set plus ``owner_grants`` (R/W only), whoever answers —
+    another registered user on the line does not widen it to every R/W tool.
+    Only when the callee is the owner themselves (``remote_is_owner``: a
+    registered callee whose identity placed the call) is it the full scope.
+    ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` does not apply to it, and the
+    grants never apply to any other kind of call.
     """
     if kind == "receptionist":
         # Fixed by spec; the guest list does NOT widen the public line.
         return frozenset(name for name in INBOUND_RECEPTIONIST_TOOLS if tier_of(name) != TIER_X)
     if kind == "appointment":
         scope = set(APPOINTMENT_CALL_TOOLS)
+    elif principal == PRINCIPAL_OWNER and not str(direction).lower().endswith("inbound"):
+        # Checked BEFORE the registered-caller branch: on a call the owner
+        # placed, another registered user answering must not widen the scope
+        # to every R/W tool — the tools act for the owner, so the owner's
+        # default set and grants are the whole scope. The owner answering
+        # their own phone (#299) is the one exception.
+        if caller_class == CALLER_USER and remote_is_owner:
+            scope = set(callable_tools())
+        else:
+            scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
+            scope |= {name for name in owner_grants if tier_of(name) in (TIER_R, TIER_W)}
     elif caller_class == CALLER_USER:
         scope = set(callable_tools())
     else:
@@ -380,6 +501,11 @@ def decide(
     ``requires_approval`` is the standard tool approval policy
     (``ToolRegistry.requires_approval``); it only decides for a registered
     caller. Without it, a registered caller confirms out loud as a guest does.
+
+    On an owner call (``principal_of(state) == "owner"``) the person on the
+    phone never approves anything: a write runs when the owner's approval
+    policy lets it (or it is in ``OWNER_SELF_TOOLS``), and otherwise waits
+    for the owner's approval card. Never ``need_verbal``.
     """
     # Step 1 — tier lookup; unknown → X
     tier = tier_of(tool_name)
@@ -398,6 +524,13 @@ def decide(
     # Step 5 — resolve mode: per-call override (trusted code) > caller class
     call_overrides = state.metadata.get(META_MODE_OVERRIDES) or {}
     mode = str(call_overrides.get(tool_name) or "") if isinstance(call_overrides, dict) else ""
+    if mode not in APPROVAL_MODES and principal_of(state) == PRINCIPAL_OWNER:
+        # Step 5b — the owner's authority: the owner's policy, or the owner's card.
+        if tool_name in OWNER_SELF_TOOLS:
+            return ToolDecision("execute", "owner_self", tier, MODE_POLICY)
+        if requires_approval is not None and not requires_approval(tool_name):
+            return ToolDecision("execute", "owner_policy", tier, MODE_POLICY)
+        return ToolDecision("need_user_approval", "owner", tier, "user")
     if mode not in APPROVAL_MODES:
         if caller_class_of(state) != CALLER_USER:
             # Step 6 — a guest's write is always confirmed out loud
@@ -437,6 +570,18 @@ __all__ = [
     "META_ALLOWED_TOOLS",
     "META_CALLER_CLASS",
     "META_MODE_OVERRIDES",
+    "META_OWNER_CHANNEL",
+    "META_OWNER_GRANTS",
+    "META_OWNER_PINCER_ID",
+    "META_OWNER_SESSION",
+    "META_REMOTE_IS_OWNER",
+    "META_REMOTE_USER",
+    "META_OWNER_USER",
+    "META_PRINCIPAL",
+    "OWNER_SELF_TOOLS",
+    "PRINCIPAL_OWNER",
+    "PRINCIPAL_REMOTE",
+    "SYNTHETIC_OWNER_IDS",
     "META_PENDING_ARGS",
     "META_TURN_NO",
     "META_VERBAL_CONFIRMED",
@@ -455,14 +600,18 @@ __all__ = [
     "callable_tools",
     "caller_class_of",
     "canonical_json",
+    "is_owner_identity",
     "clear_verbal_confirmation",
     "decide",
     "match_tool_patterns",
     "max_writes_per_call",
+    "owner_grants_of",
+    "principal_of",
     "receptionist_booking_mode",
     "set_verbal_confirmation",
     "tier_of",
     "tier_r_tools",
     "tier_w_tools",
     "unmatched_guest_tool_entries",
+    "validate_tool_grants",
 ]

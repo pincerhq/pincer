@@ -486,7 +486,7 @@ tools. The allowlist is a tier table in `src/pincer/voice/tool_policy.py`
 
 | Tier | Tools | Behaviour |
 |------|-------|-----------|
-| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup`, `websearch__search` (not for guests by default, see below) | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
+| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `call_memory_search` (the owner's memory, outbound only), `business_profile_lookup`, `websearch__search` (not for guests by default, see below) | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
 | **W** reversible writes | `google__create_event`, `google__update_event`, `send_owner_message`, `memory_note` | Approved per caller (below); counted against `PINCER_VOICE_MAX_WRITES_PER_CALL` |
 | **X** never on a call | `email_send`, `google__delete_event`, `make_phone_call`, `schedule_appointment_call`, `file_*`, `config_*`, `memory_dump`, `do_not_call_*`, **and every unlisted tool** | Not callable — its schema is never passed to the model. No setting can change this. |
 
@@ -505,10 +505,43 @@ phones = ["+4915112345678"]
 | Caller | Tool scope on a generic call | Tier W approval |
 |--------|------------------------------|-----------------|
 | **Registered user** (confirmed phone) | Every Tier R/W tool | The standard tool approval policy (`PINCER_APPROVAL_POLICY`): a tool that needs approval is confirmed out loud, anything else runs directly. Under the default `critical` mode, calendar writes run at once; `send_owner_message` is confirmed. |
-| **Guest** (any other number, or a failed lookup) | All reads except web search, plus `send_owner_message` and `memory_note` — or, when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` is set, exactly the R/W tools it lists (it replaces the default set, so list the reads guests need too) (`google__*` patterns allowed; Tier X never matches). Inbound guests never get `memory_search`. | Always out loud |
+| **Guest** (any other number, or a failed lookup) | All reads except web search, plus `send_owner_message` and `memory_note` — or, when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` is set, exactly the R/W tools it lists (it replaces the default set, so list the reads guests need too) (`google__*` patterns allowed; Tier X never matches). Inbound guests never get `call_memory_search`. | Always out loud |
+
+#### Calls you placed: the agent acts for you
+
+On an outbound call you asked for (`make_phone_call` from a chat, a call
+you scheduled, or any generic outbound call placed by a known Pincer
+identity), the agent works **on your authority**, whoever answers. The restaurant you order a pizza from is
+a guest on the line, but it is never asked to approve what the agent does for
+you:
+
+| | Behaviour on a call you placed |
+|---|---|
+| **Scope** | Whoever answers, registered user or guest: all reads except web search, `send_owner_message` and `memory_note`, **plus the tools you granted for this call** (`allow_tools`, below). Another registered user answering does not get the full R/W scope here, since the tools act for you, not for them; only when the agent calls your own confirmed phone (you answer) do you get the full scope. `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` does not apply. |
+| **Approval** | Never the callee. `send_owner_message` runs at once (it goes to you). Every other write follows your approval policy (`PINCER_APPROVAL_POLICY`): it runs directly when the policy allows it, and is disclosed in the post-call report; otherwise you get the in-call approval card. If you don't answer the card in time, the action is deferred to a follow-up. |
+| **Results** | Mid-call messages reach your channel and are also added, quoted and labelled as relayed, to the chat that asked for the call. Notes go into your memory under your identity (`call:`, `thread:` and `session:` tags), where your chat recall finds them. `call_memory_search` reads only your memory. |
+
+`make_phone_call(..., allow_tools=[...])` grants extra Tier R/W tools for that
+one call, for example `["google__create_event"]` to book the delivery slot in
+your calendar, or `["websearch__search"]`. Grants are exact tool names:
+patterns such as `*` or `google__*` are rejected, as is a value that is not a
+list of names. A Tier X, unknown or MCP-only name is rejected
+with an error before anything is dialled, and so is a tool this setup does
+not have (granting `google__create_event` without Google Calendar connected),
+so the agent never believes a call can do something it cannot. Grants never apply to inbound calls, appointment
+calls or the receptionist, and the write budget still applies.
+
+Owner authority needs a real Pincer identity. Calls placed by a shared
+surface — the public website demo, the dashboard, the canary — or with no
+identity at all stay on the callee's authority (the rules above), keep
+nothing in owner memory, and refuse `allow_tools`: one demo visitor's call
+can never read what another visitor's call noted.
+
+Inbound calls, appointment calls and the receptionist are unaffected: there
+the rules above (registered user / guest) decide.
 
 With no `phones` configured, everyone on a call is a guest, and on a generic
-call the agent cannot create calendar events. Startup logs a warning and
+call the agent cannot create calendar events unless you granted them. Startup logs a warning and
 `pincer doctor` reports it (`voice_registered_phones`).
 
 Appointment calls (`schedule_appointment_call`) and the inbound receptionist

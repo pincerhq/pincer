@@ -110,7 +110,7 @@ def test_contact_and_memory_search():
     text = ts.render("contact_lookup", contacts, "de")
     assert text == "Kontakt gefunden: Dr. Müller und Dr. Meier."
     assert ts.render("contact_lookup", "[]", "en") == "I have no contact on file for that."
-    assert ts.render("memory_search", "- prefers mornings\n- 2026-08-18T10:00 said hello", "en").startswith(
+    assert ts.render("call_memory_search", "- prefers mornings\n- 2026-08-18T10:00 said hello", "en").startswith(
         "Noted earlier: prefers mornings and said hello"
     )
 
@@ -326,3 +326,12 @@ def test_websearch_cap_covers_the_source_prefixes(language):
 def test_websearch_without_url_names_no_domain():
     text = ts.render("websearch__search", _websearch({"title": "Preis", "snippet": "1,60"}), "en")
     assert text.startswith("According to a website: 1,60. ")
+
+
+def test_memory_search_keeps_a_snippet_that_starts_with_no():
+    """#252: "No onions" is a remembered preference, not an empty result."""
+    spoken = ts.render("call_memory_search", "- No onions, nut allergy", "en")
+    assert "onions" in spoken
+    assert (
+        ts.render("call_memory_search", "Nothing noted about that.", "en") == en_pack.TOOL_SPEECH["memory_search.none"]
+    )
