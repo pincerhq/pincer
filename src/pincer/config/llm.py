@@ -123,6 +123,12 @@ class LLMSettings(BaseModel):
         description="OpenAI-wire providers sent a prompt_cache_key (comma-separated names); other endpoints may "
         "reject the unknown field. A keyless endpoint never gets one",
     )
+    responses_api_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["openai", "azure", "azure-openai"],
+        description="OpenAI-wire providers that use the Responses API (comma-separated names): encrypted reasoning "
+        "is passed back within and across turns (issue #358). Every other endpoint stays on Chat Completions, which "
+        "compatible servers implement more reliably. 'none' (or an empty list in pincer.toml) = no endpoint",
+    )
     anthropic_compatible_provider: str = Field(
         default="", description="Name for the Anthropic-wire compatible endpoint"
     )
@@ -152,6 +158,16 @@ class LLMSettings(BaseModel):
     def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             return split_csv(v)
+        return v
+
+    @field_validator("responses_api_providers", mode="before")
+    @classmethod
+    def parse_responses_api_providers(cls, v: str | list[str]) -> list[str]:
+        """Comma-separated names. An empty environment variable is ignored by the settings loader,
+        so "none" is how the environment turns the list off."""
+        if isinstance(v, str):
+            names = split_csv(v)
+            return [] if [n.lower() for n in names] == ["none"] else names
         return v
 
     @field_validator("server_compaction_providers", mode="before")

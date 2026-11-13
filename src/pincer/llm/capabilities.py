@@ -15,13 +15,19 @@ class EndpointCapabilities:
 
     server_compaction: bool
     drop_block: bool
+    responses_api: bool = False
 
 
 def endpoint_capabilities(settings: Settings, provider: str) -> EndpointCapabilities:
     """What ``provider``'s endpoint takes: the Anthropic betas when it is in
-    ``server_compaction_providers`` (default: ``anthropic`` and the configured compatible name)."""
+    ``server_compaction_providers`` (default: ``anthropic`` and the configured compatible name); the
+    Responses API when it is in ``responses_api_providers`` (default: ``openai``, ``azure``, ``azure-openai``)."""
     listed = settings.server_compaction_providers
     if listed is None:
         listed = ["anthropic", settings.anthropic_compatible_provider]
     takes_betas = bool(provider) and provider in listed
-    return EndpointCapabilities(server_compaction=takes_betas, drop_block=takes_betas)
+    return EndpointCapabilities(
+        server_compaction=takes_betas,
+        drop_block=takes_betas,
+        responses_api=bool(provider) and provider in settings.responses_api_providers,
+    )

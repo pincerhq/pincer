@@ -414,6 +414,7 @@ def _foundry_openai(**overrides: Any) -> dict[str, Any]:
         "openai_compatible_provider": "azure-openai",
         "openai_compatible_base_url": "https://foundry.example.invalid/openai/v1",
         "openai_compatible_model": "gpt-5.4-mini",
+        "responses_api_providers": [],  # the smoke checks' fakes serve Chat Completions
         **overrides,
     }
 

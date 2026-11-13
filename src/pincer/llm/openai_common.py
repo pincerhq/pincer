@@ -31,12 +31,20 @@ from pincer.llm.base import (
     rate_limit_backoff,
     transient_status,
 )
+from pincer.llm.capabilities import endpoint_capabilities
 from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
+from pincer.llm.openai_responses import (
+    convert_messages_to_responses,
+    convert_tools_to_responses,
+    parse_responses_response,
+)
+from pincer.llm.replay import wire_tag
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from openai.types.chat import ChatCompletion
+    from openai.types.responses import Response
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
@@ -53,12 +61,14 @@ logger = logging.getLogger(__name__)
 OPENAI_MAX_TOOLS = 128
 # OpenAI's finish_reason when the output hit the token limit
 _FINISH_REASON_LENGTH = "length"
+# Asks a Responses request to return its reasoning items encrypted, so they can be sent back (store=false)
+_INCLUDE_ENCRYPTED_REASONING = "reasoning.encrypted_content"
 # The first wait after a 429, which the SDK's error carries no retry-after for here; it doubles per retry
 _RATE_LIMIT_WAIT_S = 5.0
 
 
-def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert Anthropic-style tool defs to OpenAI function-calling format."""
+def cap_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The first ``OPENAI_MAX_TOOLS`` tools; the rest are named in a warning."""
     if len(tools) > OPENAI_MAX_TOOLS:
         logger.warning(
             "%d tools exceed OpenAI's %d-tool limit — sending the first %d and dropping: %s",
@@ -68,6 +78,12 @@ def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]
             ", ".join(t.get("name", "?") for t in tools[OPENAI_MAX_TOOLS:]),
         )
         tools = tools[:OPENAI_MAX_TOOLS]
+    return tools
+
+
+def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Anthropic-style tool defs to OpenAI function-calling format."""
+    tools = cap_tools(tools)
     oai_tools: list[dict[str, Any]] = []
     for tool in tools:
         oai_tools.append(
@@ -179,6 +195,27 @@ def _usage_counts(usage: Any) -> TokenCounts:
     )
 
 
+def _responses_usage_counts(usage: Any) -> TokenCounts:
+    """The token counts of a Responses `usage` (None when the API sent none).
+
+    `input_tokens` is the whole prompt: the cached part (`cached_tokens`, billed reads) and the part
+    written to the cache (`cache_write_tokens`, stored as 5-minute writes) come out of it. `output_tokens`
+    includes the reasoning tokens, which are billed as output.
+    """
+    total = _token_count(getattr(usage, "input_tokens", 0))
+    details = getattr(usage, "input_tokens_details", None)
+    read = _token_count(getattr(details, "cached_tokens", 0))
+    # Not in the SDK's model: read from the response's extra fields
+    written = _token_count(getattr(details, "cache_write_tokens", 0))
+    return TokenCounts(
+        input_tokens=max(0, total - read - written),
+        cache_write_5m_tokens=written,
+        cache_write_1h_tokens=0,
+        cache_read_tokens=read,
+        output_tokens=_token_count(getattr(usage, "output_tokens", 0)),
+    )
+
+
 def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     """Parse OpenAI ChatCompletion into unified LLMResponse."""
     choice = response.choices[0]
@@ -248,6 +285,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         )
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
         self._request_clients = RequestClients[AsyncOpenAI]()
+        # Chat Completions (today's code) or the Responses API for this endpoint, read once
+        self._responses_api = endpoint_capabilities(settings, provider).responses_api
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
@@ -302,6 +341,49 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)
 
+    def _build_responses_kwargs(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        system: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
+    ) -> dict[str, Any]:
+        """Request kwargs of a Responses call: stateless (`store` false), reasoning items encrypted."""
+        model = model or self._default_model
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "input": convert_messages_to_responses(messages, wire_tag(self._provider_name, model)),
+            "store": False,
+            "max_output_tokens": max_tokens or self._default_max_tokens,
+        }
+        if system:
+            kwargs["instructions"] = system
+        if tools:
+            kwargs["tools"] = convert_tools_to_responses(cap_tools(tools))
+        if openai_is_reasoning_model(model):
+            kwargs["include"] = [_INCLUDE_ENCRYPTED_REASONING]
+        else:  # a reasoning model rejects a temperature
+            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
+        if self._sends_cache_key and (cache_key := prompt_cache_key()):
+            kwargs["prompt_cache_key"] = cache_key
+        # The same effort rules as Chat Completions; the Responses API takes the level as `reasoning.effort`
+        reasoning = resolve_and_warn(
+            ReasoningWire.OPENAI,
+            model,
+            self._reasoning_effort if reasoning_effort is None else reasoning_effort,
+            self._thinking if thinking is None else thinking,
+            pinned=pinned,
+            with_tools=bool(tools),
+        )
+        if effort := reasoning.fragment.get("reasoning_effort"):
+            kwargs["reasoning"] = {"effort": effort}
+        return kwargs
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -314,7 +396,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(
+        build = self._build_responses_kwargs if self._responses_api else self._build_kwargs
+        kwargs = build(
             messages,
             tools,
             model,
@@ -327,17 +410,45 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         )
 
         try:
-            response = await self._call_with_retry(kwargs)
+            response = await self._call_with_retry(kwargs, responses=self._responses_api)
         except openai.APIStatusError as e:
             message = f"{self._provider_name} API error: {e.status_code} {e.message}"
             raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except openai.APIConnectionError as e:
             raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
-        result = parse_openai_response(response)
+        if self._responses_api:
+            result = self._parse_responses(response, kwargs["model"])
+        else:
+            result = parse_openai_response(response)
         result.provider = self._provider_name
         result.request_model = kwargs["model"]
         return result
+
+    def _parse_responses(self, response: Response, model: str) -> LLMResponse:
+        """A Responses reply as a unified response, with its usage and a log line about its reasoning."""
+        result = parse_responses_response(response, wire_tag(self._provider_name, model))
+        counts = _responses_usage_counts(response.usage)
+        result.input_tokens = counts["input_tokens"]
+        result.cache_write_5m_tokens = counts["cache_write_5m_tokens"]
+        result.cache_read_tokens = counts["cache_read_tokens"]
+        result.output_tokens = counts["output_tokens"]
+        self._log_reasoning(response, model)
+        return result
+
+    def _log_reasoning(self, response: Response, model: str) -> None:
+        """How much of the output was reasoning, and which reasoning mode the API says it used
+        (`current_turn`: earlier turns' reasoning is not rendered). Counts and a mode name only."""
+        details = getattr(response.usage, "output_tokens_details", None)
+        reasoning = getattr(response.reasoning, "context", None) if response.reasoning else None
+        logger.debug(
+            "%s %s: %d output tokens, of which %d reasoning; reasoning context %s",
+            self._provider_name,
+            model,
+            _token_count(getattr(response.usage, "output_tokens", 0)),
+            _token_count(getattr(details, "reasoning_tokens", 0)),
+            reasoning or "unreported",
+        )
 
     async def stream_turn(
         self,
@@ -441,14 +552,15 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     async def close(self) -> None:
         await self._client.close()
 
-    async def _call_with_retry(self, kwargs: dict[str, Any]) -> ChatCompletion:
+    async def _call_with_retry(self, kwargs: dict[str, Any], *, responses: bool = False) -> Any:
+        """One request, with the 429 retries; the Responses API when ``responses``, else Chat Completions."""
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                result: ChatCompletion = await self._request_clients.pick(self._client).chat.completions.create(
-                    **kwargs
-                )
-                return result
+                client = self._request_clients.pick(self._client)
+                if responses:
+                    return await client.responses.create(**kwargs)
+                return await client.chat.completions.create(**kwargs)
             except openai.RateLimitError as e:
                 if attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e

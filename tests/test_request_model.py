@@ -109,7 +109,13 @@ def openai_leaf():  # type: ignore[no-untyped-def]
         client.close = AsyncMock()
         mock_cls.return_value = client
         yield OpenAICompatibleProvider(
-            _settings(openai_api_key="sk-test", default_provider="openai", default_model="gpt-sent"), "openai"
+            _settings(
+                openai_api_key="sk-test",
+                default_provider="openai",
+                default_model="gpt-sent",
+                responses_api_providers=[],  # this test is about Chat Completions
+            ),
+            "openai",
         )
 
 

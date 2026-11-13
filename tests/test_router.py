@@ -817,7 +817,14 @@ async def _openai_answering(settings, statuses: list[int], text: str) -> tuple[B
         return httpx.Response(200, json=completion)
 
     provider = OpenAICompatibleProvider(
-        settings.model_copy(update={"openai_api_key": SecretStr("sk-test"), "openai_model": "gpt-5-mini"}), "openai"
+        settings.model_copy(
+            update={
+                "openai_api_key": SecretStr("sk-test"),
+                "openai_model": "gpt-5-mini",
+                "responses_api_providers": [],  # these tests are about Chat Completions
+            }
+        ),
+        "openai",
     )
     await provider.close()
     provider._client = AsyncOpenAI(  # type: ignore[attr-defined]

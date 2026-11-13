@@ -53,6 +53,7 @@ def openai_settings():
         telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
         default_provider="openai",
         default_model="my-model",
+        responses_api_providers=[],  # these tests are about Chat Completions
     )
 
 
@@ -534,6 +535,7 @@ class TestStreamTurn:
             openai_api_key="sk-oai-test",
             telegram_bot_token="123456:TEST",
             openai_model="gpt-4o-mini",
+            responses_api_providers=[],  # these tests are about Chat Completions
         )
         with patch("pincer.llm.openai_common.AsyncOpenAI") as mock_cls:
             mock_cls.return_value = MagicMock()
@@ -716,6 +718,7 @@ def _reasoning_settings(model: str, **update):
         openai_api_key="sk-test",  # type: ignore[arg-type]
         telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
         default_provider="openai",
+        responses_api_providers=[],  # these tests are about Chat Completions
         _env_file=None,  # type: ignore[call-arg]
     )
     return base.model_copy(update={"openai_model": model, "reasoning_effort": "", "thinking": "", **update})

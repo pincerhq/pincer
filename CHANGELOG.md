@@ -51,6 +51,22 @@ Always on, without setting anything:
 - `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
   warning at startup and `pincer doctor` reports it. Remove it from `.env`.
 
+#### OpenAI and Azure OpenAI use the Responses API (#358)
+
+- Requests to `openai`, `azure` and `azure-openai` now go to `/responses` instead of
+  `/chat/completions`, stateless (`store: false`). The model's reasoning comes back encrypted and is
+  sent back between tool calls, on later turns and after a restart, so a reasoning model no longer
+  starts from scratch after every tool call. Tools, `prompt_cache_key` and the 128-tool cap work as
+  before, and usage still splits into uncached, cached and output tokens.
+- `PINCER_RESPONSES_API_PROVIDERS` (default `openai,azure,azure-openai`) lists the OpenAI-wire
+  providers that use it. **Every other endpoint (Ollama, OpenRouter, DeepSeek, Grok, LiteLLM, ...)
+  stays on Chat Completions exactly as before**; add a name to the list to move it. To keep an
+  endpoint on Chat Completions, remove its name; `none` (or `[]` in `pincer.toml`) turns it off for
+  all. An Azure endpoint needs the v1 base URL (`https://<resource>.openai.azure.com/openai/v1/`),
+  which is what `.env.example` already shows.
+- Streamed chat and voice turns still use Chat Completions in this change; they follow in the next
+  step of #358.
+
 #### One storage root, with `skills/` and `workspace/` under it
 
 - Everything the agent reads and writes now lives in `<storage root>/workspace`:
