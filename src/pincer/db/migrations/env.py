@@ -176,7 +176,7 @@ def _upgrade_lock(engine: Engine) -> Iterator[None]:
 def _check_search_path(engine: Engine) -> None:
     """Refuse a `search_path` that names a schema missing from the database.
 
-    Postgres skips such an entry silently: with `-csearch_path=pincr` (a typo,
+    Postgres skips such an entry silently: with `search_path=pincr` (a typo,
     or a schema nobody created) the first migration fails with "no schema has
     been selected to create in", and with `pincr,public` every table quietly
     lands in `public`. Only `"$user"` may be missing, as it is by default; when
@@ -205,13 +205,13 @@ def _check_search_path(engine: Engine) -> None:
                 break
             raise RuntimeError(
                 f"The search_path ({search_path}) names schema {entry}, which does not exist in this database. "
-                f"Create it (CREATE SCHEMA {entry} AUTHORIZATION <role>) or fix the `options` in "
-                "PINCER_DATABASE_URL, or the role's or database's search_path"
+                f"Create it (CREATE SCHEMA {entry} AUTHORIZATION <role>) or fix the `search_path` "
+                "(or `options`) in PINCER_DATABASE_URL, or the role's or database's search_path"
             )
         if conn.exec_driver_sql("SELECT current_schema()").scalar() is None:
             raise RuntimeError(
                 f"None of the schemas in the search_path ({search_path}) exists in this database; "
-                "create one or name an existing one with `options` in PINCER_DATABASE_URL"
+                "create one or name an existing one with `search_path` (or `options`) in PINCER_DATABASE_URL"
             )
 
 

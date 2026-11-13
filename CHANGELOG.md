@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### `search_path=` in `PINCER_DATABASE_URL`
+
+- `PINCER_DATABASE_URL` takes `?search_path=<schema>`, the same form as
+  `PINCER_WHATSAPP_SESSION_DB`. Pincer rewrites it into
+  `options=-c search_path=<schema>` for Alembic and the runtime.
+  Before, both drivers rejected it. `options=-csearch_path%3D<schema>` still
+  works. A URL that sets the schema both ways fails at startup.
+
 #### WhatsApp session in Postgres, and picking the account
 
 - `PINCER_WHATSAPP_SESSION_DB` stores the WhatsApp (whatsmeow) session in
