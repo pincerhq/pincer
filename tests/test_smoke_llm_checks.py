@@ -736,3 +736,22 @@ def test_a_dummy_key_does_not_mangle_the_output(smoke, capsys):
     assert code == 0
     assert "check=openai-xhigh max_tokens=512 effort=xhigh" in out
     assert "<redacted>" not in out
+
+
+@pytest.mark.parametrize(
+    ("listed", "planned_effort"),
+    [(["openai"], "-"), ([], "none")],
+    ids=["responses-sends-nothing", "chat-completions-sends-none"],
+)
+async def test_the_dry_run_plans_a_gpt_6_tool_turn_for_the_api_the_endpoint_really_uses(smoke, listed, planned_effort):
+    """The planner resolves with the endpoint's own wire (`reasoning_wire`): terra with tools and nothing set
+    goes out with no effort on the Responses API and `none` on Chat Completions (issue #358, slice 8)."""
+    settings = _settings(openai_api_key="sk-test", responses_api_providers=listed)
+    from pincer.llm.base import LLMMessage, MessageRole
+
+    planned: list[Any] = []
+    tools = [{"name": "get_weather", "description": "w", "input_schema": {"type": "object", "properties": {}}}]
+    dry = smoke.DryRunProvider(settings, "openai", planned)
+    await dry.complete([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools, model="gpt-6.1-terra")
+
+    assert [p.effort for p in planned] == [planned_effort]

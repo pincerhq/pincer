@@ -71,6 +71,25 @@ Always on, without setting anything:
   saved before this change, or by an endpoint on Chat Completions, still loads and is sent without
   reasoning.
 
+#### gpt-6 on OpenAI and Azure now reasons with tools (#358)
+
+- On the Responses API a tool turn is no longer sent `reasoning_effort: none` for gpt-6. With
+  `PINCER_REASONING_EFFORT` unset nothing is sent, so `gpt-6.1-terra`, `gpt-6-sol`, `gpt-6-luna` and
+  `gpt-6.1-sol` run at their default effort, which is medium on OpenAI's documentation (gpt-6-astra and
+  Azure deployments: not documented). Expect more reasoning tokens, billed as output, and slower tool
+  turns. Any effort now works with tools, and `gpt-6-astra` and `gpt-6.1-sol` can be chat and voice models.
+- **To lower it:** `PINCER_REASONING_EFFORT=low`, or `PINCER_THINKING=disabled`, which sends `none`
+  (not accepted by gpt-6-astra and gpt-6.1-sol, which have no off level). `none` itself is not a value
+  of `PINCER_REASONING_EFFORT`.
+- **Voice calls reason too.** A gpt-6 voice call on a Responses endpoint now reasons at the model's
+  default under the 220-token voice limit (`PINCER_VOICE_MAX_RESPONSE_TOKENS`): the reasoning can use the
+  limit up before the caller hears a word. Set `PINCER_VOICE_THINKING=disabled` for voice, or
+  `PINCER_VOICE_REASONING_EFFORT=low` and raise `PINCER_VOICE_MAX_RESPONSE_TOKENS` (at least 512).
+  `pincer doctor` warns about it.
+- Endpoints that stay on Chat Completions keep the old rules (tool turns send `none`, a higher effort
+  refuses to start). The refusal now says to add the endpoint to `PINCER_RESPONSES_API_PROVIDERS` if it
+  serves `/v1/responses`. `pincer doctor` lists the API of every endpoint (`llm_endpoints`).
+
 #### One storage root, with `skills/` and `workspace/` under it
 
 - Everything the agent reads and writes now lives in `<storage root>/workspace`:

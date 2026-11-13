@@ -34,8 +34,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
-    # + 1 WhatsApp session store
-    assert len(report.checks) == 72
+    # + 1 WhatsApp session store + 1 LLM endpoints (issue #358)
+    assert len(report.checks) == 73
 
     assert 0 <= report.score <= 100
 
@@ -2082,13 +2082,42 @@ def test_llm_reasoning_summary_on_an_openai_provider_uses_its_own_model():
             {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-5"},
             CheckStatus.WARNING,
         ),
-        # gpt-6 thinks by default, but voice turns carry tools, so they send none (issue #357)
+        # gpt-6 thinks by default, but voice turns carry tools, so on Chat Completions they send none (issue #357)
+        (
+            {
+                "voice_max_response_tokens": 150,
+                "openai_api_key": "sk-test",
+                "voice_turn_model": "openai:gpt-6.1-terra",
+                "responses_api_providers": [],
+            },
+            CheckStatus.PASS,
+        ),
+        # on the Responses API nothing is sent, so gpt-6 reasons at its default (issue #358, slice 8)
         (
             {"voice_max_response_tokens": 150, "openai_api_key": "sk-test", "voice_turn_model": "openai:gpt-6.1-terra"},
+            CheckStatus.WARNING,
+        ),
+        (
+            {
+                "voice_max_response_tokens": 150,
+                "openai_api_key": "sk-test",
+                "voice_turn_model": "openai:gpt-6.1-terra",
+                "voice_thinking": "disabled",
+            },
             CheckStatus.PASS,
         ),
     ],
-    ids=["thinks-150", "thinks-600", "disabled-150", "between-tools-150", "gpt-5.1-150", "gpt-5-150", "gpt-6-150"],
+    ids=[
+        "thinks-150",
+        "thinks-600",
+        "disabled-150",
+        "between-tools-150",
+        "gpt-5.1-150",
+        "gpt-5-150",
+        "gpt-6-chat-150",
+        "gpt-6-responses-150",
+        "gpt-6-responses-disabled-150",
+    ],
 )
 def test_voice_thinking_token_limit(update, status):
     result = SecurityDoctor()._check_voice_thinking_token_limit(_llm_cfg(**update))
@@ -2177,6 +2206,7 @@ def test_llm_reasoning_shows_none_sent_with_tools_to_gpt_6_and_not_for_summaries
         openai_model="gpt-6.1-terra",
         summary_provider="openai",
         summary_model="gpt-6.1-terra",
+        responses_api_providers=[],
     )
     sent = "openai gpt-6.1-terra: nothing set; sends reasoning_effort none with tools (gpt-6 on Chat Completions)"
 
@@ -2185,6 +2215,70 @@ def test_llm_reasoning_shows_none_sent_with_tools_to_gpt_6_and_not_for_summaries
     assert (
         SecurityDoctor()._check_llm_reasoning_summary(cfg).message == "openai gpt-6.1-terra: nothing set; model default"
     )
+
+
+def test_llm_reasoning_says_gpt_6_sends_nothing_with_tools_on_the_responses_api():
+    cfg = _llm_cfg(
+        openai_api_key="sk-test",
+        default_provider="openai",
+        openai_model="gpt-6.1-terra",
+        summary_provider="openai",
+        summary_model="gpt-6.1-terra",
+    )
+    sent = "openai gpt-6.1-terra: nothing set; model default (Responses API: reasoning with tools)"
+
+    assert SecurityDoctor()._check_llm_reasoning_default(cfg).message == sent
+    assert SecurityDoctor()._check_llm_reasoning_voice(cfg).message == sent
+    assert (
+        SecurityDoctor()._check_llm_reasoning_summary(cfg).message == "openai gpt-6.1-terra: nothing set; model default"
+    )
+    pinned = _llm_cfg(
+        openai_api_key="sk-test", default_provider="openai", openai_model="gpt-6-astra", reasoning_effort="high"
+    )
+    assert SecurityDoctor()._check_llm_reasoning_default(pinned).message == "openai gpt-6-astra: reasoning_effort high"
+
+
+def test_the_voice_warning_for_gpt_6_on_responses_says_why_and_how_to_avoid_it():
+    cfg = _llm_cfg(voice_max_response_tokens=220, openai_api_key="sk-test", voice_turn_model="openai:gpt-6.1-terra")
+    result = SecurityDoctor()._check_voice_thinking_token_limit(cfg)
+
+    assert result.status == CheckStatus.WARNING
+    assert result.message == (
+        "gpt-6.1-terra thinks on voice turns, but the voice token limit is 220: on the Responses API gpt-6 reasons at "
+        "the model's default effort (OpenAI documents medium) when nothing is set, where Chat Completions turned "
+        "reasoning off for tool turns, and thinking can use the limit up before the caller hears a word"
+    )
+    assert result.fix_hint == (
+        "Set PINCER_VOICE_THINKING=disabled (sends reasoning none; not accepted by gpt-6-astra or gpt-6.1-sol) or "
+        "PINCER_VOICE_REASONING_EFFORT=low, and raise PINCER_VOICE_MAX_RESPONSE_TOKENS to at least 512"
+    )
+
+
+def test_llm_endpoints_lists_the_api_of_every_endpoint_with_credentials():
+    from pydantic import SecretStr
+
+    cfg = _llm_cfg(
+        anthropic_api_key=SecretStr(""),  # no credentials: not listed
+        openai_api_key="sk-test",
+        openai_compatible_provider="gw",
+        openai_compatible_base_url="http://localhost:9999/v1",
+        openai_compatible_api_key="gw-key",
+        openai_compatible_model="llama-3.3-70b",
+    )
+    result = SecurityDoctor()._check_llm_endpoints(cfg)
+
+    assert result.status == CheckStatus.PASS
+    assert result.category == "llm"
+    assert result.message == (
+        "LLM endpoints: gw: Chat Completions (/chat/completions); openai: Responses API (/responses)"
+    )
+    moved = cfg.model_copy(update={"responses_api_providers": ["gw"]})
+    assert "gw: Responses API (/responses)" in SecurityDoctor()._check_llm_endpoints(moved).message
+    assert "openai: Chat Completions (/chat/completions)" in SecurityDoctor()._check_llm_endpoints(moved).message
+
+
+def test_llm_endpoints_is_part_of_the_run(doctor_env):
+    assert "llm_endpoints" in {c.name for c in doctor_env.run_all().checks}
 
 
 _SUMMARY_THRESHOLD_WARNING = (

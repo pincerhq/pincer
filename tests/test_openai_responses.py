@@ -505,11 +505,12 @@ async def test_a_model_that_does_not_reason_gets_its_temperature_and_no_include(
     assert "reasoning" not in body
 
 
-async def test_gpt6_with_tools_still_sends_the_off_level_until_slice_8_changes_its_rules(openai_settings):
-    """Documents the state of this slice: the gpt-6 effort rules are untouched, only re-spelled for
-    Responses (`reasoning.effort`). Slice 8 lifts them for Responses endpoints."""
+async def test_gpt6_with_tools_and_no_effort_sends_no_reasoning_so_the_model_uses_its_default(openai_settings):
+    """On Chat Completions gpt-6 takes tools only at `none`, so that is what a tool turn sent. The
+    Responses API takes tools at any effort: nothing set means nothing sent (slice 8)."""
     settings = openai_settings.model_copy(update={"openai_model": "gpt-6.1-terra"})
-    assert (await _body(settings, tools=GOLDEN_TOOLS))["reasoning"] == {"effort": "none"}
+
+    assert "reasoning" not in await _body(settings, tools=GOLDEN_TOOLS)
 
 
 # ── Errors ───────────────────────────────────────────────────────────────────

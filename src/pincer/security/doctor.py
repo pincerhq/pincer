@@ -25,7 +25,6 @@ from pincer.utils.csv_list import split_csv
 if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
-    from pincer.llm.model_params import ReasoningWire
 
 
 #: The shared API tokens removed in favour of per-identity auth (issue #228).
@@ -206,13 +205,14 @@ class SecurityDoctor:
         report.checks.append(self._check_schedule_action_types(settings))
         # Google Workspace (1 check, issue #297)
         report.checks.append(self._check_google_workspace(settings))
-        # LLM effort and thinking (4 checks, issue #345)
+        # LLM effort, thinking and endpoints (issue #345, #358)
         report.checks.append(self._check_llm_reasoning_default(settings))
         report.checks.append(self._check_llm_reasoning_voice(settings))
         report.checks.append(self._check_llm_reasoning_summary(settings))
         report.checks.append(self._check_voice_thinking_token_limit(settings))
         report.checks.append(self._check_llm_pricing(settings))
         report.checks.append(self._check_llm_compaction(settings))
+        report.checks.append(self._check_llm_endpoints(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2258,6 +2258,27 @@ class SecurityDoctor:
             category="llm",
         )
 
+    def _check_llm_endpoints(self, cfg: Settings | None = None) -> CheckResult:
+        """The API each endpoint with credentials is called on (issue #358): the Responses API for the
+        endpoints in PINCER_RESPONSES_API_PROVIDERS, Chat Completions for every other OpenAI-wire one."""
+        from pincer.llm.capabilities import reasoning_wire
+        from pincer.llm.model_params import ReasoningWire
+        from pincer.llm.router import has_credentials, known_provider_names
+
+        cfg = self._cfg(cfg)
+        apis = {
+            ReasoningWire.OPENAI_RESPONSES: "Responses API (/responses)",
+            ReasoningWire.OPENAI: "Chat Completions (/chat/completions)",
+            ReasoningWire.ANTHROPIC: "Messages API",
+        }
+        listed = [
+            f"{name}: {apis[wire]}"
+            for name in sorted(known_provider_names(cfg))
+            if has_credentials(cfg, name) and (wire := reasoning_wire(cfg, name)) is not None
+        ]
+        message = f"LLM endpoints: {'; '.join(listed)}" if listed else "No LLM endpoint has credentials"
+        return CheckResult("llm_endpoints", CheckStatus.PASS, message, category="llm")
+
     def _check_llm_pricing(self, cfg: Settings | None = None) -> CheckResult:
         """Every model Pincer will call has a valid `[pricing]` entry (issue #357); the same
         check `pincer run` refuses to start on."""
@@ -2375,7 +2396,8 @@ class SecurityDoctor:
         """Thinking and speech share the voice token limit: a model that thinks
         can spend a small limit before saying a word."""
         from pincer.config.llm import effective_effort, effective_thinking
-        from pincer.llm.model_params import model_thinks, resolve_reasoning
+        from pincer.llm.capabilities import reasoning_wire
+        from pincer.llm.model_params import ReasoningWire, model_thinks, openai_tools_need_off, resolve_reasoning
         from pincer.llm.router import plan_voice_turn
 
         name = "voice_thinking_token_limit"
@@ -2384,17 +2406,37 @@ class SecurityDoctor:
             return CheckResult(name, CheckStatus.SKIPPED, "Voice not enabled", category="voice")
         plan = plan_voice_turn(cfg)  # builds the client object only: nothing is sent
         model = plan.effective_model
-        wire = _reasoning_wire(cfg, plan.provider)
+        wire = reasoning_wire(cfg, plan.provider)
         thinks = None
+        sends_nothing = False
         if wire is not None:
             effort = effective_effort(cfg.voice_reasoning_effort, cfg.reasoning_effort)
             thinking = effective_thinking(cfg.voice_thinking, cfg.thinking)
-            # Voice turns carry tools: a gpt-6 model then gets none (issue #357)
+            # Voice turns carry tools: on Chat Completions a gpt-6 model then gets none (issue #357); on the
+            # Responses API nothing is sent, so it reasons at its own default (issue #358)
             params = resolve_reasoning(wire, model, effort, thinking, with_tools=True)
             thinks = model_thinks(wire, model, params)
+            sends_nothing = (
+                wire is ReasoningWire.OPENAI_RESPONSES and openai_tools_need_off(model) and not params.fragment
+            )
         limit = cfg.voice_max_response_tokens
         if thinks is None:
             return CheckResult(name, CheckStatus.PASS, f"Can't tell whether {model} thinks", category="voice")
+        if thinks and sends_nothing and limit < _VOICE_THINKING_MIN_TOKENS:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"{model} thinks on voice turns, but the voice token limit is {limit}: on the Responses API gpt-6 "
+                "reasons at the model's default effort (OpenAI documents medium) when nothing is set, where Chat "
+                "Completions turned reasoning off for tool turns, and thinking can use the limit up before the "
+                "caller hears a word",
+                fix_hint=(
+                    "Set PINCER_VOICE_THINKING=disabled (sends reasoning none; not accepted by gpt-6-astra or "
+                    "gpt-6.1-sol) or PINCER_VOICE_REASONING_EFFORT=low, and raise PINCER_VOICE_MAX_RESPONSE_TOKENS "
+                    f"to at least {_VOICE_THINKING_MIN_TOKENS}"
+                ),
+                category="voice",
+            )
         if thinks and limit < _VOICE_THINKING_MIN_TOKENS:
             return CheckResult(
                 name,
@@ -3055,18 +3097,6 @@ class SecurityDoctor:
 # ── LLM effort and thinking (issue #345) ──────────────────────────────────────
 
 
-def _reasoning_wire(cfg: Settings, name: str) -> ReasoningWire | None:
-    """The request format a provider name speaks, as the router builds it; None if unknown."""
-    from pincer.llm.model_params import ReasoningWire
-    from pincer.llm.router import is_openai_wire
-
-    if is_openai_wire(cfg, name):
-        return ReasoningWire.OPENAI
-    if name == "anthropic" or (name and name == cfg.anthropic_compatible_provider):
-        return ReasoningWire.ANTHROPIC
-    return None
-
-
 def _reasoning_report(
     check: str,
     cfg: Settings,
@@ -3083,14 +3113,19 @@ def _reasoning_report(
     ``env`` names the effort and thinking settings an operator changes for this target.
     ``with_tools``: the target's requests carry tools (chat and voice; summaries don't).
     """
+    from pincer.llm.capabilities import reasoning_wire
     from pincer.llm.model_params import ReasoningWire, openai_tools_need_off, resolve_reasoning
 
     if not (effort or thinking):
         default = "model default"
-        if with_tools and _reasoning_wire(cfg, provider) is ReasoningWire.OPENAI and openai_tools_need_off(model):
-            default = "sends reasoning_effort none with tools (gpt-6 on Chat Completions)"
+        if with_tools and openai_tools_need_off(model):
+            wire = reasoning_wire(cfg, provider)
+            if wire is ReasoningWire.OPENAI:
+                default = "sends reasoning_effort none with tools (gpt-6 on Chat Completions)"
+            elif wire is ReasoningWire.OPENAI_RESPONSES:
+                default = "model default (Responses API: reasoning with tools)"
         return CheckResult(check, CheckStatus.PASS, f"{provider} {model}: nothing set; {default}", category="llm")
-    wire = _reasoning_wire(cfg, provider)
+    wire = reasoning_wire(cfg, provider)
     if wire is None:
         return CheckResult(
             check,
@@ -3119,7 +3154,7 @@ def _reasoning_report(
         sent.append(
             f"reasoning_effort {level}" if level == effort else f"reasoning_effort {effort} → {level} (stepped down)"
         )
-    if wire is ReasoningWire.OPENAI and thinking == "adaptive":
+    if wire.openai and thinking == "adaptive":
         sent.append("thinking adaptive ignored (OpenAI models have no such setting)")
     message = f"{provider} {model}: {', '.join(sent) or 'nothing sent'}"
     if not params.dropped:

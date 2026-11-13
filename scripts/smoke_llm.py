@@ -59,7 +59,7 @@ from pincer.llm.base import (
     MessageRole,
     ToolCall,
 )
-from pincer.llm.capabilities import endpoint_capabilities
+from pincer.llm.capabilities import endpoint_capabilities, reasoning_wire
 from pincer.llm.model_params import DropReason, ReasoningParams, ReasoningWire, resolve_reasoning, thinking_is_bound
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.llm.replay import wire_tag
@@ -290,7 +290,7 @@ class DryRunProvider(BaseLLMProvider):  # type: ignore[misc]  # plain mypy can't
         self._settings = settings
         self._name = name
         self._planned = planned
-        self._wire = ReasoningWire.OPENAI if is_openai_wire(settings, name) else ReasoningWire.ANTHROPIC
+        self._wire = reasoning_wire(settings, name) or ReasoningWire.ANTHROPIC
 
     def _record(
         self,
@@ -308,6 +308,7 @@ class DryRunProvider(BaseLLMProvider):  # type: ignore[misc]  # plain mypy can't
             model,
             self._settings.reasoning_effort if effort is None else effort,
             self._settings.thinking if thinking is None else thinking,
+            with_tools=bool(tools),
         )
         sent_effort = params.fragment.get("output_config", {}).get("effort") or params.fragment.get("reasoning_effort")
         sent_thinking = params.fragment.get("thinking", {}).get("type", "-")
@@ -598,6 +599,8 @@ VOICE_CHECKS: tuple[tuple[str, Callable[[VoiceTarget], Awaitable[Outcome]]], ...
 
 
 def _openai_params(model: str, effort: ReasoningEffort, thinking: ThinkingMode) -> ReasoningParams:
+    """The level table for one model. These checks send no tools, where the two OpenAI request formats
+    resolve alike, so the wire does not matter here (the planner above takes it from the endpoint)."""
     return resolve_reasoning(ReasoningWire.OPENAI, model, effort, thinking)
 
 

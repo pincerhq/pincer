@@ -399,7 +399,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             kwargs["prompt_cache_key"] = cache_key
         # The same effort rules as Chat Completions; the Responses API takes the level as `reasoning.effort`
         reasoning = resolve_and_warn(
-            ReasoningWire.OPENAI,
+            ReasoningWire.OPENAI_RESPONSES,
             model,
             self._reasoning_effort if reasoning_effort is None else reasoning_effort,
             self._thinking if thinking is None else thinking,
