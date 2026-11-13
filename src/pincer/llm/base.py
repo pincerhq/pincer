@@ -133,6 +133,9 @@ class LLMMessage:
     content: str = ""
     images: list[ImageContent] = field(default_factory=list)
     tool_call_id: str | None = None  # For tool_result messages
+    # A tool_result that closes a call which never ran to its end (an interrupted turn), sent as an
+    # error result. Real tool errors carry no flag: their text says it.
+    is_error: bool = False
     tool_calls: list[ToolCall] = field(default_factory=list)  # From assistant
     # An assistant message's provider output verbatim (Anthropic: the whole `content` array, thinking
     # included), replayed on later requests while `wire` matches the target (see `llm.replay`). Saved
@@ -151,6 +154,8 @@ class LLMMessage:
         d: dict[str, Any] = {"role": self.role.value, "content": self.content}
         if self.tool_call_id:
             d["tool_call_id"] = self.tool_call_id
+        if self.is_error:
+            d["is_error"] = True
         if self.tool_calls:
             d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
         if self.context:
@@ -181,6 +186,7 @@ class LLMMessage:
             role=MessageRole(d["role"]),
             content=d.get("content", ""),
             tool_call_id=d.get("tool_call_id"),
+            is_error=bool(d.get("is_error", False)),
             tool_calls=tool_calls,
             raw=list(d.get("raw", [])),
             wire=d.get("wire", ""),
@@ -278,23 +284,6 @@ def transient_status(status_code: int) -> bool:
 def rate_limit_backoff(retry_after: float, attempt: int) -> float:
     """Seconds to wait after the `attempt`-th (0-based) 429: retry_after·2^attempt, at most 60 s."""
     return min(retry_after * 2.0**attempt, _RATE_LIMIT_MAX_WAIT_S)
-
-
-# Output block types that are a model's reasoning (Anthropic)
-_THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
-
-
-def holds_thinking(message: LLMMessage) -> bool:
-    """True when the message's raw output holds a thinking block."""
-    return any(block.get("type") in _THINKING_TYPES for block in message.raw)
-
-
-def strip_thinking(messages: list[LLMMessage]) -> None:
-    """Drop the thinking of every message that holds some, in place: its raw output goes, so the
-    message is rebuilt from its text and tool calls when sent."""
-    for message in messages:
-        if holds_thinking(message):
-            message.raw = []
 
 
 @dataclass(frozen=True, slots=True)

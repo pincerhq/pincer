@@ -45,7 +45,6 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
     prompt_cache_session,
-    strip_thinking,
 )
 from pincer.llm.cost_tracker import record_response
 from pincer.llm.model_params import model_max_output_tokens
@@ -118,6 +117,8 @@ _SELECTION_EXTRA_CHARS = 500
 _LOAD_SKILL_TOOL = "load_skill"
 _CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
+# The result that closes a tool call whose turn died before the tool finished (sent as an error)
+_INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
 # How a web chat turn ends when no request answers its last tools
 _MAX_ITERATIONS_TEXT = "Max iterations reached."
@@ -659,6 +660,28 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     return clean if changed else messages
 
 
+def _interrupted_results(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """The error results that close a history ending in tool calls nobody answered.
+
+    A turn that died mid-tool (a crash, a cancel, a hang-up) leaves its assistant tool-call
+    message as the last of the history, with none or only some of its results after it. One
+    error result per unanswered call, in call order; none when the history ends otherwise.
+    Appending them keeps every earlier message (and the thinking in it) as it was.
+    """
+    end = len(messages)
+    start = end
+    while start > 0 and messages[start - 1].role == MessageRole.TOOL_RESULT:
+        start -= 1
+    if start == 0 or not (messages[start - 1].role == MessageRole.ASSISTANT and messages[start - 1].tool_calls):
+        return []
+    answered = {m.tool_call_id for m in messages[start:end]}
+    return [
+        LLMMessage(role=MessageRole.TOOL_RESULT, content=_INTERRUPTED_TOOL_RESULT, tool_call_id=tc.id, is_error=True)
+        for tc in messages[start - 1].tool_calls
+        if tc.id not in answered
+    ]
+
+
 def _log_thinking_dropped(session_id: str, response: LLMResponse) -> None:
     """One WARNING per thinking block the API dropped from the request: the session and the block's
     place in the request, never its content (reasoning is not logged)."""
@@ -744,17 +767,22 @@ class Agent:
     async def _repair_tool_pairs(self, session: Session) -> bool:
         """Strip orphaned tool pairs from the session and persist it.
 
-        Returns whether anything was stripped.
+        Returns whether anything was stripped. A message it rewrites loses its raw output (it is
+        rebuilt from its text and tool calls); the others keep theirs.
         """
         clean = _sanitize_tool_pairs(session.messages)
         if clean is session.messages:
             return False
         logger.info("Repaired orphaned tool pairs (%d -> %d messages)", len(session.messages), len(clean))
         session.messages = clean
-        # The history changed under the turn's thinking blocks: drop them (Q2c)
-        strip_thinking(session.messages)
         await self._sessions.save(session)
         return True
+
+    async def _close_interrupted_tool_calls(self, session: Session) -> None:
+        """Start a turn by answering the tool calls an earlier turn left open (see `_interrupted_results`),
+        before the user's message is appended."""
+        for result in _interrupted_results(session.messages):
+            await self._sessions.add_message(session, result)
 
     async def _recover_from_tool_pair_error(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
         """Decide how a turn continues after `error`, given `attempts` retries so far.
@@ -947,6 +975,7 @@ class Agent:
             self._preferred_language(user_id, read=read_language),
         )
         user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
+        await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
 
         # Inject the onboarding followup instruction only on the turn that
@@ -1118,8 +1147,8 @@ class Agent:
                         self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                        strip_thinking(session.messages)
+                        # New tools or system prompt: the next request still sends the turn's thinking,
+                        # and the API drops what no longer fits it (drop_block)
                         tool_schemas = reselected
                         # Read again: the turn may have changed it (set_preferred_language)
                         language = await self._preferred_language(user_id, read=read_language)
@@ -1295,8 +1324,8 @@ class Agent:
                     # From the allowed_tools subset only, like the first selection.
                     reselected = await self._reselect_after_skills(candidates, prompt, messages, skills_loaded)
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                        strip_thinking(messages)
+                        # New tools or system prompt: the next request still sends the run's thinking,
+                        # and the API drops what no longer fits it (drop_block)
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
                             user_id,
@@ -1446,6 +1475,7 @@ class Agent:
             self._preferred_language(user_id, read=memory),
         )
         user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
+        await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
@@ -1578,8 +1608,8 @@ class Agent:
                         self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                        strip_thinking(session.messages)
+                        # New tools or system prompt: the next request still sends the turn's thinking,
+                        # and the API drops what no longer fits it (drop_block)
                         tool_schemas = reselected
                         # Read again: the turn may have changed it (set_preferred_language)
                         language = await self._preferred_language(user_id, read=memory)
@@ -1752,6 +1782,7 @@ class Agent:
         # prompt stays the same while its extra_system does (Q15).
         context = await self._turn_context(user_id, text, memory=True, user_timezone=turn.timezone)
         user_msg = LLMMessage(role=MessageRole.USER, content=text, context=context)
+        await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
         # add_message does not trim while the turn is open: SessionManager.turn()
         # trims to max_session_messages when the turn ends. Growth within one turn

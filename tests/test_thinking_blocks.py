@@ -9,7 +9,7 @@ import json
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
@@ -642,16 +642,65 @@ def _tool_names(request: dict[str, Any]) -> list[str]:
     return [t["name"] for t in request.get("tools", [])]
 
 
-async def test_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
-        agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
+_DROP_BLOCK = {"prefix_mismatch_behavior": "drop_block"}
+
+
+def _on_haiku_5_5(settings):
+    """Settings whose Anthropic model takes the binding controls (so a request carries drop_block)."""
+    return settings.model_copy(update={"anthropic_model": "claude-haiku-5-5"})
+
+
+def _assert_thinking_kept(request: dict[str, Any]) -> None:
+    """The request after a change carries the turn's thinking as it was and asks the API to drop what no longer fits."""
+    assistant = [m for m in request["messages"] if m["role"] == "assistant"]
+    assert assistant[-1]["content"][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
+    assert request["thinking"]["block_binding"] == _DROP_BLOCK
+
+
+async def test_reselected_tools_keep_the_turns_thinking(settings, session_manager, cost_tracker):
+    """#345 stripped it here (the tools no longer fit it); drop_block decides now (D8)."""
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(_on_haiku_5_5(settings), llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         await agent.handle_message("user1", "test", "Check my budget", memory=False)
 
     assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
-    assert "thinking" not in _block_types(llm.requests[1])
-    _assert_no_sentinel("the request after re-selection", llm.raw_requests[1])
+    _assert_thinking_kept(llm.requests[1])
+
+
+async def test_a_language_change_mid_turn_keeps_the_turns_thinking(settings, session_manager, cost_tracker):
+    """The rebuild after a skill load reads the language again; the system prompt changes and the thinking stays."""
+    stored = ["de"]
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+
+    async def list_memories(**kwargs: Any) -> list[SimpleNamespace]:
+        if kwargs.get("category") != "profile":
+            return []
+        language = stored[0]
+        stored[0] = "uk"  # set_preferred_language ran during the turn
+        return [SimpleNamespace(id="p1", content=f"Preferred language: {language}.")]
+
+    memory.list_memories.side_effect = list_memories
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(
+            _on_haiku_5_5(settings),
+            llm.provider,
+            session_manager,
+            cost_tracker,
+            _skill_tools().registry,
+            memory_store=memory,
+        )
+        agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
+        await agent.handle_message("user1", "test", "Check my budget")
+
+    def system_text(request: dict[str, Any]) -> str:
+        return "".join(block["text"] for block in request["system"])
+
+    assert "[User preferred language: de]" in system_text(llm.requests[0])  # precondition: the language changed
+    assert "[User preferred language: uk]" in system_text(llm.requests[1])
+    _assert_thinking_kept(llm.requests[1])
 
 
 async def test_same_tools_after_reselection_keep_the_thinking(settings, session_manager, cost_tracker):
@@ -668,17 +717,15 @@ async def test_same_tools_after_reselection_keep_the_thinking(settings, session_
     assert assistant[-1]["content"][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
 
 
-async def test_streaming_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
-        agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
+async def test_streaming_reselected_tools_keep_the_turns_thinking(settings, session_manager, cost_tracker):
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(_on_haiku_5_5(settings), llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         _chunks = [c async for c in agent.handle_message_stream("user1", "web", "Check my budget", memory=False)]
 
     assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
-    for request, raw in zip(llm.requests[1:], llm.raw_requests[1:], strict=True):
-        assert "thinking" not in _block_types(request)
-        _assert_no_sentinel("a request after re-selection", raw)
+    _assert_thinking_kept(llm.requests[1])
 
 
 async def test_headless_follow_up_carries_the_turns_thinking(settings, session_manager, cost_tracker, tools):
@@ -693,20 +740,22 @@ async def test_headless_follow_up_carries_the_turns_thinking(settings, session_m
     assert assistant[-1]["content"][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
 
 
-async def test_headless_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
-        agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
+async def test_headless_reselected_tools_keep_the_turns_thinking(settings, session_manager, cost_tracker):
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(_on_haiku_5_5(settings), llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         await agent.run_headless("Check my budget", "user1", "telegram")
 
     assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
-    assert "thinking" not in _block_types(llm.requests[1])
-    _assert_no_sentinel("the request after re-selection", llm.raw_requests[1])
+    _assert_thinking_kept(llm.requests[1])
 
 
-async def test_mid_turn_pair_repair_drops_the_turns_thinking(settings, session_manager, cost_tracker, tools):
-    """A compatible server repeating a tool_use id makes the next iteration's repair rewrite history."""
+async def test_mid_turn_pair_repair_keeps_the_thinking_of_the_messages_it_did_not_rewrite(
+    settings, session_manager, cost_tracker, tools
+):
+    """A compatible server repeating a tool_use id makes the next iteration's repair rewrite one message.
+    #345 stripped the whole history's thinking; now only the rewritten message loses its raw output (D8)."""
     script = [
         ([thinking(_THOUGHT, _SIGNATURE), tool_use("toolu_1", "create_event", {"title": "Dentist"})], "tool_use"),
         (
@@ -726,9 +775,10 @@ async def test_mid_turn_pair_repair_drops_the_turns_thinking(settings, session_m
     assert result.text == "Both booked."
     assert len(llm.requests) == 3
     assert "thinking" in _block_types(llm.requests[1])  # precondition: thinking rode along before the repair
-    assert "thinking" not in _block_types(llm.requests[2])
-    for sentinel in (*_SENTINELS, "SECOND-THOUGHT-7f3a"):
-        assert sentinel not in llm.raw_requests[2]
+    assistant = [m["content"] for m in llm.requests[2]["messages"] if m["role"] == "assistant"]
+    assert [[b["type"] for b in blocks] for blocks in assistant] == [["thinking", "tool_use"], ["tool_use"]]
+    assert assistant[0][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
+    assert "SECOND-THOUGHT-7f3a" not in llm.raw_requests[2]  # the rewritten message is rebuilt without it
 
 
 def _failover_router(primary: BaseLLMProvider, failover: BaseLLMProvider) -> LLMRouter:

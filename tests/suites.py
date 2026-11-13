@@ -47,6 +47,7 @@ SUITES: dict[str, list[str]] = {
         "test_*caching*",
         "test_thinking_blocks",
         "test_thinking_across_turns",
+        "test_interrupted_tool_calls",
         "test_message_raw_output",
         "test_endpoint_capabilities",
         "test_reasoning*",

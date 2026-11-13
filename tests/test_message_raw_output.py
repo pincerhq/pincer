@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall, holds_thinking, strip_thinking
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
 from pincer.llm.replay import replayable_raw, wire_tag
 
 _THINKING = {"type": "thinking", "thinking": "SECRET-THOUGHT-7f3a", "signature": "SIG-7f3a"}
@@ -70,16 +70,3 @@ def test_the_replayed_output_is_a_copy_the_caller_may_change():
     replayed.append({"type": "text", "text": "extra"})
 
     assert message.raw == [_THINKING, {"type": "text", "text": "Checking."}, _TOOL_USE]
-
-
-def test_stripping_thinking_rebuilds_only_the_messages_that_hold_some():
-    with_thinking = _assistant()
-    without = _assistant(raw=[{"type": "text", "text": "Checking."}, _TOOL_USE])
-
-    assert holds_thinking(with_thinking)  # precondition
-    assert not holds_thinking(without)
-    strip_thinking([with_thinking, without])
-
-    assert with_thinking.raw == []
-    assert (with_thinking.content, with_thinking.tool_calls) == ("Checking.", [_CALL])
-    assert without.raw == [{"type": "text", "text": "Checking."}, _TOOL_USE]

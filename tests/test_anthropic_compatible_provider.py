@@ -794,6 +794,40 @@ async def test_orphaned_tool_call_turn_is_dropped_with_its_thinking(anthropic_se
     assert sent == [{"role": "user", "content": "hi\nagain"}]
 
 
+async def test_an_error_result_is_sent_flagged_and_a_plain_result_is_not(anthropic_settings):
+    calls = [ToolCall(id="toolu_a", name="t", arguments={}), ToolCall(id="toolu_b", name="t", arguments={})]
+    sent = await _sent_messages(
+        anthropic_settings,
+        [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=calls),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="42", tool_call_id="toolu_a"),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="(interrupted)", tool_call_id="toolu_b", is_error=True),
+        ],
+    )
+
+    assert sent[2]["content"] == [
+        {"type": "tool_result", "tool_use_id": "toolu_a", "content": "42"},
+        {"type": "tool_result", "tool_use_id": "toolu_b", "content": "(interrupted)", "is_error": True},
+    ]
+
+
+def test_an_error_result_reaches_an_openai_wire_provider_as_its_text_only():
+    from pincer.llm.openai_common import convert_messages_to_openai
+
+    def history(is_error: bool) -> list[LLMMessage]:
+        return [
+            LLMMessage(role=MessageRole.USER, content="hi"),
+            LLMMessage(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[ToolCall(id="call_1", name="t", arguments={})]
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="(interrupted)", tool_call_id="call_1", is_error=is_error),
+        ]
+
+    assert history(True)[2].is_error  # precondition
+    assert convert_messages_to_openai(history(True)) == convert_messages_to_openai(history(False))
+
+
 # ── Effort and thinking settings (issue #345) ─────────────────────
 
 _HI = [LLMMessage(role=MessageRole.USER, content="hi")]

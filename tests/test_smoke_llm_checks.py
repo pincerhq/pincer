@@ -293,24 +293,35 @@ def test_edited_history_400_is_inconclusive_when_the_control_failed(smoke, capsy
     assert "FAIL  edited-history: inconclusive: control (tool-loop-thinking) did not pass" in capsys.readouterr().out
 
 
-def test_stripped_continuation_with_adaptive_thinking_passes(smoke, capsys):
-    code, build = _run(smoke, ["--check", "stripped-continuation"], {_VOICE: [_STEP1, _ANSWER]})
+def test_changed_tools_continuation_is_accepted_and_counts_the_blocks_the_api_dropped(smoke, capsys):
+    dropped = {
+        "input_transformations": [
+            {"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_binding_mismatch"}
+        ]
+    }
+    answer = (*_ANSWER[:2], {}, dropped)
+    code, build = _run(smoke, ["--check", "changed-tools-continuation"], {_VOICE: [_STEP1, answer]})
 
     out = capsys.readouterr().out
     assert code == 0
-    assert "PASS  stripped-continuation: 1 thinking block(s) returned (signed), stripped" in out
+    assert (
+        "PASS  changed-tools-continuation: 1 thinking block(s) returned (signed), tools changed, "
+        "accepted (1 block(s) dropped by the API)"
+    ) in out
     first, second = build.requests()
-    assert [b["type"] for b in _assistant_blocks(second)] == ["tool_use"]
+    assert [t["name"] for t in first["tools"]] == ["get_weather"]
+    assert [t["name"] for t in second["tools"]] == ["get_weather", "lookup_city_facts"]  # the list changed
+    assert _assistant_blocks(second)[0] == {"type": "thinking", "thinking": "weighing the cities", "signature": _SIG}
     drop_block = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
     assert second["thinking"] == drop_block
     assert first["thinking"] == drop_block  # a 5.x model thinks adaptively either way (issue #358)
 
 
-def test_stripped_continuation_rejected_fails(smoke, capsys):
-    code, _ = _run(smoke, ["--check", "stripped-continuation"], {_VOICE: [_STEP1, 400]})
+def test_changed_tools_continuation_rejected_fails(smoke, capsys):
+    code, _ = _run(smoke, ["--check", "changed-tools-continuation"], {_VOICE: [_STEP1, 400]})
 
     assert code == 1
-    assert "FAIL  stripped-continuation: Anthropic stream error: 400" in capsys.readouterr().out
+    assert "FAIL  changed-tools-continuation: Anthropic stream error: 400" in capsys.readouterr().out
 
 
 def test_model_switch_skipped_without_a_second_model(smoke, capsys):
@@ -337,19 +348,18 @@ def test_model_switch_sends_the_blocks_unchanged_to_the_second_model(smoke, caps
     assert _assistant_blocks(second)[0] == {"type": "thinking", "thinking": "weighing the cities", "signature": _SIG}
 
 
-def test_cache_reads_reported_for_two_turns_before_and_after_the_strip(smoke, capsys):
+def test_cache_reads_reported_for_two_turns_with_the_thinking_kept(smoke, capsys):
     step1 = (*_STEP1, {"cache_read_input_tokens": 0, "cache_creation_input_tokens": 1500})
     answer = ([thinking("short", _SIG), text("12C in Kyiv.")], "end_turn", {"cache_read_input_tokens": 1401})
     turn2 = ([text("Lviv is cooler.")], "end_turn", {"cache_read_input_tokens": 1402})
-    turn2_stripped = ([text("Lviv is cooler.")], "end_turn", {"cache_read_input_tokens": 1403})
-    code, build = _run(smoke, ["--check", "cache-reads"], {_VOICE: [step1, answer, turn2, turn2_stripped]})
+    code, build = _run(smoke, ["--check", "cache-reads"], {_VOICE: [step1, answer, turn2]})
 
     out = capsys.readouterr().out
     assert code == 0
-    assert "PASS  cache-reads: cache_read_tokens turn 1: 0, 1401; turn 2: 1402 unstripped, 1403 after the strip" in out
+    assert "PASS  cache-reads: cache_read_tokens turn 1: 0, 1401; turn 2: 1402 (tools prefix" in out
     assert "tokens; reads also cover the conversation)" in out  # automatic caching reads past the tools
     requests = build.requests()
-    assert len(requests) == 4
+    assert len(requests) == 3
     for body in requests:
         assert len(body["tools"]) == 2
         assert body["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}  # production's breakpoints
@@ -365,8 +375,6 @@ def test_cache_reads_reported_for_two_turns_before_and_after_the_strip(smoke, ca
         )
 
     assert thinking_count(requests[2]) == 2  # both turn-1 responses' thinking, kept
-    assert thinking_count(requests[3]) == 0  # the end-of-turn strip
-    assert requests[3]["messages"][-1] == requests[2]["messages"][-1]
 
 
 def test_cache_prefix_is_above_the_haiku_5_5_minimum(smoke):
@@ -509,15 +517,16 @@ def test_dry_run_lists_every_request_and_sends_nothing(smoke, capsys, monkeypatc
     out = capsys.readouterr().out
     assert code == 0
     lines = [line for line in out.splitlines() if line.startswith(_AZURE)]
-    assert len(lines) == 19  # 4 basic + 15 voice (model-switch skipped); no OpenAI key: none
+    assert len(lines) == 18  # 4 basic + 14 voice (model-switch skipped); no OpenAI key: none
     # a 5.x model on an endpoint with the binding controls thinks adaptively whatever is set (issue #358)
     assert sum("check=forced-cutoff " in line for line in lines) == 1
     assert "check=forced-cutoff max_tokens=32 effort=- thinking=adaptive replay=no" in out
     assert "check=effort-low max_tokens=1024 effort=low thinking=adaptive replay=no" in out
     assert "check=thinking-disabled max_tokens=1024 effort=- thinking=disabled replay=no" in out
-    assert "check=stripped-continuation max_tokens=1024 effort=- thinking=adaptive replay=no" in out
+    assert "check=changed-tools-continuation max_tokens=1024 effort=- thinking=adaptive replay=no" in out  # step 1
+    assert "check=changed-tools-continuation max_tokens=1024 effort=- thinking=adaptive replay=yes" in out  # step 2
     assert "check=signature-tamper max_tokens=1024 effort=- thinking=adaptive replay=yes" in out
-    assert "19 requests, largest max_tokens 1024" in out
+    assert "18 requests, largest max_tokens 1024" in out
     assert f"cache check tools prefix ~{smoke.CACHE_PREFIX_TOKENS} tokens" in out
     assert "bound: 40 requests" in out
     assert "nothing was sent" in out
@@ -544,7 +553,7 @@ async def test_dry_run_plan_is_exactly_what_a_live_run_sends(smoke, capsys):
     scripts: dict[str, list[Any]] = {
         basic: [pong, pong, _STEP1, _ANSWER],
         _VOICE: [pong, pong, _STEP1, _ANSWER, _STEP1, 400, _STEP1, 400, _STEP1, _ANSWER, _STEP1]
-        + [_STEP1, _ANSWER, _ANSWER, _ANSWER, cut],
+        + [_STEP1, _ANSWER, _ANSWER, cut],
         switch: [_ANSWER],
         _MINI: ["ok", "ok", "ok", 400],
         _UNRECOGNISED: ["ok"],
@@ -561,7 +570,7 @@ async def test_dry_run_plan_is_exactly_what_a_live_run_sends(smoke, capsys):
     failures = await smoke.run(settings, [("anthropic", "claude-opus-5-5")], build=build, **kwargs)
 
     assert failures == 0, capsys.readouterr().out
-    assert len(planned) == len(build.order) == 4 + 17 + 4 + 1
+    assert len(planned) == len(build.order) == 4 + 16 + 4 + 1
 
     def sent(value: str) -> str:  # a dropped setting is absent from the body
         return "-" if value.startswith("dropped(") else value
@@ -581,12 +590,12 @@ def test_a_plan_over_the_cost_bound_is_refused_before_anything_is_built(smoke, c
 
     captured = capsys.readouterr()
     assert code == 2
-    assert "Refusing to run: 43 requests" in captured.err
+    assert "Refusing to run: 42 requests" in captured.err
     assert captured.out == ""
 
 
 def test_a_plan_at_the_cost_bound_runs(smoke, capsys):
-    # 6 basic targets (24) + 15 voice = 39, under the bound of 40: it gets as far as building
+    # 6 basic targets (24) + 14 voice = 38, under the bound of 40: it gets as far as building
     with pytest.raises(AssertionError, match="a real provider was built"):
         smoke.main(["--voice-model", _VOICE, *_many_models(6)], settings=_settings(), build=_never_build)
 
@@ -597,7 +606,7 @@ def test_dry_run_over_the_bound_says_it_would_be_refused(smoke, capsys):
     )
 
     assert code == 2
-    assert "43 requests" in capsys.readouterr().out
+    assert "42 requests" in capsys.readouterr().out
 
 
 def test_keys_and_base_urls_are_never_printed(smoke, capsys):
@@ -682,7 +691,7 @@ def test_dry_run_of_the_live_gate_command(smoke, capsys):
     lines = [line for line in out.splitlines() if " check=" in line]
     assert code == 0
     assert not [line for line in lines if line.startswith("anthropic:")]
-    assert sum(line.startswith(f"{_AZURE} check=") for line in lines) == 4 + 16
+    assert sum(line.startswith(f"{_AZURE} check=") for line in lines) == 4 + 15
     assert sum(line.startswith("azure:claude-sonnet-5-5 check=model-switch") for line in lines) == 1
     assert sum(line.startswith(f"{_MINI} check=openai-") for line in lines) == 4
     # gpt-6.1-terra is recognised (issue #357): the four table checks, no unrecognised one
@@ -692,7 +701,7 @@ def test_dry_run_of_the_live_gate_command(smoke, capsys):
         f"{_TERRA} check=openai-xhigh max_tokens=512 effort=xhigh",
         f"{_TERRA} check=openai-minimal max_tokens=512 effort=minimal",
     ]
-    assert "29 requests, largest max_tokens 1024" in out
+    assert "28 requests, largest max_tokens 1024" in out
 
 
 def test_openai_disabled_skips_a_model_that_cannot_turn_reasoning_off(smoke, capsys):

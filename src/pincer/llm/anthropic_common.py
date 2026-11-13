@@ -283,18 +283,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 continue
 
             if msg.role == MessageRole.TOOL_RESULT:
-                result.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id,
-                                "content": msg.content,
-                            }
-                        ],
-                    }
-                )
+                block: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": msg.content,
+                }
+                if msg.is_error:
+                    block["is_error"] = True
+                result.append({"role": "user", "content": [block]})
                 continue
 
             if msg.role == MessageRole.ASSISTANT:

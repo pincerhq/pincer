@@ -10,9 +10,9 @@ through the real providers and reports each one.
 Then, on the voice turn model (issue #345): effort `low`, thinking `disabled`, a
 tool loop that sends the thinking back, a tampered signature and an edited
 history (both must get a 400), a model switch mid-loop (with --switch-model), a
-continuation with the thinking stripped, prompt-cache reads across two turns,
-and a forced max_tokens cut-off. On each --openai-model: reasoning_effort `low`,
-thinking `disabled`, `xhigh`, and `minimal` sent past Pincer's table (5.2+); a
+continuation after the tool list changed (the API drops the thinking that no longer
+fits), prompt-cache reads across two turns, and a forced max_tokens cut-off. On each
+--openai-model: reasoning_effort `low`, thinking `disabled`, `xhigh`, and `minimal` sent past Pincer's table (5.2+); a
 model the table doesn't know must be sent without any reasoning_effort.
 
 These are real, paid API calls. --dry-run prints every request first (model,
@@ -58,8 +58,6 @@ from pincer.llm.base import (
     LLMResponse,
     MessageRole,
     ToolCall,
-    holds_thinking,
-    strip_thinking,
 )
 from pincer.llm.capabilities import endpoint_capabilities
 from pincer.llm.model_params import DropReason, ReasoningParams, ReasoningWire, resolve_reasoning, thinking_is_bound
@@ -324,7 +322,7 @@ class DryRunProvider(BaseLLMProvider):  # type: ignore[misc]  # plain mypy can't
             max_tokens,
             _with_dropped(sent_effort or "-", params, "reasoning_effort"),
             _with_dropped(sent_thinking, params, "thinking"),
-            any(holds_thinking(m) for m in messages),
+            any(_carries_thinking(m) for m in messages),
         )
         return LLMResponse(
             content="pong",
@@ -414,6 +412,10 @@ async def check_effort_low(t: VoiceTarget) -> Outcome:
     if not reply.content.strip():
         return Outcome("FAIL", f"empty reply (stop_reason={reply.stop_reason}, out={reply.output_tokens})")
     return Outcome("PASS", f"{reply.content.strip()[:40]!r} ({reply.output_tokens} tokens out)")
+
+
+def _carries_thinking(message: LLMMessage) -> bool:
+    return any(block["type"] in ("thinking", "redacted_thinking") for block in message.raw)
 
 
 def _thinking_blocks(reply: LLMResponse) -> list[dict[str, Any]]:
@@ -526,13 +528,16 @@ async def check_edited_history(t: VoiceTarget) -> Outcome:
     return await _expect_400(t, messages, "edited history")
 
 
-async def check_stripped_continuation(t: VoiceTarget) -> Outcome:
-    """Slice 4's re-selection and repair paths: the turn's thinking stripped (as production
-    strips it), then the loop continues with thinking explicitly on."""
+async def check_changed_tools_continuation(t: VoiceTarget) -> Outcome:
+    """A skill load or a language change mid-turn changes the tools or the system prompt; production
+    sends the turn's thinking on anyway and the API drops what no longer fits (issue #358). Step 2
+    here carries another tool list: it must be accepted, and the blocks the API reports dropping are
+    counted (the thinking the next request lost, none of it is shown)."""
     messages, first = await _tool_step(t)
-    strip_thinking(messages)
-    final = await _turn(t.provider, t.model, messages, tools=WEATHER_TOOL, thinking="adaptive")
-    return Outcome("PASS", f"{_thinking_summary(_thinking_blocks(first))}, stripped, accepted -> {_answered(final)}")
+    final = await _turn(t.provider, t.model, messages, tools=CACHE_TOOLS)
+    summary = _thinking_summary(_thinking_blocks(first))
+    dropped = f"{len(final.thinking_dropped)} block(s) dropped by the API"
+    return Outcome("PASS", f"{summary}, tools changed, accepted ({dropped}) -> {_answered(final)}")
 
 
 async def check_model_switch(t: VoiceTarget) -> Outcome:
@@ -552,20 +557,17 @@ async def check_model_switch(t: VoiceTarget) -> Outcome:
 
 
 async def check_cache_reads(t: VoiceTarget) -> Outcome:
-    """Q2b: prompt-cache reads on two voice-style turns, the second sent as it was (thinking
-    kept) and after the end-of-turn strip. Recorded, never judged: 0 is a finding."""
+    """Q2b: prompt-cache reads on two voice-style turns, the second sent with the first's thinking kept
+    (production never strips it, issue #358). Recorded, never judged: 0 is a finding."""
     messages, first = await _tool_step(t, CACHE_TOOLS)
     answer = await _turn(t.provider, t.model, messages, tools=CACHE_TOOLS)
     messages.append(LLMMessage.from_response(answer))
     messages.append(LLMMessage(role=MessageRole.USER, content="And Lviv? Answer from what you know, no tool."))
-    stripped = deepcopy(messages)
-    strip_thinking(stripped)
     kept = await _turn(t.provider, t.model, messages, tools=CACHE_TOOLS)
-    after = await _turn(t.provider, t.model, stripped, tools=CACHE_TOOLS)
     return Outcome(
         "PASS",
         f"cache_read_tokens turn 1: {first.cache_read_tokens}, {answer.cache_read_tokens}; "
-        f"turn 2: {kept.cache_read_tokens} unstripped, {after.cache_read_tokens} after the strip "
+        f"turn 2: {kept.cache_read_tokens} "
         f"(tools prefix ~{CACHE_PREFIX_TOKENS} tokens; reads also cover the conversation)",
     )
 
@@ -585,7 +587,7 @@ VOICE_CHECKS: tuple[tuple[str, Callable[[VoiceTarget], Awaitable[Outcome]]], ...
     ("tool-loop-thinking", check_tool_loop_thinking),
     ("signature-tamper", check_signature_tamper),
     ("edited-history", check_edited_history),
-    ("stripped-continuation", check_stripped_continuation),
+    ("changed-tools-continuation", check_changed_tools_continuation),
     ("model-switch", check_model_switch),
     ("cache-reads", check_cache_reads),
     ("forced-cutoff", check_forced_cutoff),
