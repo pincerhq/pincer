@@ -9,8 +9,10 @@ the Responses API existed: an endpoint that is not on it must keep sending exact
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -138,12 +140,207 @@ def _chat_stream(reply: str, prompt_tokens: int, model: str) -> httpx.Response:
     return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
 
 
+# ── Streamed Responses replies ───────────────────────────────────────────────
+
+# The encrypted_content an `output_item.added` event carries while the item is still in progress: the
+# docs say it "may be incomplete", only the `output_item.done` item is complete
+PARTIAL_ENCRYPTED = "PARTIAL"
+
+
+def _sse(events: list[dict[str, Any]]) -> bytes:
+    """Server-sent events: each dict is one event named by its `type`."""
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+
+
+def responses_events(
+    output: list[dict[str, Any]],
+    usage_: dict[str, Any] | None = None,
+    model: str = "gpt-5.2",
+    status: str = "completed",
+    text_chunks: list[str] | None = None,
+    terminal_output: bool = True,
+) -> list[dict[str, Any]]:
+    """The events of a streamed Responses reply for ``output`` items, as the API orders them: created,
+    then per item `added`, its deltas and `done`, then the terminal event holding the whole response.
+
+    ``text_chunks`` splits the (first) message's text into deltas; an unsplit text is one delta. A
+    reasoning item is `added` with a PARTIAL encrypted_content. ``terminal_output`` False sends the
+    terminal response with no output items (the items then only exist in the `done` events).
+    """
+    terminal = {"completed": "response.completed", "incomplete": "response.incomplete", "failed": "response.failed"}
+    seq = iter(range(1000))
+    whole = response_body(output, usage_, model, status)
+    events: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "sequence_number": next(seq),
+            "response": {**whole, "output": [], "status": "in_progress"},
+        }
+    ]
+    for index, item in enumerate(output):
+        at = {"sequence_number": next(seq), "output_index": index}
+        if item["type"] == "reasoning":
+            added = {**item, "encrypted_content": PARTIAL_ENCRYPTED}
+        elif item["type"] == "message":
+            added = {**item, "status": "in_progress", "content": []}
+        elif item["type"] == "function_call":
+            added = {**item, "status": "in_progress", "arguments": ""}
+        else:
+            added = item
+        events.append({"type": "response.output_item.added", **at, "item": added})
+        if item["type"] == "message":
+            part = item["content"][0]
+            chunks = text_chunks if text_chunks is not None else [part["text"]]
+            ids = {"item_id": item["id"], "output_index": index, "content_index": 0}
+            empty = {**part, "text": ""}
+            events.append({"type": "response.content_part.added", "sequence_number": next(seq), **ids, "part": empty})
+            for chunk in chunks:
+                events.append(
+                    {
+                        "type": "response.output_text.delta",
+                        "sequence_number": next(seq),
+                        **ids,
+                        "delta": chunk,
+                        "logprobs": [],
+                    }
+                )
+            done = {"type": "response.output_text.done", "sequence_number": next(seq), **ids, "text": part["text"]}
+            events.append({**done, "logprobs": []})
+            events.append({"type": "response.content_part.done", "sequence_number": next(seq), **ids, "part": part})
+        elif item["type"] == "function_call":
+            args = item["arguments"]
+            half = len(args) // 2
+            for piece in (args[:half], args[half:]):
+                events.append(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "sequence_number": next(seq),
+                        "item_id": item["id"],
+                        "output_index": index,
+                        "delta": piece,
+                    }
+                )
+            events.append(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "sequence_number": next(seq),
+                    "item_id": item["id"],
+                    "output_index": index,
+                    "name": item["name"],
+                    "arguments": args,
+                }
+            )
+        events.append({"type": "response.output_item.done", **at, "item": item})
+    final = whole if terminal_output else {**whole, "output": []}
+    events.append({"type": terminal[status], "sequence_number": next(seq), "response": final})
+    return events
+
+
+class RecordingStream(httpx.AsyncByteStream):
+    """A streamed HTTP body that remembers whether the client closed it; with ``hang`` it never ends
+    after its chunks (a model still generating)."""
+
+    def __init__(self, chunks: list[bytes], hang: bool = False) -> None:
+        self._chunks = chunks
+        self._hang = hang
+        self.closed = False
+
+    async def __aiter__(self) -> Any:
+        for chunk in self._chunks:
+            yield chunk
+        if self._hang:
+            await asyncio.sleep(3600)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class Call:
+    """One tool call of a scripted turn; its arguments arrive in several chunks."""
+
+    name: str
+    arguments: list[str]
+    call_id: str = "call_1"
+
+
+@dataclass
+class Turn:
+    """One scripted streamed reply, served as Chat Completions chunks to a Chat request and as Responses
+    events to a Responses request, so both APIs can be given exactly the same reply."""
+
+    text: list[str] = field(default_factory=list)
+    calls: list[Call] = field(default_factory=list)
+    reasoning: bool = False
+    prompt_tokens: int = 100
+    completion_tokens: int = 12
+    cached: int = 0
+    truncated: bool = False
+
+    def usage(self) -> dict[str, Any]:
+        return usage(self.prompt_tokens, self.completion_tokens, self.cached)
+
+    def items(self) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = [reasoning_item()] if self.reasoning else []
+        if self.text:
+            output.append(message_item("".join(self.text)))
+        for n, call in enumerate(self.calls):
+            output.append(function_call_item(call.name, "".join(call.arguments), call.call_id, f"fc_{n}"))
+        return output
+
+
+def _chat_turn_chunks(turn: Turn, model: str) -> httpx.Response:
+    """A streamed Chat Completions reply of ``turn``: a chunk per text piece, a first chunk per tool
+    call then its argument pieces, the finish reason, then the usage."""
+
+    def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
+        choice = {"index": 0, "delta": delta, "finish_reason": finish}
+        return {
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": model,
+            "choices": [choice],
+        }
+
+    chunks = [chunk({"role": "assistant", "content": piece}) for piece in turn.text]
+    for index, call in enumerate(turn.calls):
+        head = {
+            "index": index,
+            "id": call.call_id,
+            "type": "function",
+            "function": {"name": call.name, "arguments": ""},
+        }
+        chunks.append(chunk({"tool_calls": [head]}))
+        for piece in call.arguments:
+            chunks.append(chunk({"tool_calls": [{"index": index, "function": {"arguments": piece}}]}))
+    finish = "length" if turn.truncated else "tool_calls" if turn.calls else "stop"
+    chunks.append(chunk({}, finish))
+    usage_ = {"prompt_tokens": turn.prompt_tokens, "completion_tokens": turn.completion_tokens}
+    usage_["total_tokens"] = turn.prompt_tokens + turn.completion_tokens
+    if turn.cached:
+        usage_["prompt_tokens_details"] = {"cached_tokens": turn.cached}  # type: ignore[assignment]
+    chunks.append({**chunk({}), "choices": [], "usage": usage_})
+    sse = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
+
+
 class Incomplete(list[dict[str, Any]]):
     """Output items of a response that stopped on `max_output_tokens`."""
 
 
-# What a scripted reply can be: output items (a Responses reply), a Chat text, or an HTTP error status
-Reply = list[dict[str, Any]] | str | int | Exception | tuple[list[dict[str, Any]], dict[str, Any]]
+@dataclass
+class RawStream:
+    """A Responses stream of exactly these events (an error shape, an unknown event, a cut-off stream);
+    with ``hang`` the body never ends after them."""
+
+    events: list[dict[str, Any]]
+    hang: bool = False
+
+
+# What a scripted reply can be: output items (a Responses reply), a Chat text, an HTTP error status,
+# a scripted streamed turn, or raw stream events
+Reply = list[dict[str, Any]] | str | int | Exception | tuple[list[dict[str, Any]], dict[str, Any]] | Turn | RawStream
 
 
 class ScriptedOpenAI:
@@ -170,6 +367,7 @@ class ScriptedOpenAI:
         self.paths: list[str] = []
         self.urls: list[str] = []
         self.headers: list[httpx.Headers] = []
+        self.streams: list[RecordingStream] = []  # the HTTP body of each streamed reply served
         self.provider = OpenAICompatibleProvider(settings, provider)
         url = base_url if base_url is not None else str(self.provider._client.base_url)
         # No SDK retries: a test sees the provider's own handling of a 429
@@ -179,6 +377,22 @@ class ScriptedOpenAI:
             max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle)),
         )
+
+    def _stream(self, content: bytes, hang: bool = False) -> httpx.Response:
+        body = RecordingStream([content], hang)
+        self.streams.append(body)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
+
+    def _items_events(self, reply: Reply) -> list[dict[str, Any]]:
+        """The events of a streamed reply scripted as output items (or a Chat text)."""
+        if isinstance(reply, str):
+            reply = [function_call_item(reply[len(CALL) :], {}) if reply.startswith(CALL) else message_item(reply)]
+        if isinstance(reply, tuple):
+            output, usage_ = reply
+            return responses_events(output, usage_, self._model)
+        assert isinstance(reply, list)
+        status = "incomplete" if isinstance(reply, Incomplete) else "completed"
+        return responses_events(reply, usage(self._prompt_tokens), self._model, status)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -191,7 +405,17 @@ class ScriptedOpenAI:
             raise reply
         if isinstance(reply, int):
             return httpx.Response(reply, json={"error": {"message": f"scripted {reply}", "type": "scripted"}})
+        if isinstance(reply, RawStream):
+            return self._stream(_sse(reply.events), reply.hang)
+        if isinstance(reply, Turn):
+            if not request.url.path.endswith("/responses"):
+                return _chat_turn_chunks(reply, self._model)
+            status = "incomplete" if reply.truncated else "completed"
+            events = responses_events(reply.items(), reply.usage(), self._model, status, text_chunks=reply.text)
+            return self._stream(_sse(events))
         if request.url.path.endswith("/responses"):
+            if body.get("stream"):
+                return self._stream(_sse(self._items_events(reply)))
             if isinstance(reply, str):  # a Chat text served to a Responses request: still a valid reply
                 reply = [function_call_item(reply[len(CALL) :], {}) if reply.startswith(CALL) else message_item(reply)]
             if isinstance(reply, tuple):
@@ -252,8 +476,11 @@ GOLDEN_SCENARIOS: dict[str, dict[str, Any]] = {
 }
 
 
-async def golden_chat_request(settings: Settings, scenario: str, provider: str = "groq") -> tuple[str, str]:
-    """(URL path, body text) an OpenAI-wire endpoint named ``provider`` sends for the golden history."""
+async def golden_chat_request(
+    settings: Settings, scenario: str, provider: str = "groq", stream: bool = False
+) -> tuple[str, str]:
+    """(URL path, body text) an OpenAI-wire endpoint named ``provider`` sends for the golden history,
+    for a streamed turn when ``stream``."""
     spec = GOLDEN_SCENARIOS[scenario]
     pinned = settings.model_copy(
         update={
@@ -274,8 +501,13 @@ async def golden_chat_request(settings: Settings, scenario: str, provider: str =
         seen.append((request.url.path, request.content.decode()))
         if request.url.path.endswith(
             "/responses"
-        ):  # the wrong API still gets a valid reply: the test then fails on its path
+        ):  # the wrong API still gets a valid reply: the test fails on its path
+            if stream:
+                events = responses_events([message_item("ok")], model=spec["model"])
+                return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_sse(events))
             return httpx.Response(200, json=response_body([message_item("ok")], model=spec["model"]))
+        if stream:
+            return _chat_stream("ok", 10, spec["model"])
         return httpx.Response(200, json=completion_body("ok", model=spec["model"]))
 
     llm = OpenAICompatibleProvider(pinned, provider)
@@ -285,6 +517,9 @@ async def golden_chat_request(settings: Settings, scenario: str, provider: str =
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
     )
     with prompt_cache_session(lambda: GOLDEN_CACHE_KEY):
-        await llm.complete(golden_messages(), tools=GOLDEN_TOOLS, system="You are Pincer.")
+        if stream:
+            [e async for e in llm.stream_turn(golden_messages(), tools=GOLDEN_TOOLS, system="You are Pincer.")]
+        else:
+            await llm.complete(golden_messages(), tools=GOLDEN_TOOLS, system="You are Pincer.")
     assert len(seen) == 1
     return seen[0]

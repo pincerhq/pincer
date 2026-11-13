@@ -64,8 +64,12 @@ Always on, without setting anything:
   endpoint on Chat Completions, remove its name; `none` (or `[]` in `pincer.toml`) turns it off for
   all. An Azure endpoint needs the v1 base URL (`https://<resource>.openai.azure.com/openai/v1/`),
   which is what `.env.example` already shows.
-- Streamed chat and voice turns still use Chat Completions in this change; they follow in the next
-  step of #358.
+- Every call to such an endpoint uses `/responses`: streamed web chat and voice turns (same events
+  as before: text as it is written, then the tool calls and usage), headless scheduled runs, and the
+  one-shot internal calls (the fallback summary, the onboarding and call-report extractions).
+  Earlier turns' reasoning goes back in streamed chat, voice calls and headless runs. A conversation
+  saved before this change, or by an endpoint on Chat Completions, still loads and is sent without
+  reasoning.
 
 #### One storage root, with `skills/` and `workspace/` under it
 

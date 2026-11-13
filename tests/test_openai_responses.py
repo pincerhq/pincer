@@ -549,25 +549,32 @@ async def test_a_connection_error_names_the_provider(openai_settings):
         await llm.provider.complete(_HI)
 
 
-# ── Paths this slice does not convert, and the Azure shape ───────────────────
+# ── The Azure shape ──────────────────────────────────────────────────────────
 
 
-async def test_the_stream_path_still_uses_chat_completions_and_rebuilds_a_history_saved_with_reasoning(
+async def test_the_stream_path_uses_the_responses_api_and_sends_the_reasoning_a_complete_turn_saved(
     openai_settings, session_manager, cost_tracker
 ):
-    """Until slice 7 a streamed turn on a listed endpoint is a Chat Completions request. It must send a
-    history saved by a Responses turn (reasoning items and all) without any of the reasoning."""
+    """Before slice 7 a streamed turn on a listed endpoint was a Chat Completions request that rebuilt the
+    history without its reasoning. It is now a Responses request that sends the reasoning items."""
     await session_manager.onboarding.complete("user1", "test", now=1.0)
     agent, llm = _agent(openai_settings, session_manager, cost_tracker, [_FIRST, _SECOND, "Streamed."])
     await agent.handle_message("user1", "test", "Which tea?", memory=False)
     [c async for c in agent.handle_message_stream("user1", "test", "And coffee?", memory=False)]
 
-    assert llm.paths == ["/v1/responses", "/v1/responses", "/v1/chat/completions"]
+    assert llm.paths == ["/v1/responses", "/v1/responses", "/v1/responses"]
     body = llm.requests[2]
     assert body["stream"] is True
-    assert [m["role"] for m in body["messages"]] == ["system", "user", "assistant", "tool", "assistant", "user"]
-    assert body["messages"][2]["tool_calls"][0]["id"] == "call_1"
-    assert "ENC-" not in json.dumps(body)
+    assert _kinds(body) == [
+        "user",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+        "user",
+    ]
+    assert body["input"][1:3] == _FIRST and body["input"][4:6] == _SECOND
 
 
 async def test_an_azure_endpoint_posts_to_the_v1_responses_url_without_an_api_version(settings):

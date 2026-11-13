@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
 import openai
@@ -41,7 +42,7 @@ from pincer.llm.openai_responses import (
 from pincer.llm.replay import wire_tag
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from openai.types.chat import ChatCompletion
     from openai.types.responses import Response
@@ -63,6 +64,12 @@ OPENAI_MAX_TOOLS = 128
 _FINISH_REASON_LENGTH = "length"
 # Asks a Responses request to return its reasoning items encrypted, so they can be sent back (store=false)
 _INCLUDE_ENCRYPTED_REASONING = "reasoning.encrypted_content"
+# Stream events that end a Responses reply with its whole `response` (a failed one raises instead)
+_ENDING_EVENTS = ("response.completed", "response.incomplete")
+# Error kinds of a failure inside a Responses stream (an HTTP 200 whose events then say it failed):
+# OpenAI's `rate_limit_exceeded` and `server_error` response codes, Azure's `too_many_requests` error type
+_RATE_LIMIT_KINDS = {"rate_limit_exceeded", "too_many_requests"}
+_SERVER_ERROR_KINDS = {"server_error"}
 # The first wait after a 429, which the SDK's error carries no retry-after for here; it doubles per retry
 _RATE_LIMIT_WAIT_S = 5.0
 
@@ -239,6 +246,25 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
         stop_reason=_normalize_finish_reason(choice.finish_reason),
         **_usage_counts(response.usage),
     )
+
+
+class _StreamFailed(Exception):
+    """A Responses stream that failed after it started: the `error` event or a `response.failed` event."""
+
+    def __init__(self, code: str | None, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.type = None
+        self.message = message
+
+
+def _stream_failure(error: openai.APIError | _StreamFailed) -> tuple[bool, bool, str]:
+    """(is it a rate limit, is it worth asking again, what to say) for a failed stream request: an HTTP
+    error, a failure event, or the SDK's error for an error payload (Azure's shape)."""
+    if isinstance(error, openai.APIStatusError):
+        return error.status_code == 429, transient_status(error.status_code), f"{error.status_code} {error.message}"
+    kinds = {error.code, error.type}
+    return bool(kinds & _RATE_LIMIT_KINDS), bool(kinds & _SERVER_ERROR_KINDS), error.message
 
 
 # ── Base class ────────────────────────────────────────────────────────────────
@@ -467,7 +493,26 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         Anthropic implementation, so the voice pipeline can run either.
 
         A 429 before the first event is retried as `complete()` retries it; once
-        text has been yielded nothing is retried, since the caller already has it."""
+        text has been yielded nothing is retried, since the caller already has it.
+        A listed endpoint streams on the Responses API (``_stream_responses``) and gives the
+        caller the same events."""
+        if self._responses_api:
+            kwargs = self._build_responses_kwargs(
+                messages,
+                tools,
+                model,
+                max_tokens,
+                temperature,
+                system,
+                reasoning_effort=reasoning_effort,
+                thinking=thinking,
+            )
+            kwargs["stream"] = True
+            # aclosing: a caller that stops reading closes the request's stream too, at once
+            async with aclosing(self._stream_responses(kwargs)) as events:
+                async for event in events:
+                    yield event
+            return
         kwargs = self._build_kwargs(
             messages,
             tools,
@@ -516,11 +561,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                         finish_reason = choice.finish_reason
                 break
             except openai.RateLimitError as e:
-                if started or attempt == attempts - 1:
-                    raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e
-                wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
-                logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
-                await asyncio.sleep(wait)
+                await self._wait_after_rate_limit(e, started=started, attempt=attempt, attempts=attempts)
             except openai.APIStatusError as e:
                 message = f"{self._provider_name} stream error: {e.status_code} {e.message}"
                 raise LLMError(message, retryable=transient_status(e.status_code)) from e
@@ -548,6 +589,64 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 **_usage_counts(usage),
             )
         )
+
+    async def _stream_responses(self, kwargs: dict[str, Any]) -> AsyncGenerator[StreamTurnEvent]:
+        """One streamed Responses request: the text deltas as they arrive, then the final response.
+
+        The final response is built from the items of the `response.output_item.done` events laid over
+        the terminal event's own output: the docs give the complete reasoning item (its
+        `encrypted_content` included) only there. The terminal event can be `response.incomplete`
+        (the output limit), which the SDK's `get_final_response` would turn into an error.
+        """
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
+            started = False
+            done: dict[int, Any] = {}
+            terminal: Response | None = None
+            try:
+                stream = await self._request_clients.pick(self._client).responses.create(**kwargs)
+                async with stream:  # closes the HTTP stream when the caller stops reading
+                    async for event in stream:
+                        if event.type == "response.output_text.delta":
+                            if event.delta:
+                                started = True
+                                yield StreamTurnEvent(text=event.delta)
+                        elif event.type == "response.output_item.done":
+                            done[event.output_index] = event.item
+                        elif event.type in _ENDING_EVENTS:
+                            terminal = event.response  # type: ignore[union-attr]
+                        elif event.type == "response.failed":
+                            failure = event.response.error
+                            raise _StreamFailed(failure.code if failure else None, failure.message if failure else "")
+                        elif event.type == "error":
+                            raise _StreamFailed(event.code, event.message)
+                break
+            except openai.APIConnectionError as e:
+                raise LLMError(f"{self._provider_name} connection error: {e}") from e
+            except (openai.APIError, _StreamFailed) as e:
+                rate_limited, retryable, detail = _stream_failure(e)
+                if not rate_limited:
+                    raise LLMError(f"{self._provider_name} stream error: {detail}", retryable=retryable) from e
+                await self._wait_after_rate_limit(e, started=started, attempt=attempt, attempts=attempts)
+
+        if terminal is None:
+            raise LLMError(f"{self._provider_name} stream ended without a final response", retryable=True)
+        items = dict(enumerate(terminal.output))
+        items.update(done)
+        response = terminal.model_copy(update={"output": [items[index] for index in sorted(items)]})
+        result = self._parse_responses(response, kwargs["model"])
+        result.provider = self._provider_name
+        result.request_model = kwargs["model"]
+        yield StreamTurnEvent(response=result)
+
+    async def _wait_after_rate_limit(self, error: BaseException, *, started: bool, attempt: int, attempts: int) -> None:
+        """After a rate limit of a streamed request: wait before the next attempt, or raise when none is
+        left or text has already been yielded (the caller has it, so nothing is retried)."""
+        if started or attempt == attempts - 1:
+            raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from error
+        wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
+        logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
+        await asyncio.sleep(wait)
 
     async def close(self) -> None:
         await self._client.close()
