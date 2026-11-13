@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
-from pincer.core.compaction import LastRequest
+from pincer.core.compaction import LastRequest, SentRequest
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -832,12 +832,22 @@ class Agent:
 
     @staticmethod
     def _note_request(
-        session: Session, response: LLMResponse, system: str | None, tools: list[dict[str, Any]] | None
+        session: Session,
+        response: LLMResponse,
+        system: str | None,
+        tools: list[dict[str, Any]] | None,
+        *,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> None:
-        """Remember what the request `response` answers sent: the turn's last one decides compaction."""
+        """Remember what the request `response` answers sent and how: the turn's last one decides
+        compaction, and a server compaction repeats it."""
         _log_thinking_dropped(session.session_id, response)
         overhead = len(system or "") + (len(json.dumps(tools)) if tools else 0)
-        session.last_request = LastRequest.measure(response.usage.prompt_tokens, session.messages, overhead)
+        request = SentRequest(response.provider, response.request_model, system, tools, reasoning_effort, thinking)
+        session.last_request = LastRequest.measure(
+            response.usage.prompt_tokens, session.messages, overhead, request=request
+        )
 
     def _schedule_compaction(self, session: Session) -> None:
         """After a turn: compact the session in the background when its prompt went over the limit."""
@@ -1924,7 +1934,9 @@ class Agent:
                     )
                 if response is None:  # provider stream ended without a final event
                     raise LLMError("stream_turn ended without a final response")
-                self._note_request(session, response, system_prompt, tool_schemas)
+                self._note_request(
+                    session, response, system_prompt, tool_schemas, reasoning_effort=reasoning_effort, thinking=thinking
+                )
 
                 if timings is not None:
                     # Cache visibility: did the tools-prefix prompt cache hit?

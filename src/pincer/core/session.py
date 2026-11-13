@@ -23,7 +23,7 @@ from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import ImageSet, SessionService, StoredImage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -162,18 +162,27 @@ class SessionManager:
             else:
                 self._turn_locks[key] = (current_lock, users - 1)
 
-    async def compact(self, session: Session, prefix: list[LLMMessage], replacement: LLMMessage) -> bool:
+    async def compact(
+        self,
+        session: Session,
+        prefix: list[LLMMessage],
+        replacement: LLMMessage,
+        kept_ok: Callable[[list[LLMMessage]], bool] | None = None,
+    ) -> bool:
         """Replace the session's oldest messages `prefix` by `replacement`, between turns.
 
         Applies only while `prefix` is still the start of the cached session's history (the
-        same message objects), so a turn, repair, clear or trim since it was chosen wins.
-        True if the history changed.
+        same message objects), so a turn, repair, clear or trim since it was chosen wins; and
+        only if `kept_ok` accepts the messages that would follow the replacement, judged under
+        the turn lock, when no turn can add to them. True if the history changed.
         """
         async with self._locked(session.session_id):
             if self._cache.get(session.session_id) is not session:
                 return False
             head = session.messages[: len(prefix)]
             if len(head) != len(prefix) or any(a is not b for a, b in zip(head, prefix, strict=True)):
+                return False
+            if kept_ok is not None and not kept_ok(session.messages[len(prefix) :]):
                 return False
             session.messages = [replacement, *session.messages[len(prefix) :]]
             session.updated_at = time.time()

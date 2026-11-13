@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from anthropic.types import Message, Usage
     from anthropic.types.beta import BetaMessage, BetaUsage
+    from anthropic.types.beta.beta_compaction_iteration_usage import BetaCompactionIterationUsage
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
@@ -52,6 +53,9 @@ _ONE_HOUR: dict[str, str] = {"type": "ephemeral", "ttl": "1h"}
 _AUTOMATIC: dict[str, str] = {"type": "ephemeral"}
 # Anthropic's thinking-block binding controls (issue #358): `thinking.block_binding` is accepted with this beta
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+# On-demand compaction (issue #358): the request that asks for a summary carries it
+_COMPACTION_BETA = "compact-2026-09-04"
+_COMPACTION_PARAMETER = {"compaction": {"type": "summarize"}}
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -126,6 +130,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             "max_tokens": max_tokens or self._default_max_tokens,
             "messages": self._convert_messages(messages, model),
         }
+        if any(_has_compaction(message) for message in kwargs["messages"]):
+            kwargs["betas"] = [_COMPACTION_BETA]  # every request that carries the signed block needs it
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
         reasoning = resolve_and_warn(
             ReasoningWire.ANTHROPIC,
@@ -152,7 +158,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 **kwargs.get("thinking", {"type": "adaptive"}),
                 "block_binding": {"prefix_mismatch_behavior": behavior},
             }
-            kwargs["betas"] = [_THINKING_BINDING_BETA]
+            kwargs["betas"] = [*kwargs.get("betas", []), _THINKING_BINDING_BETA]
         return kwargs
 
     async def complete(
@@ -233,6 +239,47 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result.wire = wire_tag(self._provider_name, kwargs["model"])
         yield StreamTurnEvent(response=result)
 
+    async def compact(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        system: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+    ) -> LLMResponse:
+        """Ask the server to summarize `messages` (on-demand compaction).
+
+        The request is the one a normal turn sends for the same arguments (model, thinking,
+        system, tools, messages) plus the `compaction` parameter and its beta, so the prompt is
+        a cache read and the thinking in the turns kept after the block stays valid. The call
+        runs with the provider's default `max_tokens` (it caps the summary and any thinking
+        before it). A summary comes back as `stop_reason == "compaction"` with the block in `raw`.
+        """
+        kwargs = self._build_kwargs(messages, tools, model, None, None, system, reasoning_effort, thinking)
+        kwargs["betas"] = [_COMPACTION_BETA, *(b for b in kwargs.get("betas", []) if b != _COMPACTION_BETA)]
+        kwargs["extra_body"] = dict(_COMPACTION_PARAMETER)
+        try:
+            response: Message = await self._call_with_retry(kwargs)
+        except anthropic.APIStatusError as e:
+            message = f"Anthropic API error: {e.status_code} {e.message}"
+            raise LLMError(message, retryable=transient_status(e.status_code)) from e
+        except anthropic.APIConnectionError as e:
+            raise LLMError(f"Anthropic connection error: {e}") from e
+
+        result = self._parse_response(response)
+        result.provider = self._provider_name
+        result.request_model = kwargs["model"]
+        result.wire = wire_tag(self._provider_name, kwargs["model"])
+        if (billed := _compaction_counts(response.usage)) is not None:
+            # No reply was generated: the top-level counts are 0, the call is in `usage.iterations`
+            result.input_tokens = billed["input_tokens"]
+            result.cache_write_5m_tokens = billed["cache_write_5m_tokens"]
+            result.cache_write_1h_tokens = billed["cache_write_1h_tokens"]
+            result.cache_read_tokens = billed["cache_read_tokens"]
+            result.output_tokens = billed["output_tokens"]
+        return result
+
     async def close(self) -> None:
         await self._client.close()
 
@@ -277,6 +324,12 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         result: list[dict[str, Any]] = []
         for msg in messages:
             if msg.role == MessageRole.SYSTEM:
+                # A server compaction's block goes back as the API returned it, as an assistant message of
+                # its own, while this wire produced it
+                replayed = replayable_raw(msg, wire)
+                if replayed is not None:
+                    result.append({"role": "assistant", "content": replayed})
+                    continue
                 # A history summary (the system prompt is the `system` parameter): sent as a
                 # user text block of its own, merged with the next user turn below
                 result.append({"role": "user", "content": [{"type": "text", "text": msg.content}]})
@@ -353,7 +406,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
            immediately followed by user message(s) with matching tool_result
            blocks for ALL tool_use IDs.
         2. Consecutive same-role messages are merged (Anthropic rejects them).
-        3. The first non-system message must be role=user.
+        3. The first non-system message must be role=user (a server compaction block excepted).
         """
         if not messages:
             return messages
@@ -417,7 +470,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         # Pass 3: merge consecutive same-role messages
         merged: list[dict[str, Any]] = []
         for msg in cleaned:
-            if merged and merged[-1]["role"] == msg["role"]:
+            if merged and merged[-1]["role"] == msg["role"] and not _has_compaction(merged[-1]):
                 prev = merged[-1]
                 prev_content = prev["content"]
                 cur_content = msg["content"]
@@ -432,8 +485,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             else:
                 merged.append(msg)
 
-        # Pass 4: ensure first message is role=user
-        if merged and merged[0]["role"] != "user":
+        # Pass 4: ensure first message is role=user (the compaction block goes first, as the API wants it)
+        if merged and merged[0]["role"] != "user" and not _has_compaction(merged[0]):
             merged.insert(0, {"role": "user", "content": "(continuing conversation)"})
 
         return merged
@@ -486,7 +539,7 @@ def _thinking_dropped(response: Message | BetaMessage) -> list[ThinkingDrop]:
     ]
 
 
-def _usage_counts(usage: Usage | BetaUsage) -> TokenCounts:
+def _usage_counts(usage: Usage | BetaUsage | BetaCompactionIterationUsage) -> TokenCounts:
     """The token counts of an Anthropic `usage`: `input_tokens` is already
     uncached input. Cache writes are split by TTL; an endpoint that reports only their
     total (no `cache_creation`) wrote at the default TTL, 5 minutes."""
@@ -501,8 +554,30 @@ def _usage_counts(usage: Usage | BetaUsage) -> TokenCounts:
     )
 
 
+def _compaction_counts(usage: Usage | BetaUsage) -> TokenCounts | None:
+    """What a compaction call was billed: the sum of the `compaction` entries of `usage.iterations`
+    (the beta usage reports them; the top-level counts are 0). None when it reports none."""
+    entries = [e for e in getattr(usage, "iterations", None) or [] if e.type == "compaction"]
+    if not entries:
+        return None
+    counts = [_usage_counts(entry) for entry in entries]
+    return TokenCounts(
+        input_tokens=sum(c["input_tokens"] for c in counts),
+        cache_write_5m_tokens=sum(c["cache_write_5m_tokens"] for c in counts),
+        cache_write_1h_tokens=sum(c["cache_write_1h_tokens"] for c in counts),
+        cache_read_tokens=sum(c["cache_read_tokens"] for c in counts),
+        output_tokens=sum(c["output_tokens"] for c in counts),
+    )
+
+
 def _tool_use_ids(blocks: list[dict[str, Any]]) -> list[str]:
     return [b["id"] for b in blocks if b.get("type") == "tool_use"]
+
+
+def _has_compaction(message: dict[str, Any]) -> bool:
+    """A message that carries a server compaction block, which the API takes as a message of its own."""
+    content = message.get("content")
+    return isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "compaction" for b in content)
 
 
 def _is_thinking(block: Any) -> bool:

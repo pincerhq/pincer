@@ -6,6 +6,7 @@ The SDK's own stream parser runs, so tests see what it really yields from
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +45,11 @@ def tool_use(tool_id: str, name: str, arguments: dict[str, Any]) -> dict[str, An
     return {"type": "tool_use", "id": tool_id, "name": name, "input": arguments}
 
 
+def compaction(summary: str | None, signature: str = "SIG-compaction") -> dict[str, Any]:
+    """The block an on-demand compaction returns; it arrives whole, with no deltas (docs: compaction-on-demand)."""
+    return {"type": "compaction", "content": summary, "signature": signature}
+
+
 def _block_events(index: int, block: dict[str, Any]) -> list[dict[str, Any]]:
     kind = block["type"]
     if kind == "thinking":
@@ -52,7 +58,7 @@ def _block_events(index: int, block: dict[str, Any]) -> list[dict[str, Any]]:
             {"type": "thinking_delta", "thinking": block["thinking"]},
             {"type": "signature_delta", "signature": block["signature"]},
         ]
-    elif kind == "redacted_thinking":
+    elif kind in {"redacted_thinking", "compaction"}:
         start, deltas = dict(block), []
     elif kind == "text":
         start, deltas = {"type": "text", "text": ""}, [{"type": "text_delta", "text": block["text"]}]
@@ -74,7 +80,8 @@ def sse_body(
     message: dict[str, Any] | None = None,
 ) -> bytes:
     """One streamed Messages response holding `blocks`, in order; `usage` adds to the start usage
-    (e.g. ``cache_read_input_tokens``), `message` adds fields to the message (e.g. ``input_transformations``)."""
+    (e.g. ``cache_read_input_tokens``, ``iterations``), `message` adds fields to the message (e.g.
+    ``input_transformations``)."""
     events: list[dict[str, Any]] = [
         {
             "type": "message_start",
@@ -97,7 +104,7 @@ def sse_body(
         {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": 5},
+            "usage": {"output_tokens": (usage or {}).get("output_tokens", 5)},
         }
     )
     events.append({"type": "message_stop"})
@@ -116,17 +123,27 @@ class ScriptedAnthropic:
         self.raw_requests: list[str] = []
         self.headers: list[httpx.Headers] = []  # each request's headers
         self.urls: list[httpx.URL] = []  # each request's URL
+        # Request number (1-based) -> event: that request's response is held back until the event is set
+        self.gates: dict[int, asyncio.Event] = {}
         self.provider = AnthropicCompatibleProvider(settings, provider)
 
     async def __aenter__(self) -> ScriptedAnthropic:
         await self.provider._client.close()
         self.provider._client = AsyncAnthropic(
-            api_key="sk-ant-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+            api_key="sk-ant-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
         )
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         await self.provider.close()
+
+    async def _serve(self, request: httpx.Request) -> httpx.Response:
+        """`_handle`, then hold the response back while the request has a gate that is not set."""
+        response = self._handle(request)
+        gate = self.gates.get(len(self.requests))
+        if gate is not None:
+            await gate.wait()
+        return response
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.raw_requests.append(request.content.decode())
