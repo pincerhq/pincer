@@ -14,7 +14,8 @@ kept verbatim. The summary is a SYSTEM-role history message at the head of the
 session (never part of the system prompt, which stays byte-identical); the
 providers send it as a message of its own. When no summary can be had (the call
 fails, or the daily budget is reached), the history is kept as it is: compaction is
-tried again after a later turn, and the message-count trim still bounds the session.
+tried again after a later turn; only a prompt over `compact_hard_tokens` makes it cut the oldest turns
+(`choose_hard_cut`, issue #358 D7).
 
 Server compaction summarizes exactly the messages of the last request (same model, system prompt and
 tools, so the prompt is a cache read and the thinking of the turns kept after the block stays valid).
@@ -27,7 +28,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
@@ -60,6 +61,10 @@ SUMMARY_PREFIX = "[Previous conversation summary]\n"
 SUMMARY_THRESHOLD_DEPRECATED = (
     "PINCER_SUMMARY_THRESHOLD no longer has an effect: history is compacted by prompt tokens "
     "(PINCER_COMPACT_AT_TOKENS / PINCER_COMPACT_TO_TOKENS)"
+)
+MAX_SESSION_MESSAGES_DEPRECATED = (
+    "PINCER_MAX_SESSION_MESSAGES no longer has an effect: sessions are no longer cut by message count, "
+    "they are compacted by prompt tokens (PINCER_COMPACT_AT_TOKENS, PINCER_COMPACT_HARD_TOKENS)"
 )
 # The stop reason of a Messages response that holds a compaction block (and nothing else)
 STOP_REASON_COMPACTION = "compaction"
@@ -105,8 +110,8 @@ class LastRequest:
     def measure(
         cls, prompt_tokens: int, sent: list[LLMMessage], overhead_chars: int, *, request: SentRequest | None = None
     ) -> LastRequest:
-        """Calibrate on the messages the request sent, as they were sent: end_turn later trims
-        the session, so they cannot be counted afterwards (PR #366).
+        """Calibrate on the messages the request sent, as they were sent: the session holds more
+        by the time it is compacted (the reply, and what arrived since), PR #366.
 
         Images carry prompt tokens but no characters, so a request that sent one gets a higher
         rate and may summarize a little more. Photos now stay in the history, so every later
@@ -120,7 +125,7 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     """How many of the oldest messages to replace so the next prompt is about `target_tokens`.
 
     The next prompt is estimated as the last request's tokens per character times the
-    history as it is now (after the turn's trim) plus the system prompt and tools. The cut
+    history as it is now plus the system prompt and tools. The cut
     never ends inside a tool result run and never reaches the last user message, so the
     latest exchange stays verbatim. 0 means nothing to cut.
     """
@@ -134,6 +139,26 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     while cut < floor and messages[cut].role == MessageRole.TOOL_RESULT:
         cut += 1
     return cut if cut >= _MIN_CUT else 0
+
+
+def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int) -> int:
+    """How many of the oldest messages the emergency cut drops so the next prompt is about `target_tokens`.
+
+    Same estimate as `choose_cut`, with no room kept for a summary: nothing is written. The cut moves
+    on to the next user message, so it always lands on a turn boundary (a tool call and its results sit
+    between two user messages: no pair is split, and what is kept starts with a user message), and it
+    never reaches the last user message. 0 means there is no earlier turn to drop.
+    """
+    per_char = last.tokens_per_char
+    estimate = per_char * (last.overhead_chars + sum(_chars(m) for m in messages))
+    floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
+    cut = 0
+    while estimate > target_tokens and cut < floor:
+        estimate -= per_char * _chars(messages[cut])
+        cut += 1
+    while cut < floor and messages[cut].role != MessageRole.USER:
+        cut += 1
+    return cut
 
 
 def _follows_a_summary(kept: list[LLMMessage]) -> bool:
@@ -150,6 +175,17 @@ def _transcript(messages: list[LLMMessage]) -> str:
         if msg.content:
             lines.append(f"{msg.role.value.capitalize()}: {msg.content}")
     return "\n".join(lines)
+
+
+class CompactionOutcome(Enum):
+    """What `Compactor.compact` did (issue #358, D7). Not a bool: a failed compaction (above the hard
+    limit) triggers the emergency cut, a skipped one (nothing to do, or a later turn made the result
+    stale) does not."""
+
+    COMPACTED = "compacted"  # a summary replaced the oldest messages
+    CUT = "cut"  # the emergency cut dropped the oldest turns
+    FAILED = "failed"  # wanted to compact and could not (no summary, call failed, budget reached)
+    SKIPPED = "skipped"  # nothing to do, or the swap was discarded
 
 
 class CompactionStrategy(StrEnum):
@@ -196,8 +232,10 @@ class Compactor:
         reasoning_effort: ReasoningEffort | None = None,
         thinking: ThinkingMode | None = None,
         server: ServerCompaction | None = None,
+        hard_tokens: int | None = None,
     ) -> None:
         self._server = server
+        self._hard_tokens = hard_tokens
         self._llm = llm
         self._model = model
         self._costs = costs
@@ -215,22 +253,55 @@ class Compactor:
         """True when the last request's whole prompt went over the limit."""
         return last.prompt_tokens > self._at_tokens
 
-    async def compact(self, session: Session, last: LastRequest) -> bool:
-        """Compact the session once its last request went over the limit; True if the history changed.
+    async def compact(self, session: Session, last: LastRequest) -> CompactionOutcome:
+        """Compact the session once its last request went over the limit, and say what happened.
 
         The strategy follows the endpoint that served that request: server compaction on an endpoint
         that does it, the client summary otherwise (see `pick_strategy`).
         """
         if not self.due(last):
-            return False
+            return CompactionOutcome.SKIPPED
         request = last.request
         if self._server is not None and request is not None:
             leaf = self._server.provider(request.provider, request.model)
             if pick_strategy(self._server.settings, request.provider, leaf) is CompactionStrategy.ANTHROPIC_SERVER:
                 # pick_strategy checked the leaf speaks the Anthropic wire
                 leaf = cast("AnthropicCompatibleProvider", leaf)
-                return await self._compact_on_server(session, last, request, leaf, self._server)
-        return await self._compact_by_summary(session, last)
+                outcome = await self._compact_on_server(session, last, request, leaf, self._server)
+                return await self._cut_if_failed(outcome, session, last)
+        return await self._cut_if_failed(await self._compact_by_summary(session, last), session, last)
+
+    async def _cut_if_failed(
+        self, outcome: CompactionOutcome, session: Session, last: LastRequest
+    ) -> CompactionOutcome:
+        """The emergency cut (D7): compaction failed and the last prompt is over the hard limit. Below it,
+        a failed compaction changes nothing and is tried again after a later turn (Q22)."""
+        if outcome is not CompactionOutcome.FAILED or self._hard_tokens is None:
+            return outcome
+        if last.prompt_tokens <= self._hard_tokens:
+            return outcome
+        cut = choose_hard_cut(session.messages, last, self._to_tokens)
+        if not cut:
+            logger.warning(
+                "Session %s: prompt of %d tokens is over the hard limit of %d and compaction failed, "
+                "but there is no earlier turn to drop",
+                session.session_id,
+                last.prompt_tokens,
+                self._hard_tokens,
+            )
+            return outcome
+        if not await self._sessions.cut(session, list(session.messages[:cut])):
+            logger.info("Session %s changed while it was being cut; the cut is discarded", session.session_id)
+            return outcome
+        logger.warning(
+            "Session %s: prompt of %d tokens is over the hard limit of %d and compaction failed; "
+            "dropped the oldest %d messages",
+            session.session_id,
+            last.prompt_tokens,
+            self._hard_tokens,
+            cut,
+        )
+        return CompactionOutcome.CUT
 
     async def _compact_on_server(
         self,
@@ -239,20 +310,20 @@ class Compactor:
         request: SentRequest,
         leaf: AnthropicCompatibleProvider,
         server: ServerCompaction,
-    ) -> bool:
+    ) -> CompactionOutcome:
         """Ask the conversation's own endpoint to summarize exactly what the last request sent."""
         if await self._costs.budget_reached():  # the pre-call budget check every LLM call goes through
             logger.warning("Daily budget reached: session %s is not compacted", session.session_id)
-            return False
+            return CompactionOutcome.FAILED
         prefix = list(last.sent)
         if not prefix:
-            return False
+            return CompactionOutcome.SKIPPED
         if not _follows_a_summary(session.messages[len(prefix) :]):
             logger.warning(
                 "Session %s: a user message follows the last request; not compacted, retried after a later turn",
                 session.session_id,
             )
-            return False
+            return CompactionOutcome.FAILED
         try:
             response = await leaf.compact(
                 prefix,
@@ -264,7 +335,7 @@ class Compactor:
             )
         except Exception:
             logger.warning("Compacting session %s on the server failed", session.session_id, exc_info=True)
-            return False
+            return CompactionOutcome.FAILED
         await self._costs.record(
             provider=response.provider or request.provider,
             model=response.request_model or request.model,
@@ -282,32 +353,32 @@ class Compactor:
                 session.session_id,
                 response.stop_reason,
             )
-            return False
+            return CompactionOutcome.FAILED
         replacement = LLMMessage(
             role=MessageRole.SYSTEM, content=SUMMARY_PREFIX + summary, raw=[block], wire=response.wire
         )
         if not await self._sessions.compact(session, prefix, replacement, kept_ok=_follows_a_summary):
             logger.info("Session %s changed while it was being compacted; compaction discarded", session.session_id)
-            return False
+            return CompactionOutcome.SKIPPED
         logger.info("Session %s compacted on the server: %d messages summarized", session.session_id, len(prefix))
         await self._remember(session, summary)
-        return True
+        return CompactionOutcome.COMPACTED
 
-    async def _compact_by_summary(self, session: Session, last: LastRequest) -> bool:
+    async def _compact_by_summary(self, session: Session, last: LastRequest) -> CompactionOutcome:
         """Replace the oldest messages by a summary written by the summary model; without one,
         change nothing.
 
         The summary call runs without the session's turn lock, so a turn arriving meanwhile
         runs on the full history; the swap then applies only if those messages are still
-        the session's oldest. True if the history changed.
+        the session's oldest.
         """
         llm = self._llm
         if llm is None:
             logger.info("Session %s: no summary model, history kept", session.session_id)
-            return False
+            return CompactionOutcome.FAILED
         cut = choose_cut(session.messages, last, self._to_tokens)
         if not cut:
-            return False
+            return CompactionOutcome.SKIPPED
         prefix = list(session.messages[:cut])
         summary = await self._summarize(session, llm, prefix)
         if not summary:
@@ -316,14 +387,14 @@ class Compactor:
                 "Session %s: no summary, history kept; compaction will be retried after a later turn",
                 session.session_id,
             )
-            return False
+            return CompactionOutcome.FAILED
         replacement = LLMMessage(role=MessageRole.SYSTEM, content=SUMMARY_PREFIX + summary)
         if not await self._sessions.compact(session, prefix, replacement):
             logger.info("Session %s changed while it was being compacted; compaction discarded", session.session_id)
-            return False
+            return CompactionOutcome.SKIPPED
         logger.info("Session %s compacted: %d oldest messages summarized", session.session_id, cut)
         await self._remember(session, summary)
-        return True
+        return CompactionOutcome.COMPACTED
 
     async def _summarize(self, session: Session, llm: BaseLLMProvider, messages: list[LLMMessage]) -> str:
         """The summary text, or "" when it cannot be had (budget spent, call failed)."""
@@ -381,6 +452,8 @@ def build_compactor(
 
     if settings.summary_threshold is not None:
         logger.warning(SUMMARY_THRESHOLD_DEPRECATED)
+    if settings.max_session_messages is not None:
+        logger.warning(MAX_SESSION_MESSAGES_DEPRECATED)
     llm: BaseLLMProvider | None
     model: str | None
     try:
@@ -399,6 +472,7 @@ def build_compactor(
         is_free=router.is_free(provider),
         at_tokens=settings.compact_at_tokens,
         to_tokens=settings.compact_to_tokens,
+        hard_tokens=settings.compact_hard_tokens,
         # Empty means the global setting (the provider reads None that way), `none` sends nothing
         reasoning_effort=call_effort(settings.summary_reasoning_effort),
         thinking=call_thinking(settings.summary_thinking),

@@ -16,6 +16,7 @@ from sqlmodel import select
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.core.compaction import (
+    CompactionOutcome,
     CompactionStrategy,
     Compactor,
     LastRequest,
@@ -470,7 +471,7 @@ async def test_a_message_that_would_follow_the_summary_with_the_same_role_means_
     async with ScriptedAnthropic(settings, []) as llm:
         compactor = _compactor(settings, llm, session_manager, cost_tracker)
         assert last.prompt_tokens > 80_000  # precondition: it is due
-        assert not await compactor.compact(session, last)
+        assert await compactor.compact(session, last) is CompactionOutcome.FAILED
 
     assert llm.requests == []  # no paid call
     assert [m.content for m in session.messages] == ["one", "two", "three", "four"]
@@ -493,7 +494,7 @@ async def test_a_turn_arriving_during_the_call_cannot_become_the_first_kept_mess
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
         await asyncio.wait_for(agent.handle_message("user1", "test", "four", memory=False), timeout=5)
         gate.set()
-        assert not await asyncio.wait_for(compaction_task, timeout=5)
+        assert await asyncio.wait_for(compaction_task, timeout=5) is CompactionOutcome.SKIPPED
 
     assert [m.content for m in session.messages] == ["one", "two", "three", "four", "Reply 2"]
     assert any("compaction discarded" in r.getMessage() for r in caplog.records)
@@ -609,7 +610,7 @@ async def test_after_a_restart_the_stored_block_goes_first_in_the_next_request(
         await agent.wait_compactions()
         await session_manager.close()  # persists and drops every cached session
 
-        restarted = SessionManager(session_manager._db_path, max_messages=20)
+        restarted = SessionManager(session_manager._db_path)
         await restarted.initialize()
         try:
             assert await restarted.get_or_create("user1", "test") is not None
@@ -765,6 +766,7 @@ async def test_a_last_request_that_sent_nothing_is_not_compacted(settings, sessi
     session = await session_manager.get_or_create("user1", "test")
     await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="one"))
     async with ScriptedAnthropic(settings, []) as llm:
-        assert not await _compactor(settings, llm, session_manager, cost_tracker).compact(session, _last_request([]))
+        outcome = await _compactor(settings, llm, session_manager, cost_tracker).compact(session, _last_request([]))
+        assert outcome is CompactionOutcome.SKIPPED
 
     assert llm.requests == []  # the API would answer 400 compaction_nothing_to_summarize

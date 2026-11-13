@@ -138,6 +138,12 @@ class ToolSettings(BaseModel):
         ge=1_000,
         description="The whole prompt a compaction aims for: the oldest messages become a summary until it fits",
     )
+    compact_hard_tokens: int = Field(
+        default=160_000,
+        ge=1_000,
+        description="Emergency limit: after a turn whose last prompt was over this many tokens and whose "
+        "compaction failed, the oldest whole turns are dropped until the prompt is about compact_to_tokens",
+    )
 
     # ── Image Generation ──────────────────────────────────
     image_provider: str = Field(
@@ -214,6 +220,15 @@ class ToolSettings(BaseModel):
         if self.compact_to_tokens >= self.compact_at_tokens:
             raise ValueError(
                 f"compact_to_tokens ({self.compact_to_tokens}) must be below "
+                f"compact_at_tokens ({self.compact_at_tokens})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_compaction_hard_limit(self) -> Self:
+        if self.compact_hard_tokens <= self.compact_at_tokens:
+            raise ValueError(
+                f"compact_hard_tokens ({self.compact_hard_tokens}) must be above "
                 f"compact_at_tokens ({self.compact_at_tokens})"
             )
         return self

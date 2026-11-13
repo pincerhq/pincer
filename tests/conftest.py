@@ -618,7 +618,7 @@ def mock_llm() -> AsyncMock:
 
 @pytest_asyncio.fixture
 async def session_manager(tmp_path: Path) -> SessionManager:
-    sm = SessionManager(tmp_path / "test.db", max_messages=20)
+    sm = SessionManager(tmp_path / "test.db")
     await sm.initialize()
     yield sm  # type: ignore[misc]
     await sm.close()

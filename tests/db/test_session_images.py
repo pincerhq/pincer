@@ -53,9 +53,9 @@ def photo(n: int) -> ImageContent:
     return ImageContent.from_bytes(f"photo-{n}".encode() * 8, "image/jpeg")
 
 
-def manager_on(url: str, *, max_messages: int = 50) -> SessionManager:
+def manager_on(url: str) -> SessionManager:
     # Attached to `url` directly: `initialize()` only takes a SQLite path, so this runs on either dialect.
-    manager = SessionManager(Path(), max_messages=max_messages)
+    manager = SessionManager(Path())
     manager._service = SessionService(url)
     return manager
 
@@ -191,29 +191,28 @@ async def test_the_client_summary_swap_deletes_the_photos_of_the_messages_it_rep
     assert await photo_rows(url) == {"telegram:alice": {photo(3).sha256, photo(1).sha256}}
 
 
-async def test_trimming_a_session_deletes_the_photos_of_the_messages_it_cut(url):
-    manager = manager_on(url, max_messages=10)
+async def test_cutting_a_session_deletes_the_photos_of_the_messages_it_cut(url):
+    manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram")
-    async with manager.turn("alice", "telegram") as inside:
-        assert inside is session
-        for n in range(1, 13):  # past the cap of 10; nothing is cut while the turn runs
-            await say(manager, session, f"message {n}", photo(n))
-        assert len(await photo_rows(url)) == 1
-        assert len(next(iter((await photo_rows(url)).values()))) == 12  # precondition: every photo stored
+    for n in range(1, 13):
+        await say(manager, session, f"message {n}", photo(n))
+    assert len(next(iter((await photo_rows(url)).values()))) == 12  # precondition: every photo stored
 
-    # cut to 3/5 of the cap: the newest six messages stay
+    assert await manager.cut(session, list(session.messages[:6]))  # the emergency cut of the oldest six
+
     assert [m.content for m in session.messages] == [f"message {n}" for n in range(7, 13)]
     assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in range(7, 13)}}
 
 
-async def test_trimming_between_turns_deletes_the_photos_of_the_messages_it_cut(url):
-    manager = manager_on(url, max_messages=10)
+async def test_a_cut_keeps_the_photo_a_kept_message_still_shows(url):
+    manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram")
-    for n in range(1, 12):  # the 11th message passes the cap of 10
-        await say(manager, session, f"message {n}", photo(n))
+    for n in range(1, 9):
+        await say(manager, session, f"message {n}", photo(1) if n in (1, 8) else photo(n))
 
-    assert [m.content for m in session.messages] == [f"message {n}" for n in range(6, 12)]
-    assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in range(6, 12)}}
+    assert await manager.cut(session, list(session.messages[:4]))
+
+    assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in (1, 5, 6, 7)}}
 
 
 # ── identity merge ───────────────────────────────────────────────────

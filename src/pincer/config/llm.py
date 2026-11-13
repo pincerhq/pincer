@@ -211,9 +211,11 @@ class LLMSettings(BaseModel):
         le=50,
         description="Max ReAct loop iterations before forcing a response",
     )
-    max_session_messages: int = Field(
-        default=50,
+    # Deprecated: sessions are compacted by prompt tokens now (issue #358, D7). Kept so a value
+    # still set is warned about at startup rather than silently ignored.
+    max_session_messages: int | None = Field(
+        default=None,
         ge=10,
         le=500,
-        description="Past this many messages a session is cut to the newest 3/5 of them (50 -> 30)",
+        description="Deprecated, no effect: see compact_at_tokens / compact_hard_tokens",
     )

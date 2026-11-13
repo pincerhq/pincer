@@ -2187,19 +2187,35 @@ def test_llm_reasoning_shows_none_sent_with_tools_to_gpt_6_and_not_for_summaries
     )
 
 
+_SUMMARY_THRESHOLD_WARNING = (
+    "PINCER_SUMMARY_THRESHOLD no longer has an effect: history is compacted by prompt tokens "
+    "(PINCER_COMPACT_AT_TOKENS / PINCER_COMPACT_TO_TOKENS)"
+)
+_MAX_SESSION_MESSAGES_WARNING = (
+    "PINCER_MAX_SESSION_MESSAGES no longer has an effect: sessions are no longer cut by message count, "
+    "they are compacted by prompt tokens (PINCER_COMPACT_AT_TOKENS, PINCER_COMPACT_HARD_TOKENS)"
+)
+
+
 @pytest.mark.parametrize(
     ("update", "status", "message"),
     [
-        ({}, CheckStatus.PASS, "History compacted past 80,000 prompt tokens, to about 50,000"),
         (
-            {"summary_threshold": 20},
+            {},
+            CheckStatus.PASS,
+            "History compacted past 80,000 prompt tokens, to about 50,000; "
+            "the oldest turns are cut past 160,000 when compaction fails",
+        ),
+        ({"summary_threshold": 20}, CheckStatus.WARNING, _SUMMARY_THRESHOLD_WARNING),
+        ({"max_session_messages": 20}, CheckStatus.WARNING, _MAX_SESSION_MESSAGES_WARNING),
+        (
+            {"summary_threshold": 20, "max_session_messages": 20},
             CheckStatus.WARNING,
-            "PINCER_SUMMARY_THRESHOLD no longer has an effect: history is compacted by prompt tokens "
-            "(PINCER_COMPACT_AT_TOKENS / PINCER_COMPACT_TO_TOKENS)",
+            f"{_SUMMARY_THRESHOLD_WARNING}; {_MAX_SESSION_MESSAGES_WARNING}",
         ),
     ],
 )
-def test_llm_compaction_warns_about_a_summary_threshold_still_set(update, status, message):
+def test_llm_compaction_warns_about_the_removed_settings_still_set(update, status, message):
     result = SecurityDoctor()._check_llm_compaction(_llm_cfg(**update))
 
     assert (result.status, result.message, result.category) == (status, message, "llm")

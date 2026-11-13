@@ -15,13 +15,13 @@ event ID in hand. The ID-less paths reproduced here:
   event ID and has no update, so "move it" can only become a second create;
 - an edit arriving in another channel's session (``whatsapp:`` vs
   ``telegram:`` — sessions are per channel) has no ID in context;
-- an edit after the session trim dropped the create result.
+- an edit after a compaction summarized the create result away.
 
 What the scripted model can and cannot prove: its policy is written down in
 ``ScriptedLLM``. When no event ID is in context it searches first only if the
 *offered* tool descriptions steer edits to the update tool (the create tool
 forbids rename/reschedule, or the update tool names them); otherwise it
-creates a copy, as the production model did. So the cross-session and trim
+creates a copy, as the production model did. So the cross-session and compaction
 tests prove that the steering text reaches the model in every turn's tool
 schemas and that search → update then works end to end — not that a real
 model obeys the text (the live smoke run covers that).
@@ -217,8 +217,8 @@ async def costs(tmp_path) -> AsyncIterator[CostTracker]:
     await tracker.close()
 
 
-async def _sessions(tmp_path, max_messages: int) -> SessionManager:
-    manager = SessionManager(tmp_path / f"sessions-{max_messages}.db", max_messages=max_messages)
+async def _sessions(tmp_path) -> SessionManager:
+    manager = SessionManager(tmp_path / "sessions.db")
     await manager.initialize()
     return manager
 
@@ -255,7 +255,7 @@ async def test_create_then_move_updates_the_one_event(tmp_path, fake, berlin_set
     calendar_week (no IDs) → calendar_create again — two events. Now no builtin is
     offered, and create then move updates the same Workspace event."""
     llm = ScriptedLLM()
-    sessions = await _sessions(tmp_path, 50)
+    sessions = await _sessions(tmp_path)
     try:
         agent = _agent(berlin_settings, llm, sessions, costs, registry)
         day = _tomorrow()
@@ -273,7 +273,7 @@ async def test_create_then_move_updates_the_one_event(tmp_path, fake, berlin_set
 async def test_rename_from_another_channel_renames_the_event(tmp_path, fake, berlin_settings, registry, costs) -> None:
     """The screenshot: created in WhatsApp, renamed from Telegram (ID not in context)."""
     llm = ScriptedLLM()
-    sessions = await _sessions(tmp_path, 50)
+    sessions = await _sessions(tmp_path)
     try:
         agent = _agent(berlin_settings, llm, sessions, costs, registry)
         day = _tomorrow()
@@ -291,21 +291,22 @@ async def test_rename_from_another_channel_renames_the_event(tmp_path, fake, ber
     assert fake.start_of("primary", original["id"]) == _kyiv(day, "10:00")
 
 
-async def test_move_after_history_trim_searches_then_updates(tmp_path, fake, berlin_settings, registry, costs) -> None:
-    """The create result has been trimmed out of the session before "move it"."""
+async def test_move_after_compaction_searches_then_updates(tmp_path, fake, berlin_settings, registry, costs) -> None:
+    """The create result has been summarized out of the session before "move it"."""
     llm = ScriptedLLM()
-    sessions = await _sessions(tmp_path, 8)
+    sessions = await _sessions(tmp_path)
     try:
         agent = _agent(berlin_settings, llm, sessions, costs, registry)
         day = _tomorrow()
         await _say(agent, "whatsapp", f'create "Dentist" on {day} at 10:00')
         (original,) = fake.events_on("primary")
         session = await sessions.get_or_create(OWNER, "whatsapp")
-        for n in range(10):
-            if not any(original["id"] in m.content for m in session.messages):
-                break
-            await _say(agent, "whatsapp", f"thanks {n}")
-        assert not any(original["id"] in m.content for m in session.messages)  # trimmed away
+        # What a compaction leaves: a summary in place of the turn that created the event
+        summary = LLMMessage(
+            role=MessageRole.SYSTEM, content="[Previous conversation summary]\nA dentist visit was booked."
+        )
+        assert await sessions.compact(session, list(session.messages), summary)
+        assert not any(original["id"] in m.content for m in session.messages)  # summarized away
         await _say(agent, "whatsapp", 'move "Dentist" to 17:00')
     finally:
         await sessions.close()
@@ -376,7 +377,7 @@ def _call_gate(settings: Settings, kind: str, registry: ToolRegistry):
 async def _on_a_call(tmp_path, settings: Settings, llm: _OneCallLLM, costs, registry, kind: str) -> None:
     from pincer.voice.in_call_tools import bind_gate
 
-    sessions = await _sessions(tmp_path, 50)
+    sessions = await _sessions(tmp_path)
     try:
         agent = Agent(settings, llm, sessions, costs, registry, approval_callback=_approve)
         with bind_gate(_call_gate(settings, kind, registry)):
@@ -506,7 +507,7 @@ async def test_a_search_on_a_call_without_a_gate_reads_its_bounds_in_the_voice_z
     llm = _OneCallLLM(
         "google__search_events", {"query": "Dentist", "time_min": f"{day}T14:00:00", "time_max": f"{day}T16:00:00"}
     )
-    sessions = await _sessions(tmp_path, 50)
+    sessions = await _sessions(tmp_path)
     try:
         agent = Agent(berlin_settings, llm, sessions, costs, registry, approval_callback=_approve)
         async for _chunk in agent.stream_voice_turn(OWNER, "voice", "is my dentist between two and four?"):
@@ -628,7 +629,7 @@ async def _deferred_on_a_call(settings: Settings, registry: ToolRegistry, tool: 
 async def _replayed_in_chat(tmp_path, settings: Settings, registry, costs, tool: str, arguments) -> list[str]:
     """The owner's later "yes, do it" in chat: the agent runs the draft as remembered, off the call.
     Returns the replay's tool results."""
-    sessions = await _sessions(tmp_path, 50)
+    sessions = await _sessions(tmp_path)
     llm = _OneCallLLM(tool, dict(arguments))
     try:
         await _say(_agent(settings, llm, sessions, costs, registry), "telegram", "do it")

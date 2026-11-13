@@ -941,7 +941,7 @@ class TestGpt6Family:
         from pydantic import SecretStr
 
         from pincer.config.llm import call_effort, call_thinking
-        from pincer.core.compaction import Compactor, LastRequest
+        from pincer.core.compaction import CompactionOutcome, Compactor, LastRequest
         from pincer.core.session import Session
         from pincer.llm.openai_common import OpenAICompatibleProvider
         from pincer.llm.pricing_check import pricing_problems
@@ -991,7 +991,7 @@ class TestGpt6Family:
         )
         try:
             last = LastRequest.measure(100_000, session.messages, overhead_chars=0)
-            assert await compactor.compact(session, last) is True
+            assert await compactor.compact(session, last) is CompactionOutcome.COMPACTED
         finally:
             await provider.close()
 

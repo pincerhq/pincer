@@ -36,6 +36,21 @@ Always on, without setting anything:
 
 ### Changed
 
+#### Sessions are no longer cut by message count; an emergency cut by tokens replaces it (#358)
+
+- A session is no longer cut from 50 to 30 messages: it keeps every message, and long ones are
+  compacted by prompt tokens (`PINCER_COMPACT_AT_TOKENS`, default 80,000). Claude endpoints
+  compact on their own server; every other endpoint uses the summary model.
+- New `PINCER_COMPACT_HARD_TOKENS` (default 160,000). After a turn whose prompt went over it and
+  whose compaction failed (the call failed, no summary came back, or the daily budget was
+  reached), the oldest whole turns are dropped until the prompt is about
+  `PINCER_COMPACT_TO_TOKENS`, with a warning in the log. Their photos are deleted with them. Below
+  the limit a failed compaction changes nothing and is tried again after a later turn. At startup
+  the limits must run `PINCER_COMPACT_HARD_TOKENS` > `PINCER_COMPACT_AT_TOKENS` >
+  `PINCER_COMPACT_TO_TOKENS`.
+- `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
+  warning at startup and `pincer doctor` reports it. Remove it from `.env`.
+
 #### One storage root, with `skills/` and `workspace/` under it
 
 - Everything the agent reads and writes now lives in `<storage root>/workspace`:

@@ -92,7 +92,7 @@ async def test_a_photo_is_stored_once_as_a_ref_and_survives_a_reload(
         assert base64.b64encode(photo).decode() not in row["messages"]  # the bytes live in their own table
         assert [(i.sha256, i.media_type, i.data) for i in row["images"]] == [(digest, "image/jpeg", photo)]
 
-        reloaded = SessionManager(tmp_path / "test.db", max_messages=20)
+        reloaded = SessionManager(tmp_path / "test.db")
         await reloaded.initialize()
         try:
             agent = Agent(settings, llm.provider, reloaded, cost_tracker, registry)

@@ -1795,10 +1795,8 @@ class Agent:
         user_msg = LLMMessage(role=MessageRole.USER, content=text, context=context)
         await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
-        # add_message does not trim while the turn is open: SessionManager.turn()
-        # trims to max_session_messages when the turn ends. Growth within one turn
-        # is bounded by max_tool_iterations. Compaction runs after the turn, off the
-        # call's critical path (see stream_voice_turn).
+        # Growth within one turn is bounded by max_tool_iterations. Compaction runs after
+        # the turn, off the call's critical path (see stream_voice_turn).
 
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback

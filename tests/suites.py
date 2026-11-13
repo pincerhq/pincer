@@ -56,6 +56,7 @@ SUITES: dict[str, list[str]] = {
         "test_smoke_llm*",
         "test_compaction",
         "test_server_compaction",
+        "test_hard_cut",
         "test_pricing*",
         "test_router",
         "test_image_router",

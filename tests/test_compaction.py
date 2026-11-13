@@ -327,22 +327,27 @@ async def test_a_later_turn_over_the_limit_retries_the_compaction(settings, sess
     assert session.messages[1].content == _earlier(6)
 
 
-async def test_the_message_backstop_cuts_51_messages_to_the_newest_30(tmp_path):
+async def test_a_long_session_is_never_cut_by_message_count(tmp_path):
     from pincer.core.session import SessionManager
 
-    manager = SessionManager(tmp_path / "test.db", max_messages=50)
+    manager = SessionManager(tmp_path / "test.db")
     await manager.initialize()
     try:
         session = await manager.get_or_create("user1", "test")
-        for index in range(50):
+        for index in range(200):  # four times the old cap of 50: no cut at any length
             role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
             await manager.add_message(session, LLMMessage(role=role, content=f"message {index}"))
-        assert len(session.messages) == 50  # at the cap: no cut
-        await manager.add_message(session, LLMMessage(role=MessageRole.USER, content="message 50"))
+        assert len(session.messages) == 200
     finally:
         await manager.close()
 
-    assert [m.content for m in session.messages] == [f"message {i}" for i in range(21, 51)]
+    reloaded = SessionManager(tmp_path / "test.db")
+    await reloaded.initialize()
+    try:
+        stored = await reloaded.get_or_create("user1", "test")
+    finally:
+        await reloaded.close()
+    assert [m.content for m in stored.messages] == [f"message {i}" for i in range(200)]
 
 
 class _GatedSummary:
@@ -600,14 +605,13 @@ def test_the_api_lifespan_cancels_the_agents_compactions(monkeypatch, tmp_path):
     agent.cancel_compactions.assert_awaited_once()
 
 
-async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_history(
-    settings, cost_tracker, tmp_path
-):
-    """The reviewer's case (PR #366): the turn's request sent 51 messages, then end_turn trimmed
-    52 to 30. The tokens-per-character rate must come from the 51 sent, not the 30 left."""
+async def test_the_rate_is_measured_on_what_the_request_sent(settings, cost_tracker, tmp_path):
+    """The reviewer's case (PR #366) was a trim between the request and the compaction. Nothing trims a
+    turn's history any more; the tokens-per-character rate still comes from the 51 messages the
+    request sent, and the cut is chosen on the 52 the session holds after the reply."""
     from pincer.core.session import SessionManager
 
-    sessions = SessionManager(tmp_path / "cap50.db", max_messages=50)
+    sessions = SessionManager(tmp_path / "long.db")
     await sessions.initialize()
     try:
         session = await sessions.get_or_create("user1", "test")
@@ -628,7 +632,7 @@ async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_
     finally:
         await sessions.close()
 
-    assert len(session.messages) == 24  # the summary + 23 of the 30 the trim left: 7 summarized
+    assert len(session.messages) == 24  # the summary + the newest 23 of the 52: 29 summarized
     assert session.messages[0].content == f"[Previous conversation summary]\n{_SUMMARY}"
     assert session.messages[1].content.startswith("message 29 ")
 

@@ -35,7 +35,7 @@ async def build_agent_from_settings() -> Agent:
 
     settings = get_settings_relaxed()
 
-    session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
+    session_mgr = SessionManager(settings.db_path)
     await session_mgr.initialize()
 
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import logging
+import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
 
@@ -372,44 +371,11 @@ def test_a_call_report_after_the_reply_serializes_for_the_next_turn():
     assert [m["role"] for m in openai] == ["user", "assistant", "assistant", "user"]
 
 
-async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, caplog):
-    """The trimmed session stays cached, photos and thinking kept, even when the save fails."""
-    session = await session_manager.get_or_create("user1", "test")
-    session_manager.begin_turn(session)
-    for index in range(25):  # past the fixture's cap of 20: nothing is trimmed within the turn
-        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
-        await session_manager.add_message(
-            session,
-            LLMMessage(
-                role=role,
-                content=f"message {index}",
-                images=[ImageContent(data="aW1n", media_type="image/png")] if index == 24 else [],
-                raw=list(_THOUGHT) if role is MessageRole.ASSISTANT else [],
-            ),
-        )
-    assert len(session.messages) == 25  # precondition: no trimming within the turn
-
-    async def failing_save(**kwargs: object) -> None:
-        raise OSError("disk full")
-
-    with patch.object(session_manager._store, "save", side_effect=failing_save), caplog.at_level(logging.WARNING):
-        await session_manager.end_turn(session)
-
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert session._turn_open is False
-    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo (D3)
-    assert all(m.raw for m in session.messages if m.role is MessageRole.ASSISTANT)  # thinking is kept (D2)
-    warnings = [r for r in caplog.records if r.name == "pincer.core.session" and r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert session.session_id in warnings[0].getMessage()
-    assert "SECRET-THOUGHT" not in warnings[0].getMessage()
-
-
 _THOUGHT = [{"type": "thinking", "thinking": "SECRET-THOUGHT", "signature": "SIG"}]
 
 
-async def _fill_past_the_cap(session_manager: SessionManager, session) -> None:
-    """25 messages, past the fixture's cap of 20; the last carries an image, assistant ones a thought."""
+async def _fill(session_manager: SessionManager, session) -> None:
+    """25 messages, past the old cap of 20 of the fixture; the last carries an image, assistant ones a thought."""
     for index in range(25):
         role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
         await session_manager.add_message(
@@ -423,40 +389,40 @@ async def _fill_past_the_cap(session_manager: SessionManager, session) -> None:
         )
 
 
-async def test_a_turn_keeps_its_history_whole_and_ends_by_trimming(session_manager):
-    """The turn's end no longer drops thinking (D2, slice 1) or photos (D3, slice 3); the trim stays until slice 5."""
+def _assert_whole(session) -> None:
+    assert [m.content for m in session.messages] == [f"message {i}" for i in range(25)]  # nothing is cut
+    assert [len(m.images) for m in session.messages] == [0] * 24 + [1]  # the photo stays
+    assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)  # so does thinking
+
+
+async def test_a_turn_keeps_its_whole_history_thinking_and_photos(session_manager):
     async with session_manager.turn("user1", "test") as session:
-        await _fill_past_the_cap(session_manager, session)
-        assert len(session.messages) == 25  # nothing is trimmed while the turn runs
-        assert any(m.raw for m in session.messages)
+        await _fill(session_manager, session)
+        _assert_whole(session)
 
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo
-    assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)
+    _assert_whole(session)  # and when the turn ends
 
 
-async def test_a_turn_that_fails_still_ends(session_manager):
+async def test_a_failed_turn_keeps_its_messages_and_releases_the_session(session_manager):
     with pytest.raises(RuntimeError, match="boom"):
         async with session_manager.turn("user1", "test") as session:
-            await _fill_past_the_cap(session_manager, session)
+            await _fill(session_manager, session)
             raise RuntimeError("boom")
 
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo
-    assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)
-    assert session._turn_open is False
+    _assert_whole(session)
+    async with asyncio.timeout(5):  # the turn lock is free again
+        async with session_manager.turn("user1", "test") as again:
+            assert again is session
 
 
-async def test_a_cancelled_turn_still_ends(session_manager):
-    import asyncio
-
+async def test_a_cancelled_turn_keeps_its_messages_and_releases_the_session(session_manager):
     inside = asyncio.Event()
     holder: list = []
 
     async def run() -> None:
         async with session_manager.turn("user1", "test") as session:
             holder.append(session)
-            await _fill_past_the_cap(session_manager, session)
+            await _fill(session_manager, session)
             inside.set()
             await asyncio.sleep(60)
 
@@ -467,9 +433,10 @@ async def test_a_cancelled_turn_still_ends(session_manager):
         await task
 
     session = holder[0]
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert [len(m.images) for m in session.messages] == [0] * 11 + [1]  # the newest message keeps its photo
-    assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)
+    _assert_whole(session)
+    async with asyncio.timeout(5):
+        async with session_manager.turn("user1", "test") as again:
+            assert again is session
 
 
 async def test_a_turn_yields_the_cached_session(session_manager):

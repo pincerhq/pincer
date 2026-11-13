@@ -268,7 +268,7 @@ async def test_voice_cut_off_retry_never_sends_the_discarded_thinking(settings, 
 
 
 @pytest.mark.parametrize("entry", ["chat", "stream", "voice"])
-async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
+async def test_a_turn_looks_its_session_up_once_and_writes_to_the_one_it_looked_up(
     settings, mock_llm, session_manager, cost_tracker, tools, entry
 ):
     """turn() yields the session; the inner method must use it, not look the key up again."""
@@ -286,22 +286,14 @@ async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
         else Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
     )
     lookups: list[Any] = []
-    ended: list[Any] = []
-    real_get, real_end = session_manager.get_or_create, session_manager.end_turn
+    real_get = session_manager.get_or_create
 
     async def get_or_create(*args, **kwargs):
         session = await real_get(*args, **kwargs)
         lookups.append(session)
         return session
 
-    async def end_turn(session):
-        ended.append(session)
-        await real_end(session)
-
-    with (
-        patch.object(session_manager, "get_or_create", get_or_create),
-        patch.object(session_manager, "end_turn", end_turn),
-    ):
+    with patch.object(session_manager, "get_or_create", get_or_create):
         if entry == "chat":
             await agent.handle_message("user1", "test", "hi", memory=False)
         elif entry == "stream":
@@ -310,9 +302,9 @@ async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
             _chunks = [c async for c in agent.stream_voice_turn("+4930111222", "voice", "hi")]
 
     assert len(lookups) == 1
-    assert len(ended) == 1
-    assert ended[0] is lookups[0]
-    assert any(m.role is MessageRole.ASSISTANT and m.content == "done" for m in ended[0].messages)  # it holds the reply
+    assert any(
+        m.role is MessageRole.ASSISTANT and m.content == "done" for m in lookups[0].messages
+    )  # it holds the reply
 
 
 async def test_chat_turn_keeps_its_thinking_when_it_fails(settings, mock_llm, session_manager, cost_tracker, tools):
@@ -435,16 +427,16 @@ def test_repaired_tool_call_message_drops_its_stale_thinking():
 
 # ── Stable history within a turn (slice 4, Q2c) ──────
 
-_CAP = 20  # the session_manager fixture's max_messages
+_EARLIER = 20  # earlier messages a long session already holds; nothing cuts them (slice 5)
 
 
-async def _fill_to_cap(session_manager, user_id: str, channel: str, session_key: str | None = None) -> None:
-    """Earlier turns, outside any turn, up to the session cap."""
+async def _fill_long_history(session_manager, user_id: str, channel: str, session_key: str | None = None) -> None:
+    """Earlier turns, outside any turn: a long history."""
     session = await session_manager.get_or_create(user_id, channel, session_key=session_key)
-    for index in range(_CAP):
+    for index in range(_EARLIER):
         role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
         await session_manager.add_message(session, LLMMessage(role=role, content=f"earlier message {index}"))
-    assert len(session.messages) == _CAP  # precondition: at the cap
+    assert len(session.messages) == _EARLIER  # precondition: the earlier messages are all there
 
 
 def _assert_extends(earlier: dict[str, Any], later: dict[str, Any]) -> None:
@@ -466,8 +458,8 @@ _TOOL_THEN_TEXT = [
 ]
 
 
-async def test_voice_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
-    await _fill_to_cap(session_manager, "+4930111222", "voice")
+async def test_voice_turn_with_a_long_history_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
+    await _fill_long_history(session_manager, "+4930111222", "voice")
     async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = _voice_agent(settings, llm.provider, session_manager, cost_tracker, tools)
         chunks = [c async for c in agent.stream_voice_turn("+4930111222", "voice", "Termin beim Zahnarzt")]
@@ -476,12 +468,12 @@ async def test_voice_turn_at_the_cap_sends_an_unchanged_prefix(settings, session
     assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("+4930111222", "voice")
-    assert len(session.messages) <= _CAP
-    assert await _stored_length(session_manager, "voice:+4930111222", "+4930111222", "voice") <= _CAP
+    assert len(session.messages) == _EARLIER + 4  # the history stays whole: the turn's user, tool call, result, reply
+    assert await _stored_length(session_manager, "voice:+4930111222", "+4930111222", "voice") == _EARLIER + 4
 
 
-async def test_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
-    await _fill_to_cap(session_manager, "user1", "test")
+async def test_chat_turn_with_a_long_history_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
+    await _fill_long_history(session_manager, "user1", "test")
     async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         result = await agent.handle_message("user1", "test", "Book the dentist", memory=False)
@@ -490,12 +482,14 @@ async def test_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_
     assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "test")
-    assert len(session.messages) <= _CAP
-    assert await _stored_length(session_manager, "test:user1", "user1", "test") <= _CAP
+    assert len(session.messages) == _EARLIER + 4  # the history stays whole: the turn's user, tool call, result, reply
+    assert await _stored_length(session_manager, "test:user1", "user1", "test") == _EARLIER + 4
 
 
-async def test_streaming_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
-    await _fill_to_cap(session_manager, "user1", "web")
+async def test_streaming_chat_turn_with_a_long_history_sends_an_unchanged_prefix(
+    settings, session_manager, cost_tracker, tools
+):
+    await _fill_long_history(session_manager, "user1", "web")
     async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
@@ -504,8 +498,8 @@ async def test_streaming_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings
     assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "web")
-    assert len(session.messages) <= _CAP
-    assert await _stored_length(session_manager, "web:user1", "user1", "web") <= _CAP
+    assert len(session.messages) == _EARLIER + 4  # the history stays whole: the turn's user, tool call, result, reply
+    assert await _stored_length(session_manager, "web:user1", "user1", "web") == _EARLIER + 4
 
 
 _IMAGE = (b"\x89PNG fake image bytes", "image/png")
@@ -817,29 +811,6 @@ async def test_failover_mid_turn_to_another_model_sends_no_thinking(settings, se
     assert assistant[-1]["content"] == [{"type": "tool_use", "id": "toolu_1", "name": "create_event", "input": {}}]
     for sentinel in _SENTINELS:
         assert sentinel not in b.raw_requests[0]
-
-
-@pytest.mark.parametrize("loop", ["chat", "stream", "voice"])
-async def test_a_failed_turn_leaves_no_turn_open(settings, session_manager, cost_tracker, tools, loop):
-    """A turn that fails right after it began still ends: the session trims again on its next add."""
-    agent = _voice_agent(settings, _ScriptedVoice([]), session_manager, cost_tracker, tools)
-    open_when_failing: list[bool] = []
-
-    async def failing_add(session, message):
-        open_when_failing.append(session._turn_open)
-        raise RuntimeError("database is locked")
-
-    with patch.object(session_manager, "add_message", side_effect=failing_add), pytest.raises(RuntimeError):
-        if loop == "chat":
-            await agent.handle_message("user1", loop, "hi", memory=False)
-        elif loop == "stream":
-            _chunks = [c async for c in agent.handle_message_stream("user1", loop, "hi", memory=False)]
-        else:
-            _chunks = [c async for c in agent.stream_voice_turn("user1", loop, "hi")]
-
-    assert open_when_failing == [True]  # precondition: it failed inside the turn
-    session = await session_manager.get_or_create("user1", loop)
-    assert session._turn_open is False
 
 
 _INTERLEAVED = (
