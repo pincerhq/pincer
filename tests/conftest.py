@@ -82,6 +82,21 @@ def _test_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_google_oauth_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Google token lookup logs each problem once per process: give each test a fresh one."""
+    from pincer.config import main as config_main
+    from pincer.core.log_once import LogOncePerKey
+    from pincer.integrations.google import token_source
+
+    monkeypatch.setattr(token_source, "_LOG", LogOncePerKey(token_source.logger))
+    monkeypatch.setattr(token_source, "_MISMATCH_CHECKED", set())
+    monkeypatch.setattr(config_main, "_LEGACY_OAUTH_DIR_LOG", LogOncePerKey(config_main.logger))
+    monkeypatch.delenv("PINCER_GOOGLE_OAUTH_DIR", raising=False)
+    monkeypatch.delenv("PINCER_GOOGLE_TOKEN_JSON", raising=False)
+    monkeypatch.delenv("PINCER_GOOGLE_CREDENTIALS_JSON", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_skill_service() -> Iterator[None]:
     """The SkillService is a per-process singleton built from the first settings
     that ask for it; a test's mocked settings must not leak into the next test."""

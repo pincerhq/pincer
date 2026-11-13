@@ -28,13 +28,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Logged when the Google integration is on but no token is found (a token without usable
-#: scopes gets get_google_factory's own warning instead).
+#: scopes gets get_google_factory's own warning instead). Formatted with the directory looked in.
 GOOGLE_SETUP_HINT = (
-    "Google Workspace tools off (no calendar, Gmail or Drive): no Google token found — "
+    "Google Workspace tools off (no calendar, Gmail or Drive): no Google token found in %s — "
     "run `pincer google setup` to connect"
 )
-# Once per process at INFO: register_default_tools also runs on every GET /api/integrations.
+#: The same with an OAuth client present: setup was started (or the token sits elsewhere), so WARNING.
+GOOGLE_TOKEN_MISSING = (
+    "Google Workspace tools off (no calendar, Gmail or Drive): OAuth client found (%s) but no token at %s — "
+    "run `pincer google setup`, or set PINCER_GOOGLE_OAUTH_DIR to the directory holding the token"
+)
+# Once at INFO until the tools register: register_default_tools also runs on every GET /api/integrations.
 _SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
+_TOKEN_MISSING_LOG = LogOnce(logger)
 # A crashing Workspace registration (with its traceback): WARNING once, DEBUG until it registers again.
 _REGISTRATION_FAILURE_LOG = LogOnce(logger)
 # A token missing a required scope, apart from the crash log: a crash must not demote the one
@@ -353,16 +359,39 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
             from pincer.integrations.google import token_source
             from pincer.integrations.google.config import load_config
 
-            if load_config().enabled and token_source.locate_token(get_settings_relaxed()) is None:
-                _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT)
+            settings = get_settings_relaxed()
+            if load_config().enabled and token_source.locate_token(settings) is None:
+                _log_no_google_token(settings)
             _clear_failure_logs()  # the token state changed: the next failure deserves a WARNING
             return
         report["google"] = register_all_tools(tools, factory)
         _clear_failure_logs()
+        # A token is there now: if it goes missing later in this process, say so at full level again.
+        _SETUP_HINT_LOG.clear()
+        _TOKEN_MISSING_LOG.clear()
     except RuntimeError as e:  # e.g. a token missing a required scope: as repeating as any other failure
         _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
     except Exception as e:
         _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
+
+
+def _log_no_google_token(settings: Settings) -> None:
+    """Say why there are no Google tools, naming where the token was looked for.
+
+    Only for a missing token file: a set ``PINCER_GOOGLE_TOKEN_JSON`` that is
+    unusable gets its own warning from ``token_source.locate_token``.
+    """
+    from pincer.integrations.google import token_source
+
+    if token_source.token_env_state(settings) == "ok":
+        return
+    oauth_dir = settings.google_oauth_dir()
+    paths = ", ".join(str(p) for p in token_source.searched_paths(settings, oauth_dir))
+    client = token_source.client_config(settings, oauth_dir)
+    if client is not None:
+        _TOKEN_MISSING_LOG.log(GOOGLE_TOKEN_MISSING, client.label, paths)
+    else:
+        _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT, oauth_dir)
 
 
 def _register_slack(tools: ToolRegistry, report: dict[str, int]) -> None:

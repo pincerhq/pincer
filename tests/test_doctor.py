@@ -1821,6 +1821,114 @@ def test_google_workspace_check_reads_the_token_of_the_settings_it_is_given(monk
     assert "covers" not in found.message
     assert found.message.startswith("Google token found with scopes for: calendar")
     assert "not checked against Google" in found.message
+    # Both say where they looked (issue #226).
+    assert str(with_token) in found.message
+    assert str(without) in missing.message
+
+
+def _google_cfg(oauth_dir, token: str = ""):
+    from pydantic import SecretStr
+
+    return SimpleNamespace(
+        google_token_json=SecretStr(token), google_credentials_json=SecretStr(""), google_oauth_dir=lambda: oauth_dir
+    )
+
+
+@pytest.fixture
+def google_enabled(monkeypatch):
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.config.load_config",
+        lambda: GoogleIntegrationConfig(enabled=True, services=["calendar"]),
+    )
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_warns_on_an_oauth_client_without_a_token(tmp_path):
+    """Setup was started, or the token sits in another directory: a WARNING, not SKIPPED (issue #226)."""
+    import json
+
+    (tmp_path / "google_credentials.json").write_text(
+        json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+    )
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path))
+    assert result.status == CheckStatus.WARNING
+    assert str(tmp_path) in result.message
+    assert "PINCER_GOOGLE_OAUTH_DIR" in result.fix_hint
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_warns_on_an_undecodable_env_token(tmp_path):
+    (tmp_path / "google_workspace_token.json").write_text("{}")
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token="not-a-token"))
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_GOOGLE_TOKEN_JSON is set but cannot be decoded" in result.message
+    assert f"token file in {tmp_path}" in result.message
+    assert "not-a-token" not in result.message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_undecodable_env_token_without_a_token_file(tmp_path):
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token="not-a-token"))
+    assert result.status == CheckStatus.WARNING
+    assert f"no token file in {tmp_path}" in result.message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_warns_on_an_env_token_without_a_client(tmp_path):
+    import json
+
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token=json.dumps({"refresh_token": "rt"})))
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_GOOGLE_TOKEN_JSON is set but unusable" in result.message
+    assert "--print-env" in result.fix_hint
+
+
+def _gmail_only_token(directory):
+    import json
+
+    from pincer.integrations.google.auth import SERVICE_SCOPES
+
+    client = {"installed": {"client_id": "c", "client_secret": "s"}}
+    (directory / "google_credentials.json").write_text(json.dumps(client))
+    (directory / "google_workspace_token.json").write_text(json.dumps({"scopes": SERVICE_SCOPES["gmail"]}))
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_a_token_without_the_configured_scopes_is_not_a_missing_token(tmp_path):
+    """Calendar configured, a gmail-only token found: re-consent, not "no token" / PINCER_GOOGLE_OAUTH_DIR."""
+    _gmail_only_token(tmp_path)
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path))
+    assert result.status == CheckStatus.WARNING
+    assert "grants no scopes for the configured services" in result.message
+    assert f"token file in {tmp_path}" in result.message
+    assert "re-consent" in result.fix_hint
+    assert "PINCER_GOOGLE_OAUTH_DIR" not in result.fix_hint
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_undecodable_env_token_with_an_unusable_token_file(tmp_path):
+    _gmail_only_token(tmp_path)
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token="not-a-token"))
+    assert result.status == CheckStatus.WARNING
+    assert "grants no scopes for the configured services" in result.message
+    assert "no token file" not in result.message
+
+
+@pytest.mark.usefixtures("google_enabled")
+def test_google_workspace_check_names_an_oauth_client_taken_from_the_file(tmp_path):
+    import json
+
+    from pincer.integrations.google.auth import ALL_SCOPES
+
+    (tmp_path / "google_credentials.json").write_text(
+        json.dumps({"installed": {"client_id": "c", "client_secret": "s"}})
+    )
+    token = json.dumps({"refresh_token": "rt", "scopes": ALL_SCOPES})
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path, token=token))
+    assert result.status == CheckStatus.PASS
+    assert f"PINCER_GOOGLE_TOKEN_JSON, OAuth client from {tmp_path / 'google_credentials.json'}" in result.message
 
 
 @pytest.mark.parametrize(
@@ -1852,7 +1960,7 @@ def test_google_workspace_check_reads_the_token_of_the_settings_it_is_given(monk
         ),
     ],
 )
-def test_google_workspace_check(monkeypatch, enabled, status, expected, hint):
+def test_google_workspace_check(monkeypatch, tmp_path, enabled, status, expected, hint):
     """No token: calendar tools are off, and the doctor says how to connect (issue #297)."""
     from pincer.integrations.google.config import GoogleIntegrationConfig
 
@@ -1860,7 +1968,7 @@ def test_google_workspace_check(monkeypatch, enabled, status, expected, hint):
         "pincer.integrations.google.config.load_config", lambda: GoogleIntegrationConfig(enabled=enabled)
     )
     monkeypatch.setattr("pincer.integrations.google.google_status", lambda settings=None: status)
-    result = SecurityDoctor()._check_google_workspace()
+    result = SecurityDoctor()._check_google_workspace(_google_cfg(tmp_path))
     assert result.status == expected
     assert result.category == "google"
     assert (hint in result.fix_hint) if hint else result.fix_hint == ""

@@ -68,6 +68,7 @@ def _integration_entries() -> list[dict[str, Any]]:
             "enabled_services": google["enabled_services"],
             "missing_scopes": google["missing_scopes"],
             "token_source": google["source"],
+            "client_source": google.get("client_source"),
             "reauth_hint": _reauth_hint(google),
             "source": "integration",
             "slug": "google",
@@ -211,7 +212,13 @@ def _google_status() -> dict[str, Any]:
         return google_status()
     except Exception:
         logger.debug("Could not determine Google Workspace status", exc_info=True)
-        return {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None}
+        return {
+            "status": "disabled",
+            "enabled_services": [],
+            "missing_scopes": [],
+            "source": None,
+            "client_source": None,
+        }
 
 
 def _reauth_hint(state: dict[str, Any]) -> str:
@@ -280,6 +287,7 @@ async def get_integration(slug: str) -> dict[str, Any]:
             "enabled_services": state["enabled_services"],
             "missing_scopes": state["missing_scopes"],
             "token_source": state["source"],
+            "client_source": state.get("client_source"),
             "reauth_hint": _reauth_hint(state),
         }
 

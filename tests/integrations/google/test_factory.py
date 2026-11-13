@@ -173,6 +173,7 @@ def test_google_status_active_with_full_token(env):
         "enabled_services": list(SERVICE_SCOPES),
         "missing_scopes": [],
         "source": "file",
+        "client_source": "token",
     }
 
 
