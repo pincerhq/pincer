@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
-from pincer.cli import app
+from pincer.cli import _shared, app
 from pincer.config.pricing import TokenUsage
 
 runner = CliRunner()
@@ -246,7 +246,8 @@ def test_cost_by_model_shows_each_model_s_cache_tokens_and_hit_rate(monkeypatch:
         [("anthropic", "claude-sonnet-5-5", _ORACLE), ("openai", "gpt-5.4-mini", _MINI)],
     )
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
-    monkeypatch.setenv("COLUMNS", "200")
+    # On the console itself: it read COLUMNS once, when it was built at import.
+    monkeypatch.setattr(_shared.console, "_width", 200)
 
     result = runner.invoke(app, ["cost", "--by-model"])
 
