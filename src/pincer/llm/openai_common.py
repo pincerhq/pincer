@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
+    STOP_REASON_COMPACTION,
     STOP_REASON_MAX_TOKENS,
     BaseLLMProvider,
     LLMMessage,
@@ -450,6 +451,42 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         result.provider = self._provider_name
         result.request_model = kwargs["model"]
         return result
+
+    async def compact(self, messages: list[LLMMessage], *, model: str | None = None) -> LLMResponse:
+        """Ask the server to compact `messages` (`/responses/compact`), the input a turn sent.
+
+        The body is the model and the input items and nothing else: the preserved-reasoning guide says to
+        omit `instructions`, and the endpoint takes no tools. The returned window (the user messages it
+        keeps and the encrypted compaction item) comes back as `raw`, tagged with the wire, to be stored
+        and sent as it is; `stop_reason == "compaction"` says it holds a compaction item.
+        """
+        model = model or self._default_model
+        wire = wire_tag(self._provider_name, model)
+        kwargs: dict[str, Any] = {"model": model, "input": convert_messages_to_responses(messages, wire)}
+        try:
+            response = await self._request_clients.pick(self._client).responses.compact(**kwargs)
+        except openai.APIStatusError as e:
+            message = f"{self._provider_name} API error: {e.status_code} {e.message}"
+            raise LLMError(message, retryable=transient_status(e.status_code)) from e
+        except openai.APIConnectionError as e:
+            raise LLMError(f"{self._provider_name} connection error: {e}") from e
+
+        # The SDK types the retained user messages as output messages (`input_text` parts) and warns on dump
+        window = [item.model_dump(mode="json", exclude_none=True, warnings=False) for item in response.output]
+        counts = _responses_usage_counts(response.usage)
+        has_item = any(item.get("type") == "compaction" and item.get("encrypted_content") for item in window)
+        return LLMResponse(
+            model=model,
+            provider=self._provider_name,
+            request_model=model,
+            stop_reason=STOP_REASON_COMPACTION if has_item else "stop",
+            raw=window,
+            wire=wire,
+            input_tokens=counts["input_tokens"],
+            cache_write_5m_tokens=counts["cache_write_5m_tokens"],
+            cache_read_tokens=counts["cache_read_tokens"],
+            output_tokens=counts["output_tokens"],
+        )
 
     def _parse_responses(self, response: Response, model: str) -> LLMResponse:
         """A Responses reply as a unified response, with its usage and a log line about its reasoning."""

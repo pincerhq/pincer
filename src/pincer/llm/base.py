@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 # The stop reason every provider reports when the output hit max_tokens
 STOP_REASON_MAX_TOKENS = "max_tokens"
+# The stop reason of a compaction call that returned a compaction block or item (and no reply)
+STOP_REASON_COMPACTION = "compaction"
 # A rate-limited (429) request is sent this many times in all, by complete() and by stream_turn()
 # before its first event; the wait doubles each time, up to the cap
 RATE_LIMIT_ATTEMPTS = 3

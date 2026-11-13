@@ -39,8 +39,9 @@ Always on, without setting anything:
 #### Sessions are no longer cut by message count; an emergency cut by tokens replaces it (#358)
 
 - A session is no longer cut from 50 to 30 messages: it keeps every message, and long ones are
-  compacted by prompt tokens (`PINCER_COMPACT_AT_TOKENS`, default 80,000). Claude endpoints
-  compact on their own server; every other endpoint uses the summary model.
+  compacted by prompt tokens (`PINCER_COMPACT_AT_TOKENS`, default 80,000). Claude endpoints and
+  the endpoints on the Responses API (`openai`, `azure`, `azure-openai`) compact on their own
+  server; every other endpoint uses the summary model.
 - New `PINCER_COMPACT_HARD_TOKENS` (default 160,000). After a turn whose prompt went over it and
   whose compaction failed (the call failed, no summary came back, or the daily budget was
   reached), the oldest whole turns are dropped until the prompt is about
@@ -70,6 +71,15 @@ Always on, without setting anything:
   Earlier turns' reasoning goes back in streamed chat, voice calls and headless runs. A conversation
   saved before this change, or by an endpoint on Chat Completions, still loads and is sent without
   reasoning.
+- An endpoint on the Responses API compacts on its own server too: after the reply, over
+  `PINCER_COMPACT_AT_TOKENS`, Pincer sends the conversation to `/responses/compact` (the model and
+  the input, nothing else) and keeps the returned window, with its encrypted compaction item, as it
+  came back; it goes first in the next request, and the turns that arrived meanwhile stay after it.
+  The window is encrypted, so no summary is saved as a memory and another model or endpoint sees
+  only a note that the earlier conversation was compacted. The call is priced and checked against
+  the daily budget like any other; when it fails the history is kept and it is tried again after a
+  later turn. To keep an endpoint on the summary model, remove its name from
+  `PINCER_RESPONSES_API_PROVIDERS` (it then also leaves the Responses API).
 
 #### gpt-6 on OpenAI and Azure now reasons with tools (#358)
 

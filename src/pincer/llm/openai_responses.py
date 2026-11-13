@@ -19,6 +19,10 @@ from pincer.llm.replay import replayable_raw
 if TYPE_CHECKING:
     from openai.types.responses import Response
 
+# What a request to any other wire (or model) sees of a compacted window: the window's compaction item is
+# encrypted, so it cannot be rebuilt as text
+WINDOW_NOTICE = "[Earlier conversation was compacted by OpenAI; its content is encrypted and cannot be read here]"
+
 
 def convert_tools_to_responses(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Anthropic-style tool defs as Responses function tools: flat (not nested under `function`, as in
@@ -41,11 +45,14 @@ def convert_messages_to_responses(messages: list[LLMMessage], wire: str) -> list
 
     An assistant message goes back as the provider's own output items (reasoning included) while it was
     produced by this provider and model (see `llm.replay`); any other is rebuilt from its text and tool
-    calls.
+    calls. A compacted window (a SYSTEM message holding what `/responses/compact` returned) goes back the
+    same way, and as `WINDOW_NOTICE` text on any other wire.
     """
     items: list[dict[str, Any]] = []
     for msg in messages:
-        if msg.role == MessageRole.TOOL_RESULT:
+        if msg.role == MessageRole.SYSTEM and (window := replayable_raw(msg, wire)) is not None:
+            items.extend(window)  # a compacted window goes back as the API returned it, in its order
+        elif msg.role == MessageRole.TOOL_RESULT:
             items.append({"type": "function_call_output", "call_id": msg.tool_call_id or "", "output": msg.content})
         elif msg.role == MessageRole.ASSISTANT:
             items.extend(_replayed_assistant(msg, wire) or _rebuilt_assistant(msg))

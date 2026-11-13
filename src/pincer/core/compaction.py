@@ -3,8 +3,9 @@ History compaction by prompt tokens (issue #357, owner rulings Q20 and Q22; issu
 
 Who writes the summary depends on the endpoint that served the turn's last request (`pick_strategy`):
 an Anthropic-wire endpoint in ``server_compaction_providers`` summarizes on its own server, on the
-conversation's own model (`Compactor._compact_on_server`); every other endpoint uses Pincer's summary
-model, described next.
+conversation's own model (`Compactor._compact_on_server`); an OpenAI-wire endpoint in
+``responses_api_providers`` has ``/responses/compact`` do it (`Compactor._compact_on_responses`); every
+other endpoint uses Pincer's summary model, described next.
 
 After a turn whose last request's whole prompt (uncached input, cache writes
 and cache reads, from the API usage) went over `at_tokens`, the oldest
@@ -21,6 +22,11 @@ Server compaction summarizes exactly the messages of the last request (same mode
 tools, so the prompt is a cache read and the thinking of the turns kept after the block stays valid).
 The returned block replaces them as one SYSTEM-role message at the head, tagged with its wire; whatever
 arrived meanwhile stays after it. Nothing changes when no summary comes back.
+
+``/responses/compact`` takes the same messages (as input items, no instructions) and returns a window: the
+user messages it keeps and an encrypted compaction item. The window replaces them as one SYSTEM-role
+message holding the items verbatim (``raw``), tagged with its wire, so it goes back unchanged on that
+wire and as a short notice on any other; no memory is written, nothing in it is readable.
 """
 
 from __future__ import annotations
@@ -32,16 +38,18 @@ from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-from pincer.llm.base import LLMMessage, MessageRole
+from pincer.llm.base import STOP_REASON_COMPACTION, LLMMessage, MessageRole
 from pincer.llm.capabilities import endpoint_capabilities
+from pincer.llm.openai_common import OpenAICompatibleProvider
+from pincer.llm.openai_responses import WINDOW_NOTICE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
     from pincer.core.session import Session, SessionManager
-    from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.base import BaseLLMProvider, LLMResponse
     from pincer.llm.cost_tracker import CostTracker
     from pincer.llm.router import LLMRouter
     from pincer.memory.base import BaseMemoryBackend
@@ -66,8 +74,6 @@ MAX_SESSION_MESSAGES_DEPRECATED = (
     "PINCER_MAX_SESSION_MESSAGES no longer has an effect: sessions are no longer cut by message count, "
     "they are compacted by prompt tokens (PINCER_COMPACT_AT_TOKENS, PINCER_COMPACT_HARD_TOKENS)"
 )
-# The stop reason of a Messages response that holds a compaction block (and nothing else)
-STOP_REASON_COMPACTION = "compaction"
 # A cut of fewer messages is not worth a summary call (or re-summarizing a summary alone)
 _MIN_CUT = 2
 
@@ -193,6 +199,7 @@ class CompactionStrategy(StrEnum):
 
     CLIENT_SUMMARY = "client-summary"  # Pincer's summary model (any endpoint)
     ANTHROPIC_SERVER = "anthropic-server"  # on-demand compaction on the conversation's own model
+    OPENAI_SERVER = "openai-server"  # `/responses/compact` on a Responses endpoint
 
 
 @dataclass(frozen=True)
@@ -207,10 +214,14 @@ class ServerCompaction:
 
 def pick_strategy(settings: Settings, provider: str, leaf: BaseLLMProvider | None) -> CompactionStrategy:
     """The strategy for a conversation whose last request went to `provider` (served by `leaf`):
-    server compaction when the endpoint is in ``server_compaction_providers`` and speaks the
-    Anthropic wire, the client summary for every other endpoint."""
-    if endpoint_capabilities(settings, provider).server_compaction and isinstance(leaf, AnthropicCompatibleProvider):
+    server compaction when the endpoint is in ``server_compaction_providers`` and speaks the Anthropic
+    wire, or is in ``responses_api_providers`` and speaks the OpenAI wire (``server_compaction_providers``
+    is the Anthropic beta list and does not govern it); the client summary for every other endpoint."""
+    capabilities = endpoint_capabilities(settings, provider)
+    if capabilities.server_compaction and isinstance(leaf, AnthropicCompatibleProvider):
         return CompactionStrategy.ANTHROPIC_SERVER
+    if capabilities.responses_api and isinstance(leaf, OpenAICompatibleProvider):
+        return CompactionStrategy.OPENAI_SERVER
     return CompactionStrategy.CLIENT_SUMMARY
 
 
@@ -264,10 +275,15 @@ class Compactor:
         request = last.request
         if self._server is not None and request is not None:
             leaf = self._server.provider(request.provider, request.model)
-            if pick_strategy(self._server.settings, request.provider, leaf) is CompactionStrategy.ANTHROPIC_SERVER:
+            strategy = pick_strategy(self._server.settings, request.provider, leaf)
+            if strategy is CompactionStrategy.ANTHROPIC_SERVER:
                 # pick_strategy checked the leaf speaks the Anthropic wire
-                leaf = cast("AnthropicCompatibleProvider", leaf)
-                outcome = await self._compact_on_server(session, last, request, leaf, self._server)
+                anthropic_leaf = cast("AnthropicCompatibleProvider", leaf)
+                outcome = await self._compact_on_server(session, last, request, anthropic_leaf, self._server)
+                return await self._cut_if_failed(outcome, session, last)
+            if strategy is CompactionStrategy.OPENAI_SERVER:
+                openai_leaf = cast("OpenAICompatibleProvider", leaf)
+                outcome = await self._compact_on_responses(session, last, request, openai_leaf, self._server)
                 return await self._cut_if_failed(outcome, session, last)
         return await self._cut_if_failed(await self._compact_by_summary(session, last), session, last)
 
@@ -312,8 +328,7 @@ class Compactor:
         server: ServerCompaction,
     ) -> CompactionOutcome:
         """Ask the conversation's own endpoint to summarize exactly what the last request sent."""
-        if await self._costs.budget_reached():  # the pre-call budget check every LLM call goes through
-            logger.warning("Daily budget reached: session %s is not compacted", session.session_id)
+        if not await self._budget_left(session):
             return CompactionOutcome.FAILED
         prefix = list(last.sent)
         if not prefix:
@@ -324,25 +339,21 @@ class Compactor:
                 session.session_id,
             )
             return CompactionOutcome.FAILED
-        try:
-            response = await leaf.compact(
+        response = await self._call_on_server(
+            session,
+            request,
+            server,
+            lambda: leaf.compact(
                 prefix,
                 tools=request.tools,
                 model=request.model,
                 system=request.system,
                 reasoning_effort=request.reasoning_effort,
                 thinking=request.thinking,
-            )
-        except Exception:
-            logger.warning("Compacting session %s on the server failed", session.session_id, exc_info=True)
-            return CompactionOutcome.FAILED
-        await self._costs.record(
-            provider=response.provider or request.provider,
-            model=response.request_model or request.model,
-            usage=response.usage,
-            session_id=session.session_id,
-            is_free=server.is_free(response.provider or request.provider),
+            ),
         )
+        if response is None:
+            return CompactionOutcome.FAILED
         block = response.raw[0] if response.raw and response.raw[0].get("type") == "compaction" else None
         summary = block.get("content") if block is not None else None
         if response.stop_reason != STOP_REASON_COMPACTION or block is None or not summary:
@@ -363,6 +374,76 @@ class Compactor:
         logger.info("Session %s compacted on the server: %d messages summarized", session.session_id, len(prefix))
         await self._remember(session, summary)
         return CompactionOutcome.COMPACTED
+
+    async def _compact_on_responses(
+        self,
+        session: Session,
+        last: LastRequest,
+        request: SentRequest,
+        leaf: OpenAICompatibleProvider,
+        server: ServerCompaction,
+    ) -> CompactionOutcome:
+        """Ask the conversation's own Responses endpoint to compact exactly what the last request sent, and
+        store the window it returns unchanged. No memory is written: the compaction item is encrypted."""
+        if not await self._budget_left(session):
+            return CompactionOutcome.FAILED
+        prefix = list(last.sent)
+        if not prefix:
+            return CompactionOutcome.SKIPPED
+        response = await self._call_on_server(
+            session, request, server, lambda: leaf.compact(prefix, model=request.model)
+        )
+        if response is None:
+            return CompactionOutcome.FAILED
+        if response.stop_reason != STOP_REASON_COMPACTION:
+            # A short provider problem must never erase history (Q22): the next turn over the limit retries
+            logger.warning(
+                "Session %s: the server returned no compaction item, history kept; "
+                "compaction will be retried after a later turn",
+                session.session_id,
+            )
+            return CompactionOutcome.FAILED
+        replacement = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=response.raw, wire=response.wire)
+        if not await self._sessions.compact(session, prefix, replacement):
+            logger.info("Session %s changed while it was being compacted; compaction discarded", session.session_id)
+            return CompactionOutcome.SKIPPED
+        logger.info(
+            "Session %s compacted on the server: %d messages replaced by a window of %d items",
+            session.session_id,
+            len(prefix),
+            len(response.raw),
+        )
+        return CompactionOutcome.COMPACTED
+
+    async def _budget_left(self, session: Session) -> bool:
+        """The pre-call budget check every LLM call goes through; False (a warning) once it is reached."""
+        if await self._costs.budget_reached():
+            logger.warning("Daily budget reached: session %s is not compacted", session.session_id)
+            return False
+        return True
+
+    async def _call_on_server(
+        self,
+        session: Session,
+        request: SentRequest,
+        server: ServerCompaction,
+        ask: Callable[[], Awaitable[LLMResponse]],
+    ) -> LLMResponse | None:
+        """Make a server compaction call and record what it cost, with the session id. None when it raised
+        (a warning): nothing was billed and history is kept."""
+        try:
+            response = await ask()
+        except Exception:
+            logger.warning("Compacting session %s on the server failed", session.session_id, exc_info=True)
+            return None
+        await self._costs.record(
+            provider=response.provider or request.provider,
+            model=response.request_model or request.model,
+            usage=response.usage,
+            session_id=session.session_id,
+            is_free=server.is_free(response.provider or request.provider),
+        )
+        return response
 
     async def _compact_by_summary(self, session: Session, last: LastRequest) -> CompactionOutcome:
         """Replace the oldest messages by a summary written by the summary model; without one,
@@ -398,8 +479,7 @@ class Compactor:
 
     async def _summarize(self, session: Session, llm: BaseLLMProvider, messages: list[LLMMessage]) -> str:
         """The summary text, or "" when it cannot be had (budget spent, call failed)."""
-        if await self._costs.budget_reached():  # the pre-call budget check every LLM call goes through
-            logger.warning("Daily budget reached: session %s is not compacted", session.session_id)
+        if not await self._budget_left(session):
             return ""
         request = LLMMessage(role=MessageRole.USER, content=f"Summarize this conversation:\n\n{_transcript(messages)}")
         try:
@@ -443,9 +523,10 @@ def build_compactor(
 ) -> Compactor:
     """The compactor `pincer run`, `pincer chat` and the API agent use.
 
-    Endpoints in ``server_compaction_providers`` compact on their own server, on the conversation's
-    model; every other endpoint uses the summary model. Without one (a warning at startup) only the
-    first kind works, and a session on another endpoint keeps its history until it is built.
+    Endpoints in ``server_compaction_providers`` (Anthropic wire) and in ``responses_api_providers``
+    (OpenAI wire) compact on their own server, on the conversation's model; every other endpoint uses
+    the summary model. Without one (a warning at startup) only the first kind works, and a session on
+    another endpoint keeps its history until it is built.
     """
     from pincer.config.llm import call_effort, call_thinking
     from pincer.llm.router import summary_target

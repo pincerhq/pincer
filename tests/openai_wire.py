@@ -338,9 +338,53 @@ class RawStream:
     hang: bool = False
 
 
+@dataclass
+class Compaction:
+    """A reply of `/responses/compact`: the compacted window and the usage of the compaction pass. With
+    a ``gate`` the reply is held until the test sets it, so a turn can run while the compaction is in flight."""
+
+    items: list[dict[str, Any]]
+    usage: dict[str, Any] | None = None
+    gate: asyncio.Event | None = None
+
+
+def compaction_item(item_id: str = "cmp_1", encrypted: str = "ENC-CMP-1", **extra: Any) -> dict[str, Any]:
+    return {"id": item_id, "type": "compaction", "encrypted_content": encrypted, **extra}
+
+
+def user_item(text: str, item_id: str = "msg_u1") -> dict[str, Any]:
+    """A user message as the compact endpoint retains it."""
+    return {
+        "id": item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}],
+    }
+
+
+def compacted_body(items: list[dict[str, Any]], usage_: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": "resp_cmp",
+        "object": "response.compaction",
+        "created_at": 0,
+        "output": items,
+        "usage": usage_ if usage_ is not None else usage(),
+    }
+
+
 # What a scripted reply can be: output items (a Responses reply), a Chat text, an HTTP error status,
-# a scripted streamed turn, or raw stream events
-Reply = list[dict[str, Any]] | str | int | Exception | tuple[list[dict[str, Any]], dict[str, Any]] | Turn | RawStream
+# a scripted streamed turn, raw stream events, or a compaction
+Reply = (
+    list[dict[str, Any]]
+    | str
+    | int
+    | Exception
+    | tuple[list[dict[str, Any]], dict[str, Any]]
+    | Turn
+    | RawStream
+    | Compaction
+)
 
 
 class ScriptedOpenAI:
@@ -375,8 +419,16 @@ class ScriptedOpenAI:
             api_key=self.provider._client.api_key,
             base_url=url,
             max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle)),
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._serve)),
         )
+
+    async def _serve(self, request: httpx.Request) -> httpx.Response:
+        """`_handle`, then a held `Compaction` reply waits for its gate."""
+        pending = self._replies[0] if self._replies else None
+        response = self._handle(request)
+        if isinstance(pending, Compaction) and pending.gate is not None:
+            await pending.gate.wait()
+        return response
 
     def _stream(self, content: bytes, hang: bool = False) -> httpx.Response:
         body = RecordingStream([content], hang)
@@ -407,6 +459,9 @@ class ScriptedOpenAI:
             return httpx.Response(reply, json={"error": {"message": f"scripted {reply}", "type": "scripted"}})
         if isinstance(reply, RawStream):
             return self._stream(_sse(reply.events), reply.hang)
+        if isinstance(reply, Compaction):
+            assert request.url.path.endswith("/responses/compact"), f"a compaction served to {request.url.path}"
+            return httpx.Response(200, json=compacted_body(reply.items, reply.usage))
         if isinstance(reply, Turn):
             if not request.url.path.endswith("/responses"):
                 return _chat_turn_chunks(reply, self._model)
