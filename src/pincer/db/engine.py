@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import weakref
 from contextlib import contextmanager
 from functools import lru_cache
@@ -59,7 +60,8 @@ SQLITE_BUSY_TIMEOUT_MS = 5000
 #: a startup parameter Postgres itself parses (`-c name=value` pairs), so the
 #: raw server setting asyncpg makes of it is exactly what libpq would send.
 #: It is how a DSN picks a non-`public` schema:
-#: `?options=-csearch_path%3Dpincer`.
+#: `?options=-csearch_path%3Dpincer`, or `?search_path=pincer`, which
+#: `lift_search_path` rewrites into exactly that before either driver sees it.
 _LIBPQ_DSN_KEYS = frozenset(
     {
         "sslmode",
@@ -79,6 +81,10 @@ _LIBPQ_DSN_KEYS = frozenset(
 #: Keys the asyncpg SQLAlchemy dialect pops for itself before ever calling
 #: `asyncpg.connect()`, so they need neither moving nor rejecting.
 _ASYNCPG_DIALECT_KWARGS = frozenset({"async_fallback", "prepared_statement_cache_size"})
+
+#: A `search_path` setting already inside libpq's `options`: `-c search_path=`,
+#: `-csearch_path=` or `--search_path=`.
+_OPTIONS_SETS_SEARCH_PATH = re.compile(r"(?:^|\s)(?:-c\s*|--)search_path\s*=", re.IGNORECASE)
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -100,6 +106,44 @@ _engines: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, AsyncEn
 _engines_pid = os.getpid()
 
 
+def escape_option_value(value: str) -> str:
+    """Escape a value for libpq's `options` (space-separated, backslash escapes)."""
+    return value.replace("\\", "\\\\").replace(" ", "\\ ")
+
+
+def lift_search_path(url: URL) -> URL:
+    """Rewrite a `?search_path=<schema>` URL into `?options=-c search_path=<schema>`.
+
+    `search_path` is the lib/pq (Go) spelling, which `PINCER_WHATSAPP_SESSION_DB`
+    takes, but neither driver here knows it: libpq (Alembic, through psycopg)
+    rejects it as an unknown URI parameter and asyncpg as an unknown keyword.
+    Both understand `options`, so the schema is moved there, after any
+    `options` the URL already has. Only `search_path` is lifted; any other
+    unknown key still fails loudly in `_asyncpg_connect_args`.
+
+    Raises ValueError when the URL names the schema twice (both forms, or the
+    parameter repeated) or leaves it empty, rather than silently picking one.
+    """
+    if "search_path" not in url.query:
+        return url
+    raw = url.query["search_path"]
+    values = [raw] if isinstance(raw, str) else list(raw)
+    if len(values) != 1:
+        raise ValueError("PINCER_DATABASE_URL sets search_path more than once; keep one")
+    value = values[0].strip()
+    if not value:
+        raise ValueError("PINCER_DATABASE_URL sets an empty search_path; name a schema or remove it")
+    existing = url.query.get("options")
+    options = [existing] if isinstance(existing, str) else list(existing or ())
+    if any(_OPTIONS_SETS_SEARCH_PATH.search(option) for option in options):
+        raise ValueError(
+            "PINCER_DATABASE_URL sets the schema twice, with search_path= and with "
+            "`-c search_path` in options; keep one"
+        )
+    lifted = " ".join([*(option for option in options if option), f"-c search_path={escape_option_value(value)}"])
+    return url.difference_update_query(["search_path", "options"]).update_query_dict({"options": lifted})
+
+
 def get_sync_url(db_path: Path) -> str:
     """The synchronous SQLAlchemy URL Alembic runs migrations against.
 
@@ -118,7 +162,7 @@ def get_sync_url(db_path: Path) -> str:
     configured = DatabaseSettings().database_url
     override = configured.get_secret_value() if configured else None
     if override:
-        parsed = make_url(override)
+        parsed = lift_search_path(make_url(override))
         backend = parsed.get_backend_name()
         if backend not in _SYNC_DRIVERS:
             raise RuntimeError(f"PINCER_DATABASE_URL names {backend!r}; supported backends are {sorted(_SYNC_DRIVERS)}")
@@ -138,14 +182,16 @@ def build_config(db_path: Path, url: str | None = None) -> Config:
     on the result: the config is a ConfigParser, which reads `%` as
     interpolation, so a percent-encoded URL (`?options=-csearch_path%3Dpincer`,
     a password with `%40`) set unescaped fails to parse. Escaped here, it
-    reaches `env.py` as written.
+    reaches `env.py` as written. A `?search_path=` in `url` is lifted into
+    `options`, as `get_sync_url` does for the configured one.
     """
     # Built programmatically rather than relying on alembic.ini's on-disk
     # `script_location` discovery, so migrations can run without an ini file
     # present on the filesystem next to wherever the package is installed.
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR).replace("%", "%%"))
-    cfg.set_main_option("sqlalchemy.url", (url or get_sync_url(db_path)).replace("%", "%%"))
+    resolved = lift_search_path(make_url(url)).render_as_string(hide_password=False) if url else get_sync_url(db_path)
+    cfg.set_main_option("sqlalchemy.url", resolved.replace("%", "%%"))
     return cfg
 
 

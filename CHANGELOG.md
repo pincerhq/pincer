@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### `search_path=` in `PINCER_DATABASE_URL`
+
+- `PINCER_DATABASE_URL` takes `?search_path=<schema>`, the same form as
+  `PINCER_WHATSAPP_SESSION_DB`. Pincer rewrites it into
+  `options=-c search_path=<schema>` for Alembic and the runtime.
+  Before, both drivers rejected it. `options=-csearch_path%3D<schema>` still
+  works. A URL that sets the schema both ways fails at startup.
+
 #### WhatsApp session in Postgres, and picking the account
 
 - `PINCER_WHATSAPP_SESSION_DB` stores the WhatsApp (whatsmeow) session in
@@ -1026,6 +1034,9 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Security
 
+- **soupsieve 2.9.2 → 4.1** (CVE-2026-126192, CVE-2026-126190). It comes in
+  only through beautifulsoup4 (via linkpreview), which allows any
+  `soupsieve>=1.6.1`.
 - **Dependencies bumped to clear 60 pip-audit advisories.** fastmcp 3.2.4 →
   3.4.10 in every workspace MCP server (GHSA-7xgj-8392-5q4r; 3.4.10 fixes the
   broken `fastmcp`/`fastmcp-slim` packaging split from 3.4.2), authlib 1.9.1,

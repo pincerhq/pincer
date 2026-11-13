@@ -72,7 +72,7 @@ services:
     # Point Pincer at it from the http services with:
     #   PINCER_DATABASE_URL=postgresql://pincer:pincer@postgres:5432/pincer
     # or, to keep Pincer's tables in an existing schema other than `public`:
-    #   PINCER_DATABASE_URL=postgresql://pincer:pincer@postgres:5432/pincer?options=-csearch_path%3Dpincer
+    #   PINCER_DATABASE_URL=postgresql://pincer:pincer@postgres:5432/pincer?search_path=pincer
 
   newsapi-mcp:
     extends:

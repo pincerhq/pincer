@@ -118,7 +118,7 @@ To keep the session out of the volume, store it in Postgres:
 PINCER_WHATSAPP_SESSION_DB="postgres://pincer_wa:secret@db:5432/pincer?sslmode=disable&search_path=whatsapp"
 ```
 
-- The value must be a `postgres://` or `postgresql://` URL. `search_path` picks the schema for the `whatsmeow_*` tables, and whatsmeow creates and migrates those tables itself. Pincer's Alembic migrations ignore any table named `whatsmeow_*`, so sharing Pincer's database (even its schema) is safe.
+- The value must be a `postgres://` or `postgresql://` URL. `search_path` picks the schema for the `whatsmeow_*` tables, and whatsmeow creates and migrates those tables itself. Pincer's Alembic migrations ignore any table named `whatsmeow_*`, so sharing Pincer's database (even its schema) is safe. `PINCER_DATABASE_URL` takes the same `&search_path=<schema>` for Pincer's own tables.
 - Create the schema once, and preferably a dedicated role that can only touch it:
   ```sql
   CREATE ROLE pincer_wa LOGIN PASSWORD 'secret';

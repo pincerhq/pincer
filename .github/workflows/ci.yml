@@ -127,10 +127,11 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
-  # Combines the pincer legs' coverage data into one report per commit.
-  # Codecov failures are non-fatal, so `checks` does not wait on this job.
+  # Combines the pincer legs' and the postgres job's coverage data into one
+  # report per commit (tests/db runs only in the postgres job). Codecov
+  # failures are non-fatal, so `checks` does not wait on this job.
   coverage:
-    needs: [changes, pincer]
+    needs: [changes, pincer, postgres]
     if: always() && needs.pincer.result != 'skipped' && needs.pincer.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
@@ -173,13 +174,25 @@ jobs:
           --health-retries 10
     env:
       PINCER_TEST_PG_URL: postgresql://postgres:pincer@localhost:5432/postgres
+      COVERAGE_FILE: .coverage.postgres
+      COVERAGE_CORE: sysmon
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
 
       - name: Database layer tests (SQLite + Postgres)
-        run: uv run pytest tests/db tests/test_db_migrations.py tests/test_schema_drift.py -v --no-cov
+        run: >-
+          uv run pytest tests/db tests/test_db_migrations.py tests/test_schema_drift.py -v
+          --cov=pincer --cov-report=
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-postgres
+          path: .coverage.postgres
+          include-hidden-files: true
+          if-no-files-found: ignore
 
   ms365-mcp:
     needs: changes

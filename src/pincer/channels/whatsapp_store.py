@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from pincer.config.channels import is_postgres_url
+from pincer.db.engine import escape_option_value
 
 try:
     from neonize.utils import build_jid
@@ -73,11 +74,6 @@ def _libpq_keywords() -> frozenset[str]:
     return _libpq_keywords_cache
 
 
-def _escape_option_value(value: str) -> str:
-    """Escape a value for libpq's `options` (space-separated, backslash escapes)."""
-    return value.replace("\\", "\\\\").replace(" ", "\\ ")
-
-
 def libpq_conninfo(url: str) -> tuple[str, str | None]:
     """Make a lib/pq session URL usable by libpq; return (url, search_path).
 
@@ -105,7 +101,7 @@ def libpq_conninfo(url: str) -> tuple[str, str | None]:
         elif key in known:
             kept.append((key, value))
         else:
-            settings.append(f"-c {key}={_escape_option_value(value)}")
+            settings.append(f"-c {key}={escape_option_value(value)}")
     if options or settings:
         kept.append(("options", " ".join(options + settings)))
     conninfo = urlunsplit(parts._replace(query=urlencode(kept, quote_via=quote)))

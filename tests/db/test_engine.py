@@ -25,6 +25,7 @@ from pincer.db.engine import (
     get_engine,
     get_sync_url,
     init_database,
+    lift_search_path,
     to_async_url,
 )
 
@@ -164,6 +165,62 @@ def test_a_url_without_options_adds_nothing_to_the_connection():
     """No schema named, nothing sent: Postgres's own `search_path` applies,
     including any `ALTER ROLE ... SET search_path` an operator has set."""
     assert _asyncpg_connect_args("postgresql+asyncpg://u@h/d")[1] == {}
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("search_path=pincer", {"options": "-c search_path=pincer"}),
+        ("sslmode=require&search_path=pincer", {"sslmode": "require", "options": "-c search_path=pincer"}),
+        (
+            "options=-cstatement_timeout%3D5s&search_path=a,b",
+            {"options": "-cstatement_timeout=5s -c search_path=a,b"},
+        ),
+        ("search_path=a,%20b", {"options": "-c search_path=a,\\ b"}),
+        ("sslmode=require", {"sslmode": "require"}),
+    ],
+)
+def test_a_search_path_parameter_is_lifted_into_options(query, expected):
+    """The lib/pq spelling `PINCER_WHATSAPP_SESSION_DB` takes works here too:
+    neither libpq nor asyncpg knows `search_path`, both know `options`."""
+    assert dict(lift_search_path(make_url(f"postgresql://u@h/d?{query}")).query) == expected
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "search_path=a&options=-csearch_path%3Db",
+        "search_path=a&options=-c%20search_path%3Db",
+        "search_path=a&options=--search_path%3Db",
+        "search_path=a&search_path=b",
+        "search_path=%20",
+    ],
+)
+def test_an_ambiguous_or_empty_search_path_is_refused(query):
+    with pytest.raises(ValueError, match="search_path"):
+        lift_search_path(make_url(f"postgresql://u@h/d?{query}"))
+
+
+def test_a_search_path_url_is_lifted_for_alembic_and_accepted_by_asyncpg(monkeypatch, tmp_path):
+    """Both drivers get the same `options`: psycopg from the sync URL, asyncpg
+    from the DSN `_asyncpg_connect_args` rebuilds from the runtime one."""
+    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u:p@h/d?sslmode=require&search_path=pincer")
+    sync = make_url(get_sync_url(tmp_path / "p.db"))
+    assert dict(sync.query) == {"sslmode": "require", "options": "-c search_path=pincer"}
+    assert make_url(build_config(tmp_path / "p.db").get_main_option("sqlalchemy.url")) == sync
+    target, connect_args = _asyncpg_connect_args(get_database_url(tmp_path / "p.db"))
+    assert dict(target.query) == {}
+    from urllib.parse import parse_qs, urlsplit
+
+    assert parse_qs(urlsplit(connect_args["dsn"]).query) == {
+        "sslmode": ["require"],
+        "options": ["-c search_path=pincer"],
+    }
+
+
+def test_an_explicit_alembic_url_has_its_search_path_lifted(tmp_path):
+    cfg = build_config(tmp_path / "p.db", "postgresql+psycopg://u@h/d?search_path=pincer")
+    assert dict(make_url(cfg.get_main_option("sqlalchemy.url")).query) == {"options": "-c search_path=pincer"}
 
 
 def test_a_key_asyncpg_connect_actually_accepts_reaches_it_unmoved():
@@ -409,11 +466,14 @@ async def test_init_database_migrates_the_configured_database_and_names_it(monke
         await dispose_engines()
 
 
-@pytest.mark.parametrize("schema", [None, "pincer_alt"])
-async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monkeypatch, tmp_path, schema):
-    """`?options=-csearch_path%3D<schema>` puts the migrations and the runtime
-    in that schema; without it, tables land in `public` as they always have.
-    `migration_url` is a throwaway database, dropped with the schema in it."""
+@pytest.mark.parametrize(
+    ("schema", "spelling"), [(None, None), ("pincer_alt", "options"), ("pincer_alt", "search_path")]
+)
+async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monkeypatch, tmp_path, schema, spelling):
+    """`?search_path=<schema>` or `?options=-csearch_path%3D<schema>` puts the
+    migrations and the runtime in that schema; without either, tables land in
+    `public` as they always have. `migration_url` is a throwaway database,
+    dropped with the schema in it."""
     if not migration_url.startswith("postgresql"):
         pytest.skip("SQLite has no schemas")
     import sqlalchemy as sa
@@ -428,7 +488,10 @@ async def test_the_schema_named_in_the_url_holds_every_table(migration_url, monk
         if schema is not None:
             with admin.connect() as conn:
                 conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
-            url = url.update_query_dict({"options": f"-csearch_path={schema}"})
+            if spelling == "search_path":
+                url = url.update_query_dict({"search_path": schema})
+            else:
+                url = url.update_query_dict({"options": f"-csearch_path={schema}"})
         monkeypatch.setenv("PINCER_DATABASE_URL", url.render_as_string(hide_password=False))
         try:
             runtime_url = await init_database(tmp_path / "unused.db")
