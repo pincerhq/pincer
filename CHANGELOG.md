@@ -1034,6 +1034,9 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Security
 
+- **soupsieve 2.9.2 → 4.1** (CVE-2026-126192, CVE-2026-126190). It comes in
+  only through beautifulsoup4 (via linkpreview), which allows any
+  `soupsieve>=1.6.1`.
 - **Dependencies bumped to clear 60 pip-audit advisories.** fastmcp 3.2.4 →
   3.4.10 in every workspace MCP server (GHSA-7xgj-8392-5q4r; 3.4.10 fixes the
   broken `fastmcp`/`fastmcp-slim` packaging split from 3.4.2), authlib 1.9.1,
