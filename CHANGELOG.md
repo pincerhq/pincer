@@ -57,6 +57,13 @@ Always on, without setting anything:
   the limit a failed compaction changes nothing and is tried again after a later turn. At startup
   the limits must run `PINCER_COMPACT_HARD_TOKENS` > `PINCER_COMPACT_AT_TOKENS` >
   `PINCER_COMPACT_TO_TOKENS`.
+  A summary of the earlier conversation at the start of the history stays when the oldest turns
+  are dropped.
+- When an endpoint rejects a request as too long for the model (Anthropic "prompt is too long",
+  OpenAI and Azure `context_length_exceeded`, a request over the size limit), the turn drops about
+  the oldest half of the history (whole turns, the summary kept) and retries, up to four times.
+  Compaction only runs after a request succeeded, so without this a history no request can carry
+  would fail on every later message.
 - `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
   warning at startup and `pincer doctor` reports it. Remove it from `.env`.
 

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
-from pincer.core.compaction import LastRequest, SentRequest
+from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, leading_summary
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -118,6 +118,19 @@ _SELECTION_EXTRA_CHARS = 500
 _LOAD_SKILL_TOOL = "load_skill"
 _CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
+# How many times a turn cuts its history in half and retries when the endpoint says it is too long
+_MAX_SHRINK_ATTEMPTS = 4
+# What the providers say when a request is over the model's window (lowercase): Anthropic's 400
+# "prompt is too long" and its 413 on size, OpenAI / Azure / vLLM "context_length_exceeded" and its
+# wordings, Groq's "reduce the length"
+_CONTEXT_LENGTH_PHRASES = (
+    "prompt is too long",
+    "context_length_exceeded",
+    "maximum context length",
+    "exceeds the context window",
+    "reduce the length of the messages",
+    "maximum allowed number of bytes",
+)
 # The result that closes a tool call whose turn died before the tool finished (sent as an error)
 _INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
@@ -596,6 +609,13 @@ def _is_tool_pair_error(e: Exception) -> bool:
     )
 
 
+def _is_context_length_error(e: Exception) -> bool:
+    """True when a provider rejected the request because it is over the model's context window (or size
+    limit), whatever its wording (see `_CONTEXT_LENGTH_PHRASES`)."""
+    message = str(e).lower()
+    return any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES)
+
+
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     """Remove orphaned tool_use and tool_result messages.
 
@@ -792,14 +812,21 @@ class Agent:
         for result in _interrupted_results(session.messages):
             await self._sessions.add_message(session, result)
 
-    async def _recover_from_tool_pair_error(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
+    async def _recover_from_rejected_history(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
         """Decide how a turn continues after `error`, given `attempts` retries so far.
 
-        Retries while stripping still changes the history. Once it can't, the
-        same request would fail on every later turn too — e.g. Anthropic's
-        "must define tools" for a history with tool pairs sent with no tools —
-        so the session is cleared instead.
+        A history over the endpoint's window is cut in half (see `_shrink_history`) and sent again, up
+        to `_MAX_SHRINK_ATTEMPTS` times: compaction runs only after a request succeeded, so nothing else
+        would ever shrink a history no request can carry.
+
+        A tool pairing error retries while stripping still changes the history. Once it can't, the
+        same request would fail on every later turn too — e.g. Anthropic's "must define tools" for a
+        history with tool pairs sent with no tools — so the session is cleared instead.
         """
+        if _is_context_length_error(error):
+            if attempts < _MAX_SHRINK_ATTEMPTS and await self._shrink_history(session):
+                return _PairRecovery.RETRY
+            return _PairRecovery.RAISE
         if not _is_tool_pair_error(error):
             return _PairRecovery.RAISE
         if attempts < _MAX_SANITIZE_ATTEMPTS and await self._repair_tool_pairs(session):
@@ -809,6 +836,28 @@ class Agent:
         session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
         await self._sessions.save(session)
         return _PairRecovery.CLEARED
+
+    async def _shrink_history(self, session: Session) -> bool:
+        """Drop about the oldest half of the session's history (whole turns, the leading summary kept) and
+        save it. Runs inside the turn, which holds the session's lock, so it edits the session itself
+        (`SessionManager.cut` takes that lock). The photos only the dropped messages showed go with them.
+        False when no earlier turn can be dropped."""
+        cut = choose_halving_cut(session.messages)
+        if not cut:
+            logger.warning(
+                "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id
+            )
+            return False
+        keep = leading_summary(session.messages)
+        session.messages = [*([keep] if keep else []), *session.messages[cut:]]
+        session.updated_at = time.time()
+        await self._sessions.save(session)
+        logger.warning(
+            "Session %s: the endpoint rejected the history as too long; dropped the oldest %d messages",
+            session.session_id,
+            cut - (keep is not None),
+        )
+        return True
 
     @property
     def tool_registry(self) -> ToolRegistry:
@@ -1062,7 +1111,7 @@ class Agent:
                 # The image stays in the history for good (see `_image_contents`): dropping
                 # it would change the history under the turn's thinking blocks.
             except LLMError as e:
-                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                recovery = await self._recover_from_rejected_history(session, e, sanitize_attempts)
                 if recovery is _PairRecovery.RETRY:
                     sanitize_attempts += 1
                     continue
@@ -1548,7 +1597,7 @@ class Agent:
                             yield StreamChunk(StreamEventType.TEXT, event.text)
                 except Exception as e:
                     if isinstance(e, LLMError) and not step_text:
-                        recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                        recovery = await self._recover_from_rejected_history(session, e, sanitize_attempts)
                         if recovery is _PairRecovery.RETRY:
                             sanitize_attempts += 1
                             continue
@@ -1917,7 +1966,7 @@ class Agent:
                         llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
                     # CLEARED raises too: this utterance fails, but the cleared
                     # session lets the call's next one go through.
-                    if await self._recover_from_tool_pair_error(session, e, sanitize_attempts) is _PairRecovery.RETRY:
+                    if await self._recover_from_rejected_history(session, e, sanitize_attempts) is _PairRecovery.RETRY:
                         sanitize_attempts += 1
                         recover_pairs = True
                         break

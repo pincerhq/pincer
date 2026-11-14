@@ -208,6 +208,14 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
     return cut if cut > start else 0
 
 
+def choose_halving_cut(messages: list[LLMMessage]) -> int:
+    """How many of the oldest messages to drop so about half of the history's characters are left, on the
+    rules of `choose_hard_cut`. For a request the endpoint refused as too long: no request succeeded, so
+    there is no measured rate and no known window, and half is the step that is retried until it fits."""
+    total = sum(_chars(m) for m in messages)
+    return choose_hard_cut(messages, LastRequest(total, 1.0, 0), total // 2)
+
+
 def _follows_a_summary(kept: list[LLMMessage]) -> bool:
     """True when `kept` can follow a server compaction block: it is empty, or it starts with an
     assistant message. The API merges a first kept message of the summarized messages' last role
