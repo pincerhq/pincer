@@ -6,8 +6,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 from argon2 import PasswordHasher
+from rich.console import Console
 from typer.testing import CliRunner
 
+from pincer.cli import identity as identity_cli
 from pincer.cli.main import app
 from pincer.config import get_settings_relaxed
 from pincer.db.engine import dispose_engines, get_database_url
@@ -29,14 +31,16 @@ def _scratch_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PINCER_JWT_SECRET", "j" * 48)
     monkeypatch.setattr(credentials, "_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1))
+    # A fixed size, so rich neither wraps messages nor truncates table cells, whatever the worker's terminal state.
+    # Both dimensions are needed: with only a width, rich still falls back to 80 columns on a dumb terminal.
+    monkeypatch.setattr(identity_cli, "console", Console(width=200, height=50))
     get_settings_relaxed.cache_clear()
     yield
     get_settings_relaxed.cache_clear()
 
 
 def _run(*args: str, input: str | None = None):
-    # Wide enough that rich does not wrap the table cells under test.
-    return runner.invoke(app, ["identity", *args], input=input, env={"COLUMNS": "200"})
+    return runner.invoke(app, ["identity", *args], input=input)
 
 
 async def _login(name: str, password: str):
