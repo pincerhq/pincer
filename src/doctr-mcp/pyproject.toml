@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 telemetry = [
-    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@0.1.0"
+    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@0.2.1"
 ]
 dev = [
     "pytest>=8.3.0",

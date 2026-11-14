@@ -450,42 +450,103 @@ Server-specific variables:
 | `doctr-mcp` | `DOCTR_CACHE_DIR` | `~/.cache/doctr` | Model weight cache directory (read natively by docTR itself) |
 | `doctr-mcp` | `DOCTR_LOG_TOOL_REQUESTS` | `false` | Log every tool call's request/response payload (truncated) via FastMCP's `LoggingMiddleware` |
 | `doctr-mcp` | `DOCTR_LOG_MAX_PAYLOAD_LENGTH` | `2000` | Max characters of payload logged per call when the above is on |
-| All MCP servers | `OTEL_DSN` | — | OpenTelemetry collector DSN (optional, see [Telemetry](#telemetry)) |
+| All MCP servers | `TELEMETRY_UPTRACE_DSN` | — | Uptrace DSN (optional, see [Telemetry](#telemetry)) |
+| All MCP servers | `TELEMETRY_POSTHOG_DSN` | — | PostHog DSN (optional, see [Telemetry](#telemetry)) |
 
 ---
 
 ## Telemetry
 
-All bundled MCP servers can emit OpenTelemetry traces, metrics, and structured
-logs to an [Uptrace](https://uptrace.dev)-compatible OTLP collector. Telemetry is
-**disabled by default** and fully opt-in — no data leaves the process unless you
-set the DSN.
+The Pincer agent and all bundled MCP servers can emit OpenTelemetry traces,
+metrics and structured logs to [Uptrace](https://uptrace.dev) or
+[PostHog](https://posthog.com), through
+[pincer-telemetry](https://github.com/pincerhq/pincer-telemetry). Telemetry is
+**disabled by default** and fully opt-in: no data leaves the process unless a
+DSN is set.
 
-### MCP servers (`pomodoro-mcp`, `pincer-mcps`, `sqlite-vec-memory-mcp`, `doctr-mcp`)
+### Variables
 
-Set `OTEL_DSN` to your collector DSN before starting the server:
+Each provider has one DSN, with the token embedded in the URL. The provider is
+detected from the variable name; there is no separate provider switch.
+
+| Component | Uptrace | PostHog |
+|-----------|---------|---------|
+| Pincer agent | `PINCER_TELEMETRY_UPTRACE_DSN` | `PINCER_TELEMETRY_POSTHOG_DSN` |
+| Pincer agent, `pincer.toml` `[telemetry]` | `uptrace_dsn` | `posthog_dsn` |
+| All MCP servers (`pomodoro-mcp`, `pincer-mcps`, `sqlite-vec-memory-mcp`, `doctr-mcp`) | `TELEMETRY_UPTRACE_DSN` | `TELEMETRY_POSTHOG_DSN` |
+
+DSN formats:
+
+- **Uptrace:** `https://<token>@api.uptrace.dev?grpc=4317` (gRPC; drop `?grpc=…` for OTLP/HTTP, or use `http://<token>@collector.internal:4318` for a self-hosted collector)
+- **PostHog:** `https://<phc_api_key>@us.i.posthog.com`, or `https://<phc_api_key>@eu.i.posthog.com` for the EU region
+
+### Rules
+
+The agent applies these rules to its two DSN settings, and each MCP server to
+its two `TELEMETRY_*_DSN` variables:
+
+- **Nothing set** (or only empty values, as docker-compose `${VAR}` produces) → telemetry off.
+- **One DSN set** → that provider.
+- **Both DSNs set** → error. For the agent this counts across sources, e.g. one DSN in `pincer.toml` and the other in the environment.
+- **Malformed DSN** (no scheme, host or token/key; a PostHog DSN with a path or query) → error.
+- **Any other name**, e.g. `TELEMETRY_PROVIDER` or a misspelt variable → ignored, so check the spelling if nothing arrives.
+
+An error stops the process before anything else starts: `pincer run` exits 1
+with `Telemetry configuration error: …`, and an MCP server exits non-zero.
+Messages name the variables, never their values. `pincer doctor` reports the
+same problems as a critical `telemetry_config` check.
+
+The removed variables are not read any more:
+
+- `PINCER_TELEMETRY_DSN` (environment or `.env`), and `telemetry_dsn` or `[telemetry] dsn` in `pincer.toml` / `pincer.local.toml`: `pincer run` refuses to start while it is set and tells you to rename it to `PINCER_TELEMETRY_UPTRACE_DSN`.
+- `OTEL_DSN`: MCP servers log a warning naming `TELEMETRY_UPTRACE_DSN` and start without telemetry.
+
+### Pincer agent
 
 ```bash
-OTEL_DSN=https://<token>@uptrace.dev/<project_id> python -m pomodoro_server
+PINCER_TELEMETRY_UPTRACE_DSN=https://<token>@api.uptrace.dev?grpc=4317 pincer run
+```
+
+Set the variable in the environment or `.env` (the docker-compose agent
+services read it from `.env`), or in `pincer.toml` / `pincer.local.toml`. The
+environment and `.env` win over the TOML files, and `pincer.local.toml` wins
+over `pincer.toml`:
+
+```toml
+# pincer.local.toml
+[telemetry]
+uptrace_dsn = "https://<token>@api.uptrace.dev?grpc=4317"
+# or, instead (never both): posthog_dsn = "https://<phc_api_key>@eu.i.posthog.com"
+```
+
+Error messages name the environment variables even when the value came from
+TOML. Install the telemetry extra:
+
+```bash
+pip install "pincer-agent[telemetry]"
+```
+
+### MCP servers
+
+```bash
+TELEMETRY_POSTHOG_DSN=https://<phc_api_key>@eu.i.posthog.com python -m pomodoro_server
 ```
 
 For Docker / docker-compose, add it to the service environment:
 
 ```yaml
 environment:
-  - OTEL_DSN=https://<token>@uptrace.dev/<project_id>
+  - TELEMETRY_UPTRACE_DSN=${TELEMETRY_UPTRACE_DSN}
 ```
 
-When `OTEL_DSN` is set and the `[telemetry]` extra is installed, each server:
+When a DSN is set and the `[telemetry]` extra is installed, each server:
 
 - Emits a trace per tool call (tool name logged at entry via `logger.info`)
 - Exports runtime metrics via a periodic OTLP reader
 - Routes Python logging through the OTel log pipeline
 
-When `OTEL_DSN` is unset or the extra is not installed the server starts normally
-— a warning is logged and execution continues without any telemetry.
-
-Install the telemetry extra for each package:
+When a `TELEMETRY_*` variable is set but the extra is not installed, the server
+logs a warning and starts without telemetry. Install the extra for each package:
 
 ```bash
 pip install "pomodoro-mcp[telemetry]"
@@ -493,33 +554,3 @@ pip install "pincer-mcps[telemetry]"
 pip install "sqlite-vec-memory-mcp[telemetry]"
 pip install "doctr-mcp[telemetry]"
 ```
-
-### Pincer agent
-
-The Pincer agent uses a **different** variable — `PINCER_TELEMETRY_DSN` — which
-can be set via environment or `pincer.toml`:
-
-```bash
-PINCER_TELEMETRY_DSN=https://<token>@uptrace.dev/<project_id> pincer run
-```
-
-```toml
-# pincer.toml
-telemetry_dsn = "https://<token>@uptrace.dev/<project_id>"
-```
-
-Install the telemetry extra:
-
-```bash
-pip install "pincer-agent[telemetry]"
-```
-
-### Variable summary
-
-| Component | Environment variable | `pincer.toml` key |
-|-----------|---------------------|-------------------|
-| `pomodoro-mcp` | `OTEL_DSN` | — |
-| `pincer-mcps` (all servers) | `OTEL_DSN` | — |
-| `sqlite-vec-memory-mcp` | `OTEL_DSN` | — |
-| `doctr-mcp` | `OTEL_DSN` | — |
-| Pincer agent | `PINCER_TELEMETRY_DSN` | `telemetry_dsn` |

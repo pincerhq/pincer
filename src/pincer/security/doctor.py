@@ -177,8 +177,9 @@ class SecurityDoctor:
         # Voice ElevenLabs (1 check, Sprint 4)
         report.checks.append(self._check_voice_elevenlabs_voices(settings))
         report.checks.append(self._check_voice_language_pairing(settings))
-        # Observability (2 checks, Sprint 9)
+        # Observability (3 checks, Sprint 9)
         report.checks.append(self._check_ops_alert_routing(settings))
+        report.checks.append(self._check_telemetry_config(settings))
         report.checks.append(self._check_voice_canary(settings))
         # Voice security hardening (4 checks, Sprint 8)
         report.checks.append(self._check_voice_webhook_signature(settings))
@@ -492,13 +493,15 @@ class SecurityDoctor:
         details = f"channel={channel or 'unset'}"
         if email:
             details += f", email fallback={email}"
-        if not getattr(settings, "telemetry_dsn", None):
+        from pincer.observability.telemetry import POSTHOG_ENV, UPTRACE_ENV, telemetry_configured
+
+        if not telemetry_configured(settings):
             return CheckResult(
                 name="ops_alert_routing",
                 status=CheckStatus.WARNING,
-                message=f"Alerts route to {details}, but PINCER_TELEMETRY_DSN is unset — "
+                message=f"Alerts route to {details}, but no {UPTRACE_ENV} or {POSTHOG_ENV} is set — "
                 "no metrics dashboard, only alerts and the CLI",
-                fix_hint="Set PINCER_TELEMETRY_DSN to your OTLP collector for the Voice Ops dashboard",
+                fix_hint=f"Set {UPTRACE_ENV} (or {POSTHOG_ENV}) for the Voice Ops dashboard",
                 category="observability",
             )
         return CheckResult(
@@ -507,6 +510,47 @@ class SecurityDoctor:
             message=f"Ops alerts route to {details}; metrics export configured",
             category="observability",
         )
+
+    def _check_telemetry_config(self, cfg: Settings | None = None) -> CheckResult:
+        """`pincer run` refuses to start on a bad telemetry config; report it rather than crash."""
+        from pincer.observability.telemetry import (
+            LEGACY_DSN_ENV,
+            POSTHOG_ENV,
+            UPTRACE_ENV,
+            TelemetryState,
+            inspect_telemetry,
+        )
+
+        setup = inspect_telemetry(self._cfg(cfg), self.config_dir)
+
+        def result(status: CheckStatus, message: str, fix_hint: str = "") -> CheckResult:
+            return CheckResult(
+                name="telemetry_config", status=status, message=message, fix_hint=fix_hint, category="observability"
+            )
+
+        match setup.state:
+            case TelemetryState.LEGACY:
+                return result(
+                    CheckStatus.CRITICAL,
+                    setup.message,
+                    f"Rename {LEGACY_DSN_ENV} to {UPTRACE_ENV} ([telemetry] uptrace_dsn in pincer.toml)",
+                )
+            case TelemetryState.INVALID:
+                return result(
+                    CheckStatus.CRITICAL,
+                    f"Telemetry configuration error: {setup.message} — `pincer run` refuses to start",
+                    f"Set exactly one of {UPTRACE_ENV} or {POSTHOG_ENV}, in the documented DSN format",
+                )
+            case TelemetryState.NOT_INSTALLED:
+                return result(
+                    CheckStatus.WARNING,
+                    "A telemetry DSN is set but pincer-telemetry is not installed — nothing is exported",
+                    'pip install "pincer-agent[telemetry]"',
+                )
+            case TelemetryState.ENABLED:
+                assert setup.provider is not None
+                return result(CheckStatus.PASS, f"Telemetry exports to {setup.provider.name}")
+        return result(CheckStatus.SKIPPED, "Telemetry not configured")
 
     def _check_voice_canary(self, cfg: Settings | None = None) -> CheckResult:
         """T9.2: the canary is the probe that catches provider outages first."""

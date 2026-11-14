@@ -44,6 +44,35 @@ Always on, without setting anything:
 
 ### Changed
 
+#### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.2.1)
+
+Telemetry moves to pincer-telemetry 0.2.1, which adds PostHog next to Uptrace.
+Each provider has one DSN with the token in the URL, and the provider is picked
+from the variable name.
+
+> **Breaking — action required after upgrading.**
+>
+> 1. **Agent:** `PINCER_TELEMETRY_DSN` (`telemetry_dsn`) is replaced by
+>    `PINCER_TELEMETRY_UPTRACE_DSN` or `PINCER_TELEMETRY_POSTHOG_DSN`.
+>    `pincer run` refuses to start while the old variable is set (environment,
+>    `.env` or `pincer.toml`); `pincer doctor` reports it as critical.
+> 2. **MCP servers:** `OTEL_DSN` is replaced by `TELEMETRY_UPTRACE_DSN` or
+>    `TELEMETRY_POSTHOG_DSN`. A leftover `OTEL_DSN` logs a warning and the
+>    server starts without telemetry.
+> 3. The docker-compose agent services no longer map `PINCER_TELEMETRY_DSN=${OTEL_DSN}`;
+>    set `PINCER_TELEMETRY_*_DSN` in `.env`.
+
+- DSN formats: Uptrace `https://<token>@api.uptrace.dev?grpc=4317`;
+  PostHog `https://<phc_api_key>@us.i.posthog.com` (or `eu.i.posthog.com`).
+- Both DSNs set or a malformed DSN is an error that stops the process before
+  anything else starts. Nothing set keeps telemetry off; other
+  `PINCER_TELEMETRY_*` / `TELEMETRY_*` names are ignored. See
+  [Telemetry](docs/core-components/mcp-servers.md#telemetry).
+- The agent DSNs can also be set in a new `[telemetry]` section of
+  `pincer.toml` / `pincer.local.toml` (`uptrace_dsn`, `posthog_dsn`), below
+  the environment and `.env`.
+- `pincer doctor` adds a `telemetry_config` check.
+
 #### One storage root, with `skills/` and `workspace/` under it
 
 - Everything the agent reads and writes now lives in `<storage root>/workspace`:

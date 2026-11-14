@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 class APISettings(BaseModel):
@@ -20,9 +20,15 @@ class APISettings(BaseModel):
     webhook_secret: SecretStr = Field(default=SecretStr(""), description="Webhook HMAC secret")
 
     # ── Telemetry ─────────────────────────────────────────
-    telemetry_dsn: AnyHttpUrl | None = Field(
+    # One provider at most; `pincer.observability.telemetry` validates the pair.
+    telemetry_uptrace_dsn: SecretStr | None = Field(
         None,
-        description="OpenTelemetry DSN url with token sent as uptrace-dsn header (None = telemetry disabled)",
+        description="Uptrace DSN, https://<token>@api.uptrace.dev?grpc=4317 (unset = no Uptrace export)",
+    )
+    telemetry_posthog_dsn: SecretStr | None = Field(
+        None,
+        description="PostHog DSN, https://<phc_api_key>@us.i.posthog.com or eu.i.posthog.com "
+        "(unset = no PostHog export)",
     )
 
     # ── Security ──────────────────────────────────────────

@@ -44,7 +44,6 @@ corresponds to (`legacy_identity_map_toml`).
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -227,20 +226,10 @@ def legacy_identity_map(config_dir: Path | None = None) -> str | None:
     Settings ignores unknown variables, so without this check a deployment
     that relied on the variable to gate its channels would silently open.
     """
-    for key, value in os.environ.items():
-        if key.upper() == LEGACY_IDENTITY_MAP_ENV and value.strip():
-            return value
-    from dotenv import dotenv_values
+    from pincer.config.legacy_env import find_env_setting
 
-    base_dir = config_dir or Path.cwd()
-    # The files and order `Settings.model_config.env_file` names.
-    for env_file in (base_dir.parent / ".env", base_dir / ".env"):
-        if not env_file.is_file():
-            continue
-        for key, env_value in dotenv_values(env_file).items():
-            if key.upper() == LEGACY_IDENTITY_MAP_ENV and env_value and env_value.strip():
-                return env_value
-    return None
+    found = find_env_setting(LEGACY_IDENTITY_MAP_ENV, config_dir)
+    return found.value if found else None
 
 
 def _parse_legacy_entry(entry: str) -> tuple[str | None, list[tuple[str, str]]]:

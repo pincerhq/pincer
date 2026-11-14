@@ -549,6 +549,15 @@ wheels = [
 ]
 
 [[package]]
+name = "backoff"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/d7/5bbeb12c44d7c4f2fb5b56abce497eb5ed9f34d85701de869acedd602619/backoff-2.2.1.tar.gz", hash = "sha256:03f829f5bb1923180821643f8753b0502c3b682293992485b0eef2807afa5cba", size = 17001, upload-time = "2022-10-05T19:19:32.061Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/73/b6e24bd22e6720ca8ee9a85a0c4a2971af8497d8f3193fa05390cbd46e09/backoff-2.2.1-py3-none-any.whl", hash = "sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8", size = 15148, upload-time = "2022-10-05T19:19:30.546Z" },
+]
+
+[[package]]
 name = "bandit"
 version = "1.9.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1057,7 +1066,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "opencv-python-headless", specifier = ">=4.5.0,<5.0.0" },
     { name = "pillow", specifier = ">=10.1.0" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.2.1" },
     { name = "pydantic", specifier = ">=2.4.1,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
@@ -3392,7 +3401,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.60.0" },
     { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "tasks-redis", "postgres", "remote-skills"], marker = "extra == 'all'" },
     { name = "pincer-mcps", marker = "extra == 'mcp'", editable = "src/pincer-mcps" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.2.1" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49.0" },
     { name = "pomodoro-mcp", marker = "extra == 'mcp'", editable = "src/pomodoro-mcp" },
     { name = "protobuf", specifier = ">=7.34.1,<8.0" },
@@ -3460,7 +3469,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastmcp", specifier = "==3.4.10" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.2.1" },
     { name = "pydantic", specifier = ">=2.4.1,<2.13" },
     { name = "tavily-python", specifier = ">=0.5.0" },
     { name = "youtube-transcript-api", specifier = ">=0.6.3" },
@@ -3469,13 +3478,14 @@ provides-extras = ["telemetry"]
 
 [[package]]
 name = "pincer-telemetry"
-version = "0.1.0"
-source = { git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0#b5c8b7821a6dd7a82ab05f571c1a251ee1a94519" }
+version = "0.2.1"
+source = { git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.2.1#31b3e40a87e9a9b985bffa361fbd289c46362eac" }
 dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-instrumentation-logging" },
     { name = "opentelemetry-sdk" },
+    { name = "posthog", extra = ["async"] },
 ]
 
 [[package]]
@@ -3535,11 +3545,31 @@ telemetry = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastmcp", specifier = "==3.4.10" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.2.1" },
     { name = "pydantic", specifier = ">=2.4.1,<2.13" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 provides-extras = ["telemetry"]
+
+[[package]]
+name = "posthog"
+version = "7.91.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "backoff" },
+    { name = "distro" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/50/1acd1a03d0fb49b5b9c7617ec1eec7df86edf475538dec4e18d906166cab/posthog-7.91.1.tar.gz", hash = "sha256:e4b3d34854860d814c04b276057c52282bab8fa0d1636d01e44868b32037649c", size = 1000112, upload-time = "2026-11-13T14:22:48.829Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/1f/90c26e72e23cfae827dcff7a76ecad623f1a447d613079fbd0bc1c345c06/posthog-7.91.1-py3-none-any.whl", hash = "sha256:22ce67d6ea2adb523920edb00033a8c49377704c523513f6afe168eded5e0b98", size = 1150356, upload-time = "2026-11-13T14:22:46.537Z" },
+]
+
+[package.optional-dependencies]
+async = [
+    { name = "httpx" },
+]
 
 [[package]]
 name = "primp"
@@ -4666,7 +4696,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastembed", specifier = ">=0.4.0" },
     { name = "fastmcp", specifier = "==3.4.10" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.2.1" },
     { name = "pydantic", specifier = ">=2.4.1,<2.13" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
     { name = "uvicorn", specifier = ">=0.34.0" },

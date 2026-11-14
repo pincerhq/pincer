@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from pincer.config.api import APISettings
 from pincer.config.channels import ChannelSettings
@@ -14,6 +14,7 @@ from pincer.config.llm import LLMSettings
 from pincer.config.mcp import MCPSettings
 from pincer.config.observability import ObservabilitySettings
 from pincer.config.tasks import TaskSettings
+from pincer.config.telemetry import TelemetryTomlSource
 from pincer.config.tools import ToolSettings
 from pincer.core.log_once import LogOncePerKey
 from pincer.integrations.google.token_source import CREDENTIALS_FILE, TOKEN_FILES
@@ -45,6 +46,18 @@ class Settings(
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # The [telemetry] section of pincer.toml, below the environment and .env.
+        return (init_settings, env_settings, dotenv_settings, TelemetryTomlSource(settings_cls), file_secret_settings)
 
     @model_validator(mode="after")
     def validate_api_keys(self) -> Settings:

@@ -19,7 +19,6 @@ x-pincer-base: &pincer-base
     - PINCER_MCP_SERVER_EXPORT_ENABLED=true
     - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
     - PINCER_MCP_SERVER_EXPORT_PORT=18800
-    - PINCER_TELEMETRY_DSN=${OTEL_DSN}
   volumes:
     - pincer-data:/app/data
     # Optional: mount pincer.toml to configure MCP client servers
@@ -196,7 +195,6 @@ services:
       - PINCER_MCP_SERVER_EXPORT_ENABLED=true
       - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
       - PINCER_MCP_SERVER_EXPORT_PORT=18800
-      - PINCER_TELEMETRY_DSN=${OTEL_DSN}
       - PINCER_TASK_BROKER=redis
       - PINCER_TASK_BROKER_URL=redis://redis:6379/0
     env_file: .env
@@ -255,7 +253,6 @@ services:
       - PINCER_MCP_SERVER_EXPORT_ENABLED=true
       - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
       - PINCER_MCP_SERVER_EXPORT_PORT=18800
-      - PINCER_TELEMETRY_DSN=${OTEL_DSN}
       - PINCER_TASK_BROKER=redis
       - PINCER_TASK_BROKER_URL=redis://redis:6379/0
     env_file: .env

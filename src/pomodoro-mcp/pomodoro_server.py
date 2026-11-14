@@ -6,6 +6,7 @@ A Model Context Protocol server for managing Pomodoro sessions.
 import argparse
 import json
 import logging
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -502,21 +503,37 @@ async def pomodoro_settings(ctx: Context | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    import os
+def _init_telemetry_from_env() -> None:
+    """Start telemetry from ``TELEMETRY_UPTRACE_DSN`` / ``TELEMETRY_POSTHOG_DSN``; off when neither is set.
 
+    Other ``TELEMETRY_*`` variables are ignored. A misconfiguration (both set, a
+    malformed DSN) raises ``TelemetryConfigError`` and stops the server before it
+    serves anything.
+    """
+    dsn_env = {k: os.environ[k] for k in ("TELEMETRY_UPTRACE_DSN", "TELEMETRY_POSTHOG_DSN") if k in os.environ}
+    if os.environ.get("OTEL_DSN"):
+        logger.warning("OTEL_DSN is no longer read — rename it to TELEMETRY_UPTRACE_DSN")
     try:
         from pincer_telemetry import init as _init_telemetry
-
-        _init_telemetry(project_name="pomodoro_mcp", version="0.1.0")
-        logger.info("Telemetry init success")
+        from pincer_telemetry import provider_from_prefixed_env
     except ImportError:
-        logger.warning(
-            "OTEL_DSN is set but pincer-telemetry is not installed — "
-            'skipping. Install with: pip install "pomodoro-mcp[telemetry]"'
-        )
+        if any(v.strip() for v in dsn_env.values()):
+            logger.warning(
+                'TELEMETRY_*_DSN is set but pincer-telemetry is not installed — install "pomodoro-mcp[telemetry]"'
+            )
+        return
+    provider = provider_from_prefixed_env("TELEMETRY_", dsn_env)  # config errors propagate: the server exits
+    if provider is None:
+        return
+    try:
+        _init_telemetry(provider, service_name="pomodoro_mcp", version="0.1.0")
+        logger.info("Telemetry init success (%s)", provider.name)
     except Exception as _tel_err:
         logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
+
+def main() -> None:
+    _init_telemetry_from_env()
 
     parser = argparse.ArgumentParser(description="Pomodoro MCP server (fastmcp)")
     parser.add_argument(
