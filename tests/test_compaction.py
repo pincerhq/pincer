@@ -655,4 +655,91 @@ def test_the_rate_counts_the_thinking_a_request_replayed():
 
     last = LastRequest.measure(5_000, sent, overhead_chars=0)
 
-    assert last.tokens_per_char == 1.0  # 5,000 tokens over 1,000 + 1,000 + 3,000 characters
+    assert last.tokens_per_char == 5_000 / 5_003  # 1,000 + 1,000 + 3,000 characters and the 3-character signature
+
+
+# ── what a request carries, beyond text: the size estimate behind every cut (PR #379 review) ─────────
+
+
+def _rate(prompt_tokens: int, *messages: LLMMessage) -> float:
+    return LastRequest.measure(prompt_tokens, list(messages), overhead_chars=0).tokens_per_char
+
+
+def test_a_photo_counts_as_the_characters_of_its_tokens():
+    from pincer.core.compaction import PHOTO_CHARS
+    from pincer.llm.base import ImageContent
+
+    photo = LLMMessage(
+        role=MessageRole.USER, content="u" * 1_000, images=[ImageContent.from_bytes(b"jpeg bytes", "image/jpeg")]
+    )
+
+    assert PHOTO_CHARS == 16_000  # an estimate (a photo at the 2,576 px cap is about 4,600 tokens)
+    assert _rate(17_000, photo) == 1.0  # 1,000 characters of text + one photo
+
+
+def test_a_compacted_openai_window_counts_its_encrypted_item_and_the_messages_it_keeps():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    window = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "w" * 2_000}]},
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000},
+    ]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    assert _rate(42_000, message) == 1.0  # not the notice's few characters
+
+
+def test_a_compaction_block_counts_its_content_and_signature():
+    block = {"type": "compaction", "content": "S" * 5_000, "signature": "G" * 3_000}
+    message = LLMMessage(role=MessageRole.SYSTEM, content="[summary]\n" + "S" * 5_000, raw=[block], wire="anthropic:x")
+
+    assert _rate(8_000, message) == 1.0
+
+
+def test_encrypted_reasoning_counts_but_the_text_and_calls_of_the_raw_output_do_not_count_twice():
+    answer = [{"type": "output_text", "text": "a" * 1_000}]
+    raw = [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "R" * 5_000},
+        {"type": "message", "role": "assistant", "content": answer},
+        {"type": "function_call", "call_id": "c1", "name": "search", "arguments": "{}"},
+    ]
+    call = ToolCall(id="c1", name="search", arguments={})
+    message = LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, tool_calls=[call], raw=raw, wire="openai:x")
+    calls = len(json.dumps([call.to_dict()]))
+
+    assert _rate(1_000 + calls + 5_000, message) == 1.0
+
+
+def test_an_anthropic_assistant_message_counts_its_thinking_once_beside_its_text_and_tool_calls():
+    call = ToolCall(id="toolu_1", name="search", arguments={"q": "x"})
+    raw = [
+        {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"},
+        {"type": "redacted_thinking", "data": "d" * 500},
+        {"type": "text", "text": "a" * 1_000},
+        {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {"q": "x"}},
+    ]
+    message = LLMMessage(
+        role=MessageRole.ASSISTANT, content="a" * 1_000, tool_calls=[call], raw=raw, wire="anthropic:x"
+    )
+    calls = len(json.dumps([call.to_dict()]))
+
+    assert _rate(1_000 + calls + 3_003 + 500, message) == 1.0
+
+
+def test_the_cut_of_a_photo_turn_saves_what_the_photo_cost():
+    """The first turn holds the photo that made the prompt big: dropping that one turn is enough."""
+    from pincer.core.compaction import choose_hard_cut
+    from pincer.llm.base import ImageContent
+
+    photo = ImageContent.from_bytes(b"jpeg bytes", "image/jpeg")
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100, images=[photo]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(16_600, messages, overhead_chars=0)
+
+    assert choose_hard_cut(messages, last, target_tokens=1_000) == 2  # the photo turn only

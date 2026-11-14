@@ -76,13 +76,45 @@ MAX_SESSION_MESSAGES_DEPRECATED = (
 )
 # A cut of fewer messages is not worth a summary call (or re-summarizing a summary alone)
 _MIN_CUT = 2
+# What one photo weighs in `_chars`, as the characters of text with the same tokens. An ESTIMATE: a photo
+# at the 2,576 px cap is about 4,600 tokens (Claude's width x height / 750 rule), at ~3.5 characters per
+# token. A photo carries no text, and the rate calibration (`LastRequest.measure`) divides the prompt's
+# tokens over these characters, so an error here moves the rate and the cut estimate together.
+PHOTO_CHARS = 16_000
+# Blocks of an assistant message's raw output that only repeat its text and tool calls (Anthropic and
+# Responses names), and the fields of a block that are names, not payload
+_REPEATED_BLOCKS = frozenset({"text", "tool_use", "message", "function_call"})
+_NOT_PAYLOAD = frozenset({"type", "id", "name", "call_id", "role", "status"})
+
+
+def _text_len(value: Any) -> int:
+    """The characters of every string held in a stored provider block, without its names and types."""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(_text_len(item) for key, item in value.items() if key not in _NOT_PAYLOAD)
+    if isinstance(value, list):
+        return sum(_text_len(item) for item in value)
+    return 0
 
 
 def _chars(message: LLMMessage) -> int:
-    """The characters a request carries for `message`: its text, tool calls and the thinking it keeps."""
+    """The characters a request carries for `message`: its text, tool calls, photos and what the provider's
+    own output adds to them, all of which go out again on every request.
+
+    An assistant message's raw output adds its thinking (with signatures), redacted thinking and encrypted
+    reasoning; its text and tool-call blocks repeat `content` and `tool_calls`, so they are not counted
+    twice. A SYSTEM message (a summary, a compaction block, or a compacted window) is the larger of its
+    text and its raw: a window's text is a short notice while its items are what is sent.
+    """
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
-    thinking = sum(len(block.get("thinking", "")) + len(block.get("data", "")) for block in message.raw)
-    return len(message.context) + len(message.content) + len(calls) + thinking
+    if message.role == MessageRole.SYSTEM:
+        text = max(len(message.content), _text_len(message.raw))
+    else:
+        text = len(message.content) + sum(
+            _text_len(block) for block in message.raw if block.get("type") not in _REPEATED_BLOCKS
+        )
+    return len(message.context) + text + len(calls) + PHOTO_CHARS * len(message.images)
 
 
 @dataclass(frozen=True)
@@ -119,9 +151,9 @@ class LastRequest:
         """Calibrate on the messages the request sent, as they were sent: the session holds more
         by the time it is compacted (the reply, and what arrived since), PR #366.
 
-        Images carry prompt tokens but no characters, so a request that sent one gets a higher
-        rate and may summarize a little more. Photos now stay in the history, so every later
-        request of the conversation carries them too (issue #358).
+        A photo counts as `PHOTO_CHARS` and the provider's own output as what it holds (see `_chars`):
+        photos and reasoning stay in the history, so every later request of the conversation carries them
+        too (issue #358).
         """
         sent_chars = overhead_chars + sum(_chars(m) for m in sent)
         return cls(prompt_tokens, prompt_tokens / max(1, sent_chars), overhead_chars, tuple(sent), request)
