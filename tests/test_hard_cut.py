@@ -92,11 +92,11 @@ async def test_a_max_session_messages_still_set_is_warned_about_once_at_startup(
             "Value error, compact_to_tokens (80000) must be below compact_at_tokens (80000)",
         ),
         (
-            {"compact_at_tokens": 200_000},
+            {"compact_at_tokens": 200_000, "compact_hard_tokens": 160_000},
             "Value error, compact_hard_tokens (160000) must be above compact_at_tokens (200000)",
         ),
     ],
-    ids=["hard equal to at", "hard below at", "to equal to at", "at raised past the default hard"],
+    ids=["hard equal to at", "hard below at", "to equal to at", "an explicit hard below a raised at"],
 )
 def test_the_limits_must_run_hard_above_at_above_to(limits, error):
     from pydantic import ValidationError
@@ -113,15 +113,45 @@ def test_the_limits_default_to_160k_80k_50k_and_the_hard_one_is_read_from_the_en
     from pincer.config.tools import ToolSettings
 
     defaults = ToolSettings()
-    assert (defaults.compact_hard_tokens, defaults.compact_at_tokens, defaults.compact_to_tokens) == (
+    assert (defaults.compact_hard_limit, defaults.compact_at_tokens, defaults.compact_to_tokens) == (
         160_000,
         80_000,
         50_000,
     )
+    assert defaults.compact_hard_tokens is None  # not set: derived
     monkeypatch.setenv("PINCER_COMPACT_HARD_TOKENS", "200000")
     from pincer.config import Settings
 
-    assert Settings(_env_file=None).compact_hard_tokens == 200_000  # type: ignore[call-arg]
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert (settings.compact_hard_tokens, settings.compact_hard_limit) == (200_000, 200_000)
+
+
+@pytest.mark.parametrize(
+    ("at", "to", "limit"),
+    [
+        (80_000, 50_000, 160_000),
+        (100_000, 60_000, 200_000),
+        (200_000, 150_000, 400_000),
+        (1_000_000, 700_000, 2_000_000),
+    ],
+)
+def test_the_hard_limit_not_set_follows_compact_at_tokens(monkeypatch, at, to, limit):
+    """A deployment that raised the compaction limit for a big-context model (valid before the hard limit
+    existed) still starts: the limit not set is twice `compact_at_tokens`, and at least 160,000."""
+    from pincer.config import Settings
+
+    monkeypatch.setenv("PINCER_COMPACT_AT_TOKENS", str(at))
+    monkeypatch.setenv("PINCER_COMPACT_TO_TOKENS", str(to))
+
+    assert Settings(_env_file=None).compact_hard_limit == limit  # type: ignore[call-arg]
+
+
+def test_an_explicit_hard_limit_is_used_as_it_is():
+    from pincer.config.tools import ToolSettings
+
+    settings = ToolSettings(compact_at_tokens=100_000, compact_to_tokens=60_000, compact_hard_tokens=120_000)
+
+    assert settings.compact_hard_limit == 120_000
 
 
 # ── what compact() reports, exit by exit ─────────────────────────────────────
@@ -405,6 +435,21 @@ async def test_a_cut_is_discarded_when_the_history_changed_meanwhile(settings, s
 
     assert not await session_manager.cut(session, prefix)
     assert len(session.messages) == 12  # untouched
+
+
+async def test_the_built_compactor_cuts_past_the_derived_hard_limit_of_a_raised_compaction_limit(
+    settings, session_manager, cost_tracker
+):
+    from pincer.core.compaction import build_compactor
+
+    settings.compact_at_tokens, settings.compact_to_tokens = 200_000, 150_000  # the limit is 400,000: not set
+    session, sent = await _history(session_manager)
+    whole = list(session.messages)
+    async with ScriptedAnthropic(settings, [400, 400]) as scripted:
+        compactor = build_compactor(settings, _Router(scripted.provider), cost_tracker, session_manager, None)
+        assert await compactor.compact(session, _last(300_000, sent, server=True)) is CompactionOutcome.FAILED
+        assert session.messages == whole  # over 160,000 but under the derived limit: nothing is cut
+        assert await compactor.compact(session, _last(410_000, sent, server=True)) is CompactionOutcome.CUT
 
 
 async def test_the_built_compactor_enables_the_hard_cut_from_the_settings(settings, session_manager, cost_tracker):

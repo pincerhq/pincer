@@ -609,7 +609,7 @@ def build_compactor(
         is_free=router.is_free(provider),
         at_tokens=settings.compact_at_tokens,
         to_tokens=settings.compact_to_tokens,
-        hard_tokens=settings.compact_hard_tokens,
+        hard_tokens=settings.compact_hard_limit,
         # Empty means the global setting (the provider reads None that way), `none` sends nothing
         reasoning_effort=call_effort(settings.summary_reasoning_effort),
         thinking=call_thinking(settings.summary_thinking),

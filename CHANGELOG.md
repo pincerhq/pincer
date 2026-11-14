@@ -50,12 +50,13 @@ Always on, without setting anything:
   compacted by prompt tokens (`PINCER_COMPACT_AT_TOKENS`, default 80,000). Claude endpoints and
   the endpoints on the Responses API (`openai`, `azure`, `azure-openai`) compact on their own
   server; every other endpoint uses the summary model.
-- New `PINCER_COMPACT_HARD_TOKENS` (default 160,000). After a turn whose prompt went over it and
+- New `PINCER_COMPACT_HARD_TOKENS` (not set: twice `PINCER_COMPACT_AT_TOKENS`, at least 160,000, so
+  160,000 with the default 80,000; a raised `PINCER_COMPACT_AT_TOKENS` needs no second variable). After a turn whose prompt went over it and
   whose compaction failed (the call failed, no summary came back, or the daily budget was
   reached), the oldest whole turns are dropped until the prompt is about
   `PINCER_COMPACT_TO_TOKENS`, with a warning in the log. Their photos are deleted with them. Below
   the limit a failed compaction changes nothing and is tried again after a later turn. At startup
-  the limits must run `PINCER_COMPACT_HARD_TOKENS` > `PINCER_COMPACT_AT_TOKENS` >
+  the limits must run `PINCER_COMPACT_HARD_TOKENS` (when set) > `PINCER_COMPACT_AT_TOKENS` >
   `PINCER_COMPACT_TO_TOKENS`.
   A summary of the earlier conversation at the start of the history stays when the oldest turns
   are dropped.

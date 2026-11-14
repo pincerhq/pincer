@@ -12,6 +12,9 @@ from pincer.config.llm import (  # noqa: TC001 (pydantic resolves them at runtim
 )
 from pincer.utils.csv_list import split_csv
 
+# The emergency-cut limit when `compact_hard_tokens` is not set: twice `compact_at_tokens`, and at least this
+MIN_DERIVED_COMPACT_HARD_TOKENS = 160_000
+
 
 class ToolSettings(BaseModel):
     # ── Shell ─────────────────────────────────────────────
@@ -139,11 +142,12 @@ class ToolSettings(BaseModel):
         ge=1_000,
         description="The whole prompt a compaction aims for: the oldest messages become a summary until it fits",
     )
-    compact_hard_tokens: int = Field(
-        default=160_000,
+    compact_hard_tokens: int | None = Field(
+        default=None,
         ge=1_000,
         description="Emergency limit: after a turn whose last prompt was over this many tokens and whose "
-        "compaction failed, the oldest whole turns are dropped until the prompt is about compact_to_tokens",
+        "compaction failed, the oldest whole turns are dropped until the prompt is about compact_to_tokens. "
+        "Not set = twice compact_at_tokens, at least 160,000 (see compact_hard_limit)",
     )
 
     # ── Image Generation ──────────────────────────────────
@@ -254,9 +258,18 @@ class ToolSettings(BaseModel):
 
     @model_validator(mode="after")
     def check_compaction_hard_limit(self) -> Self:
-        if self.compact_hard_tokens <= self.compact_at_tokens:
+        if self.compact_hard_tokens is not None and self.compact_hard_tokens <= self.compact_at_tokens:
             raise ValueError(
                 f"compact_hard_tokens ({self.compact_hard_tokens}) must be above "
                 f"compact_at_tokens ({self.compact_at_tokens})"
             )
         return self
+
+    @property
+    def compact_hard_limit(self) -> int:
+        """The emergency-cut limit in force: `compact_hard_tokens`, or when it is not set twice
+        `compact_at_tokens` (at least 160,000), so raising the compaction limit for a big-context model
+        never needs a second variable."""
+        if self.compact_hard_tokens is not None:
+            return self.compact_hard_tokens
+        return max(MIN_DERIVED_COMPACT_HARD_TOKENS, 2 * self.compact_at_tokens)

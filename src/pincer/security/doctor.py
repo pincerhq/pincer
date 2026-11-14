@@ -2327,7 +2327,7 @@ class SecurityDoctor:
             "llm_compaction",
             CheckStatus.PASS,
             f"History compacted past {cfg.compact_at_tokens:,} prompt tokens, to about {cfg.compact_to_tokens:,}; "
-            f"the oldest turns are cut past {cfg.compact_hard_tokens:,} when compaction fails",
+            f"the oldest turns are cut past {cfg.compact_hard_limit:,} when compaction fails",
             category="llm",
         )
 

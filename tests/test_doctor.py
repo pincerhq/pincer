@@ -2443,6 +2443,12 @@ _MAX_SESSION_MESSAGES_WARNING = (
             "History compacted past 80,000 prompt tokens, to about 50,000; "
             "the oldest turns are cut past 160,000 when compaction fails",
         ),
+        (
+            {"compact_at_tokens": 200_000, "compact_to_tokens": 150_000},
+            CheckStatus.PASS,
+            "History compacted past 200,000 prompt tokens, to about 150,000; "
+            "the oldest turns are cut past 400,000 when compaction fails",
+        ),
         ({"summary_threshold": 20}, CheckStatus.WARNING, _SUMMARY_THRESHOLD_WARNING),
         ({"max_session_messages": 20}, CheckStatus.WARNING, _MAX_SESSION_MESSAGES_WARNING),
         (
