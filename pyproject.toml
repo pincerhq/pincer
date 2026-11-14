@@ -309,7 +309,7 @@ pincer-mcps = { workspace = true }
 sqlite-vec-memory-mcp = { workspace = true }
 ms365-mcp = { workspace = true }
 doctr-mcp = { workspace = true }
-pincer-telemetry = { git = "https://github.com/pincerhq/pincer-telemetry.git", branch = "main" }
+pincer-telemetry = { git = "https://github.com/pincerhq/pincer-telemetry.git", tag = "0.1.0" }
 
 # CPU-only torch/torchvision wheel index for doctr-mcp (src/doctr-mcp/pyproject.toml
 # points its `torch`/`torchvision` sources at this index) — `explicit = true` means it
