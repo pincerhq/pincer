@@ -8,6 +8,7 @@ import pytest
 from argon2 import PasswordHasher
 from typer.testing import CliRunner
 
+from pincer.cli._shared import console
 from pincer.cli.main import app
 from pincer.config import get_settings_relaxed
 from pincer.db.engine import dispose_engines, get_database_url
@@ -29,6 +30,9 @@ def _scratch_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PINCER_JWT_SECRET", "j" * 48)
     monkeypatch.setattr(credentials, "_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1))
+    # Under pytest-xdist every worker starts with COLUMNS=80, and the shared console reads it when it is
+    # created, so the COLUMNS=200 of `_run` would never reach it and rich would wrap the lines under test.
+    monkeypatch.setattr(console, "_width", 200)
     get_settings_relaxed.cache_clear()
     yield
     get_settings_relaxed.cache_clear()
