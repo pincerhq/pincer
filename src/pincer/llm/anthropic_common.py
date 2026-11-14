@@ -29,7 +29,7 @@ from pincer.llm.base import (
     rate_limit_backoff,
     transient_status,
 )
-from pincer.llm.capabilities import endpoint_capabilities, learn_from_error
+from pincer.llm.capabilities import BINDING_BETA, COMPACTION_BETA, endpoint_capabilities, learn_from_error
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn, thinking_is_bound
 from pincer.llm.replay import replayable_raw, wire_tag
 
@@ -51,10 +51,8 @@ _THINKING_TYPES = frozenset({"thinking", "redacted_thinking"})
 # minutes apart reuse them; the conversation uses top-level automatic caching (5 minutes)
 _ONE_HOUR: dict[str, str] = {"type": "ephemeral", "ttl": "1h"}
 _AUTOMATIC: dict[str, str] = {"type": "ephemeral"}
-# Anthropic's thinking-block binding controls (issue #358): `thinking.block_binding` is accepted with this beta
-_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
-# On-demand compaction (issue #358): the request that asks for a summary carries it
-_COMPACTION_BETA = "compact-2026-09-04"
+# On-demand compaction (issue #358): the request that asks for a summary carries the beta of
+# `COMPACTION_BETA`; `thinking.block_binding` (thinking-block binding controls) is accepted with `BINDING_BETA`
 _COMPACTION_PARAMETER = {"compaction": {"type": "summarize"}}
 
 
@@ -131,7 +129,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             "messages": self._convert_messages(messages, model),
         }
         if any(_has_compaction(message) for message in kwargs["messages"]):
-            kwargs["betas"] = [_COMPACTION_BETA]  # every request that carries the signed block needs it
+            kwargs["betas"] = [COMPACTION_BETA]  # every request that carries the signed block needs it
         # A per-call value (voice, summary) replaces the global setting; None keeps it.
         reasoning = resolve_and_warn(
             ReasoningWire.ANTHROPIC,
@@ -158,7 +156,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 **kwargs.get("thinking", {"type": "adaptive"}),
                 "block_binding": {"prefix_mismatch_behavior": behavior},
             }
-            kwargs["betas"] = [*kwargs.get("betas", []), _THINKING_BINDING_BETA]
+            kwargs["betas"] = [*kwargs.get("betas", []), BINDING_BETA]
         return kwargs
 
     async def complete(
@@ -269,7 +267,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         before it). A summary comes back as `stop_reason == "compaction"` with the block in `raw`.
         """
         kwargs = self._build_kwargs(messages, tools, model, None, None, system, reasoning_effort, thinking)
-        kwargs["betas"] = [_COMPACTION_BETA, *(b for b in kwargs.get("betas", []) if b != _COMPACTION_BETA)]
+        kwargs["betas"] = [COMPACTION_BETA, *(b for b in kwargs.get("betas", []) if b != COMPACTION_BETA)]
         kwargs["extra_body"] = dict(_COMPACTION_PARAMETER)
         caps = endpoint_capabilities(self._settings, self._provider_name)
         try:

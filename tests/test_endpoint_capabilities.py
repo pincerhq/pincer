@@ -41,6 +41,24 @@ def test_an_explicit_list_replaces_the_default(listed, expected):
     assert {name: endpoint_capabilities(settings, name).server_compaction for name in expected} == expected
 
 
+@pytest.mark.parametrize("field", ["responses_api_providers", "server_compaction_providers"])
+@pytest.mark.parametrize(
+    ("given", "parsed"),
+    [
+        ("openai, vllm", ["openai", "vllm"]),
+        ("none", []),
+        ("None", []),
+        (" NONE ", []),
+        ("none, openai", ["none", "openai"]),
+        (["openai"], ["openai"]),
+        ([], []),
+    ],
+    ids=["csv with spaces", "none", "None", "padded NONE", "none beside a name", "list", "empty list"],
+)
+def test_both_provider_lists_are_read_the_same_way(field, given, parsed):
+    assert getattr(_settings(**{field: given}), field) == parsed
+
+
 def test_none_in_the_environment_turns_the_list_off(monkeypatch):
     monkeypatch.setenv("PINCER_SERVER_COMPACTION_PROVIDERS", "None")
 

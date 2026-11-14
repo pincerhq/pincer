@@ -18,9 +18,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Anthropic beta names an endpoint can reject
-_COMPACTION_BETA = "compact-2026-09-04"
-_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+# Anthropic beta names an endpoint can reject: the one home of these strings, for the requests that send
+# them and for the fallback that recognises them in a rejection (the two must stay the same names)
+COMPACTION_BETA = "compact-2026-09-04"
+BINDING_BETA = "thinking-binding-controls-2026-08-01"
 # The two message shapes that prove an Anthropic-wire endpoint lacks a beta (deliberately not the bare
 # words: the prefix-check 400 names `block_binding` and `compaction_*` codes name `compaction`)
 _UNKNOWN_BETA = re.compile(r"Unexpected value\(s\) (.+?) for the `anthropic-beta` header")
@@ -40,7 +41,7 @@ class Feature(StrEnum):
 
 
 # The feature each beta name stands for
-_BETA_FEATURES = {_COMPACTION_BETA: Feature.SERVER_COMPACTION, _BINDING_BETA: Feature.DROP_BLOCK}
+_BETA_FEATURES = {COMPACTION_BETA: Feature.SERVER_COMPACTION, BINDING_BETA: Feature.DROP_BLOCK}
 # What the process logs once when an endpoint loses a feature, and what doctor lists
 _SWITCHED_OFF_LOG = {
     Feature.RESPONSES_API: "Endpoint %s answered %d on /responses: it has no Responses API, so it uses Chat "

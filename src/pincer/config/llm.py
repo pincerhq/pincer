@@ -160,19 +160,9 @@ class LLMSettings(BaseModel):
             return split_csv(v)
         return v
 
-    @field_validator("responses_api_providers", mode="before")
+    @field_validator("responses_api_providers", "server_compaction_providers", mode="before")
     @classmethod
-    def parse_responses_api_providers(cls, v: str | list[str]) -> list[str]:
-        """Comma-separated names. An empty environment variable is ignored by the settings loader,
-        so "none" is how the environment turns the list off."""
-        if isinstance(v, str):
-            names = split_csv(v)
-            return [] if [n.lower() for n in names] == ["none"] else names
-        return v
-
-    @field_validator("server_compaction_providers", mode="before")
-    @classmethod
-    def parse_server_compaction_providers(cls, v: str | list[str] | None) -> list[str] | None:
+    def parse_provider_lists(cls, v: str | list[str] | None) -> list[str] | None:
         """Comma-separated names. An empty environment variable is ignored by the settings loader,
         so "none" is how the environment turns the list off."""
         if isinstance(v, str):

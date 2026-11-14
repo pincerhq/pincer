@@ -167,6 +167,10 @@ async def test_a_turn_over_the_limit_asks_the_server_to_compact_exactly_what_the
 
     assert request["compaction"] == {"type": "summarize"}
     assert {key: value for key, value in request.items() if key != "compaction"} == turn
+    # the names sent are the names a rejecting endpoint is matched against (`learn_from_error`): one list
+    from pincer.llm.capabilities import _BETA_FEATURES
+
+    assert set(llm.headers[1]["anthropic-beta"].split(",")) == set(_BETA_FEATURES)
     assert llm.headers[1]["anthropic-beta"] == _BETAS
     assert llm.urls[1].path == "/v1/messages"
     assert llm.urls[1].params["beta"] == "true"
