@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -321,6 +322,8 @@ def test_slack_setup_warns_on_malformed_app_token(monkeypatch: pytest.MonkeyPatc
 
 # ── google ────────────────────────────────────────────────────────────────
 
+_CLIENT = {"installed": {"client_id": "cid.apps.googleusercontent.com", "client_secret": "cs"}}
+
 
 def test_google_setup_missing_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
@@ -330,11 +333,11 @@ def test_google_setup_missing_credentials(monkeypatch: pytest.MonkeyPatch, tmp_p
     result = runner.invoke(app, ["google", "setup"])
 
     assert result.exit_code == 1
-    assert "Missing:" in result.output
+    assert "No OAuth client found" in result.output
 
 
 def test_google_setup_declines_reauth(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_credentials.json").write_text(json.dumps(_CLIENT))
     (tmp_path / "google_workspace_token.json").write_text("{}")
 
     mock_settings = MagicMock()
@@ -348,7 +351,7 @@ def test_google_setup_declines_reauth(monkeypatch: pytest.MonkeyPatch, tmp_path)
 
 
 def test_google_setup_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_credentials.json").write_text(json.dumps(_CLIENT))
 
     mock_settings = MagicMock()
     mock_settings.google_oauth_dir.return_value = tmp_path
@@ -367,11 +370,11 @@ def test_google_setup_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None
 
     assert result.exit_code == 0
     assert "Google Workspace authenticated!" in result.output
-    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=True, client_config=None)
+    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=True, client_config=_CLIENT)
 
 
 def test_google_setup_reports_missing_oauthlib(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_credentials.json").write_text(json.dumps(_CLIENT))
 
     mock_settings = MagicMock()
     mock_settings.google_oauth_dir.return_value = tmp_path
@@ -385,7 +388,7 @@ def test_google_setup_reports_missing_oauthlib(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_google_setup_reports_auth_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_credentials.json").write_text(json.dumps(_CLIENT))
 
     mock_settings = MagicMock()
     mock_settings.google_oauth_dir.return_value = tmp_path
@@ -499,7 +502,7 @@ def test_google_setup_print_env_does_not_save(monkeypatch: pytest.MonkeyPatch, t
     import base64
     import json
 
-    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_credentials.json").write_text(json.dumps(_CLIENT))
     mock_settings = MagicMock()
     mock_settings.google_oauth_dir.return_value = tmp_path
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
@@ -517,7 +520,7 @@ def test_google_setup_print_env_does_not_save(monkeypatch: pytest.MonkeyPatch, t
     result = runner.invoke(app, ["google", "setup", "--print-env"])
 
     assert result.exit_code == 0
-    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=False, client_config=None)
+    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=False, client_config=_CLIENT)
     line = next(ln for ln in result.output.splitlines() if ln.startswith("PINCER_GOOGLE_TOKEN_JSON="))
     assert json.loads(base64.b64decode(line.split("=", 1)[1]))["refresh_token"] == "rt"
 
@@ -600,3 +603,34 @@ def test_google_setup_uses_env_client_config_without_file(monkeypatch: pytest.Mo
 
     assert result.exit_code == 0, result.output
     mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=True, client_config=client)
+
+
+def test_google_setup_print_env_takes_the_client_file_over_the_env_and_writes_no_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    """--print-env reads the client the way the runtime does (client_config: file first) and only prints."""
+    from pydantic import SecretStr
+
+    from pincer.integrations.google.token_source import decode_json_blob
+
+    (tmp_path / "google_credentials.json").write_text(json.dumps(_CLIENT))
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    mock_settings.google_credentials_json = SecretStr(json.dumps({"installed": {"client_id": "env-cid"}}))
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    mock_creds = MagicMock()
+    mock_creds.refresh_token = "rt"
+    mock_creds.to_json.return_value = json.dumps({"refresh_token": "rt", "client_id": "cid.apps.googleusercontent.com"})
+    mock_flow_cls = MagicMock()
+    mock_flow_cls.from_client_config.return_value.run_local_server.return_value = mock_creds
+    monkeypatch.setattr("google_auth_oauthlib.flow.InstalledAppFlow", mock_flow_cls)
+
+    result = runner.invoke(app, ["google", "setup", "--print-env"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_flow_cls.from_client_config.call_args.args[0] == _CLIENT
+    assert str(tmp_path / "google_credentials.json") in "".join(result.output.split())  # Rich wraps the path
+    assert not (tmp_path / "google_workspace_token.json").exists()
+    line = next(ln for ln in result.output.splitlines() if ln.startswith("PINCER_GOOGLE_TOKEN_JSON="))
+    assert decode_json_blob(line.split("=", 1)[1])["refresh_token"] == "rt"

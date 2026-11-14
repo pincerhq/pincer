@@ -119,7 +119,7 @@ TOOL_LATENCY_HINTS_S: dict[str, float] = {
     "google__list_events": 2.0,
     "google__create_event": 2.5,
     "google__update_event": 2.5,
-    "memory_search": 1.0,
+    "call_memory_search": 1.0,
     "business_profile_lookup": 0.5,
     "contact_lookup": 0.3,
     "send_owner_message": 0.5,

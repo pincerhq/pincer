@@ -1158,3 +1158,151 @@ async def test_inbound_calls_are_answered_on_registration(voice):
     state = await voice.engine.on_call_start("CA_in2", "+4917612345", CallDirection.INBOUND, language="en")
     assert state.metadata.get("answered_at") is not None
     assert voice.channel.get_state_machine("CA_in2") is not None
+
+
+# ── Issue #252: the owner's per-call tool grants ─────────────────────
+
+
+async def test_allow_tools_rejects_ungrantable_names_before_dialling(voice):
+    result = await outbound.make_phone_call(
+        TARGET, TASK, context={"user_id": "u1"}, allow_tools=["google__create_event", "email_send", "srv__tool"]
+    )
+    assert result.startswith("Error") and "email_send" in result and "srv__tool" in result
+    assert "google__create_event" not in result
+    assert voice.placed == []
+
+
+@pytest.mark.parametrize("bad", [{"google__create_event": True}, True, ["*"], ["google__*"]])
+async def test_allow_tools_rejects_patterns_and_non_lists_before_dialling(voice, bad):
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}, allow_tools=bad)
+    assert result.startswith("Error")
+    assert voice.placed == []
+
+
+async def test_allow_tools_ride_on_the_pending_state_and_the_tracking(voice):
+    from pincer.voice import tool_policy as tp
+
+    seen: list[dict[str, Any]] = []
+    original = voice.engine.register_pending_outbound
+
+    async def _spy(*args: Any, **kwargs: Any) -> Any:
+        state = await original(*args, **kwargs)
+        seen.append(dict(state.metadata))
+        return state
+
+    voice.engine.register_pending_outbound = _spy  # type: ignore[method-assign]
+    result = await outbound.make_phone_call(
+        TARGET,
+        TASK,
+        context={"user_id": "u1", "channel": "telegram", "pincer_user_id": "owner-1"},
+        allow_tools=["google__create_event", "google__update_event"],
+    )
+    assert "Call SID: CA_1" in result
+    grants = {"google__create_event", "google__update_event"}
+    assert seen[0][tp.META_OWNER_USER] == "u1"
+    assert seen[0][tp.META_OWNER_CHANNEL] == "telegram"
+    assert seen[0][tp.META_OWNER_GRANTS] == grants
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None and info.tool_grants == grants and info.pincer_user_id == "owner-1"
+
+
+async def test_no_allow_tools_means_no_grants(voice):
+    await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None and info.tool_grants == frozenset()
+
+
+async def test_allow_tools_rejects_tools_this_setup_does_not_have(voice):
+    def registered():
+        return ["websearch__search", "make_phone_call"]
+
+    owner = {"user_id": "u1", "pincer_user_id": "owner-1"}
+    result = await outbound.make_phone_call(
+        TARGET,
+        TASK,
+        context=owner,
+        allow_tools=["google__create_event", "websearch__search"],
+        registered_tools=registered,
+    )
+    assert result.startswith("Error") and "google__create_event" in result and "not connected" in result
+    assert voice.placed == []
+    ok = await outbound.make_phone_call(
+        TARGET, TASK, context=owner, allow_tools=["websearch__search"], registered_tools=registered
+    )
+    assert "Call SID: CA_1" in ok
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None and info.tool_grants == {"websearch__search"}
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"user_id": "u1"},  # no Pincer identity
+        {"user_id": "website-demo", "channel": "web"},  # public demo
+        {"user_id": "dashboard", "channel": "web"},  # dashboard
+        {"user_id": "pincer-canary", "channel": "canary", "pincer_user_id": "pincer-canary"},
+    ],
+)
+async def test_allow_tools_without_an_owner_identity_is_refused_before_dialling(voice, context):
+    """Grants are owner authority: a call with no real identity would stay
+    `remote` and silently ignore them, so it is refused instead."""
+    result = await outbound.make_phone_call(TARGET, TASK, context=context, allow_tools=["google__create_event"])
+    assert result.startswith("Error") and "signed-in" in result
+    assert voice.placed == []
+
+
+@pytest.mark.parametrize("user_id", ["website-demo", "dashboard", "pincer-canary"])
+async def test_synthetic_initiators_record_no_pre_dial_owner(voice, user_id):
+    from pincer.voice import tool_policy as tp
+
+    seen: list[dict[str, Any]] = []
+    original = voice.engine.register_pending_outbound
+
+    async def _spy(*args: Any, **kwargs: Any) -> Any:
+        state = await original(*args, **kwargs)
+        seen.append(dict(state.metadata))
+        return state
+
+    voice.engine.register_pending_outbound = _spy  # type: ignore[method-assign]
+    result = await outbound.make_phone_call(
+        TARGET, TASK, context={"user_id": user_id, "channel": "web", "pincer_user_id": user_id}
+    )
+    assert "Call SID: CA_1" in result
+    assert tp.META_OWNER_USER not in seen[0]
+
+
+async def test_chat_tool_through_the_registry_places_an_owner_call(voice):
+    """PR #369 review: the chat handler must receive the turn context.
+    `ToolRegistry.execute` injects `context` only into handlers that declare
+    it, so this goes through the real registry, not make_phone_call directly."""
+    from pincer.tools.registry import ToolRegistry
+    from pincer.voice import tool_policy as tp
+    from pincer.voice.engine import CallDirection
+
+    registry = ToolRegistry()
+    registry.register(
+        name="make_phone_call",
+        description="Place a call.",
+        handler=outbound.make_chat_phone_call(lambda: ["make_phone_call", "google__create_event"]),
+        parameters={"type": "object", "properties": {}, "required": []},
+        require_approval=False,
+    )
+    result = await registry.execute(
+        "make_phone_call",
+        {"target_number": TARGET, "purpose": TASK, "allow_tools": ["google__create_event"]},
+        context={
+            "user_id": "12345",
+            "channel": "telegram",
+            "pincer_user_id": "owner-1",
+            "session_key": "telegram:12345",
+        },
+    )
+    assert "Call SID: CA_1" in result
+    info = status_notify.get_call_info("CA_1")
+    assert info is not None
+    assert (info.user_id, info.pincer_user_id, info.session_key) == ("12345", "owner-1", "telegram:12345")
+    assert info.tool_grants == {"google__create_event"}
+
+    state = await voice.engine.on_call_start("CA_1", TARGET, CallDirection.OUTBOUND, language="en")
+    assert voice.channel._resolve_principal("CA_1", state, "generic") == tp.PRINCIPAL_OWNER
+    assert state.metadata[tp.META_OWNER_GRANTS] == {"google__create_event"}

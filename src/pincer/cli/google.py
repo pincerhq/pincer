@@ -21,20 +21,26 @@ def google_setup(
     """One-time Google Workspace OAuth setup (opens browser for consent)."""
     from pincer.config import get_settings_relaxed
     from pincer.integrations.google.auth import ALL_SCOPES, GoogleAuth
-    from pincer.integrations.google.token_source import CREDENTIALS_ENV, env_client_config
+    from pincer.integrations.google.token_source import (
+        CREDENTIALS_FILE,
+        TOKEN_FILES,
+        client_config,
+        client_locations,
+        credentials_path,
+    )
 
     settings = get_settings_relaxed()
     oauth_dir = settings.google_oauth_dir()
-    credentials_path = oauth_dir / "google_credentials.json"
-    token_path = oauth_dir / "google_workspace_token.json"
-    client_config = None if credentials_path.exists() else env_client_config(settings)
+    token_path = oauth_dir / TOKEN_FILES[0]
+    # The same rule the runtime uses to fill in a token's client: the file wins over the env var.
+    client = client_config(settings, oauth_dir)
 
     console.print("[bold]Google Workspace Setup[/bold]\n")
     console.print("This sets up all Google Workspace tools: Gmail, Calendar, Drive,")
     console.print("Docs, Sheets, Slides, Tasks, Contacts, and Meet.\n")
 
-    if not credentials_path.exists() and client_config is None:
-        console.print(f"[red]Missing: {credentials_path}[/red] (or set {CREDENTIALS_ENV})\n")
+    if client is None:
+        console.print(f"[red]No OAuth client found[/red] (looked in {client_locations(settings, oauth_dir)})\n")
         console.print("Complete these steps in Google Cloud Console (~5 minutes):\n")
         console.print("  1. Go to [link]https://console.cloud.google.com/apis/credentials[/link]")
         console.print("  2. Create or select a project")
@@ -45,7 +51,7 @@ def google_setup(
         console.print("  4. OAuth consent screen → External → add your email")
         console.print("     (publish it — tokens of apps in Testing expire after 7 days)")
         console.print("  5. Credentials → Create → OAuth 2.0 Client ID → Desktop App")
-        console.print(f"  6. Download JSON → save as:\n     {credentials_path}\n")
+        console.print(f"  6. Download JSON → save as:\n     {oauth_dir / CREDENTIALS_FILE}\n")
         raise typer.Exit(1)
 
     if token_path.exists() and not print_env:
@@ -59,15 +65,16 @@ def google_setup(
         console.print("[red]google-auth-oauthlib not installed.[/red]\nRun:  uv pip install google-auth-oauthlib")
         raise typer.Exit(1) from None
 
+    console.print(f"OAuth client: {client.label}")
     console.print(f"Requesting {len(ALL_SCOPES)} scope(s) for all Workspace APIs...")
     console.print("Opening browser for Google consent...\n")
 
     auth = GoogleAuth(
-        credentials_path=str(credentials_path),
+        credentials_path=str(credentials_path(settings, oauth_dir)),
         token_path=str(token_path),
     )
     try:
-        creds = auth.run_auth_flow(open_browser=True, save=not print_env, client_config=client_config)
+        creds = auth.run_auth_flow(open_browser=True, save=not print_env, client_config=client.config)
     except Exception as exc:
         console.print(f"[red]Authentication failed: {exc}[/red]")
         raise typer.Exit(1) from exc
@@ -87,11 +94,11 @@ def google_setup(
 def google_export_token() -> None:
     """Print an existing token file as PINCER_GOOGLE_TOKEN_JSON=... (migrate off the data volume)."""
     from pincer.config import get_settings_relaxed
-    from pincer.integrations.google.token_source import decode_json_blob
+    from pincer.integrations.google.token_source import decode_json_blob, searched_paths
 
-    oauth_dir = get_settings_relaxed().google_oauth_dir()
-    for name in ("google_workspace_token.json", "google_token.json"):
-        token_path = oauth_dir / name
+    settings = get_settings_relaxed()
+    oauth_dir = settings.google_oauth_dir()
+    for token_path in searched_paths(settings):
         if token_path.exists():
             break
     else:
@@ -129,23 +136,30 @@ def google_auth() -> None:
 
     from pincer.config import get_settings
     from pincer.integrations.google.auth import SERVICE_SCOPES
+    from pincer.integrations.google.token_source import (
+        CREDENTIALS_FILE,
+        TOKEN_FILES,
+        client_file_paths,
+        credentials_path,
+    )
 
     scopes = SERVICE_SCOPES["calendar"]
 
     settings = get_settings()
     oauth_dir = settings.google_oauth_dir()
-    credentials_path = oauth_dir / "google_credentials.json"
-    token_path = oauth_dir / "google_token.json"
+    client_file = credentials_path(settings, oauth_dir)
+    token_path = oauth_dir / TOKEN_FILES[1]  # the legacy calendar-only token
 
     console.print("[bold]Google Calendar — OAuth Setup[/bold]\n")
 
-    if not credentials_path.exists():
-        console.print(f"[red]Missing: {credentials_path}[/red]")
+    if not client_file.exists():
+        searched = ", ".join(str(p) for p in client_file_paths(settings, oauth_dir))
+        console.print(f"[red]Missing: {CREDENTIALS_FILE}[/red] (looked in {searched})")
         console.print(
             "\nDownload the OAuth client JSON from:\n"
             "  Google Cloud Console -> APIs & Services -> Credentials\n"
             "  -> OAuth 2.0 Client IDs -> Download JSON\n"
-            f"\nSave it as: {credentials_path}"
+            f"\nSave it as: {oauth_dir / CREDENTIALS_FILE}"
         )
         raise typer.Exit(1)
 
@@ -160,7 +174,7 @@ def google_auth() -> None:
         console.print("[red]google-auth-oauthlib is not installed.[/red]\nRun:  uv pip install google-auth-oauthlib")
         raise typer.Exit(1) from None
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), scopes)
+    flow = InstalledAppFlow.from_client_secrets_file(str(client_file), scopes)
 
     console.print("Opening browser for Google consent...\n")
     try:

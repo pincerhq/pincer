@@ -791,6 +791,8 @@ class SecurityDoctor:
         from pincer.voice.tool_policy import (
             CALLER_GUEST,
             CALLER_USER,
+            PRINCIPAL_OWNER,
+            PRINCIPAL_REMOTE,
             TIER_X,
             TIERS,
             allowed_tools_for_call,
@@ -816,12 +818,23 @@ class SecurityDoctor:
             for direction in ("outbound", "inbound")
         ]
         leaks: list[str] = []
+        # Issue #252: an owner call, with every probe name "granted" — owner
+        # grants must never admit a Tier X or unlisted tool either.
+        all_grants = frozenset(probe_names)
         for kind, direction, caller in probes:
-            allowed = allowed_tools_for_call(settings, kind=kind, direction=direction, caller_class=caller)
-            visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
-            for name in sorted(visible):
-                if TIERS.get(name, TIER_X) == TIER_X:
-                    leaks.append(f"{name} ({kind}/{direction}/{caller})")
+            for principal, grants in ((PRINCIPAL_REMOTE, frozenset()), (PRINCIPAL_OWNER, all_grants)):
+                allowed = allowed_tools_for_call(
+                    settings,
+                    kind=kind,
+                    direction=direction,
+                    caller_class=caller,
+                    principal=principal,
+                    owner_grants=grants,
+                )
+                visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
+                for name in sorted(visible):
+                    if TIERS.get(name, TIER_X) == TIER_X:
+                        leaks.append(f"{name} ({kind}/{direction}/{caller}/{principal})")
         if leaks:
             return CheckResult(
                 name="voice_tier_x_reachable",
@@ -844,7 +857,7 @@ class SecurityDoctor:
         return CheckResult(
             name="voice_tier_x_reachable",
             status=CheckStatus.PASS,
-            message="Call-context tool schemas contain no Tier X tool (all call kinds)",
+            message="Call-context tool schemas contain no Tier X tool (all call kinds, owner grants included)",
             category="voice",
         )
 
@@ -2196,19 +2209,39 @@ class SecurityDoctor:
         """Whether a Google token is present with scopes — without it there are no calendar, Gmail or
         Drive tools. Read from the token file or env only: a revoked token still passes here."""
         from pincer.integrations import google
+        from pincer.integrations.google import token_source
         from pincer.integrations.google.config import load_config
 
         settings = self._cfg(cfg)
         name, setup = "google_workspace_token", "Run `pincer google setup`"
         if not load_config().enabled:
             return CheckResult(name, CheckStatus.SKIPPED, "Google integration disabled in config", category="google")
+        oauth_dir = settings.google_oauth_dir()
+        env_state = token_source.token_env_state(settings)
         state = google.google_status(settings)
+        origin = self._google_token_origin(state, oauth_dir)
+        # "disabled" with a source: a token was found but covers none of the configured services.
+        token_found = state.get("source") is not None
+        if env_state == "invalid":
+            if state["status"] != "disabled":
+                fallback = f"using {origin} instead"
+            elif token_found:
+                fallback = f"the {origin} grants no scopes for the configured services"
+            else:
+                fallback = f"no token file in {oauth_dir}"
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"{token_source.TOKEN_ENV} is set but cannot be decoded; {fallback}",
+                fix_hint=f"Fix or unset {token_source.TOKEN_ENV} (`pincer google setup --print-env` prints a new one)",
+                category="google",
+            )
         if state["status"] == "active":
             services = ", ".join(state["enabled_services"])
             return CheckResult(
                 name,
                 CheckStatus.PASS,
-                f"Google token found with scopes for: {services} (not checked against Google; "
+                f"Google token found with scopes for: {services} ({origin}; not checked against Google; "
                 "a revoked token still shows here)",
                 category="google",
             )
@@ -2216,17 +2249,56 @@ class SecurityDoctor:
             return CheckResult(
                 name,
                 CheckStatus.WARNING,
-                f"Google token is missing scopes; only {', '.join(state['enabled_services'])} enabled",
+                f"Google token is missing scopes; only {', '.join(state['enabled_services'])} enabled ({origin})",
                 fix_hint=f"{setup} to re-consent",
+                category="google",
+            )
+        if token_found:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"Google token found ({origin}) but it grants no scopes for the configured services — "
+                "no calendar, Gmail or Drive tools",
+                fix_hint=f"Run `pincer google setup --print-env` and update {token_source.TOKEN_ENV}"
+                if state.get("source") == "env"
+                else f"{setup} to re-consent",
+                category="google",
+            )
+        if env_state == "ok":
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"{token_source.TOKEN_ENV} is set but unusable: no client_id/client_secret and no matching "
+                f"OAuth client in {token_source.client_locations(settings, oauth_dir)}",
+                fix_hint=f"Run `pincer google setup --print-env` and update {token_source.TOKEN_ENV}",
+                category="google",
+            )
+        if token_source.client_config(settings, oauth_dir) is not None:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"OAuth client found but no Google token in {oauth_dir} — no calendar, Gmail or Drive tools",
+                fix_hint=f"{setup}, or set PINCER_GOOGLE_OAUTH_DIR to the directory holding the token",
                 category="google",
             )
         return CheckResult(
             name,
             CheckStatus.SKIPPED,
-            "No usable Google token — no calendar, Gmail or Drive tools",
+            f"No usable Google token in {oauth_dir} — no calendar, Gmail or Drive tools",
             fix_hint=f"{setup} to connect",
             category="google",
         )
+
+    @staticmethod
+    def _google_token_origin(state: dict[str, Any], oauth_dir: Any) -> str:
+        """Where the token (and its OAuth client, if not its own) comes from, for the check message."""
+        from pincer.integrations.google.token_source import TOKEN_ENV, client_source_label
+
+        origin = TOKEN_ENV if state.get("source") == "env" else f"token file in {oauth_dir}"
+        client = state.get("client_source")
+        if client and client != "token":
+            origin += f", OAuth client from {client_source_label(client)}"
+        return origin
 
     # ── LLM effort and thinking (issue #345) ──────────────
 

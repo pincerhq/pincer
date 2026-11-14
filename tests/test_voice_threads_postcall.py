@@ -219,6 +219,9 @@ async def test_thread_note_replaces_the_previous_one(threaded, memory):
 
     tag = f"thread:{threaded.thread.thread_id}"
     notes = await memory.list_memories(user_id=None, limit=20, tags=[tag])
+    # Call notes carry the same thread link (#252); the thread note is the one
+    # with the "thread" marker tag.
+    notes = [n for n in notes if "thread" in n.tags]
     assert len(notes) == 1
     assert "Termin Dr. Müller" in notes[0].content
     assert "wartet auf Rückruf bis Freitag" in notes[0].content
@@ -243,7 +246,7 @@ async def test_thread_note_replaces_the_previous_one(threaded, memory):
     )
     await processor2.process(second_sid, state, transcript, completed=True)
 
-    notes = await memory.list_memories(user_id=None, limit=20, tags=[tag])
+    notes = [n for n in await memory.list_memories(user_id=None, limit=20, tags=[tag]) if "thread" in n.tags]
     assert len(notes) == 1
     assert "erledigt" in notes[0].content
 
@@ -408,3 +411,26 @@ async def test_ambiguous_followup_surfaces_both_threads(threaded, tmp_path):
     found = json.loads(await lookup("Dr. Müller"))
     assert len(found) == 2
     assert {t["subject"] for t in found} == {"Termin Dr. Müller", "Rechnung Dr. Müller"}
+
+
+async def test_thread_note_update_keeps_the_calls_linked_notes(threaded, memory):
+    """#252: in-call notes carry the same thread:{id} link as the thread note;
+    replacing the thread note must not delete them."""
+    tag = f"thread:{threaded.thread.thread_id}"
+    await memory.store_memory(
+        user_id="tester",
+        content="[Call note] Pizza arrives at 19:30",
+        category="voice_call",
+        extra_tags=["source:voice_call", f"call:{CALL_SID}", "in_call_note", tag],
+    )
+    processor = PostCallProcessor(
+        threaded.settings,
+        llm=SequencedLLM(OUTCOME_JSON, MERGE_JSON),
+        memory=memory,
+        db_path=threaded.settings.db_path,
+    )
+    await processor.process(CALL_SID, _state(), _transcript(), completed=True)
+
+    notes = await memory.list_memories(user_id=None, limit=20, tags=[tag])
+    assert any("Pizza arrives" in n.content for n in notes)
+    assert len([n for n in notes if "thread" in n.tags]) == 1

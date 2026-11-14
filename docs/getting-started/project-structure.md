@@ -248,7 +248,7 @@ pincer/
 │   └── PROJECT_STRUCTURE.md        # ← You are here
 │
 ├── data/
-│   └── google_credentials.json     # Google OAuth client (gitignored)
+│   └── google_credentials.json     # Google OAuth client (gitignored; deprecated location — use PINCER_DATA_DIR)
 │
 ├── src/pincer/                     # Main Python package (~10,600 lines)
 │   ├── __init__.py
@@ -541,6 +541,7 @@ enables random failover.
 |----------------|---------|
 | `~/.pincer/google_credentials.json` | OAuth 2.0 client ID (from Google Cloud Console, Desktop App type) |
 | `~/.pincer/google_workspace_token.json` | OAuth token (created by `pincer google setup`, `chmod 0o600`) |
+| `PINCER_GOOGLE_OAUTH_DIR` | Directory for both files instead of `PINCER_DATA_DIR` (`~/.pincer`); see [CLI Reference](../reference/cli.md#where-the-google-files-live) |
 
 When both files exist, all 85 `google__*` tools auto-register on `pincer run`. No env vars required.
 

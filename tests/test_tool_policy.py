@@ -265,10 +265,10 @@ def test_websearch_never_reaches_appointment_calls_or_the_receptionist(caller):
 
 def test_inbound_excludes_memory_search():
     scope = tp.allowed_tools_for_call(_settings(), kind="generic", direction="inbound")
-    assert "memory_search" not in scope
-    assert "memory_search" in tp.allowed_tools_for_call(_settings(), kind="generic", direction="outbound")
-    guest = _settings(voice_guests_tools_allowed="memory_*")
-    assert "memory_search" not in tp.allowed_tools_for_call(guest, kind="generic", direction="inbound")
+    assert "call_memory_search" not in scope
+    assert "call_memory_search" in tp.allowed_tools_for_call(_settings(), kind="generic", direction="outbound")
+    guest = _settings(voice_guests_tools_allowed="*memory_*")
+    assert "call_memory_search" not in tp.allowed_tools_for_call(guest, kind="generic", direction="inbound")
 
 
 def test_google_pattern_expands_to_rw_calendar_tools_only():
@@ -325,7 +325,7 @@ def test_call_context_tool_schemas_exact():
             "contact_lookup",
             "send_owner_message",
             "memory_note",
-            "memory_search",
+            "call_memory_search",
             "make_phone_call",
             "some_mcp__tool",
         )
@@ -341,7 +341,7 @@ def test_call_context_tool_schemas_exact():
         "memory_note",
     ]
     # Registry order preserved, no X tool, nothing outside scope.
-    assert "memory_search" not in visible  # not in the appointment scope
+    assert "call_memory_search" not in visible  # not in the appointment scope
     assert tp.call_context_schemas(registry, None) == []
 
 
@@ -476,3 +476,184 @@ def test_inbound_receptionist_reads_no_event_contents() -> None:
     assert "google__check_freebusy" in allowed  # the set is real, not empty
     assert not contents & allowed
     assert not contents & tp.INBOUND_RECEPTIONIST_TOOLS
+
+
+# ── Issue #252: the owner's authority on outbound calls ─────────────
+
+
+def _owner_state(caller=tp.CALLER_GUEST, grants=frozenset(), settings=None) -> CallState:
+    settings = settings or _settings()
+    state = CallState(call_sid="CA_owner", direction=CallDirection.OUTBOUND, caller_number="+15550001111")
+    state.metadata[tp.META_CALLER_CLASS] = caller
+    state.metadata[tp.META_PRINCIPAL] = tp.PRINCIPAL_OWNER
+    state.metadata[tp.META_OWNER_GRANTS] = frozenset(grants)
+    state.metadata[tp.META_ALLOWED_TOOLS] = tp.allowed_tools_for_call(
+        settings,
+        kind="generic",
+        direction="outbound",
+        caller_class=caller,
+        principal=tp.PRINCIPAL_OWNER,
+        owner_grants=grants,
+    )
+    return state
+
+
+def test_principal_fails_closed():
+    state = CallState(call_sid="CA_p", direction=CallDirection.OUTBOUND, caller_number="+1555")
+    assert tp.principal_of(state) == tp.PRINCIPAL_REMOTE
+    for forged in ("OWNER", "admin", True, 1, {"owner": 1}):
+        state.metadata[tp.META_PRINCIPAL] = forged
+        assert tp.principal_of(state) == tp.PRINCIPAL_REMOTE
+
+
+def test_owner_call_default_scope_is_the_guest_default():
+    owner = tp.allowed_tools_for_call(_settings(), principal=tp.PRINCIPAL_OWNER)
+    guest = tp.allowed_tools_for_call(_settings())
+    assert owner == guest
+    assert {"call_memory_search", "send_owner_message", "memory_note"} <= owner
+    assert "google__create_event" not in owner and "websearch__search" not in owner
+
+
+def test_owner_grants_add_only_rw_tools():
+    grants = frozenset({"google__create_event", "websearch__search", "email_send", "make_phone_call", "srv__x"})
+    scope = tp.allowed_tools_for_call(_settings(), principal=tp.PRINCIPAL_OWNER, owner_grants=grants)
+    assert {"google__create_event", "websearch__search"} <= scope
+    assert not scope & {"email_send", "make_phone_call", "srv__x"}
+    assert all(tp.tier_of(name) != tp.TIER_X for name in scope)
+
+
+def test_guest_list_never_widens_an_owner_call():
+    settings = _settings(voice_guests_tools_allowed="google__*,websearch__search")
+    scope = tp.allowed_tools_for_call(settings, principal=tp.PRINCIPAL_OWNER)
+    assert "google__create_event" not in scope and "websearch__search" not in scope
+    # …while it still widens a remote party's call
+    assert "google__create_event" in tp.allowed_tools_for_call(settings)
+
+
+@pytest.mark.parametrize("kind", ["receptionist", "appointment"])
+def test_owner_grants_never_reach_fixed_purpose_calls(kind):
+    grants = frozenset({"websearch__search", "google__update_event"})
+    for direction in ("inbound", "outbound"):
+        scope = tp.allowed_tools_for_call(
+            _settings(), kind=kind, direction=direction, principal=tp.PRINCIPAL_OWNER, owner_grants=grants
+        )
+        assert not scope & grants
+
+
+def test_owner_grants_never_reach_inbound_calls():
+    grants = frozenset({"websearch__search", "google__create_event"})
+    scope = tp.allowed_tools_for_call(
+        _settings(), direction="inbound", principal=tp.PRINCIPAL_OWNER, owner_grants=grants
+    )
+    assert not scope & grants
+    assert "call_memory_search" not in scope
+
+
+def test_registered_callee_does_not_widen_an_owner_call():
+    """A registered user answering the owner's call gets the owner's scope
+    (default set + grants), not every R/W tool: the tools act for the owner."""
+    guest = tp.allowed_tools_for_call(_settings(), principal=tp.PRINCIPAL_OWNER)
+    scope = tp.allowed_tools_for_call(
+        _settings(), kind="generic", direction="outbound", caller_class=tp.CALLER_USER, principal=tp.PRINCIPAL_OWNER
+    )
+    assert scope == guest
+    assert "google__create_event" not in scope and "google__update_event" not in scope
+    granted = tp.allowed_tools_for_call(
+        _settings(),
+        caller_class=tp.CALLER_USER,
+        principal=tp.PRINCIPAL_OWNER,
+        owner_grants=frozenset({"google__create_event"}),
+    )
+    assert granted == guest | {"google__create_event"}
+    # Off an owner call, a registered caller keeps the full R/W scope
+    user = tp.allowed_tools_for_call(_settings(), caller_class=tp.CALLER_USER)
+    assert "google__create_event" in user and user > guest
+    # The owner answering their own phone (#299) keeps the full scope ...
+    own = tp.allowed_tools_for_call(
+        _settings(), caller_class=tp.CALLER_USER, principal=tp.PRINCIPAL_OWNER, remote_is_owner=True
+    )
+    assert own == user
+    # ... but only as a registered caller: the flag alone widens nothing
+    assert tp.allowed_tools_for_call(_settings(), principal=tp.PRINCIPAL_OWNER, remote_is_owner=True) == guest
+
+
+def test_validate_tool_grants():
+    granted, rejected = tp.validate_tool_grants(["google__create_event", "google__update_event", "websearch__search"])
+    assert granted == {"google__create_event", "google__update_event", "websearch__search"}
+    assert rejected == []
+    granted, rejected = tp.validate_tool_grants(["google__create_event", "email_send", "shell_exec", "srv__tool", ""])
+    assert granted == {"google__create_event"}
+    assert rejected == ["email_send", "shell_exec", "srv__tool"]
+    assert tp.validate_tool_grants("google__create_event, make_phone_call") == (
+        frozenset({"google__create_event"}),
+        ["make_phone_call"],
+    )
+    assert tp.validate_tool_grants(None) == (frozenset(), [])
+    assert tp.validate_tool_grants([]) == (frozenset(), [])
+
+
+@pytest.mark.parametrize("pattern", ["*", "google__*", "google__create_*", "websearch__?earch"])
+def test_validate_tool_grants_takes_exact_names_only(pattern):
+    """A pattern would grant a whole family at once; grants are exact names."""
+    assert tp.validate_tool_grants([pattern]) == (frozenset(), [pattern])
+
+
+@pytest.mark.parametrize("bad", [{"google__create_event": True}, True, 1, {"google__create_event"}])
+def test_validate_tool_grants_rejects_non_list_values(bad):
+    with pytest.raises(TypeError):
+        tp.validate_tool_grants(bad)
+
+
+def test_owner_grants_of_refilters_metadata():
+    state = _owner_state()
+    state.metadata[tp.META_OWNER_GRANTS] = ["google__create_event", "email_send"]
+    assert tp.owner_grants_of(state) == {"google__create_event"}
+    state.metadata[tp.META_OWNER_GRANTS] = "google__create_event"  # not a collection: nothing
+    assert tp.owner_grants_of(state) == frozenset()
+
+
+@pytest.mark.parametrize("caller", [tp.CALLER_GUEST, tp.CALLER_USER])
+def test_owner_call_never_asks_the_callee(caller):
+    state = _owner_state(caller=caller, grants={"google__create_event", "google__update_event"})
+    for requires in (lambda _n: True, lambda _n: False, None):
+        for tool in ("send_owner_message", "memory_note", "google__create_event", "google__update_event"):
+            decision = tp.decide(tool, state, _settings(), {"x": 1}, requires)
+            assert decision.action != "need_verbal", (tool, caller)
+
+
+def test_owner_self_message_runs_without_approval():
+    decision = tp.decide("send_owner_message", _owner_state(), _settings(), {"text": "hi"}, lambda _n: True)
+    assert decision.action == "execute" and decision.reason == "owner_self" and decision.mode == tp.MODE_POLICY
+
+
+def test_owner_write_follows_owner_policy():
+    state = _owner_state(grants={"google__create_event"})
+    auto = tp.decide("memory_note", state, _settings(), {"note": "x"}, lambda _n: False)
+    assert auto.action == "execute" and auto.reason == "owner_policy" and auto.mode == tp.MODE_POLICY
+    card = tp.decide("google__create_event", state, _settings(), {"summary": "x"}, lambda _n: True)
+    assert card.action == "need_user_approval" and card.reason == "owner" and card.mode == "user"
+    # No policy wired: fail closed to the owner's card, never the callee
+    assert tp.decide("memory_note", state, _settings(), {}, None).action == "need_user_approval"
+
+
+def test_owner_call_keeps_scope_budget_and_x_checks():
+    state = _owner_state()
+    assert tp.decide("google__create_event", state, _settings(), {}, lambda _n: False).reason == tp.REASON_NOT_IN_SCOPE
+    assert tp.decide("email_send", state, _settings(), {}, lambda _n: False).reason == tp.REASON_TIER_X
+    state.metadata[tp.META_WRITES_USED] = 3
+    assert tp.decide("send_owner_message", state, _settings(), {}, None).reason == tp.REASON_WRITE_BUDGET
+
+
+def test_trusted_mode_override_still_wins_on_owner_call():
+    state = _owner_state(grants={"google__create_event"})
+    _pin(state, google__create_event="off")
+    assert tp.decide("google__create_event", state, _settings(), {}, lambda _n: True).reason == "mode_off"
+
+
+def test_validate_tool_grants_against_registered_tools():
+    registered = {"websearch__search", "send_owner_message"}  # no calendar connected
+    granted, rejected = tp.validate_tool_grants(["google__create_event", "websearch__search"], available=registered)
+    assert granted == {"websearch__search"}
+    assert rejected == ["google__create_event"]
+    granted, rejected = tp.validate_tool_grants(["google__list_events"], available={"google__list_events"})
+    assert granted == {"google__list_events"} and rejected == []

@@ -149,7 +149,9 @@ def make_scheduled_call_handler(settings: Settings) -> Any:
                 purpose=purpose,
                 instructions=str(action.get("instructions", "")),
                 language=str(action.get("language", "")),
-                context={"user_id": pincer_user_id, "channel": channel},
+                # The schedule's owner is a Pincer identity: the call acts on
+                # their authority (#252) unless it is a synthetic one.
+                context={"user_id": pincer_user_id, "channel": channel, "pincer_user_id": pincer_user_id},
                 target_name=str(action.get("target_name", "")),
                 thread_id=str(action.get("thread_id", "")),
                 source="scheduler",

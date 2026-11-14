@@ -323,7 +323,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         from pincer.llm.cost_tracker import MeteredLLM
         from pincer.tools.builtin.call_transcript import get_call_transcript
         from pincer.voice.call_tools import register_call_tools
-        from pincer.voice.outbound import make_phone_call
+        from pincer.voice.outbound import make_chat_phone_call
         from pincer.voice.threads import init_thread_manager, register_thread_tools
 
         init_thread_manager(settings, llm=MeteredLLM(llm, cost_tracker, settings.default_provider), memory=memory_store)
@@ -376,14 +376,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
         )
 
         if settings.voice_outbound_enabled:
-
-            async def _make_phone_call_from_chat(**kwargs: Any) -> str:
-                """The chat-tool entry point. Only difference from the API path
-                is the briefing's `source`; both go through make_phone_call."""
-                from pincer.voice.briefing import SOURCE_CHAT
-
-                kwargs.setdefault("source", SOURCE_CHAT)
-                return await make_phone_call(**kwargs)
+            # Issue #252: allow_tools may only grant tools this process has.
+            _make_phone_call_from_chat = make_chat_phone_call(tools.list_tools)
 
             tools.register(
                 name="make_phone_call",
@@ -454,6 +448,20 @@ async def _build_core(settings: Settings) -> CoreComponents:
                                 "never guess. Empty starts a new thread."
                             ),
                             "default": "",
+                        },
+                        "allow_tools": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Extra tools the call may use on the user's behalf, for THIS call only. "
+                                "Without it the call can read the calendar, look up contacts, search the "
+                                "user's memory and message/note things to the user. Grant calendar writes "
+                                "when the task needs them ('book the delivery slot in my calendar' → "
+                                '["google__create_event"]; moving an event → "google__update_event"), '
+                                'web search with "websearch__search". Writes still need the user\'s '
+                                "approval per their approval policy; other tools are rejected."
+                            ),
+                            "default": [],
                         },
                     },
                     "required": ["target_number", "purpose"],

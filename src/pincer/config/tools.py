@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path  # noqa: TC003 (pydantic resolves it at runtime)
 from typing import Annotated, Self
 
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
@@ -169,8 +170,35 @@ class ToolSettings(BaseModel):
     )
     google_credentials_json: SecretStr = Field(
         default=SecretStr(""),
-        description="Google OAuth client JSON (raw or base64), used by the consent flow when the file is absent",
+        description=(
+            "Google OAuth client JSON (raw or base64), used when google_credentials.json is absent: by the "
+            "consent flow, and to fill in a PINCER_GOOGLE_TOKEN_JSON that lacks client_id/client_secret"
+        ),
     )
+    # Named for its env var: the `google_oauth_dir()` method resolves the directory actually used.
+    google_oauth_dir_override: Path | None = Field(
+        default=None,
+        validation_alias="PINCER_GOOGLE_OAUTH_DIR",
+        description=(
+            "Absolute directory for google_credentials.json and the Google token files. Unset = data_dir "
+            "(or, deprecated, ./data when it already holds them)"
+        ),
+    )
+
+    @field_validator("google_oauth_dir_override", mode="after")
+    @classmethod
+    def _expand_google_oauth_dir(cls, value: Path | None) -> Path | None:
+        """Expand ``~`` once, at load: an unknown ``~user`` is a config error naming the
+        setting, not a RuntimeError from every token lookup, doctor run and CLI command."""
+        if value is None:
+            return None
+        try:
+            return value.expanduser()
+        except RuntimeError as exc:
+            raise ValueError(
+                f"PINCER_GOOGLE_OAUTH_DIR={value}: cannot expand '{value.parts[0]}' ({exc}) — "
+                "use an absolute path or an existing user's ~"
+            ) from exc
 
     # ── Scheduling ────────────────────────────────────────
     schedule_tool_enabled: bool = Field(default=True, description="Enable schedule_create/list/remove/toggle tools")

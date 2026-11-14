@@ -118,24 +118,35 @@ def _check_webhook(settings: Settings | Any) -> tuple[StepStatus, str]:
 
 
 def _check_calendar(settings: Settings | Any) -> tuple[StepStatus, str]:
-    """Google Calendar OAuth — appointment scheduling is dead without it."""
-    import contextlib
-    from pathlib import Path
+    """Google Calendar OAuth — appointment scheduling is dead without it.
 
-    from pincer.integrations.google.token_source import TOKEN_ENV, env_token_info
+    Uses the runtime's own lookup (``locate_token`` via ``google_status``), so READY
+    means the calendar tools register.
+    """
+    from pincer.integrations.google import google_status, token_source
+    from pincer.integrations.google.config import load_config
 
-    if env_token_info(settings) is not None:
-        return StepStatus.READY, f"OAuth token from {TOKEN_ENV}"
-
-    dirs = [Path.home() / ".pincer", Path(str(getattr(settings, "data_dir", "data")))]
-    with contextlib.suppress(Exception):
-        dirs.insert(0, Path(settings.google_oauth_dir()))
-    for directory in dirs:
-        for name in ("google_workspace_token.json", "google_token.json"):
-            path = directory / name
-            if path.exists():
-                return StepStatus.READY, f"OAuth token present ({path})"
-    return StepStatus.MISSING, "no Google OAuth token found — run `pincer google setup`"
+    if not load_config().enabled:
+        return StepStatus.MISSING, "Google integration disabled in config ([integrations.google] enabled = false)"
+    state = google_status(settings)
+    if state["source"] is None:
+        if token_source.token_env_state(settings) == "ok":
+            return StepStatus.MISSING, (
+                f"{token_source.TOKEN_ENV} is set but has no client_id/client_secret and no matching OAuth client "
+                f"in {token_source.client_locations(settings)} — run `pincer google setup --print-env`"
+            )
+        paths = ", ".join(str(p) for p in token_source.searched_paths(settings))
+        return StepStatus.MISSING, f"no Google OAuth token found (looked in {paths}) — run `pincer google setup`"
+    if state["source"] == "env":
+        origin = token_source.TOKEN_ENV
+    else:
+        origin = str(next((p for p in token_source.searched_paths(settings) if p.exists()), "the token file"))
+    if "calendar" not in state["enabled_services"]:
+        return StepStatus.MISSING, (
+            f"OAuth token from {origin} grants no Calendar access (or calendar is not in [integrations.google] "
+            "services) — run `pincer google setup` to re-consent"
+        )
+    return StepStatus.READY, f"OAuth token from {origin}"
 
 
 def _check_voice(settings: Settings | Any) -> tuple[StepStatus, str]:
