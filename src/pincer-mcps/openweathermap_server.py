@@ -307,19 +307,35 @@ async def get_forecast(params: ForecastInput) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def _init_telemetry_from_env() -> None:
+    """Start telemetry from ``TELEMETRY_UPTRACE_DSN`` / ``TELEMETRY_POSTHOG_DSN``; off when neither is set.
+
+    A misconfiguration (both set, an unknown ``TELEMETRY_*`` key, a malformed DSN)
+    raises ``TelemetryConfigError`` and stops the server before it serves anything.
+    """
+    if os.environ.get("OTEL_DSN"):
+        logger.warning("OTEL_DSN is no longer read — rename it to TELEMETRY_UPTRACE_DSN")
     try:
         from pincer_telemetry import init as _init_telemetry
-
-        _init_telemetry(project_name="openweathermap_mcp", version="0.1.0")
-        logger.info("Telemetry init success")
+        from pincer_telemetry import provider_from_prefixed_env
     except ImportError:
-        logger.warning(
-            "OTEL_DSN is set but pincer-telemetry is not installed — "
-            'skipping. Install with: pip install "pincer-mcps[telemetry]"'
-        )
+        if any(v for k, v in os.environ.items() if k.startswith("TELEMETRY_")):
+            logger.warning(
+                'TELEMETRY_* is set but pincer-telemetry is not installed — install "pincer-mcps[telemetry]"'
+            )
+        return
+    provider = provider_from_prefixed_env("TELEMETRY_")  # config errors propagate: the server exits
+    if provider is None:
+        return
+    try:
+        _init_telemetry(provider, service_name="openweathermap_mcp", version="0.1.0")
+        logger.info("Telemetry init success (%s)", provider.name)
     except Exception as _tel_err:
         logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
+
+def main() -> None:
+    _init_telemetry_from_env()
 
     parser = argparse.ArgumentParser(description="OpenWeatherMap MCP server (fastmcp)")
     parser.add_argument(

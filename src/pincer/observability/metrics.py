@@ -1,7 +1,7 @@
 """
 OpenTelemetry metric emission for the golden signals (Sprint 9, T9.1).
 
-`pincer_telemetry.init()` (called from `cli.run` when `PINCER_TELEMETRY_DSN` is
+`pincer_telemetry.init()` (called from `cli.run` when a `PINCER_TELEMETRY_*_DSN` is
 set) configures the global OTel providers; this module only *uses* them. When
 the `telemetry` extra is not installed, every function here is a no-op — voice
 calls must never fail because a metrics backend is missing, and the golden

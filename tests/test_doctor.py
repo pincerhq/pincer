@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
 from pincer.security.doctor import CheckStatus, DoctorReport, SecurityDoctor
 
@@ -34,8 +35,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
-    # + 1 WhatsApp session store
-    assert len(report.checks) == 72
+    # + 1 WhatsApp session store + 1 telemetry config
+    assert len(report.checks) == 73
 
     assert 0 <= report.score <= 100
 
@@ -1653,7 +1654,8 @@ def _obs_cfg(**overrides):
     cfg.ops_channel = "telegram"
     cfg.ops_alert_email = ""
     cfg.default_user_id = ""
-    cfg.telemetry_dsn = "https://token@otlp.example.com"
+    cfg.telemetry_uptrace_dsn = SecretStr("https://token@api.uptrace.dev?grpc=4317")
+    cfg.telemetry_posthog_dsn = None
     cfg.voice_enabled = True
     cfg.voice_canary_enabled = True
     cfg.voice_canary_number = "+4915100000001"
@@ -1683,8 +1685,53 @@ def test_ops_alert_routing_accepts_email_only():
 
 
 def test_ops_alert_routing_warns_without_telemetry():
-    result = SecurityDoctor()._check_ops_alert_routing(_obs_cfg(telemetry_dsn=None))
+    result = SecurityDoctor()._check_ops_alert_routing(_obs_cfg(telemetry_uptrace_dsn=None))
     assert result.status == CheckStatus.WARNING
+    assert "PINCER_TELEMETRY_UPTRACE_DSN" in result.message
+
+
+def test_ops_alert_routing_passes_with_posthog():
+    cfg = _obs_cfg(telemetry_uptrace_dsn=None, telemetry_posthog_dsn=SecretStr("https://phc_x@eu.i.posthog.com"))
+    assert SecurityDoctor()._check_ops_alert_routing(cfg).status == CheckStatus.PASS
+
+
+def _telemetry_check(tmp_path, **overrides):
+    return SecurityDoctor()._check_telemetry_config(_obs_cfg(**overrides), config_dir=tmp_path)
+
+
+def test_telemetry_config_pass(tmp_path):
+    result = _telemetry_check(tmp_path)
+    assert result.status == CheckStatus.PASS
+    assert "uptrace" in result.message
+
+
+def test_telemetry_config_skipped_when_unset(tmp_path):
+    assert _telemetry_check(tmp_path, telemetry_uptrace_dsn=None).status == CheckStatus.SKIPPED
+
+
+def test_telemetry_config_critical_on_two_providers(tmp_path):
+    """Doctor reports the conflict `pincer run` refuses on, instead of crashing."""
+    result = _telemetry_check(tmp_path, telemetry_posthog_dsn=SecretStr("https://phc_secret@us.i.posthog.com"))
+    assert result.status == CheckStatus.CRITICAL
+    assert "PINCER_TELEMETRY_UPTRACE_DSN" in result.message
+    assert "PINCER_TELEMETRY_POSTHOG_DSN" in result.message
+    assert "phc_secret" not in result.message
+
+
+def test_telemetry_config_critical_on_posthog_dsn_without_key(tmp_path):
+    result = _telemetry_check(
+        tmp_path, telemetry_uptrace_dsn=None, telemetry_posthog_dsn=SecretStr("https://us.i.posthog.com")
+    )
+    assert result.status == CheckStatus.CRITICAL
+    assert "PINCER_TELEMETRY_POSTHOG_DSN" in result.message
+
+
+def test_telemetry_config_critical_on_legacy_variable(tmp_path, monkeypatch):
+    monkeypatch.setenv("PINCER_TELEMETRY_DSN", "https://s3cr3t@api.uptrace.dev")
+    result = _telemetry_check(tmp_path)
+    assert result.status == CheckStatus.CRITICAL
+    assert "PINCER_TELEMETRY_UPTRACE_DSN" in result.message
+    assert "s3cr3t" not in result.message
 
 
 def test_ops_alert_routing_warns_when_disabled():

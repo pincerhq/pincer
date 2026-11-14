@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from pincer.cli import app
@@ -117,7 +118,8 @@ def _mock_settings_with_telemetry(monkeypatch: pytest.MonkeyPatch, data_dir: Pat
     mock_settings = MagicMock()
     mock_settings.data_dir = data_dir  # `run` looks there for a background Pincer to attach to
     mock_settings.log_level.value = "WARNING"
-    mock_settings.telemetry_dsn = "https://example.com/dsn"
+    mock_settings.telemetry_uptrace_dsn = SecretStr("https://tok@127.0.0.1:9?grpc=4317")
+    mock_settings.telemetry_posthog_dsn = None
     mock_settings.daily_budget_usd = 5.0
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
     monkeypatch.setattr("pincer.cli.run._run_agent", AsyncMock())
@@ -125,7 +127,7 @@ def _mock_settings_with_telemetry(monkeypatch: pytest.MonkeyPatch, data_dir: Pat
 
 
 def test_run_telemetry_import_error_warns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """run() warns (but doesn't crash) when telemetry_dsn is set but opentelemetry isn't installed."""
+    """run() warns (but doesn't crash) when a telemetry DSN is set but pincer-telemetry isn't installed."""
     import sys
 
     _mock_settings_with_telemetry(monkeypatch, tmp_path)
@@ -134,24 +136,31 @@ def test_run_telemetry_import_error_warns(monkeypatch: pytest.MonkeyPatch, tmp_p
     result = runner.invoke(app, ["run"])
 
     assert result.exit_code == 0
-    assert "opentelemetry packages are not installed" in result.output
+    assert "pincer-telemetry is not installed" in result.output
 
 
 def test_run_telemetry_enabled_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """run() prints 'Telemetry enabled' once pincer_telemetry.init succeeds."""
-    _mock_settings_with_telemetry(monkeypatch, tmp_path)
-    monkeypatch.setattr("pincer_telemetry.init", lambda **kwargs: None)
+    from pincer_telemetry import UptraceProvider
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    settings = _mock_settings_with_telemetry(monkeypatch, tmp_path)
+    monkeypatch.setattr("pincer_telemetry.init", lambda *args, **kwargs: calls.append((args, kwargs)))
 
     result = runner.invoke(app, ["run"])
 
     assert result.exit_code == 0
     assert "Telemetry enabled" in result.output
+    [(args, kwargs)] = calls
+    assert isinstance(args[0], UptraceProvider)
+    assert kwargs["service_name"] == settings.agent_name
+    assert set(kwargs) == {"service_name", "version"}
 
 
 def test_run_telemetry_init_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """run() keeps going (and reports the error) if pincer_telemetry.init raises."""
 
-    def _raise(**kwargs):  # type: ignore[no-untyped-def]
+    def _raise(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("telemetry boom")
 
     _mock_settings_with_telemetry(monkeypatch, tmp_path)
@@ -169,7 +178,8 @@ def _mock_settings_for_run(monkeypatch: pytest.MonkeyPatch, *, task_broker: str)
 
     mock_settings = MagicMock()
     mock_settings.log_level.value = "WARNING"
-    mock_settings.telemetry_dsn = None
+    mock_settings.telemetry_uptrace_dsn = None
+    mock_settings.telemetry_posthog_dsn = None
     mock_settings.task_broker = task_broker
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
 

@@ -118,9 +118,11 @@ can be the thing that breaks.
 
 ```bash
 # .env.production
-PINCER_TELEMETRY_DSN=https://<token>@otlp.uptrace.dev
+PINCER_TELEMETRY_UPTRACE_DSN=https://<token>@api.uptrace.dev?grpc=4317
+# or, instead (never both): PINCER_TELEMETRY_POSTHOG_DSN=https://<phc_api_key>@eu.i.posthog.com
 ```
-`pincer run` initialises OpenTelemetry from this DSN; without it every metric
+`pincer run` initialises OpenTelemetry from this DSN and refuses to start when
+both are set or the DSN is malformed; without it every metric
 call is a cheap no-op and nothing else changes. Import
 `deploy/grafana/voice-ops-dashboard.json` into Grafana (or the equivalent
 Uptrace view) and point it at the Prometheus-compatible datasource fed by your

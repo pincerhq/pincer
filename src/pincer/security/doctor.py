@@ -177,8 +177,9 @@ class SecurityDoctor:
         # Voice ElevenLabs (1 check, Sprint 4)
         report.checks.append(self._check_voice_elevenlabs_voices(settings))
         report.checks.append(self._check_voice_language_pairing(settings))
-        # Observability (2 checks, Sprint 9)
+        # Observability (3 checks, Sprint 9)
         report.checks.append(self._check_ops_alert_routing(settings))
+        report.checks.append(self._check_telemetry_config(settings))
         report.checks.append(self._check_voice_canary(settings))
         # Voice security hardening (4 checks, Sprint 8)
         report.checks.append(self._check_voice_webhook_signature(settings))
@@ -492,19 +493,81 @@ class SecurityDoctor:
         details = f"channel={channel or 'unset'}"
         if email:
             details += f", email fallback={email}"
-        if not getattr(settings, "telemetry_dsn", None):
+        from pincer.observability.telemetry import telemetry_configured
+
+        if not telemetry_configured(settings):
             return CheckResult(
                 name="ops_alert_routing",
                 status=CheckStatus.WARNING,
-                message=f"Alerts route to {details}, but PINCER_TELEMETRY_DSN is unset — "
-                "no metrics dashboard, only alerts and the CLI",
-                fix_hint="Set PINCER_TELEMETRY_DSN to your OTLP collector for the Voice Ops dashboard",
+                message=f"Alerts route to {details}, but no PINCER_TELEMETRY_UPTRACE_DSN or "
+                "PINCER_TELEMETRY_POSTHOG_DSN is set — no metrics dashboard, only alerts and the CLI",
+                fix_hint="Set PINCER_TELEMETRY_UPTRACE_DSN (or PINCER_TELEMETRY_POSTHOG_DSN) "
+                "for the Voice Ops dashboard",
                 category="observability",
             )
         return CheckResult(
             name="ops_alert_routing",
             status=CheckStatus.PASS,
             message=f"Ops alerts route to {details}; metrics export configured",
+            category="observability",
+        )
+
+    def _check_telemetry_config(self, cfg: Settings | None = None, config_dir: Path | None = None) -> CheckResult:
+        """`pincer run` refuses to start on these; report them rather than crash."""
+        from pincer.observability.telemetry import (
+            legacy_telemetry_dsn,
+            legacy_telemetry_dsn_error,
+            resolve_telemetry_provider,
+            telemetry_configured,
+        )
+
+        settings = self._cfg(cfg)
+        legacy = legacy_telemetry_dsn(config_dir)
+        if legacy is not None:
+            return CheckResult(
+                name="telemetry_config",
+                status=CheckStatus.CRITICAL,
+                message=legacy_telemetry_dsn_error(legacy),
+                fix_hint="Rename PINCER_TELEMETRY_DSN to PINCER_TELEMETRY_UPTRACE_DSN",
+                category="observability",
+            )
+        try:
+            provider = resolve_telemetry_provider(settings)
+        except ImportError:
+            if not telemetry_configured(settings):
+                return CheckResult(
+                    name="telemetry_config",
+                    status=CheckStatus.SKIPPED,
+                    message="Telemetry not configured",
+                    category="observability",
+                )
+            return CheckResult(
+                name="telemetry_config",
+                status=CheckStatus.WARNING,
+                message="A telemetry DSN is set but pincer-telemetry is not installed — nothing is exported",
+                fix_hint='pip install "pincer-agent[telemetry]"',
+                category="observability",
+            )
+        except ValueError as e:  # pincer_telemetry.TelemetryConfigError; names keys, never values
+            return CheckResult(
+                name="telemetry_config",
+                status=CheckStatus.CRITICAL,
+                message=f"Telemetry configuration error: {e} — `pincer run` refuses to start",
+                fix_hint="Set exactly one of PINCER_TELEMETRY_UPTRACE_DSN or PINCER_TELEMETRY_POSTHOG_DSN, "
+                "in the documented DSN format",
+                category="observability",
+            )
+        if provider is None:
+            return CheckResult(
+                name="telemetry_config",
+                status=CheckStatus.SKIPPED,
+                message="Telemetry not configured",
+                category="observability",
+            )
+        return CheckResult(
+            name="telemetry_config",
+            status=CheckStatus.PASS,
+            message=f"Telemetry exports to {provider.name}",
             category="observability",
         )
 

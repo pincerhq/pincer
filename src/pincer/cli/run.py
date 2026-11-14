@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
+    from pincer_telemetry import Provider
+
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
@@ -87,6 +89,8 @@ async def run(
         raise typer.Exit(1) from e
 
     _refuse_legacy_identity_map()
+    _refuse_legacy_telemetry_dsn()
+    telemetry_provider = _resolve_telemetry_or_exit(settings)
 
     if detach:
         if component is not None:
@@ -120,23 +124,15 @@ async def run(
 
     _setup_logging(settings.log_level.value)
 
-    if settings.telemetry_dsn:
+    if telemetry_provider is not None:
         try:
             from pincer_telemetry import init as _init_telemetry
 
             import pincer as _pincer_pkg
 
-            _init_telemetry(
-                project_name=settings.agent_name,
-                version=_pincer_pkg.__version__,
-                dsn_url=str(settings.telemetry_dsn),
-            )
-            console.print("[green]Telemetry enabled[/green]")
-        except ImportError:
-            console.print(
-                "[yellow]PINCER_TELEMETRY_DSN is set but opentelemetry packages are not installed — "
-                'skipping. Install with: pip install "pincer-agent[telemetry]"[/yellow]'
-            )
+            # Sync init: one long-lived process, flushed at exit by the library's atexit hook.
+            _init_telemetry(telemetry_provider, service_name=settings.agent_name, version=_pincer_pkg.__version__)
+            console.print(f"[green]Telemetry enabled[/green] ({telemetry_provider.name})")
         except Exception as _tel_err:
             console.print(f"[yellow]Telemetry init failed (non-fatal): {_tel_err}[/yellow]")
 
@@ -247,6 +243,48 @@ def _refuse_legacy_identity_map() -> None:
     # which markup would swallow as style tags.
     console.print(Text("Configuration error:", style="red"), Text(legacy_identity_map_error(value)), soft_wrap=True)
     raise typer.Exit(1)
+
+
+def _refuse_legacy_telemetry_dsn() -> None:
+    """Stop when the removed PINCER_TELEMETRY_DSN (or `telemetry_dsn`) is still set.
+
+    Settings ignores unknown variables, so starting anyway would silently stop exporting.
+    """
+    from pincer.observability.telemetry import legacy_telemetry_dsn, legacy_telemetry_dsn_error
+
+    location = legacy_telemetry_dsn()
+    if location is None:
+        return
+    from rich.text import Text
+
+    console.print(Text("Configuration error:", style="red"), Text(legacy_telemetry_dsn_error(location)), soft_wrap=True)
+    raise typer.Exit(1)
+
+
+def _resolve_telemetry_or_exit(settings: Settings) -> Provider | None:
+    """The telemetry provider the settings select, or None when telemetry is off.
+
+    Exits 1 on a misconfiguration (both providers set, a malformed DSN) before any
+    other start step. A configured DSN without the `telemetry` extra only warns.
+    """
+    from pincer.observability.telemetry import resolve_telemetry_provider, telemetry_configured
+
+    try:
+        from pincer_telemetry import TelemetryConfigError
+    except ImportError:
+        if telemetry_configured(settings):
+            console.print(
+                "[yellow]PINCER_TELEMETRY_*_DSN is set but pincer-telemetry is not installed — "
+                'skipping. Install with: pip install "pincer-agent[telemetry]"[/yellow]'
+            )
+        return None
+    try:
+        return resolve_telemetry_provider(settings)
+    except TelemetryConfigError as e:
+        from rich.text import Text
+
+        console.print(Text("Telemetry configuration error:", style="red"), Text(str(e)), soft_wrap=True)
+        raise typer.Exit(1) from e
 
 
 async def _build_core(settings: Settings) -> CoreComponents:
