@@ -123,19 +123,21 @@ def _parse_args() -> argparse.Namespace:
 def _init_telemetry_from_env() -> None:
     """Start telemetry from ``TELEMETRY_UPTRACE_DSN`` / ``TELEMETRY_POSTHOG_DSN``; off when neither is set.
 
-    A misconfiguration (both set, an unknown ``TELEMETRY_*`` key, a malformed DSN)
-    raises ``TelemetryConfigError`` and stops the server before it serves anything.
+    Other ``TELEMETRY_*`` variables are ignored. A misconfiguration (both set, a
+    malformed DSN) raises ``TelemetryConfigError`` and stops the server before it
+    serves anything.
     """
+    dsn_env = {k: os.environ[k] for k in ("TELEMETRY_UPTRACE_DSN", "TELEMETRY_POSTHOG_DSN") if k in os.environ}
     if os.environ.get("OTEL_DSN"):
         logger.warning("OTEL_DSN is no longer read — rename it to TELEMETRY_UPTRACE_DSN")
     try:
         from pincer_telemetry import init as _init_telemetry
         from pincer_telemetry import provider_from_prefixed_env
     except ImportError:
-        if any(v for k, v in os.environ.items() if k.startswith("TELEMETRY_")):
+        if any(v.strip() for v in dsn_env.values()):
             logger.warning('TELEMETRY_* is set but pincer-telemetry is not installed — install "doctr-mcp[telemetry]"')
         return
-    provider = provider_from_prefixed_env("TELEMETRY_")  # config errors propagate: the server exits
+    provider = provider_from_prefixed_env("TELEMETRY_", dsn_env)  # config errors propagate: the server exits
     if provider is None:
         return
     try:

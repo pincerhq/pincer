@@ -64,10 +64,13 @@ from the variable name.
 
 - DSN formats: Uptrace `https://<token>@api.uptrace.dev?grpc=4317`;
   PostHog `https://<phc_api_key>@us.i.posthog.com` (or `eu.i.posthog.com`).
-- Both DSNs set, a malformed DSN, or (MCP servers) an unknown `TELEMETRY_*`
-  key is an error that stops the process before anything else starts.
-  Nothing set keeps telemetry off. See
+- Both DSNs set or a malformed DSN is an error that stops the process before
+  anything else starts. Nothing set keeps telemetry off; other
+  `PINCER_TELEMETRY_*` / `TELEMETRY_*` names are ignored. See
   [Telemetry](docs/core-components/mcp-servers.md#telemetry).
+- The agent DSNs can also be set in a new `[telemetry]` section of
+  `pincer.toml` / `pincer.local.toml` (`uptrace_dsn`, `posthog_dsn`), below
+  the environment and `.env`.
 - `pincer doctor` adds a `telemetry_config` check.
 
 #### One storage root, with `skills/` and `workspace/` under it

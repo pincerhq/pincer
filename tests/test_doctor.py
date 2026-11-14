@@ -503,7 +503,11 @@ def test_identity_management_is_critical_while_the_old_env_var_is_set(tmp_path, 
     assert "[identity.john]" in result.fix_hint
     assert "[identity.person_1]" in result.fix_hint
 
+    from pincer.config.main import Settings
+
     monkeypatch.delenv("PINCER_IDENTITY_MAP")
+    # The .env files Settings reads (the test suite turns them off by default).
+    monkeypatch.setitem(Settings.model_config, "env_file", ("../.env", ".env"))
     (tmp_path / ".env").write_text("PINCER_IDENTITY_MAP=jane@telegram:3\n")
     from_dotenv = SecurityDoctor(config_dir=tmp_path)._check_identity_management(_access_cfg(tmp_path))
     assert from_dotenv.status == CheckStatus.CRITICAL
@@ -1696,7 +1700,7 @@ def test_ops_alert_routing_passes_with_posthog():
 
 
 def _telemetry_check(tmp_path, **overrides):
-    return SecurityDoctor()._check_telemetry_config(_obs_cfg(**overrides), config_dir=tmp_path)
+    return SecurityDoctor(config_dir=tmp_path)._check_telemetry_config(_obs_cfg(**overrides))
 
 
 def test_telemetry_config_pass(tmp_path):
@@ -1732,6 +1736,16 @@ def test_telemetry_config_critical_on_legacy_variable(tmp_path, monkeypatch):
     assert result.status == CheckStatus.CRITICAL
     assert "PINCER_TELEMETRY_UPTRACE_DSN" in result.message
     assert "s3cr3t" not in result.message
+
+
+def test_telemetry_config_reads_the_doctor_config_dir(tmp_path, monkeypatch):
+    """A leftover key in the directory doctor was pointed at counts, not the cwd's."""
+    monkeypatch.setattr("pincer.config.telemetry.TELEMETRY_TOML_FILES", ("pincer.toml",))
+    (tmp_path / "pincer.toml").write_text('telemetry_dsn = "https://s3cr3t@api.uptrace.dev"\n')
+    monkeypatch.chdir(tmp_path.parent)
+    result = _telemetry_check(tmp_path)
+    assert result.status == CheckStatus.CRITICAL
+    assert "telemetry_dsn" in result.message
 
 
 def test_ops_alert_routing_warns_when_disabled():

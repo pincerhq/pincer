@@ -472,6 +472,7 @@ detected from the variable name; there is no separate provider switch.
 | Component | Uptrace | PostHog |
 |-----------|---------|---------|
 | Pincer agent | `PINCER_TELEMETRY_UPTRACE_DSN` | `PINCER_TELEMETRY_POSTHOG_DSN` |
+| Pincer agent, `pincer.toml` `[telemetry]` | `uptrace_dsn` | `posthog_dsn` |
 | All MCP servers (`pomodoro-mcp`, `pincer-mcps`, `sqlite-vec-memory-mcp`, `doctr-mcp`) | `TELEMETRY_UPTRACE_DSN` | `TELEMETRY_POSTHOG_DSN` |
 
 DSN formats:
@@ -481,14 +482,14 @@ DSN formats:
 
 ### Rules
 
-The agent applies these rules to its two `PINCER_TELEMETRY_*_DSN` settings,
-and each MCP server applies them to every `TELEMETRY_*` environment variable:
+The agent applies these rules to its two DSN settings, and each MCP server to
+its two `TELEMETRY_*_DSN` variables:
 
 - **Nothing set** (or only empty values, as docker-compose `${VAR}` produces) → telemetry off.
 - **One DSN set** → that provider.
-- **Both DSNs set** → error.
+- **Both DSNs set** → error. For the agent this counts across sources, e.g. one DSN in `pincer.toml` and the other in the environment.
 - **Malformed DSN** (no scheme, host or token/key; a PostHog DSN with a path or query) → error.
-- **Unknown key** (MCP servers), e.g. `TELEMETRY_PROVIDER` or a typo → error.
+- **Any other name**, e.g. `TELEMETRY_PROVIDER` or a misspelt variable → ignored, so check the spelling if nothing arrives.
 
 An error stops the process before anything else starts: `pincer run` exits 1
 with `Telemetry configuration error: …`, and an MCP server exits non-zero.
@@ -497,7 +498,7 @@ same problems as a critical `telemetry_config` check.
 
 The removed variables are not read any more:
 
-- `PINCER_TELEMETRY_DSN` (and `telemetry_dsn` in `pincer.toml`): `pincer run` refuses to start while it is set and tells you to rename it to `PINCER_TELEMETRY_UPTRACE_DSN`.
+- `PINCER_TELEMETRY_DSN` (environment or `.env`), and `telemetry_dsn` or `[telemetry] dsn` in `pincer.toml` / `pincer.local.toml`: `pincer run` refuses to start while it is set and tells you to rename it to `PINCER_TELEMETRY_UPTRACE_DSN`.
 - `OTEL_DSN`: MCP servers log a warning naming `TELEMETRY_UPTRACE_DSN` and start without telemetry.
 
 ### Pincer agent
@@ -506,8 +507,20 @@ The removed variables are not read any more:
 PINCER_TELEMETRY_UPTRACE_DSN=https://<token>@api.uptrace.dev?grpc=4317 pincer run
 ```
 
-Set the variable in the environment or `.env`; the docker-compose agent
-services read it from `.env`. Install the telemetry extra:
+Set the variable in the environment or `.env` (the docker-compose agent
+services read it from `.env`), or in `pincer.toml` / `pincer.local.toml`. The
+environment and `.env` win over the TOML files, and `pincer.local.toml` wins
+over `pincer.toml`:
+
+```toml
+# pincer.local.toml
+[telemetry]
+uptrace_dsn = "https://<token>@api.uptrace.dev?grpc=4317"
+# or, instead (never both): posthog_dsn = "https://<phc_api_key>@eu.i.posthog.com"
+```
+
+Error messages name the environment variables even when the value came from
+TOML. Install the telemetry extra:
 
 ```bash
 pip install "pincer-agent[telemetry]"

@@ -89,8 +89,7 @@ async def run(
         raise typer.Exit(1) from e
 
     _refuse_legacy_identity_map()
-    _refuse_legacy_telemetry_dsn()
-    telemetry_provider = _resolve_telemetry_or_exit(settings)
+    telemetry_provider = _telemetry_provider_or_exit(settings)
 
     if detach:
         if component is not None:
@@ -245,46 +244,33 @@ def _refuse_legacy_identity_map() -> None:
     raise typer.Exit(1)
 
 
-def _refuse_legacy_telemetry_dsn() -> None:
-    """Stop when the removed PINCER_TELEMETRY_DSN (or `telemetry_dsn`) is still set.
+def _telemetry_provider_or_exit(settings: Settings) -> Provider | None:
+    """The telemetry provider to start, or None when telemetry is off.
 
-    Settings ignores unknown variables, so starting anyway would silently stop exporting.
+    Exits 1, before any other start step, on the removed PINCER_TELEMETRY_DSN
+    (Settings ignores unknown variables, so starting would silently stop
+    exporting) and on a misconfiguration (both providers set, a malformed DSN).
+    A configured DSN without the `telemetry` extra only warns.
     """
-    from pincer.observability.telemetry import legacy_telemetry_dsn, legacy_telemetry_dsn_error
-
-    location = legacy_telemetry_dsn()
-    if location is None:
-        return
     from rich.text import Text
 
-    console.print(Text("Configuration error:", style="red"), Text(legacy_telemetry_dsn_error(location)), soft_wrap=True)
-    raise typer.Exit(1)
+    from pincer.observability.telemetry import POSTHOG_ENV, UPTRACE_ENV, TelemetryState, inspect_telemetry
 
-
-def _resolve_telemetry_or_exit(settings: Settings) -> Provider | None:
-    """The telemetry provider the settings select, or None when telemetry is off.
-
-    Exits 1 on a misconfiguration (both providers set, a malformed DSN) before any
-    other start step. A configured DSN without the `telemetry` extra only warns.
-    """
-    from pincer.observability.telemetry import resolve_telemetry_provider, telemetry_configured
-
-    try:
-        from pincer_telemetry import TelemetryConfigError
-    except ImportError:
-        if telemetry_configured(settings):
+    setup = inspect_telemetry(settings)
+    match setup.state:
+        case TelemetryState.LEGACY:
+            # Text, not markup: the message is user config, which markup could swallow.
+            console.print(Text("Configuration error:", style="red"), Text(setup.message), soft_wrap=True)
+            raise typer.Exit(1)
+        case TelemetryState.INVALID:
+            console.print(Text("Telemetry configuration error:", style="red"), Text(setup.message), soft_wrap=True)
+            raise typer.Exit(1)
+        case TelemetryState.NOT_INSTALLED:
             console.print(
-                "[yellow]PINCER_TELEMETRY_*_DSN is set but pincer-telemetry is not installed — "
+                f"[yellow]{UPTRACE_ENV} or {POSTHOG_ENV} is set but pincer-telemetry is not installed — "
                 'skipping. Install with: pip install "pincer-agent[telemetry]"[/yellow]'
             )
-        return None
-    try:
-        return resolve_telemetry_provider(settings)
-    except TelemetryConfigError as e:
-        from rich.text import Text
-
-        console.print(Text("Telemetry configuration error:", style="red"), Text(str(e)), soft_wrap=True)
-        raise typer.Exit(1) from e
+    return setup.provider
 
 
 async def _build_core(settings: Settings) -> CoreComponents:

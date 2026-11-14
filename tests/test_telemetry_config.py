@@ -12,6 +12,8 @@ from typer.testing import CliRunner
 
 from pincer.cli import app
 from pincer.observability.telemetry import (
+    TelemetryState,
+    inspect_telemetry,
     legacy_telemetry_dsn,
     resolve_telemetry_provider,
     telemetry_configured,
@@ -98,8 +100,8 @@ def test_legacy_in_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("PINCER_TELEMETRY_DSN", _UPTRACE)
     location = legacy_telemetry_dsn(tmp_path)
     assert location is not None
-    assert "PINCER_TELEMETRY_DSN" in location
-    assert "s3cr3t" not in location
+    assert str(location) == "PINCER_TELEMETRY_DSN in the environment"
+    assert "s3cr3t" not in repr(location)
 
 
 def test_legacy_empty_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,15 +117,119 @@ def test_legacy_in_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     (tmp_path / ".env").write_text(f"PINCER_TELEMETRY_DSN={_UPTRACE}\n")
     location = legacy_telemetry_dsn(tmp_path / "app")
     assert location is not None
-    assert ".env" in location
+    assert location.source.endswith(".env")
 
 
-def test_legacy_in_pincer_toml(tmp_path: Path) -> None:
-    (tmp_path / "pincer.toml").write_text(f'telemetry_dsn = "{_UPTRACE}"\n')
+def test_legacy_dotenv_follows_settings(tmp_path: Path) -> None:
+    """Only the .env files Settings reads count (the suite turns them off)."""
+    (tmp_path / ".env").write_text(f"PINCER_TELEMETRY_DSN={_UPTRACE}\n")
+    assert legacy_telemetry_dsn(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("toml", "key"),
+    [
+        (f'telemetry_dsn = "{_UPTRACE}"\n', "telemetry_dsn"),
+        (f'[telemetry]\ndsn = "{_UPTRACE}"\n', "[telemetry] dsn"),
+    ],
+)
+def test_legacy_in_pincer_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toml: str, key: str) -> None:
+    monkeypatch.setattr("pincer.config.telemetry.TELEMETRY_TOML_FILES", ("pincer.toml", "pincer.local.toml"))
+    (tmp_path / "pincer.local.toml").write_text(toml)
     location = legacy_telemetry_dsn(tmp_path)
     assert location is not None
-    assert "telemetry_dsn" in location
-    assert "s3cr3t" not in location
+    assert location.key == key
+    assert "s3cr3t" not in str(location)
+
+
+# ── pincer.toml [telemetry] ──────────────────────────────
+
+
+@pytest.fixture
+def toml_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr("pincer.config.telemetry.TELEMETRY_TOML_FILES", ("pincer.toml", "pincer.local.toml"))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_settings_read_the_toml_section(toml_dir: Path) -> None:
+    from pincer.config.main import Settings
+
+    (toml_dir / "pincer.toml").write_text('[telemetry]\nposthog_dsn = "https://phc_key@eu.i.posthog.com"\n')
+    settings = Settings()  # type: ignore[call-arg]
+    provider = resolve_telemetry_provider(settings)
+    assert isinstance(provider, PostHogProvider)
+    assert provider.host == "https://eu.i.posthog.com"
+
+
+def test_local_toml_overrides_and_env_wins(toml_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.config.main import Settings
+
+    (toml_dir / "pincer.toml").write_text('[telemetry]\nuptrace_dsn = "https://a@shipped"\nposthog_dsn = ""\n')
+    (toml_dir / "pincer.local.toml").write_text('[telemetry]\nuptrace_dsn = "https://b@local"\n')
+    settings = Settings()  # type: ignore[call-arg]
+    assert settings.telemetry_uptrace_dsn is not None
+    assert settings.telemetry_uptrace_dsn.get_secret_value() == "https://b@local"
+    assert settings.telemetry_posthog_dsn is None  # empty counts as unset
+
+    monkeypatch.setenv("PINCER_TELEMETRY_UPTRACE_DSN", "https://c@env")
+    settings = Settings()  # type: ignore[call-arg]
+    assert settings.telemetry_uptrace_dsn is not None
+    assert settings.telemetry_uptrace_dsn.get_secret_value() == "https://c@env"
+
+
+def test_toml_and_env_providers_conflict(toml_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.config.main import Settings
+
+    (toml_dir / "pincer.toml").write_text(f'[telemetry]\nuptrace_dsn = "{_UPTRACE}"\n')
+    monkeypatch.setenv("PINCER_TELEMETRY_POSTHOG_DSN", "https://phc_key@us.i.posthog.com")
+    with pytest.raises(TelemetryConfigError):
+        resolve_telemetry_provider(Settings())  # type: ignore[call-arg]
+
+
+def test_unreadable_toml_does_not_break_settings(toml_dir: Path) -> None:
+    from pincer.config.main import Settings
+
+    (toml_dir / "pincer.toml").write_text("[telemetry\n")
+    assert Settings().telemetry_uptrace_dsn is None  # type: ignore[call-arg]
+
+
+# ── inspect_telemetry ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("dsns", "state"),
+    [
+        ({}, TelemetryState.OFF),
+        ({"uptrace": _UPTRACE}, TelemetryState.ENABLED),
+        ({"posthog": "https://us.i.posthog.com"}, TelemetryState.INVALID),
+        ({"uptrace": _UPTRACE, "posthog": "https://phc_key@us.i.posthog.com"}, TelemetryState.INVALID),
+    ],
+)
+def test_inspect_states(tmp_path: Path, dsns: dict[str, str], state: TelemetryState) -> None:
+    assert inspect_telemetry(_settings(**dsns), tmp_path).state is state
+
+
+def test_inspect_legacy_comes_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_TELEMETRY_DSN", _UPTRACE)
+    setup = inspect_telemetry(_settings(uptrace=_UPTRACE, posthog="https://phc_key@us.i.posthog.com"), tmp_path)
+    assert setup.state is TelemetryState.LEGACY
+    assert "PINCER_TELEMETRY_UPTRACE_DSN" in setup.message
+
+
+def test_inspect_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pincer_telemetry", None)
+    assert inspect_telemetry(_settings(uptrace=_UPTRACE), tmp_path).state is TelemetryState.NOT_INSTALLED
+    assert inspect_telemetry(_settings(), tmp_path).state is TelemetryState.OFF
+
+
+def test_unknown_agent_keys_are_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.config.main import Settings
+
+    monkeypatch.setenv("PINCER_TELEMETRY_TYPO_DSN", _UPTRACE)
+    assert inspect_telemetry(Settings(), tmp_path).state is TelemetryState.OFF  # type: ignore[call-arg]
 
 
 # ── pincer run ───────────────────────────────────────────

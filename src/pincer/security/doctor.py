@@ -493,16 +493,15 @@ class SecurityDoctor:
         details = f"channel={channel or 'unset'}"
         if email:
             details += f", email fallback={email}"
-        from pincer.observability.telemetry import telemetry_configured
+        from pincer.observability.telemetry import POSTHOG_ENV, UPTRACE_ENV, telemetry_configured
 
         if not telemetry_configured(settings):
             return CheckResult(
                 name="ops_alert_routing",
                 status=CheckStatus.WARNING,
-                message=f"Alerts route to {details}, but no PINCER_TELEMETRY_UPTRACE_DSN or "
-                "PINCER_TELEMETRY_POSTHOG_DSN is set — no metrics dashboard, only alerts and the CLI",
-                fix_hint="Set PINCER_TELEMETRY_UPTRACE_DSN (or PINCER_TELEMETRY_POSTHOG_DSN) "
-                "for the Voice Ops dashboard",
+                message=f"Alerts route to {details}, but no {UPTRACE_ENV} or {POSTHOG_ENV} is set — "
+                "no metrics dashboard, only alerts and the CLI",
+                fix_hint=f"Set {UPTRACE_ENV} (or {POSTHOG_ENV}) for the Voice Ops dashboard",
                 category="observability",
             )
         return CheckResult(
@@ -512,64 +511,46 @@ class SecurityDoctor:
             category="observability",
         )
 
-    def _check_telemetry_config(self, cfg: Settings | None = None, config_dir: Path | None = None) -> CheckResult:
-        """`pincer run` refuses to start on these; report them rather than crash."""
+    def _check_telemetry_config(self, cfg: Settings | None = None) -> CheckResult:
+        """`pincer run` refuses to start on a bad telemetry config; report it rather than crash."""
         from pincer.observability.telemetry import (
-            legacy_telemetry_dsn,
-            legacy_telemetry_dsn_error,
-            resolve_telemetry_provider,
-            telemetry_configured,
+            LEGACY_DSN_ENV,
+            POSTHOG_ENV,
+            UPTRACE_ENV,
+            TelemetryState,
+            inspect_telemetry,
         )
 
-        settings = self._cfg(cfg)
-        legacy = legacy_telemetry_dsn(config_dir)
-        if legacy is not None:
+        setup = inspect_telemetry(self._cfg(cfg), self.config_dir)
+
+        def result(status: CheckStatus, message: str, fix_hint: str = "") -> CheckResult:
             return CheckResult(
-                name="telemetry_config",
-                status=CheckStatus.CRITICAL,
-                message=legacy_telemetry_dsn_error(legacy),
-                fix_hint="Rename PINCER_TELEMETRY_DSN to PINCER_TELEMETRY_UPTRACE_DSN",
-                category="observability",
+                name="telemetry_config", status=status, message=message, fix_hint=fix_hint, category="observability"
             )
-        try:
-            provider = resolve_telemetry_provider(settings)
-        except ImportError:
-            if not telemetry_configured(settings):
-                return CheckResult(
-                    name="telemetry_config",
-                    status=CheckStatus.SKIPPED,
-                    message="Telemetry not configured",
-                    category="observability",
+
+        match setup.state:
+            case TelemetryState.LEGACY:
+                return result(
+                    CheckStatus.CRITICAL,
+                    setup.message,
+                    f"Rename {LEGACY_DSN_ENV} to {UPTRACE_ENV} ([telemetry] uptrace_dsn in pincer.toml)",
                 )
-            return CheckResult(
-                name="telemetry_config",
-                status=CheckStatus.WARNING,
-                message="A telemetry DSN is set but pincer-telemetry is not installed — nothing is exported",
-                fix_hint='pip install "pincer-agent[telemetry]"',
-                category="observability",
-            )
-        except ValueError as e:  # pincer_telemetry.TelemetryConfigError; names keys, never values
-            return CheckResult(
-                name="telemetry_config",
-                status=CheckStatus.CRITICAL,
-                message=f"Telemetry configuration error: {e} — `pincer run` refuses to start",
-                fix_hint="Set exactly one of PINCER_TELEMETRY_UPTRACE_DSN or PINCER_TELEMETRY_POSTHOG_DSN, "
-                "in the documented DSN format",
-                category="observability",
-            )
-        if provider is None:
-            return CheckResult(
-                name="telemetry_config",
-                status=CheckStatus.SKIPPED,
-                message="Telemetry not configured",
-                category="observability",
-            )
-        return CheckResult(
-            name="telemetry_config",
-            status=CheckStatus.PASS,
-            message=f"Telemetry exports to {provider.name}",
-            category="observability",
-        )
+            case TelemetryState.INVALID:
+                return result(
+                    CheckStatus.CRITICAL,
+                    f"Telemetry configuration error: {setup.message} — `pincer run` refuses to start",
+                    f"Set exactly one of {UPTRACE_ENV} or {POSTHOG_ENV}, in the documented DSN format",
+                )
+            case TelemetryState.NOT_INSTALLED:
+                return result(
+                    CheckStatus.WARNING,
+                    "A telemetry DSN is set but pincer-telemetry is not installed — nothing is exported",
+                    'pip install "pincer-agent[telemetry]"',
+                )
+            case TelemetryState.ENABLED:
+                assert setup.provider is not None
+                return result(CheckStatus.PASS, f"Telemetry exports to {setup.provider.name}")
+        return result(CheckStatus.SKIPPED, "Telemetry not configured")
 
     def _check_voice_canary(self, cfg: Settings | None = None) -> CheckResult:
         """T9.2: the canary is the probe that catches provider outages first."""
