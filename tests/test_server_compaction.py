@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from anthropic_sse import ScriptedAnthropic, compaction, text
 from sqlmodel import select
+from test_photos_stay import jpeg
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.core.compaction import (
@@ -299,7 +300,7 @@ async def test_a_history_changed_during_the_compaction_discards_it_and_leaves_st
 async def test_the_swap_deletes_the_photos_only_the_summarized_messages_showed(
     settings, session_manager, cost_tracker, registry
 ):
-    old_photo, new_photo = b"photo-in-a-summarized-message", b"photo-sent-while-the-compaction-ran"
+    old_photo, new_photo = b"photo-in-a-summarized-message", jpeg(64, 48)  # the new one is sent, so it must be readable
     await _seed(session_manager, "user1", "test", photo=old_photo)
     script = [_reply("Reply 1", 100_000), _COMPACTED, _reply("Reply 2", 1)]
     async with ScriptedAnthropic(settings, script) as llm:

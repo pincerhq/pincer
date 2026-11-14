@@ -5,6 +5,7 @@ The slice-2 sites (pair repair and tool re-selection still strip thinking) are t
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
+from PIL import Image
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.session import SessionManager
@@ -502,7 +504,13 @@ async def test_streaming_chat_turn_with_a_long_history_sends_an_unchanged_prefix
     assert await _stored_length(session_manager, "web:user1", "user1", "web") == _EARLIER + 4
 
 
-_IMAGE = (b"\x89PNG fake image bytes", "image/png")
+def _tiny_png() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (4, 4), (10, 120, 200)).save(out, "PNG")
+    return out.getvalue()
+
+
+_IMAGE = (_tiny_png(), "image/png")  # a photo the session keeps, so it must be one the models can read
 
 
 def _image_blocks(request: dict[str, Any]) -> list[dict[str, Any]]:

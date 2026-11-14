@@ -64,6 +64,10 @@ Always on, without setting anything:
   the oldest half of the history (whole turns, the summary kept) and retries, up to four times.
   Compaction only runs after a request succeeded, so without this a history no request can carry
   would fail on every later message.
+- A photo a chat sends stays in the conversation, so it is checked when it arrives: it gets the media
+  type of its bytes (whatever the channel claimed), a format the models do not take (BMP, TIFF) is
+  converted, and one that cannot be read (HEIC, a corrupt or cut-short file) is left out with a note to
+  the model. It used to be kept and could make every later request of the session fail.
 - `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
   warning at startup and `pincer doctor` reports it. Remove it from `.env`.
 

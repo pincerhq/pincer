@@ -30,6 +30,7 @@ from openai_wire import (
 )
 from pydantic import SecretStr
 from sqlmodel import select
+from test_photos_stay import jpeg
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.core.compaction import (
@@ -302,7 +303,7 @@ async def test_a_history_that_changed_while_the_compaction_ran_discards_the_wind
 async def test_the_swap_deletes_the_photos_only_the_replaced_messages_showed(
     openai_settings, session_manager, cost_tracker, registry
 ):
-    old_photo, new_photo = b"photo-in-a-replaced-message", b"photo-sent-while-the-compaction-ran"
+    old_photo, new_photo = b"photo-in-a-replaced-message", jpeg(64, 48)  # the new one is sent, so it must be readable
     gate = asyncio.Event()
     replies = [([message_item("Reply 1", "msg_r1")], _OVER_THE_LIMIT), Compaction(_WINDOW, gate=gate)]
     replies.append([message_item("Reply 2", "msg_r2")])

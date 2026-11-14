@@ -47,7 +47,7 @@ from pincer.llm.base import (
     prompt_cache_session,
 )
 from pincer.llm.cost_tracker import record_response
-from pincer.llm.images import prepare_image
+from pincer.llm.images import UnreadableImage, prepare_image
 from pincer.llm.model_params import model_max_output_tokens
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
@@ -132,6 +132,7 @@ _CONTEXT_LENGTH_PHRASES = (
     "maximum allowed number of bytes",
 )
 # The result that closes a tool call whose turn died before the tool finished (sent as an error)
+_UNREADABLE_PHOTOS_NOTE = "[{count} photo(s) sent with this message could not be read and are not attached]"
 _INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
 # How a web chat turn ends when no request answers its last tools
@@ -703,11 +704,34 @@ def _interrupted_results(messages: list[LLMMessage]) -> list[LLMMessage]:
     ]
 
 
-async def _image_contents(images: list[tuple[bytes, str]] | None) -> list[ImageContent]:
-    """The photos a user sent, as the conversation keeps them from now on: prepared once (see
-    `prepare_image`; the original already went to the workspace's uploads), off the event loop."""
-    prepared = [await asyncio.to_thread(prepare_image, raw, media_type) for raw, media_type in images or []]
-    return [ImageContent.from_bytes(photo.data, photo.media_type) for photo in prepared]
+async def _image_contents(images: list[tuple[bytes, str]] | None) -> tuple[list[ImageContent], int]:
+    """The photos a user sent, as the conversation keeps them from now on, and how many were left out.
+
+    Each is prepared once (see `prepare_image`; the original already went to the workspace's uploads), off
+    the event loop. One no model can read is left out, never stored: it would stay in the history and
+    fail every later request of the session.
+    """
+    contents: list[ImageContent] = []
+    unreadable = 0
+    for raw, claimed_type in images or []:
+        try:
+            photo = await asyncio.to_thread(prepare_image, raw)
+        except UnreadableImage:
+            logger.warning(
+                "A photo could not be read and was left out (%d bytes, claimed as %s)", len(raw), claimed_type
+            )
+            unreadable += 1
+            continue
+        contents.append(ImageContent.from_bytes(photo.data, photo.media_type))
+    return contents, unreadable
+
+
+def _with_unreadable_photos(context: str, unreadable: int) -> str:
+    """The turn's context block, with a line telling the model that photos did not arrive."""
+    if not unreadable:
+        return context
+    note = _UNREADABLE_PHOTOS_NOTE.format(count=unreadable)
+    return f"{context}\n{note}" if context else note
 
 
 def _log_thinking_dropped(session_id: str, response: LLMResponse) -> None:
@@ -1029,7 +1053,7 @@ class Agent:
         )
 
         # Build user message
-        img_contents = await _image_contents(images)
+        img_contents, unreadable = await _image_contents(images)
 
         turn = await self._begin_turn(user_id, session_key=session.session_id)
         read_language = memory and (channel_name or channel) != "voice"
@@ -1038,7 +1062,12 @@ class Agent:
             self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
             self._preferred_language(user_id, read=read_language),
         )
-        user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
+        user_msg = LLMMessage(
+            role=MessageRole.USER,
+            content=text,
+            images=img_contents,
+            context=_with_unreadable_photos(context, unreadable),
+        )
         await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
 
@@ -1526,7 +1555,7 @@ class Agent:
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
         )
 
-        img_contents = await _image_contents(images)
+        img_contents, unreadable = await _image_contents(images)
 
         turn = await self._begin_turn(user_id, session_key=session.session_id)
         # Both are memory round trips: run them together (the language goes in the system prompt)
@@ -1534,7 +1563,12 @@ class Agent:
             self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
             self._preferred_language(user_id, read=memory),
         )
-        user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
+        user_msg = LLMMessage(
+            role=MessageRole.USER,
+            content=text,
+            images=img_contents,
+            context=_with_unreadable_photos(context, unreadable),
+        )
         await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
 

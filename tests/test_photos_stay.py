@@ -153,6 +153,95 @@ async def test_streaming_chat_prepares_a_big_photo_once_and_sends_what_it_stores
     assert stored.data == sent[0]
 
 
+_NOT_AN_IMAGE = b"\x00ftypheic this is not a picture Pillow can open"
+
+
+def _texts(request: dict[str, Any]) -> list[str]:
+    return [
+        block["text"]
+        for message in request["messages"]
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block["type"] == "text"
+    ]
+
+
+async def test_a_photo_the_model_cannot_read_is_left_out_of_the_session_and_the_turn_goes_on(
+    settings, session_manager, cost_tracker, registry, caplog
+):
+    caplog.set_level("WARNING", logger="pincer.core.agent")
+    async with ScriptedAnthropic(settings, _replies(2)) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+        await agent.handle_message(
+            "user1", "test", "What is this?", images=[(_NOT_AN_IMAGE, "image/heic")], memory=False
+        )
+        await agent.handle_message("user1", "test", "And now?", memory=False)
+
+    assert len(llm.requests) == 2  # precondition: both turns reached the model
+    assert [image_blocks(request) for request in llm.requests] == [[], []]  # never sent, never kept
+    assert any("1 photo(s) sent with this message could not be read" in text for text in _texts(llm.requests[0]))
+    row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
+    assert row is not None
+    assert row["images"] == []
+    assert "images" not in json.loads(row["messages"])[0]
+    assert [r.getMessage() for r in caplog.records if "could not be read" in r.getMessage()] == [
+        f"A photo could not be read and was left out ({len(_NOT_AN_IMAGE)} bytes, claimed as image/heic)"
+    ]
+
+
+async def test_a_readable_photo_sent_beside_an_unreadable_one_is_kept(
+    settings, session_manager, cost_tracker, registry
+):
+    photo = jpeg(300, 200)
+    async with ScriptedAnthropic(settings, _replies(2)) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+        await agent.handle_message(
+            "user1",
+            "test",
+            "Two photos",
+            images=[(_NOT_AN_IMAGE, "image/jpeg"), (photo, "image/jpeg")],
+            memory=False,
+        )
+        await agent.handle_message("user1", "test", "And now?", memory=False)
+
+    for request in llm.requests:
+        ((_, block),) = image_blocks(request)
+        assert base64.b64decode(block["source"]["data"]) == photo
+    assert any("1 photo(s) sent with this message could not be read" in text for text in _texts(llm.requests[0]))
+
+
+async def test_streaming_chat_leaves_out_an_unreadable_photo_too(settings, session_manager, cost_tracker, registry):
+    async with ScriptedAnthropic(settings, _replies(2)) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+        chunks = [
+            c
+            async for c in agent.handle_message_stream(
+                "user1", "web", "What is this?", images=[(_NOT_AN_IMAGE, "image/heic")], memory=False
+            )
+        ]
+        _ = [c async for c in agent.handle_message_stream("user1", "web", "And now?", memory=False)]
+
+    assert chunks[-1].type == "done"
+    assert [image_blocks(request) for request in llm.requests] == [[], []]
+    assert any("1 photo(s) sent with this message could not be read" in text for text in _texts(llm.requests[0]))
+
+
+async def test_a_photo_goes_out_with_the_media_type_of_its_bytes_not_the_one_the_channel_claimed(
+    settings, session_manager, cost_tracker, registry
+):
+    png = io.BytesIO()
+    Image.new("RGB", (40, 30), (200, 10, 10)).save(png, "PNG")
+    async with ScriptedAnthropic(settings, _replies(2)) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+        await agent.handle_message("user1", "test", "Red?", images=[(png.getvalue(), "image/jpeg")], memory=False)
+        await agent.handle_message("user1", "test", "And now?", memory=False)
+
+    for request in llm.requests:
+        ((_, block),) = image_blocks(request)
+        assert block["source"]["media_type"] == "image/png"
+        assert base64.b64decode(block["source"]["data"]) == png.getvalue()
+
+
 def test_a_message_keeps_refs_to_its_photos_and_finds_them_again_by_hash():
     shown = ImageContent.from_bytes(b"photo bytes", "image/png")
     message = LLMMessage(role=MessageRole.USER, content="look", images=[shown])

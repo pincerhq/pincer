@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import io
-import logging
 from dataclasses import dataclass
 
 from PIL import Image, ImageOps
-
-logger = logging.getLogger(__name__)
 
 # The long edge the high-resolution tier of Claude 4.7+ and 5.x reads; also under the 3,000 px
 # that every image must stay under once a request holds more than 20 of them
@@ -25,10 +22,17 @@ JPEG_QUALITY = 85
 # for every 3, so 3,750,000 raw bytes is exactly 5,000,000 characters.
 MAX_ENCODED_BYTES = 3_750_000
 
+# The formats Claude and OpenAI take, by the name Pillow gives them, with their media type
+_API_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png", "GIF": "image/gif", "WEBP": "image/webp"}
 _OPAQUE_MEDIA_TYPE = "image/jpeg"
 _ALPHA_MEDIA_TYPE = "image/png"
 _ALPHA_MODES = ("RGBA", "LA", "PA")
 _WHITE = (255, 255, 255)
+
+
+class UnreadableImage(ValueError):
+    """Bytes no model can be shown: not an image Pillow decodes (a format it lacks, a corrupt or cut-short
+    file, a decompression bomb)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,24 +44,27 @@ class PreparedImage:
     sha256: str
 
 
-def prepare_image(raw: bytes, media_type: str) -> PreparedImage:
+def prepare_image(raw: bytes) -> PreparedImage:
     """The photo as the conversation keeps it.
 
-    An image within the long-edge limit and the byte cap keeps its original bytes. Any other is
-    turned upright, scaled down (never up) to the limit and encoded once: PNG when it has
-    transparency and the PNG fits the cap, otherwise JPEG. The result is deterministic, and
-    preparing it again changes nothing. Bytes that are not an image are returned as they are.
-    CPU-bound: call it off the event loop.
+    An image of a format the models take (JPEG, PNG, GIF, WEBP) within the long-edge limit and the byte
+    cap keeps its original bytes, and gets the media type of those bytes, whatever the channel claimed:
+    a provider rejects a request whose image does not match its media type, and a photo that stays in the
+    history would fail every later request. Any other is turned upright, scaled down (never up) to the
+    limit and encoded once: PNG when it has transparency and the PNG fits the cap, otherwise JPEG. The
+    result is deterministic, and preparing it again changes nothing. The whole image is decoded, so a
+    file that is cut short is found here and not by the provider. Raises `UnreadableImage` for bytes that
+    are not an image, or cannot be decoded. CPU-bound: call it off the event loop.
     """
     try:
         with Image.open(io.BytesIO(raw)) as image:
-            if max(image.size) <= MAX_LONG_EDGE and len(raw) <= MAX_ENCODED_BYTES:
-                return _prepared(raw, media_type)
             image.load()
+            media_type = _API_FORMATS.get(image.format or "")
+            if media_type and max(image.size) <= MAX_LONG_EDGE and len(raw) <= MAX_ENCODED_BYTES:
+                return _prepared(raw, media_type)
             return _re_encoded(image)
-    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-        logger.warning("Image could not be prepared; keeping it as it arrived (%d bytes)", len(raw), exc_info=True)
-        return _prepared(raw, media_type)
+    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as e:
+        raise UnreadableImage(f"not an image the models can be shown ({len(raw)} bytes): {e}") from e
 
 
 def _prepared(data: bytes, media_type: str) -> PreparedImage:
