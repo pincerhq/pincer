@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
-from pincer.core.compaction import LastRequest
+from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, leading_summary
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -45,9 +45,9 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
     prompt_cache_session,
-    strip_thinking,
 )
 from pincer.llm.cost_tracker import record_response
+from pincer.llm.images import UnreadableImage, prepare_image
 from pincer.llm.model_params import model_max_output_tokens
 from pincer.llm.router import LLMRouter, plan_voice_turn
 from pincer.memory.base import (
@@ -118,6 +118,22 @@ _SELECTION_EXTRA_CHARS = 500
 _LOAD_SKILL_TOOL = "load_skill"
 _CALL_TOOL = CALL_TOOL_NAME
 _MAX_SANITIZE_ATTEMPTS = 2
+# How many times a turn cuts its history in half and retries when the endpoint says it is too long
+_MAX_SHRINK_ATTEMPTS = 4
+# What the providers say when a request is over the model's window (lowercase): Anthropic's 400
+# "prompt is too long" and its 413 on size, OpenAI / Azure / vLLM "context_length_exceeded" and its
+# wordings, Groq's "reduce the length"
+_CONTEXT_LENGTH_PHRASES = (
+    "prompt is too long",
+    "context_length_exceeded",
+    "maximum context length",
+    "exceeds the context window",
+    "reduce the length of the messages",
+    "maximum allowed number of bytes",
+)
+# The result that closes a tool call whose turn died before the tool finished (sent as an error)
+_UNREADABLE_PHOTOS_NOTE = "[{count} photo(s) sent with this message could not be read and are not attached]"
+_INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
 # How a web chat turn ends when no request answers its last tools
 _MAX_ITERATIONS_TEXT = "Max iterations reached."
@@ -594,6 +610,13 @@ def _is_tool_pair_error(e: Exception) -> bool:
     )
 
 
+def _is_context_length_error(e: Exception) -> bool:
+    """True when a provider rejected the request because it is over the model's context window (or size
+    limit), whatever its wording (see `_CONTEXT_LENGTH_PHRASES`)."""
+    message = str(e).lower()
+    return any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES)
+
+
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     """Remove orphaned tool_use and tool_result messages.
 
@@ -657,6 +680,77 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
                 changed = True
         i = end
     return clean if changed else messages
+
+
+def _interrupted_results(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """The error results that close a history ending in tool calls nobody answered.
+
+    A turn that died mid-tool (a crash, a cancel, a hang-up) leaves its assistant tool-call
+    message as the last of the history, with none or only some of its results after it. One
+    error result per unanswered call, in call order; none when the history ends otherwise.
+    Appending them keeps every earlier message (and the thinking in it) as it was.
+    """
+    end = len(messages)
+    start = end
+    while start > 0 and messages[start - 1].role == MessageRole.TOOL_RESULT:
+        start -= 1
+    if start == 0 or not (messages[start - 1].role == MessageRole.ASSISTANT and messages[start - 1].tool_calls):
+        return []
+    answered = {m.tool_call_id for m in messages[start:end]}
+    return [
+        LLMMessage(role=MessageRole.TOOL_RESULT, content=_INTERRUPTED_TOOL_RESULT, tool_call_id=tc.id, is_error=True)
+        for tc in messages[start - 1].tool_calls
+        if tc.id not in answered
+    ]
+
+
+async def _image_contents(images: list[tuple[bytes, str]] | None) -> tuple[list[ImageContent], int]:
+    """The photos a user sent, as the conversation keeps them from now on, and how many were left out.
+
+    Each is prepared once (see `prepare_image`; the original already went to the workspace's uploads), off
+    the event loop. One no model can read is left out, never stored: it would stay in the history and
+    fail every later request of the session.
+    """
+    contents: list[ImageContent] = []
+    unreadable = 0
+    for raw, claimed_type in images or []:
+        try:
+            photo = await asyncio.to_thread(prepare_image, raw)
+        except UnreadableImage:
+            logger.warning(
+                "A photo could not be read and was left out (%d bytes, claimed as %s)", len(raw), claimed_type
+            )
+            unreadable += 1
+            continue
+        contents.append(ImageContent.from_bytes(photo.data, photo.media_type))
+    return contents, unreadable
+
+
+def _with_unreadable_photos(context: str, unreadable: int) -> str:
+    """The turn's context block, with a line telling the model that photos did not arrive."""
+    if not unreadable:
+        return context
+    note = _UNREADABLE_PHOTOS_NOTE.format(count=unreadable)
+    return f"{context}\n{note}" if context else note
+
+
+def _log_thinking_dropped(session_id: str, response: LLMResponse) -> None:
+    """One WARNING per thinking block the API dropped from the request: the session and the block's
+    place in the request, never its content (reasoning is not logged)."""
+    for drop in response.thinking_dropped:
+        logger.warning(
+            "Thinking block dropped by the API: session=%s path=%s reason=%s", session_id, drop.path, drop.reason
+        )
+
+
+def _reply_message(text: str, response: LLMResponse | None) -> LLMMessage:
+    """The assistant message that saves a reply: ``text`` as the user got it, with the model's
+    output verbatim when it came from ``response`` (see `LLMMessage.from_response`)."""
+    if response is None:
+        return LLMMessage(role=MessageRole.ASSISTANT, content=text)
+    message = LLMMessage.from_response(response, content=text)
+    message.tool_calls = []  # a reply is the turn's last message: its response had no tool calls
+    return message
 
 
 @dataclass(frozen=True)
@@ -725,26 +819,37 @@ class Agent:
     async def _repair_tool_pairs(self, session: Session) -> bool:
         """Strip orphaned tool pairs from the session and persist it.
 
-        Returns whether anything was stripped.
+        Returns whether anything was stripped. A message it rewrites loses its raw output (it is
+        rebuilt from its text and tool calls); the others keep theirs.
         """
         clean = _sanitize_tool_pairs(session.messages)
         if clean is session.messages:
             return False
         logger.info("Repaired orphaned tool pairs (%d -> %d messages)", len(session.messages), len(clean))
         session.messages = clean
-        # The history changed under the turn's thinking blocks: drop them (Q2c)
-        strip_thinking(session.messages)
         await self._sessions.save(session)
         return True
 
-    async def _recover_from_tool_pair_error(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
+    async def _close_interrupted_tool_calls(self, session: Session) -> None:
+        """Start a turn by answering the tool calls an earlier turn left open (see `_interrupted_results`),
+        before the user's message is appended."""
+        await self._sessions.add_messages(session, _interrupted_results(session.messages))
+
+    async def _recover_from_rejected_history(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
         """Decide how a turn continues after `error`, given `attempts` retries so far.
 
-        Retries while stripping still changes the history. Once it can't, the
-        same request would fail on every later turn too — e.g. Anthropic's
-        "must define tools" for a history with tool pairs sent with no tools —
-        so the session is cleared instead.
+        A history over the endpoint's window is cut in half (see `_shrink_history`) and sent again, up
+        to `_MAX_SHRINK_ATTEMPTS` times: compaction runs only after a request succeeded, so nothing else
+        would ever shrink a history no request can carry.
+
+        A tool pairing error retries while stripping still changes the history. Once it can't, the
+        same request would fail on every later turn too — e.g. Anthropic's "must define tools" for a
+        history with tool pairs sent with no tools — so the session is cleared instead.
         """
+        if _is_context_length_error(error):
+            if attempts < _MAX_SHRINK_ATTEMPTS and await self._shrink_history(session):
+                return _PairRecovery.RETRY
+            return _PairRecovery.RAISE
         if not _is_tool_pair_error(error):
             return _PairRecovery.RAISE
         if attempts < _MAX_SANITIZE_ATTEMPTS and await self._repair_tool_pairs(session):
@@ -754,6 +859,28 @@ class Agent:
         session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
         await self._sessions.save(session)
         return _PairRecovery.CLEARED
+
+    async def _shrink_history(self, session: Session) -> bool:
+        """Drop about the oldest half of the session's history (whole turns, the leading summary kept) and
+        save it. Runs inside the turn, which holds the session's lock, so it edits the session itself
+        (`SessionManager.cut` takes that lock). The photos only the dropped messages showed go with them.
+        False when no earlier turn can be dropped."""
+        cut = choose_halving_cut(session.messages)
+        if not cut:
+            logger.warning(
+                "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id
+            )
+            return False
+        keep = leading_summary(session.messages)
+        session.messages = [*([keep] if keep else []), *session.messages[cut:]]
+        session.updated_at = time.time()
+        await self._sessions.save(session)
+        logger.warning(
+            "Session %s: the endpoint rejected the history as too long; dropped the oldest %d messages",
+            session.session_id,
+            cut - (keep is not None),
+        )
+        return True
 
     @property
     def tool_registry(self) -> ToolRegistry:
@@ -777,11 +904,22 @@ class Agent:
 
     @staticmethod
     def _note_request(
-        session: Session, response: LLMResponse, system: str | None, tools: list[dict[str, Any]] | None
+        session: Session,
+        response: LLMResponse,
+        system: str | None,
+        tools: list[dict[str, Any]] | None,
+        *,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
     ) -> None:
-        """Remember what the request `response` answers sent: the turn's last one decides compaction."""
+        """Remember what the request `response` answers sent and how: the turn's last one decides
+        compaction, and a server compaction repeats it."""
+        _log_thinking_dropped(session.session_id, response)
         overhead = len(system or "") + (len(json.dumps(tools)) if tools else 0)
-        session.last_request = LastRequest.measure(response.usage.prompt_tokens, session.messages, overhead)
+        request = SentRequest(response.provider, response.request_model, system, tools, reasoning_effort, thinking)
+        session.last_request = LastRequest.measure(
+            response.usage.prompt_tokens, session.messages, overhead, request=request
+        )
 
     def _schedule_compaction(self, session: Session) -> None:
         """After a turn: compact the session in the background when its prompt went over the limit."""
@@ -914,10 +1052,7 @@ class Agent:
         )
 
         # Build user message
-        img_contents: list[ImageContent] = []
-        if images:
-            for raw, media_type in images:
-                img_contents.append(ImageContent.from_bytes(raw, media_type))
+        img_contents, unreadable = await _image_contents(images)
 
         turn = await self._begin_turn(user_id, session_key=session.session_id)
         read_language = memory and (channel_name or channel) != "voice"
@@ -926,7 +1061,13 @@ class Agent:
             self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
             self._preferred_language(user_id, read=read_language),
         )
-        user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
+        user_msg = LLMMessage(
+            role=MessageRole.USER,
+            content=text,
+            images=img_contents,
+            context=_with_unreadable_photos(context, unreadable),
+        )
+        await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
 
         # Inject the onboarding followup instruction only on the turn that
@@ -971,6 +1112,7 @@ class Agent:
         final_text = ""
         budget_stop: _BudgetStop | None = None
         last_response: LLMResponse | None = None
+        reply_response: LLMResponse | None = None  # the response whose text is the final answer
         consecutive_errors = 0
         sanitize_attempts = 0
         repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
@@ -994,11 +1136,10 @@ class Agent:
                 )
                 last_response = response
                 self._note_request(session, response, system_prompt, tool_schemas)
-                # The image stays on every request of the turn: dropping it
-                # would change the history under the turn's thinking blocks.
-                # end_turn drops it (images are never persisted).
+                # The image stays in the history for good (see `_image_contents`): dropping
+                # it would change the history under the turn's thinking blocks.
             except LLMError as e:
-                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                recovery = await self._recover_from_rejected_history(session, e, sanitize_attempts)
                 if recovery is _PairRecovery.RETRY:
                     sanitize_attempts += 1
                     continue
@@ -1043,13 +1184,7 @@ class Agent:
                     [tc.name for tc in response.tool_calls],
                 )
                 # Save the assistant's tool-call message
-                assistant_msg = LLMMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    thinking_blocks=list(response.thinking_blocks),
-                    content_blocks=list(response.content_blocks),
-                )
+                assistant_msg = LLMMessage.from_response(response)
                 await self._sessions.add_message(session, assistant_msg)
 
                 # Execute each tool
@@ -1103,8 +1238,8 @@ class Agent:
                         self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                        strip_thinking(session.messages)
+                        # New tools or system prompt: the next request still sends the turn's thinking,
+                        # and the API drops what no longer fits it (drop_block)
                         tool_schemas = reselected
                         # Read again: the turn may have changed it (set_preferred_language)
                         language = await self._preferred_language(user_id, read=read_language)
@@ -1128,6 +1263,7 @@ class Agent:
 
             # No tool calls — we have the final answer
             final_text = response.content
+            reply_response = response
             break
         else:
             # Loop exhausted
@@ -1146,7 +1282,9 @@ class Agent:
                 session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
             )
         else:
-            final_text = await self._save_reply(session, onboarding, user_id, channel, final_text, streamed=False)
+            final_text = await self._save_reply(
+                session, onboarding, user_id, channel, final_text, streamed=False, response=reply_response
+            )
             reply = final_text
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
@@ -1243,6 +1381,7 @@ class Agent:
                 logger.exception("run_headless: LLM call failed")
                 return _HEADLESS_LLM_ERROR_TEXT
 
+            _log_thinking_dropped("headless", response)
             await self._record_cost(response, None)
 
             try:
@@ -1252,15 +1391,7 @@ class Agent:
                 return _HEADLESS_LLM_ERROR_TEXT
 
             if response.has_tool_calls:
-                messages.append(
-                    LLMMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=response.content,
-                        tool_calls=response.tool_calls,
-                        thinking_blocks=list(response.thinking_blocks),
-                        content_blocks=list(response.content_blocks),
-                    )
-                )
+                messages.append(LLMMessage.from_response(response))
 
                 iteration_had_error = False
                 skills_loaded: list[str] = []
@@ -1284,8 +1415,8 @@ class Agent:
                     # From the allowed_tools subset only, like the first selection.
                     reselected = await self._reselect_after_skills(candidates, prompt, messages, skills_loaded)
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                        strip_thinking(messages)
+                        # New tools or system prompt: the next request still sends the run's thinking,
+                        # and the API drops what no longer fits it (drop_block)
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
                             user_id,
@@ -1423,10 +1554,7 @@ class Agent:
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
         )
 
-        img_contents: list[ImageContent] = []
-        if images:
-            for raw, media_type in images:
-                img_contents.append(ImageContent.from_bytes(raw, media_type))
+        img_contents, unreadable = await _image_contents(images)
 
         turn = await self._begin_turn(user_id, session_key=session.session_id)
         # Both are memory round trips: run them together (the language goes in the system prompt)
@@ -1434,7 +1562,13 @@ class Agent:
             self._turn_context(user_id, text, memory=memory, user_timezone=turn.timezone),
             self._preferred_language(user_id, read=memory),
         )
-        user_msg = LLMMessage(role=MessageRole.USER, content=text, images=img_contents, context=context)
+        user_msg = LLMMessage(
+            role=MessageRole.USER,
+            content=text,
+            images=img_contents,
+            context=_with_unreadable_photos(context, unreadable),
+        )
+        await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
@@ -1464,6 +1598,7 @@ class Agent:
 
         full_text = ""  # everything the client received this turn
         reply = ""  # the reply: saved as the turn's final assistant message
+        reply_response: LLMResponse | None = None  # the response `reply` came from, when it came whole
         step_text = ""  # what the current step streamed
         ending: str | None = None  # no request answers the turn's last tools
         budget_stop: _BudgetStop | None = None
@@ -1495,7 +1630,7 @@ class Agent:
                             yield StreamChunk(StreamEventType.TEXT, event.text)
                 except Exception as e:
                     if isinstance(e, LLMError) and not step_text:
-                        recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                        recovery = await self._recover_from_rejected_history(session, e, sanitize_attempts)
                         if recovery is _PairRecovery.RETRY:
                             sanitize_attempts += 1
                             continue
@@ -1529,19 +1664,14 @@ class Agent:
                         # the placed-call text when a call is ringing
                         raise LLMError("the reply step completed with no text")
                     reply = step_text
+                    reply_response = response
                     break
 
                 logger.info(
                     "LLM requested tools: %s",
                     [tc.name for tc in response.tool_calls],
                 )
-                assistant_msg = LLMMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    thinking_blocks=list(response.thinking_blocks),
-                    content_blocks=list(response.content_blocks),
-                )
+                assistant_msg = LLMMessage.from_response(response)
                 await self._sessions.add_message(session, assistant_msg)
                 step_text = ""  # saved with its tool calls
 
@@ -1571,8 +1701,8 @@ class Agent:
                         self._tools.get_schemas(), text, session.messages, skills_loaded, session
                     )
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
-                        # New tools or system prompt: the turn's thinking is no longer valid (Q2c)
-                        strip_thinking(session.messages)
+                        # New tools or system prompt: the next request still sends the turn's thinking,
+                        # and the API drops what no longer fits it (drop_block)
                         tool_schemas = reselected
                         # Read again: the turn may have changed it (set_preferred_language)
                         language = await self._preferred_language(user_id, read=memory)
@@ -1642,7 +1772,9 @@ class Agent:
         # Saved and recorded before the client sees the question: a disconnect
         # while it streams still leaves the user asked. The reply only: text
         # streamed before a tool call is saved with that call.
-        saved = await self._save_reply(session, onboarding, user_id, channel, reply, streamed=True)
+        saved = await self._save_reply(
+            session, onboarding, user_id, channel, reply, streamed=True, response=reply_response
+        )
         if saved != reply:
             tail = saved[len(reply) :]
             full_text += tail
@@ -1743,11 +1875,10 @@ class Agent:
         # prompt stays the same while its extra_system does (Q15).
         context = await self._turn_context(user_id, text, memory=True, user_timezone=turn.timezone)
         user_msg = LLMMessage(role=MessageRole.USER, content=text, context=context)
+        await self._close_interrupted_tool_calls(session)
         await self._sessions.add_message(session, user_msg)
-        # add_message does not trim while the turn is open: SessionManager.turn()
-        # trims to max_session_messages when the turn ends. Growth within one turn
-        # is bounded by max_tool_iterations. Compaction runs after the turn, off the
-        # call's critical path (see stream_voice_turn).
+        # Growth within one turn is bounded by max_tool_iterations. Compaction runs after
+        # the turn, off the call's critical path (see stream_voice_turn).
 
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
@@ -1815,6 +1946,7 @@ class Agent:
             turn_trace.stamp(_TelemetryEvent.AGENT_PREP_DONE)
 
         full_text = ""
+        ended_turn: LLMResponse | None = None  # the response that ended the turn with text
         consecutive_errors = 0
         sanitize_attempts = 0
         repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
@@ -1867,7 +1999,7 @@ class Agent:
                         llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
                     # CLEARED raises too: this utterance fails, but the cleared
                     # session lets the call's next one go through.
-                    if await self._recover_from_tool_pair_error(session, e, sanitize_attempts) is _PairRecovery.RETRY:
+                    if await self._recover_from_rejected_history(session, e, sanitize_attempts) is _PairRecovery.RETRY:
                         sanitize_attempts += 1
                         recover_pairs = True
                         break
@@ -1882,7 +2014,9 @@ class Agent:
                     )
                 if response is None:  # provider stream ended without a final event
                     raise LLMError("stream_turn ended without a final response")
-                self._note_request(session, response, system_prompt, tool_schemas)
+                self._note_request(
+                    session, response, system_prompt, tool_schemas, reasoning_effort=reasoning_effort, thinking=thinking
+                )
 
                 if timings is not None:
                     # Cache visibility: did the tools-prefix prompt cache hit?
@@ -1946,15 +2080,10 @@ class Agent:
             assert response is not None  # the request loop leaves with a response or raises
 
             if not response.has_tool_calls:
+                ended_turn = None if response.truncated else response
                 break
 
-            assistant_msg = LLMMessage(
-                role=MessageRole.ASSISTANT,
-                content=response.content,
-                tool_calls=response.tool_calls,
-                thinking_blocks=list(response.thinking_blocks),
-                content_blocks=list(response.content_blocks),
-            )
+            assistant_msg = LLMMessage.from_response(response)
             await self._sessions.add_message(session, assistant_msg)
 
             iteration_had_error = False
@@ -2038,7 +2167,8 @@ class Agent:
         if turn_trace is not None:
             turn_trace.stamp(_TelemetryEvent.LLM_DONE, characters=len(full_text))
         if full_text:
-            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
+            # The turn's text, as spoken. Its model output is the last step's, when that ended the turn.
+            await self._sessions.add_message(session, _reply_message(full_text, ended_turn))
         yield StreamChunk(StreamEventType.DONE, full_text)
 
     async def _select_tools(
@@ -2388,10 +2518,14 @@ class Agent:
         text: str,
         *,
         streamed: bool,
+        response: LLMResponse | None = None,
     ) -> str:
         """Save the turn's reply, with the onboarding question appended when
         this turn asks it, and return the saved text. A streamed turn sends
         the part after `text` only once this returns.
+
+        ``response`` is the model response `text` came from: the saved message keeps its output
+        verbatim (thinking included) unless the onboarding question changed the text.
 
         The question is claimed before the save, and the claim undone if the
         save fails, so a recorded question is one the history holds. A turn
@@ -2400,7 +2534,7 @@ class Agent:
         if not text:
             return text
         if not await self._reserve_onboarding_prompt(onboarding, user_id, channel):
-            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+            await self._sessions.add_message(session, _reply_message(text, response))
             return text
         claimed: bool | None = None  # None: claim_prompt raised, and its insert may have committed
         try:
@@ -2410,7 +2544,8 @@ class Agent:
                 )
                 if claimed:
                     text = _with_onboarding_question(text, streamed=streamed)
-                await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
+                    response = None  # the saved text is no longer the model's output
+                await self._sessions.add_message(session, _reply_message(text, response))
             except BaseException:
                 if claimed is not False:
                     await self._release_onboarding_prompt(session, user_id, channel)

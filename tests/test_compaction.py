@@ -18,7 +18,7 @@ from pydantic import SecretStr
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.compaction import Compactor, LastRequest, choose_cut
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ThinkingBlock, ToolCall
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.tools.registry import ToolRegistry
 
@@ -128,7 +128,14 @@ class _ScriptedOpenAI:
         self._replies = list(replies)
         self.requests: list[dict[str, Any]] = []
         self.provider = OpenAICompatibleProvider(
-            settings.model_copy(update={"openai_model": "gpt-4o", "openai_api_key": SecretStr("sk-test")}), "openai"
+            settings.model_copy(
+                update={
+                    "openai_model": "gpt-4o",
+                    "openai_api_key": SecretStr("sk-test"),
+                    "responses_api_providers": [],  # this test is about Chat Completions
+                }
+            ),
+            "openai",
         )
         self.provider._client = AsyncOpenAI(
             api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
@@ -327,22 +334,27 @@ async def test_a_later_turn_over_the_limit_retries_the_compaction(settings, sess
     assert session.messages[1].content == _earlier(6)
 
 
-async def test_the_message_backstop_cuts_51_messages_to_the_newest_30(tmp_path):
+async def test_a_long_session_is_never_cut_by_message_count(tmp_path):
     from pincer.core.session import SessionManager
 
-    manager = SessionManager(tmp_path / "test.db", max_messages=50)
+    manager = SessionManager(tmp_path / "test.db")
     await manager.initialize()
     try:
         session = await manager.get_or_create("user1", "test")
-        for index in range(50):
+        for index in range(200):  # four times the old cap of 50: no cut at any length
             role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
             await manager.add_message(session, LLMMessage(role=role, content=f"message {index}"))
-        assert len(session.messages) == 50  # at the cap: no cut
-        await manager.add_message(session, LLMMessage(role=MessageRole.USER, content="message 50"))
+        assert len(session.messages) == 200
     finally:
         await manager.close()
 
-    assert [m.content for m in session.messages] == [f"message {i}" for i in range(21, 51)]
+    reloaded = SessionManager(tmp_path / "test.db")
+    await reloaded.initialize()
+    try:
+        stored = await reloaded.get_or_create("user1", "test")
+    finally:
+        await reloaded.close()
+    assert [m.content for m in stored.messages] == [f"message {i}" for i in range(200)]
 
 
 class _GatedSummary:
@@ -600,14 +612,13 @@ def test_the_api_lifespan_cancels_the_agents_compactions(monkeypatch, tmp_path):
     agent.cancel_compactions.assert_awaited_once()
 
 
-async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_history(
-    settings, cost_tracker, tmp_path
-):
-    """The reviewer's case (PR #366): the turn's request sent 51 messages, then end_turn trimmed
-    52 to 30. The tokens-per-character rate must come from the 51 sent, not the 30 left."""
+async def test_the_rate_is_measured_on_what_the_request_sent(settings, cost_tracker, tmp_path):
+    """The reviewer's case (PR #366) was a trim between the request and the compaction. Nothing trims a
+    turn's history any more; the tokens-per-character rate still comes from the 51 messages the
+    request sent, and the cut is chosen on the 52 the session holds after the reply."""
     from pincer.core.session import SessionManager
 
-    sessions = SessionManager(tmp_path / "cap50.db", max_messages=50)
+    sessions = SessionManager(tmp_path / "long.db")
     await sessions.initialize()
     try:
         session = await sessions.get_or_create("user1", "test")
@@ -628,20 +639,107 @@ async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_
     finally:
         await sessions.close()
 
-    assert len(session.messages) == 24  # the summary + 23 of the 30 the trim left: 7 summarized
+    assert len(session.messages) == 24  # the summary + the newest 23 of the 52: 29 summarized
     assert session.messages[0].content == f"[Previous conversation summary]\n{_SUMMARY}"
     assert session.messages[1].content.startswith("message 29 ")
 
 
 def test_the_rate_counts_the_thinking_a_request_replayed():
-    """Within a turn, a tool-loop request resends the turn's thinking: its tokens are in the
-    prompt, so its characters must be in the calibration (end_turn strips them afterwards)."""
-    thought = ThinkingBlock("thinking", thinking="t" * 3_000, signature="sig")
+    """A request resends the thinking the history keeps: its tokens are in the prompt, so its
+    characters must be in the calibration."""
+    thought = {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"}
     sent = [
         LLMMessage(role=MessageRole.USER, content="u" * 1_000),
-        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, thinking_blocks=[thought]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, raw=[thought], wire="anthropic:x"),
     ]
 
     last = LastRequest.measure(5_000, sent, overhead_chars=0)
 
-    assert last.tokens_per_char == 1.0  # 5,000 tokens over 1,000 + 1,000 + 3,000 characters
+    assert last.tokens_per_char == 5_000 / 5_003  # 1,000 + 1,000 + 3,000 characters and the 3-character signature
+
+
+# ── what a request carries, beyond text: the size estimate behind every cut (PR #379 review) ─────────
+
+
+def _rate(prompt_tokens: int, *messages: LLMMessage) -> float:
+    return LastRequest.measure(prompt_tokens, list(messages), overhead_chars=0).tokens_per_char
+
+
+def test_a_photo_counts_as_the_characters_of_its_tokens():
+    from pincer.core.compaction import PHOTO_CHARS
+    from pincer.llm.base import ImageContent
+
+    photo = LLMMessage(
+        role=MessageRole.USER, content="u" * 1_000, images=[ImageContent.from_bytes(b"jpeg bytes", "image/jpeg")]
+    )
+
+    assert PHOTO_CHARS == 16_000  # an estimate (a photo at the 2,576 px cap is about 4,600 tokens)
+    assert _rate(17_000, photo) == 1.0  # 1,000 characters of text + one photo
+
+
+def test_a_compacted_openai_window_counts_its_encrypted_item_and_the_messages_it_keeps():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    window = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "w" * 2_000}]},
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000},
+    ]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    assert _rate(42_000, message) == 1.0  # not the notice's few characters
+
+
+def test_a_compaction_block_counts_its_content_and_signature():
+    block = {"type": "compaction", "content": "S" * 5_000, "signature": "G" * 3_000}
+    message = LLMMessage(role=MessageRole.SYSTEM, content="[summary]\n" + "S" * 5_000, raw=[block], wire="anthropic:x")
+
+    assert _rate(8_000, message) == 1.0
+
+
+def test_encrypted_reasoning_counts_but_the_text_and_calls_of_the_raw_output_do_not_count_twice():
+    answer = [{"type": "output_text", "text": "a" * 1_000}]
+    raw = [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "R" * 5_000},
+        {"type": "message", "role": "assistant", "content": answer},
+        {"type": "function_call", "call_id": "c1", "name": "search", "arguments": "{}"},
+    ]
+    call = ToolCall(id="c1", name="search", arguments={})
+    message = LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, tool_calls=[call], raw=raw, wire="openai:x")
+    calls = len(json.dumps([call.to_dict()]))
+
+    assert _rate(1_000 + calls + 5_000, message) == 1.0
+
+
+def test_an_anthropic_assistant_message_counts_its_thinking_once_beside_its_text_and_tool_calls():
+    call = ToolCall(id="toolu_1", name="search", arguments={"q": "x"})
+    raw = [
+        {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"},
+        {"type": "redacted_thinking", "data": "d" * 500},
+        {"type": "text", "text": "a" * 1_000},
+        {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {"q": "x"}},
+    ]
+    message = LLMMessage(
+        role=MessageRole.ASSISTANT, content="a" * 1_000, tool_calls=[call], raw=raw, wire="anthropic:x"
+    )
+    calls = len(json.dumps([call.to_dict()]))
+
+    assert _rate(1_000 + calls + 3_003 + 500, message) == 1.0
+
+
+def test_the_cut_of_a_photo_turn_saves_what_the_photo_cost():
+    """The first turn holds the photo that made the prompt big: dropping that one turn is enough."""
+    from pincer.core.compaction import choose_hard_cut
+    from pincer.llm.base import ImageContent
+
+    photo = ImageContent.from_bytes(b"jpeg bytes", "image/jpeg")
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100, images=[photo]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(16_600, messages, overhead_chars=0)
+
+    assert choose_hard_cut(messages, last, target_tokens=1_000) == 2  # the photo turn only

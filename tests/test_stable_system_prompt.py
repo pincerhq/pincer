@@ -125,7 +125,7 @@ async def test_the_context_replays_unchanged_after_a_reload_from_storage(
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, ToolRegistry(), memory_store=memory)
         await agent.handle_message("user1", "test", "turn 1")
 
-        reloaded = SessionManager(tmp_path / "test.db", max_messages=20)
+        reloaded = SessionManager(tmp_path / "test.db")
         await reloaded.initialize()
         try:
             clock.at = _TURN_2_AT
@@ -169,7 +169,14 @@ class _ScriptedOpenAI:
         self._replies = list(replies)
         self.requests: list[dict[str, Any]] = []
         self.provider = OpenAICompatibleProvider(
-            settings.model_copy(update={"openai_model": "gpt-4o", "openai_api_key": SecretStr("sk-test")}), "openai"
+            settings.model_copy(
+                update={
+                    "openai_model": "gpt-4o",
+                    "openai_api_key": SecretStr("sk-test"),
+                    "responses_api_providers": [],  # this test is about Chat Completions
+                }
+            ),
+            "openai",
         )
         self.provider._client = AsyncOpenAI(
             api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))

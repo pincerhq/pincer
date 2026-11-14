@@ -123,6 +123,12 @@ class LLMSettings(BaseModel):
         description="OpenAI-wire providers sent a prompt_cache_key (comma-separated names); other endpoints may "
         "reject the unknown field. A keyless endpoint never gets one",
     )
+    responses_api_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["openai", "azure", "azure-openai"],
+        description="OpenAI-wire providers that use the Responses API (comma-separated names): encrypted reasoning "
+        "is passed back within and across turns (issue #358). Every other endpoint stays on Chat Completions, which "
+        "compatible servers implement more reliably. 'none' (or an empty list in pincer.toml) = no endpoint",
+    )
     anthropic_compatible_provider: str = Field(
         default="", description="Name for the Anthropic-wire compatible endpoint"
     )
@@ -134,11 +140,34 @@ class LLMSettings(BaseModel):
         default="", description="Model for the Anthropic-wire compatible endpoint (defaults to default_model)"
     )
 
+    server_compaction_providers: Annotated[list[str] | None, NoDecode] = Field(
+        default=None,
+        description="Anthropic-wire providers that take Anthropic's beta features (thinking-binding controls "
+        "now, server-side compaction later), comma-separated names. Unset = 'anthropic' and the configured "
+        "Anthropic-compatible name; 'none' (or an empty list in pincer.toml) = no endpoint, for a proxy that "
+        "rejects the betas (issue #358)",
+    )
+    strict_thinking_binding: bool = Field(
+        default=False,
+        description="Test instrument: send prefix_mismatch_behavior 'error' instead of 'drop_block', so a thinking "
+        "block that fails Anthropic's prefix check fails the request instead of being dropped (issue #358)",
+    )
+
     @field_validator("fallback_providers", "prompt_cache_key_providers", mode="before")
     @classmethod
     def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             return split_csv(v)
+        return v
+
+    @field_validator("responses_api_providers", "server_compaction_providers", mode="before")
+    @classmethod
+    def parse_provider_lists(cls, v: str | list[str] | None) -> list[str] | None:
+        """Comma-separated names. An empty environment variable is ignored by the settings loader,
+        so "none" is how the environment turns the list off."""
+        if isinstance(v, str):
+            names = split_csv(v)
+            return [] if [n.lower() for n in names] == ["none"] else names
         return v
 
     default_model: str = Field(
@@ -188,9 +217,11 @@ class LLMSettings(BaseModel):
         le=50,
         description="Max ReAct loop iterations before forcing a response",
     )
-    max_session_messages: int = Field(
-        default=50,
+    # Deprecated: sessions are compacted by prompt tokens now (issue #358, D7). Kept so a value
+    # still set is warned about at startup rather than silently ignored.
+    max_session_messages: int | None = Field(
+        default=None,
         ge=10,
         le=500,
-        description="Past this many messages a session is cut to the newest 3/5 of them (50 -> 30)",
+        description="Deprecated, no effect: see compact_at_tokens / compact_hard_tokens",
     )

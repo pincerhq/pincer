@@ -228,7 +228,6 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     mock_settings.default_provider.value = "anthropic"
     mock_settings.db_path = tmp_path / "test.db"
     mock_settings.daily_budget_usd = 100.0
-    mock_settings.max_session_messages = 20
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
     mock_settings.summary_threshold = None
@@ -285,7 +284,6 @@ async def test_chat_loop_builds_the_compactor_with_a_non_mcp_memory_store(
     mock_settings.default_provider.value = "anthropic"
     mock_settings.db_path = tmp_path / "test.db"
     mock_settings.daily_budget_usd = 100.0
-    mock_settings.max_session_messages = 20
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
     mock_settings.summary_model = "test-model"
@@ -345,7 +343,6 @@ async def test_chat_loop_gives_the_compactor_the_summary_settings(
     mock_settings.default_provider.value = "anthropic"
     mock_settings.db_path = tmp_path / "test.db"
     mock_settings.daily_budget_usd = 100.0
-    mock_settings.max_session_messages = 20
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
     mock_settings.summary_threshold = None
@@ -394,7 +391,6 @@ def _mock_settings_for_build_core(tmp_path: Path):
 
     settings = MagicMock()
     settings.db_path = tmp_path / "test.db"
-    settings.max_session_messages = 20
     settings.daily_budget_usd = 100.0
     settings.audit_disabled = True
     settings.rate_messages_per_min = 20

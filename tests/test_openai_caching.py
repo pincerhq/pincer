@@ -8,82 +8,42 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, cast
 
-import httpx
 import pytest
-from openai import AsyncOpenAI
+from openai_wire import CALL as _CALL
+from openai_wire import ScriptedOpenAI
 from pydantic import SecretStr
 
 from pincer.core.agent import Agent
 from pincer.core.compaction import Compactor
 from pincer.llm.base import LLMMessage, MessageRole, prompt_cache_session
-from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.tools.registry import ToolRegistry
 from pincer.tools.selection import ToolSelector
 
-# A scripted reply that calls this tool instead of answering
-_CALL = "call:"
+
+@pytest.fixture(params=["chat_completions", "responses"])
+def api(request) -> str:
+    """Every test that takes it runs on Chat Completions and on the Responses API (issue #358): the cache
+    key and the tool list must behave the same on both."""
+    return request.param
 
 
-def _completion(text: str, prompt_tokens: int = 10) -> dict[str, Any]:
-    message: dict[str, Any] = {"role": "assistant", "content": text}
-    finish = "stop"
-    if text.startswith(_CALL):
-        call = {"id": "call_1", "type": "function", "function": {"name": text[len(_CALL) :], "arguments": "{}"}}
-        message, finish = {"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls"
-    return {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "gpt-4o",
-        "choices": [{"index": 0, "finish_reason": finish, "message": message}],
-        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 5, "total_tokens": prompt_tokens + 5},
-    }
-
-
-class _ScriptedOpenAI:
-    """An OpenAI provider whose completions are scripted text replies; keeps each request body."""
-
-    def __init__(self, settings, replies: list[str], provider: str = "openai", prompt_tokens: int = 10) -> None:
-        self._replies = list(replies)
-        self._prompt_tokens = prompt_tokens
-        self.requests: list[dict[str, Any]] = []
-        self.provider = OpenAICompatibleProvider(settings, provider)
-        self.provider._client = AsyncOpenAI(
-            api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
-        )
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        self.requests.append(body)
-        reply = self._replies.pop(0)
-        if body.get("stream"):
-            delta: dict[str, Any] = {"role": "assistant", "content": reply}
-            finish = "stop"
-            if reply.startswith(_CALL):  # a streamed tool call, in one chunk
-                call = {"index": 0, "id": "call_1", "type": "function"}
-                call["function"] = {"name": reply[len(_CALL) :], "arguments": "{}"}
-                delta, finish = {"role": "assistant", "tool_calls": [call]}, "tool_calls"
-            chunk = {
-                "id": "chatcmpl-1",
-                "object": "chat.completion.chunk",
-                "created": 0,
-                "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-            }
-            usage = {**chunk, "choices": [], "usage": _completion(reply)["usage"]}
-            sse = f"data: {json.dumps(chunk)}\n\ndata: {json.dumps(usage)}\n\ndata: [DONE]\n\n"
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse.encode())
-        return httpx.Response(200, json=_completion(reply, self._prompt_tokens))
+def _on(api: str, settings, *names: str):
+    """`settings` with the Responses API on for `names` (and the default endpoints) or on for none."""
+    listed = [] if api == "chat_completions" else [*settings.responses_api_providers, *names]
+    return settings.model_copy(update={"responses_api_providers": listed})
 
 
 @pytest.fixture
-def openai_settings(settings):
-    return settings.model_copy(
-        update={
-            "default_provider": "openai",
-            "openai_model": "gpt-4o",
-            "openai_api_key": SecretStr("sk-test"),
-        }
+def openai_settings(settings, api):
+    return _on(
+        api,
+        settings.model_copy(
+            update={
+                "default_provider": "openai",
+                "openai_model": "gpt-4o",
+                "openai_api_key": SecretStr("sk-test"),
+            }
+        ),
     )
 
 
@@ -95,7 +55,7 @@ async def test_every_request_of_a_session_carries_the_same_uuid7_cache_key(
     openai_settings, session_manager, cost_tracker
 ):
     await _onboarded(session_manager)
-    llm = _ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2"])
+    llm = ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2"])
     agent = Agent(openai_settings, llm.provider, session_manager, cost_tracker, ToolRegistry())
     await agent.handle_message("user1", "test", "turn 1", memory=False)
     await agent.handle_message("user1", "test", "turn 2", memory=False)
@@ -114,7 +74,7 @@ async def test_every_request_of_a_session_carries_the_same_uuid7_cache_key(
 async def test_different_sessions_get_different_cache_keys(openai_settings, session_manager, cost_tracker):
     await _onboarded(session_manager, "user1")
     await _onboarded(session_manager, "user2")
-    llm = _ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2"])
+    llm = ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2"])
     agent = Agent(openai_settings, llm.provider, session_manager, cost_tracker, ToolRegistry())
     await agent.handle_message("user1", "test", "hello", memory=False)
     await agent.handle_message("user2", "test", "hello", memory=False)
@@ -125,7 +85,7 @@ async def test_different_sessions_get_different_cache_keys(openai_settings, sess
 
 async def test_the_stream_and_voice_paths_send_their_sessions_cache_key(openai_settings, session_manager, cost_tracker):
     await _onboarded(session_manager)
-    llm = _ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2", "Answer 1", "Answer 2"])
+    llm = ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2", "Answer 1", "Answer 2"])
     agent = Agent(openai_settings, llm.provider, session_manager, cost_tracker, ToolRegistry())
     await agent.handle_message("user1", "test", "turn 1", memory=False)
     [c async for c in agent.handle_message_stream("user1", "test", "turn 2", memory=False)]
@@ -143,21 +103,25 @@ async def test_the_stream_and_voice_paths_send_their_sessions_cache_key(openai_s
     assert keys[3] == voice_key
 
 
-def _compatible(settings, name: str, api_key: str, **update: Any):
-    """Settings whose OpenAI-compatible endpoint is called `name` and has `api_key` ("" = keyless)."""
-    return settings.model_copy(
-        update={
-            "openai_compatible_provider": name,
-            "openai_compatible_base_url": "http://127.0.0.1:8000/v1",
-            "openai_compatible_api_key": SecretStr(api_key),
-            "openai_compatible_model": "gpt-4o",
-            **update,
-        }
+def _compatible(settings, api: str, name: str, api_key: str, **update: Any):
+    """Settings whose OpenAI-compatible endpoint is called `name` (on `api`) and has `api_key` ("" = keyless)."""
+    return _on(
+        api,
+        settings.model_copy(
+            update={
+                "openai_compatible_provider": name,
+                "openai_compatible_base_url": "http://127.0.0.1:8000/v1",
+                "openai_compatible_api_key": SecretStr(api_key),
+                "openai_compatible_model": "gpt-4o",
+                **update,
+            }
+        ),
+        name,
     )
 
 
 async def _sends_cache_key(settings, provider: str) -> bool:
-    llm = _ScriptedOpenAI(settings, ["Hi"], provider=provider)
+    llm = ScriptedOpenAI(settings, ["Hi"], provider=provider)
     with prompt_cache_session(lambda: "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b"):
         await llm.provider.complete([LLMMessage(role=MessageRole.USER, content="hello")])
     [request] = llm.requests
@@ -169,15 +133,15 @@ async def _sends_cache_key(settings, provider: str) -> bool:
     [("azure-openai", "", False), ("groq", "sk-groq", False), ("azure-openai", "sk-azure", True)],
     ids=["listed-but-keyless", "keyed-but-unlisted", "listed-and-keyed"],
 )
-async def test_only_listed_providers_get_the_cache_key(settings, name, api_key, sends_key):
+async def test_only_listed_providers_get_the_cache_key(settings, api, name, api_key, sends_key):
     """Strict endpoints (Groq, DeepSeek, a vLLM proxy) reject the unknown field with a 400, and a keyless
     local server has no paid cache to key: by default only openai and Azure OpenAI get it."""
-    assert await _sends_cache_key(_compatible(settings, name, api_key), name) is sends_key
+    assert await _sends_cache_key(_compatible(settings, api, name, api_key), name) is sends_key
 
 
-async def test_a_provider_listed_in_the_setting_gets_the_cache_key(settings):
+async def test_a_provider_listed_in_the_setting_gets_the_cache_key(settings, api):
     """A proxy that does accept the key, or an Azure endpoint named differently, opts in by name."""
-    opted_in = _compatible(settings, "groq", "sk-groq", prompt_cache_key_providers=["openai", "groq"])
+    opted_in = _compatible(settings, api, "groq", "sk-groq", prompt_cache_key_providers=["openai", "groq"])
     assert await _sends_cache_key(opted_in, "groq") is True
 
 
@@ -198,8 +162,8 @@ async def test_the_background_compaction_summary_carries_no_cache_key(openai_set
     for index in range(10):
         role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
         await session_manager.add_message(session, LLMMessage(role=role, content=f"message {index} " + "x" * 40_000))
-    llm = _ScriptedOpenAI(openai_settings, ["Reply"], prompt_tokens=100_000)
-    summary_llm = _ScriptedOpenAI(openai_settings, ["The summary."])
+    llm = ScriptedOpenAI(openai_settings, ["Reply"], prompt_tokens=100_000)
+    summary_llm = ScriptedOpenAI(openai_settings, ["The summary."])
     compactor = Compactor(
         summary_llm.provider,
         None,
@@ -222,7 +186,7 @@ async def test_the_background_compaction_summary_carries_no_cache_key(openai_set
 
 async def test_the_cache_key_survives_a_reload(openai_settings, session_manager, cost_tracker):
     await _onboarded(session_manager)
-    llm = _ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2"])
+    llm = ScriptedOpenAI(openai_settings, ["Reply 1", "Reply 2"])
     agent = Agent(openai_settings, llm.provider, session_manager, cost_tracker, ToolRegistry())
     await agent.handle_message("user1", "test", "turn 1", memory=False)
     before = await session_manager.get_or_create("user1", "test")
@@ -278,7 +242,7 @@ def capped_settings(openai_settings):
     )
 
 
-def _capped_agent(settings, session_manager, cost_tracker, replies: list[str]) -> tuple[Agent, _ScriptedOpenAI]:
+def _capped_agent(settings, session_manager, cost_tracker, replies: list[str]) -> tuple[Agent, ScriptedOpenAI]:
     registry = ToolRegistry()
     for name in _TOOLS:
 
@@ -291,14 +255,15 @@ def _capped_agent(settings, session_manager, cost_tracker, replies: list[str]) -
         return "Planning skill: use the gamma tools"
 
     registry.register(name="load_skill", description="Load a skill", handler=load_skill)
-    llm = _ScriptedOpenAI(settings, replies)
+    llm = ScriptedOpenAI(settings, replies)
     agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
     agent.tool_selector = ToolSelector(cast("Any", _Manager()), settings)
     return agent, llm
 
 
 def _sent_tools(request: dict[str, Any]) -> list[str]:
-    return [t["function"]["name"] for t in request["tools"]]
+    # Nested under "function" in Chat Completions, flat in Responses
+    return [t["name"] if "name" in t else t["function"]["name"] for t in request["tools"]]
 
 
 async def test_each_turn_appends_its_new_tools_after_the_earlier_ones(capped_settings, session_manager, cost_tracker):

@@ -304,6 +304,7 @@ def test_run_starts_with_a_valid_provider_multiplier(pricing_dir: Path, monkeypa
 
 
 # ── gpt-6 effort on Chat Completions (slice 7): the same refusal, the same entry points ──
+# The endpoint is kept on Chat Completions here; on the Responses API there is nothing to refuse (slice 8).
 
 GPT6_REFUSAL = (
     "Configuration error: 1 gpt-6 setting won't work with tools:\n"
@@ -311,7 +312,8 @@ GPT6_REFUSAL = (
     "    Fix: unset PINCER_REASONING_EFFORT; Pincer then turns reasoning off for this model's tool requests.\n"
     "Why: Pincer talks to OpenAI models through Chat Completions, which lets gpt-6 models use tools only "
     "with reasoning off. The summary model uses no tools, so PINCER_SUMMARY_REASONING_EFFORT still applies to it.\n"
-    "When it changes: reasoning with tools comes with the Responses API (#358).\n"
+    "To use reasoning with tools: add the endpoint's name to PINCER_RESPONSES_API_PROVIDERS if it serves "
+    "/v1/responses (openai, azure and azure-openai already use it).\n"
 )
 
 
@@ -327,6 +329,7 @@ def gpt6_dir(pricing_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             "summary_model": "",
             "reasoning_effort": "high",
             "thinking": "",
+            "responses_api_providers": [],  # on Chat Completions
         }
     )
     monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
@@ -363,3 +366,30 @@ def test_the_standalone_api_refuses_a_gpt_6_chat_effort(
 
     assert str(raised.value) == GPT6_REFUSAL.removeprefix("Configuration error: ").rstrip("\n")
     assert builds == []
+
+
+def test_run_starts_with_a_gpt_6_chat_effort_on_the_responses_api(
+    gpt6_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same settings as the refusal above, with `openai` on the Responses API (the default)."""
+    settings = _settings(tmp_path).model_copy(
+        update={
+            "default_provider": "openai",
+            "anthropic_api_key": SecretStr(""),
+            "openai_api_key": SecretStr("sk-test"),
+            "openai_model": "gpt-6.1-terra",
+            "summary_model": "",
+            "reasoning_effort": "high",
+            "thinking": "",
+            "responses_api_providers": ["openai", "azure", "azure-openai"],
+        }
+    )
+    monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+    started: list[Any] = []
+    monkeypatch.setattr("pincer.cli.run.start_daemon", lambda *a: started.append(a))
+
+    result = runner.invoke(app, ["run", "-d"], terminal_width=400)
+
+    assert result.exit_code == 0, result.output
+    assert len(started) == 1

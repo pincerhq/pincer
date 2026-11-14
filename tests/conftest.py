@@ -82,6 +82,16 @@ def _test_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_feature_switches() -> Iterator[None]:
+    """A feature an endpoint lost in one test (issue #358, slice 10) must not leak into the next."""
+    from pincer.llm.capabilities import SWITCHES
+
+    SWITCHES.reset()
+    yield
+    SWITCHES.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_google_oauth_logs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Google token lookup logs each problem once per process: give each test a fresh one."""
     from pincer.config import main as config_main
@@ -633,7 +643,7 @@ def mock_llm() -> AsyncMock:
 
 @pytest_asyncio.fixture
 async def session_manager(tmp_path: Path) -> SessionManager:
-    sm = SessionManager(tmp_path / "test.db", max_messages=20)
+    sm = SessionManager(tmp_path / "test.db")
     await sm.initialize()
     yield sm  # type: ignore[misc]
     await sm.close()

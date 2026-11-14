@@ -10,13 +10,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
 import openai
 from openai import AsyncOpenAI
 
+from pincer.core.log_once import LogOncePerKey
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import (
+    STOP_REASON_COMPACTION,
     STOP_REASON_MAX_TOKENS,
     BaseLLMProvider,
     LLMMessage,
@@ -31,17 +34,34 @@ from pincer.llm.base import (
     rate_limit_backoff,
     transient_status,
 )
-from pincer.llm.model_params import ReasoningWire, openai_is_reasoning_model, resolve_and_warn
+from pincer.llm.capabilities import SWITCHES, Feature, endpoint_capabilities, learn_from_error
+from pincer.llm.model_params import (
+    ReasoningWire,
+    openai_is_reasoning_model,
+    openai_tools_need_off,
+    openai_tools_unusable,
+    resolve_and_warn,
+)
+from pincer.llm.openai_responses import (
+    convert_messages_to_responses,
+    convert_tools_to_responses,
+    parse_responses_response,
+)
+from pincer.llm.replay import wire_tag
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from openai.types.chat import ChatCompletion
+    from openai.types.responses import Response
 
     from pincer.config import Settings
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
 logger = logging.getLogger(__name__)
+
+# A request refused because its model cannot use tools on the Chat Completions an endpoint fell back to
+_FALLBACK_REFUSED = LogOncePerKey(logger, logging.WARNING)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -53,12 +73,20 @@ logger = logging.getLogger(__name__)
 OPENAI_MAX_TOOLS = 128
 # OpenAI's finish_reason when the output hit the token limit
 _FINISH_REASON_LENGTH = "length"
+# Asks a Responses request to return its reasoning items encrypted, so they can be sent back (store=false)
+_INCLUDE_ENCRYPTED_REASONING = "reasoning.encrypted_content"
+# Stream events that end a Responses reply with its whole `response` (a failed one raises instead)
+_ENDING_EVENTS = ("response.completed", "response.incomplete")
+# Error kinds of a failure inside a Responses stream (an HTTP 200 whose events then say it failed):
+# OpenAI's `rate_limit_exceeded` and `server_error` response codes, Azure's `too_many_requests` error type
+_RATE_LIMIT_KINDS = {"rate_limit_exceeded", "too_many_requests"}
+_SERVER_ERROR_KINDS = {"server_error"}
 # The first wait after a 429, which the SDK's error carries no retry-after for here; it doubles per retry
 _RATE_LIMIT_WAIT_S = 5.0
 
 
-def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert Anthropic-style tool defs to OpenAI function-calling format."""
+def cap_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The first ``OPENAI_MAX_TOOLS`` tools; the rest are named in a warning."""
     if len(tools) > OPENAI_MAX_TOOLS:
         logger.warning(
             "%d tools exceed OpenAI's %d-tool limit — sending the first %d and dropping: %s",
@@ -68,6 +96,12 @@ def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]
             ", ".join(t.get("name", "?") for t in tools[OPENAI_MAX_TOOLS:]),
         )
         tools = tools[:OPENAI_MAX_TOOLS]
+    return tools
+
+
+def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Anthropic-style tool defs to OpenAI function-calling format."""
+    tools = cap_tools(tools)
     oai_tools: list[dict[str, Any]] = []
     for tool in tools:
         oai_tools.append(
@@ -179,6 +213,27 @@ def _usage_counts(usage: Any) -> TokenCounts:
     )
 
 
+def _responses_usage_counts(usage: Any) -> TokenCounts:
+    """The token counts of a Responses `usage` (None when the API sent none).
+
+    `input_tokens` is the whole prompt: the cached part (`cached_tokens`, billed reads) and the part
+    written to the cache (`cache_write_tokens`, stored as 5-minute writes) come out of it. `output_tokens`
+    includes the reasoning tokens, which are billed as output.
+    """
+    total = _token_count(getattr(usage, "input_tokens", 0))
+    details = getattr(usage, "input_tokens_details", None)
+    read = _token_count(getattr(details, "cached_tokens", 0))
+    # Not in the SDK's model: read from the response's extra fields
+    written = _token_count(getattr(details, "cache_write_tokens", 0))
+    return TokenCounts(
+        input_tokens=max(0, total - read - written),
+        cache_write_5m_tokens=written,
+        cache_write_1h_tokens=0,
+        cache_read_tokens=read,
+        output_tokens=_token_count(getattr(usage, "output_tokens", 0)),
+    )
+
+
 def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     """Parse OpenAI ChatCompletion into unified LLMResponse."""
     choice = response.choices[0]
@@ -202,6 +257,25 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
         stop_reason=_normalize_finish_reason(choice.finish_reason),
         **_usage_counts(response.usage),
     )
+
+
+class _StreamFailed(Exception):
+    """A Responses stream that failed after it started: the `error` event or a `response.failed` event."""
+
+    def __init__(self, code: str | None, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.type = None
+        self.message = message
+
+
+def _stream_failure(error: openai.APIError | _StreamFailed) -> tuple[bool, bool, str]:
+    """(is it a rate limit, is it worth asking again, what to say) for a failed stream request: an HTTP
+    error, a failure event, or the SDK's error for an error payload (Azure's shape)."""
+    if isinstance(error, openai.APIStatusError):
+        return error.status_code == 429, transient_status(error.status_code), f"{error.status_code} {error.message}"
+    kinds = {error.code, error.type}
+    return bool(kinds & _RATE_LIMIT_KINDS), bool(kinds & _SERVER_ERROR_KINDS), error.message
 
 
 # ── Base class ────────────────────────────────────────────────────────────────
@@ -248,12 +322,20 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         )
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
         self._request_clients = RequestClients[AsyncOpenAI]()
+        # Chat Completions (today's code) or the Responses API for this endpoint, read once
+        self._settings = settings
         self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
         # Read once: every request of a turn sends the same effort/thinking
         self._reasoning_effort = settings.reasoning_effort
         self._thinking = settings.thinking
+
+    @property
+    def _responses_api(self) -> bool:
+        """Whether this endpoint is called on the Responses API now: listed, and not switched off by an
+        error (read at every call, so a switch takes effect at once)."""
+        return endpoint_capabilities(self._settings, self._provider_name).responses_api
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
@@ -302,6 +384,49 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         kwargs.update(reasoning.fragment)
         return self._normalize_kwargs(kwargs)
 
+    def _build_responses_kwargs(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        system: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
+        thinking: ThinkingMode | None = None,
+        pinned: bool = False,
+    ) -> dict[str, Any]:
+        """Request kwargs of a Responses call: stateless (`store` false), reasoning items encrypted."""
+        model = model or self._default_model
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "input": convert_messages_to_responses(messages, wire_tag(self._provider_name, model)),
+            "store": False,
+            "max_output_tokens": max_tokens or self._default_max_tokens,
+        }
+        if system:
+            kwargs["instructions"] = system
+        if tools:
+            kwargs["tools"] = convert_tools_to_responses(cap_tools(tools))
+        if openai_is_reasoning_model(model):
+            kwargs["include"] = [_INCLUDE_ENCRYPTED_REASONING]
+        else:  # a reasoning model rejects a temperature
+            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
+        if self._sends_cache_key and (cache_key := prompt_cache_key()):
+            kwargs["prompt_cache_key"] = cache_key
+        # The same effort rules as Chat Completions; the Responses API takes the level as `reasoning.effort`
+        reasoning = resolve_and_warn(
+            ReasoningWire.OPENAI_RESPONSES,
+            model,
+            self._reasoning_effort if reasoning_effort is None else reasoning_effort,
+            self._thinking if thinking is None else thinking,
+            pinned=pinned,
+            with_tools=bool(tools),
+        )
+        if effort := reasoning.fragment.get("reasoning_effort"):
+            kwargs["reasoning"] = {"effort": effort}
+        return kwargs
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -314,30 +439,152 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         thinking: ThinkingMode | None = None,
         pinned: bool = False,
     ) -> LLMResponse:
-        kwargs = self._build_kwargs(
-            messages,
-            tools,
-            model,
-            max_tokens,
-            temperature,
-            system,
-            reasoning_effort=reasoning_effort,
-            thinking=thinking,
-            pinned=pinned,
+        for attempt in range(2):
+            caps = endpoint_capabilities(self._settings, self._provider_name)
+            responses = caps.responses_api
+            build = self._build_responses_kwargs if responses else self._build_kwargs
+            effort, think = reasoning_effort, thinking
+            if not responses:
+                effort, think = self._chat_fallback_reasoning(model, tools, effort, think)
+            kwargs = build(
+                messages,
+                tools,
+                model,
+                max_tokens,
+                temperature,
+                system,
+                reasoning_effort=effort,
+                thinking=think,
+                pinned=pinned,
+            )
+            try:
+                response = await self._call_with_retry(kwargs, responses=responses)
+            except openai.APIStatusError as e:
+                if attempt == 0 and responses and learn_from_error(self._settings, self._provider_name, e, caps):
+                    continue  # the endpoint has no /responses: the same request goes to Chat Completions
+                message = f"{self._provider_name} API error: {e.status_code} {e.message}"
+                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+            except openai.APIConnectionError as e:
+                raise LLMError(f"{self._provider_name} connection error: {e}") from e
+            break
+
+        result = self._parse_responses(response, kwargs["model"]) if responses else parse_openai_response(response)
+        result.provider = self._provider_name
+        result.request_model = kwargs["model"]
+        return result
+
+    def _chat_fallback_reasoning(
+        self,
+        model: str | None,
+        tools: list[dict[str, Any]] | None,
+        effort: ReasoningEffort | None,
+        thinking: ThinkingMode | None,
+    ) -> tuple[ReasoningEffort | None, ThinkingMode | None]:
+        """The reasoning settings of a Chat Completions request that fell back from the Responses API (D11).
+
+        Chat Completions takes a gpt-6 model's tools only with reasoning off: a model that has no off level
+        (astra, 6.1-sol) cannot be used with tools there, so the request fails with a clear error and sends
+        nothing; the others get no effort and no thinking setting, which sends `none`, whatever the
+        operator set for the Responses API. Anything else is unchanged.
+        """
+        name = model or self._default_model
+        if (
+            not tools
+            or self._provider_name not in self._settings.responses_api_providers
+            or not (SWITCHES.is_off(self._provider_name, Feature.RESPONSES_API))
+        ):
+            return effort, thinking
+        if openai_tools_unusable(name):
+            message = (
+                f"{self._provider_name}: {name} needs the Responses API to use tools, and this endpoint has no "
+                f"/responses (HTTP {self._switch_status()})"
+            )
+            _FALLBACK_REFUSED.log(
+                f"{self._provider_name}|{name}",
+                "Endpoint %s has no /responses (HTTP %d) and %s cannot use tools on Chat Completions: its "
+                "requests with tools fail until restart",
+                self._provider_name,
+                self._switch_status(),
+                name,
+            )
+            raise LLMError(message)
+        if openai_tools_need_off(name):
+            return "", ""
+        return effort, thinking
+
+    def _switch_status(self) -> int:
+        return next(
+            (
+                s.status
+                for s in SWITCHES.listed()
+                if s.endpoint == self._provider_name and s.feature is Feature.RESPONSES_API
+            ),
+            0,
         )
 
+    async def compact(self, messages: list[LLMMessage], *, model: str | None = None) -> LLMResponse:
+        """Ask the server to compact `messages` (`/responses/compact`), the input a turn sent.
+
+        The body is the model and the input items and nothing else: the preserved-reasoning guide says to
+        omit `instructions`, and the endpoint takes no tools. The returned window (the user messages it
+        keeps and the encrypted compaction item) comes back as `raw`, tagged with the wire, to be stored
+        and sent as it is; `stop_reason == "compaction"` says it holds a compaction item.
+        """
+        model = model or self._default_model
+        wire = wire_tag(self._provider_name, model)
+        kwargs: dict[str, Any] = {"model": model, "input": convert_messages_to_responses(messages, wire)}
+        caps = endpoint_capabilities(self._settings, self._provider_name)
         try:
-            response = await self._call_with_retry(kwargs)
+            response = await self._request_clients.pick(self._client).responses.compact(**kwargs)
         except openai.APIStatusError as e:
+            # A 404 here switches the endpoint's compaction off (the Compactor then uses the summary model)
+            learn_from_error(self._settings, self._provider_name, e, caps)
             message = f"{self._provider_name} API error: {e.status_code} {e.message}"
             raise LLMError(message, retryable=transient_status(e.status_code)) from e
         except openai.APIConnectionError as e:
             raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
-        result = parse_openai_response(response)
-        result.provider = self._provider_name
-        result.request_model = kwargs["model"]
+        # The SDK types the retained user messages as output messages (`input_text` parts) and warns on dump
+        window = [item.model_dump(mode="json", exclude_none=True, warnings=False) for item in response.output]
+        counts = _responses_usage_counts(response.usage)
+        has_item = any(item.get("type") == "compaction" and item.get("encrypted_content") for item in window)
+        return LLMResponse(
+            model=model,
+            provider=self._provider_name,
+            request_model=model,
+            stop_reason=STOP_REASON_COMPACTION if has_item else "stop",
+            raw=window,
+            wire=wire,
+            input_tokens=counts["input_tokens"],
+            cache_write_5m_tokens=counts["cache_write_5m_tokens"],
+            cache_read_tokens=counts["cache_read_tokens"],
+            output_tokens=counts["output_tokens"],
+        )
+
+    def _parse_responses(self, response: Response, model: str) -> LLMResponse:
+        """A Responses reply as a unified response, with its usage and a log line about its reasoning."""
+        result = parse_responses_response(response, wire_tag(self._provider_name, model))
+        counts = _responses_usage_counts(response.usage)
+        result.input_tokens = counts["input_tokens"]
+        result.cache_write_5m_tokens = counts["cache_write_5m_tokens"]
+        result.cache_read_tokens = counts["cache_read_tokens"]
+        result.output_tokens = counts["output_tokens"]
+        self._log_reasoning(response, model)
         return result
+
+    def _log_reasoning(self, response: Response, model: str) -> None:
+        """How much of the output was reasoning, and which reasoning mode the API says it used
+        (`current_turn`: earlier turns' reasoning is not rendered). Counts and a mode name only."""
+        details = getattr(response.usage, "output_tokens_details", None)
+        reasoning = getattr(response.reasoning, "context", None) if response.reasoning else None
+        logger.debug(
+            "%s %s: %d output tokens, of which %d reasoning; reasoning context %s",
+            self._provider_name,
+            model,
+            _token_count(getattr(response.usage, "output_tokens", 0)),
+            _token_count(getattr(details, "reasoning_tokens", 0)),
+            reasoning or "unreported",
+        )
 
     async def stream_turn(
         self,
@@ -356,7 +603,43 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         Anthropic implementation, so the voice pipeline can run either.
 
         A 429 before the first event is retried as `complete()` retries it; once
-        text has been yielded nothing is retried, since the caller already has it."""
+        text has been yielded nothing is retried, since the caller already has it.
+        A listed endpoint streams on the Responses API (``_stream_responses``) and gives the
+        caller the same events."""
+        caps = endpoint_capabilities(self._settings, self._provider_name)
+        if caps.responses_api:
+            kwargs = self._build_responses_kwargs(
+                messages,
+                tools,
+                model,
+                max_tokens,
+                temperature,
+                system,
+                reasoning_effort=reasoning_effort,
+                thinking=thinking,
+            )
+            kwargs["stream"] = True
+            started = False
+            try:
+                # aclosing: a caller that stops reading closes the request's stream too, at once
+                async with aclosing(self._stream_responses(kwargs)) as events:
+                    async for event in events:
+                        started = True
+                        yield event
+                return
+            except LLMError as e:
+                # An endpoint without /responses answers before any event: the same turn streams on Chat Completions
+                cause = e.__cause__
+                if started or not isinstance(cause, openai.APIStatusError):
+                    raise
+                if not learn_from_error(self._settings, self._provider_name, cause, caps):
+                    raise
+            async for event in self.stream_turn(
+                messages, tools, model, max_tokens, temperature, system, reasoning_effort, thinking
+            ):
+                yield event
+            return
+        reasoning_effort, thinking = self._chat_fallback_reasoning(model, tools, reasoning_effort, thinking)
         kwargs = self._build_kwargs(
             messages,
             tools,
@@ -405,11 +688,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                         finish_reason = choice.finish_reason
                 break
             except openai.RateLimitError as e:
-                if started or attempt == attempts - 1:
-                    raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e
-                wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
-                logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
-                await asyncio.sleep(wait)
+                await self._wait_after_rate_limit(e, started=started, attempt=attempt, attempts=attempts)
             except openai.APIStatusError as e:
                 message = f"{self._provider_name} stream error: {e.status_code} {e.message}"
                 raise LLMError(message, retryable=transient_status(e.status_code)) from e
@@ -438,17 +717,76 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             )
         )
 
+    async def _stream_responses(self, kwargs: dict[str, Any]) -> AsyncGenerator[StreamTurnEvent]:
+        """One streamed Responses request: the text deltas as they arrive, then the final response.
+
+        The final response is built from the items of the `response.output_item.done` events laid over
+        the terminal event's own output: the docs give the complete reasoning item (its
+        `encrypted_content` included) only there. The terminal event can be `response.incomplete`
+        (the output limit), which the SDK's `get_final_response` would turn into an error.
+        """
+        attempts = rate_limit_attempts()
+        for attempt in range(attempts):
+            started = False
+            done: dict[int, Any] = {}
+            terminal: Response | None = None
+            try:
+                stream = await self._request_clients.pick(self._client).responses.create(**kwargs)
+                async with stream:  # closes the HTTP stream when the caller stops reading
+                    async for event in stream:
+                        if event.type == "response.output_text.delta":
+                            if event.delta:
+                                started = True
+                                yield StreamTurnEvent(text=event.delta)
+                        elif event.type == "response.output_item.done":
+                            done[event.output_index] = event.item
+                        elif event.type in _ENDING_EVENTS:
+                            terminal = event.response  # type: ignore[union-attr]
+                        elif event.type == "response.failed":
+                            failure = event.response.error
+                            raise _StreamFailed(failure.code if failure else None, failure.message if failure else "")
+                        elif event.type == "error":
+                            raise _StreamFailed(event.code, event.message)
+                break
+            except openai.APIConnectionError as e:
+                raise LLMError(f"{self._provider_name} connection error: {e}") from e
+            except (openai.APIError, _StreamFailed) as e:
+                rate_limited, retryable, detail = _stream_failure(e)
+                if not rate_limited:
+                    raise LLMError(f"{self._provider_name} stream error: {detail}", retryable=retryable) from e
+                await self._wait_after_rate_limit(e, started=started, attempt=attempt, attempts=attempts)
+
+        if terminal is None:
+            raise LLMError(f"{self._provider_name} stream ended without a final response", retryable=True)
+        items = dict(enumerate(terminal.output))
+        items.update(done)
+        response = terminal.model_copy(update={"output": [items[index] for index in sorted(items)]})
+        result = self._parse_responses(response, kwargs["model"])
+        result.provider = self._provider_name
+        result.request_model = kwargs["model"]
+        yield StreamTurnEvent(response=result)
+
+    async def _wait_after_rate_limit(self, error: BaseException, *, started: bool, attempt: int, attempts: int) -> None:
+        """After a rate limit of a streamed request: wait before the next attempt, or raise when none is
+        left or text has already been yielded (the caller has it, so nothing is retried)."""
+        if started or attempt == attempts - 1:
+            raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from error
+        wait = rate_limit_backoff(_RATE_LIMIT_WAIT_S, attempt)
+        logger.warning("%s rate limited, retrying in %.1fs", self._provider_name, wait)
+        await asyncio.sleep(wait)
+
     async def close(self) -> None:
         await self._client.close()
 
-    async def _call_with_retry(self, kwargs: dict[str, Any]) -> ChatCompletion:
+    async def _call_with_retry(self, kwargs: dict[str, Any], *, responses: bool = False) -> Any:
+        """One request, with the 429 retries; the Responses API when ``responses``, else Chat Completions."""
         attempts = rate_limit_attempts()
         for attempt in range(attempts):
             try:
-                result: ChatCompletion = await self._request_clients.pick(self._client).chat.completions.create(
-                    **kwargs
-                )
-                return result
+                client = self._request_clients.pick(self._client)
+                if responses:
+                    return await client.responses.create(**kwargs)
+                return await client.chat.completions.create(**kwargs)
             except openai.RateLimitError as e:
                 if attempt == attempts - 1:
                     raise LLMRateLimitError(retry_after=_RATE_LIMIT_WAIT_S) from e

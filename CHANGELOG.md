@@ -44,6 +44,103 @@ Always on, without setting anything:
 
 ### Changed
 
+#### Sessions are no longer cut by message count; an emergency cut by tokens replaces it (#358)
+
+- A session is no longer cut from 50 to 30 messages: it keeps every message, and long ones are
+  compacted by prompt tokens (`PINCER_COMPACT_AT_TOKENS`, default 80,000). Claude endpoints and
+  the endpoints on the Responses API (`openai`, `azure`, `azure-openai`) compact on their own
+  server; every other endpoint uses the summary model.
+- New `PINCER_COMPACT_HARD_TOKENS` (not set: twice `PINCER_COMPACT_AT_TOKENS`, at least 160,000, so
+  160,000 with the default 80,000; a raised `PINCER_COMPACT_AT_TOKENS` needs no second variable). After a turn whose prompt went over it and
+  whose compaction failed (the call failed, no summary came back, or the daily budget was
+  reached), the oldest whole turns are dropped until the prompt is about
+  `PINCER_COMPACT_TO_TOKENS`, with a warning in the log. Their photos are deleted with them. Below
+  the limit a failed compaction changes nothing and is tried again after a later turn. At startup
+  the limits must run `PINCER_COMPACT_HARD_TOKENS` (when set) > `PINCER_COMPACT_AT_TOKENS` >
+  `PINCER_COMPACT_TO_TOKENS`.
+  A summary of the earlier conversation at the start of the history stays when the oldest turns
+  are dropped.
+- When an endpoint rejects a request as too long for the model (Anthropic "prompt is too long",
+  OpenAI and Azure `context_length_exceeded`, a request over the size limit), the turn drops about
+  the oldest half of the history (whole turns, the summary kept) and retries, up to four times.
+  Compaction only runs after a request succeeded, so without this a history no request can carry
+  would fail on every later message.
+- A photo a chat sends stays in the conversation, so it is checked when it arrives: it gets the media
+  type of its bytes (whatever the channel claimed), a format the models do not take (BMP, TIFF) is
+  converted, and one that cannot be read (HEIC, a corrupt or cut-short file) is left out with a note to
+  the model. It used to be kept and could make every later request of the session fail.
+- `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
+  warning at startup and `pincer doctor` reports it. Remove it from `.env`.
+
+#### OpenAI and Azure OpenAI use the Responses API (#358)
+
+- Requests to `openai`, `azure` and `azure-openai` now go to `/responses` instead of
+  `/chat/completions`, stateless (`store: false`). The model's reasoning comes back encrypted and is
+  sent back between tool calls, on later turns and after a restart, so a reasoning model no longer
+  starts from scratch after every tool call. Tools, `prompt_cache_key` and the 128-tool cap work as
+  before, and usage still splits into uncached, cached and output tokens.
+- `PINCER_RESPONSES_API_PROVIDERS` (default `openai,azure,azure-openai`) lists the OpenAI-wire
+  providers that use it. **Every other endpoint (Ollama, OpenRouter, DeepSeek, Grok, LiteLLM, ...)
+  stays on Chat Completions exactly as before**; add a name to the list to move it. To keep an
+  endpoint on Chat Completions, remove its name; `none` (or `[]` in `pincer.toml`) turns it off for
+  all. An Azure endpoint needs the v1 base URL (`https://<resource>.openai.azure.com/openai/v1/`),
+  which is what `.env.example` already shows.
+- Every call to such an endpoint uses `/responses`: streamed web chat and voice turns (same events
+  as before: text as it is written, then the tool calls and usage), headless scheduled runs, and the
+  one-shot internal calls (the fallback summary, the onboarding and call-report extractions).
+  Earlier turns' reasoning goes back in streamed chat, voice calls and headless runs. A conversation
+  saved before this change, or by an endpoint on Chat Completions, still loads and is sent without
+  reasoning.
+- An endpoint on the Responses API compacts on its own server too: after the reply, over
+  `PINCER_COMPACT_AT_TOKENS`, Pincer sends the conversation to `/responses/compact` (the model and
+  the input, nothing else) and keeps the returned window, with its encrypted compaction item, as it
+  came back; it goes first in the next request, and the turns that arrived meanwhile stay after it.
+  The window is encrypted, so no summary is saved as a memory and another model or endpoint sees
+  only a note that the earlier conversation was compacted. The call is priced and checked against
+  the daily budget like any other; when it fails the history is kept and it is tried again after a
+  later turn. To keep an endpoint on the summary model, remove its name from
+  `PINCER_RESPONSES_API_PROVIDERS` (it then also leaves the Responses API).
+
+#### Endpoints that lack a feature are detected, not configured (#358)
+
+- No startup probe: the first real request finds out. An endpoint that answers 404, 405 or 501 on
+  `/responses` is retried on Chat Completions in the same turn; a 404 on `/responses/compact` makes
+  the summary model compact its conversations (at once, and from then on); a Claude proxy that
+  rejects the compaction beta or the thinking-binding beta (Anthropic's `Unexpected value(s) ... for
+  the anthropic-beta header` or `<field>: Extra inputs are not permitted` 400) is retried without
+  it, its stored compaction blocks are sent as their summary text, and the summary model compacts.
+  Nothing else switches a feature off: a 429, a 5xx, any other 400, and a 404 that names a missing
+  model or deployment leave it alone.
+- The switch is remembered per endpoint until the process restarts and logged once as a warning
+  (`Endpoint <name> answered 404 on /responses: ...`). It is listed by `pincer doctor` only in the
+  running agent: open `/api/doctor` of the agent (the `pincer doctor` command runs in its own
+  process and always reports none). Restart to try the feature again.
+- A gpt-6 model with no reasoning-off level (`gpt-6-astra`, `gpt-6.1-sol`) cannot use tools on Chat
+  Completions: when its endpoint falls back, a request with tools fails with a clear error naming the
+  endpoint and the missing `/responses`. The other gpt-6 models fall back with reasoning off for tools.
+- Removing an endpoint from `PINCER_SERVER_COMPACTION_PROVIDERS` while a compaction block is stored now
+  sends the block as its summary text and no beta header (it used to keep sending the block and the
+  beta).
+
+#### gpt-6 on OpenAI and Azure now reasons with tools (#358)
+
+- On the Responses API a tool turn is no longer sent `reasoning_effort: none` for gpt-6. With
+  `PINCER_REASONING_EFFORT` unset nothing is sent, so `gpt-6.1-terra`, `gpt-6-sol`, `gpt-6-luna` and
+  `gpt-6.1-sol` run at their default effort, which is medium on OpenAI's documentation (gpt-6-astra and
+  Azure deployments: not documented). Expect more reasoning tokens, billed as output, and slower tool
+  turns. Any effort now works with tools, and `gpt-6-astra` and `gpt-6.1-sol` can be chat and voice models.
+- **To lower it:** `PINCER_REASONING_EFFORT=low`, or `PINCER_THINKING=disabled`, which sends `none`
+  (not accepted by gpt-6-astra and gpt-6.1-sol, which have no off level). `none` itself is not a value
+  of `PINCER_REASONING_EFFORT`.
+- **Voice calls reason too.** A gpt-6 voice call on a Responses endpoint now reasons at the model's
+  default under the 220-token voice limit (`PINCER_VOICE_MAX_RESPONSE_TOKENS`): the reasoning can use the
+  limit up before the caller hears a word. Set `PINCER_VOICE_THINKING=disabled` for voice, or
+  `PINCER_VOICE_REASONING_EFFORT=low` and raise `PINCER_VOICE_MAX_RESPONSE_TOKENS` (at least 512).
+  `pincer doctor` warns about it.
+- Endpoints that stay on Chat Completions keep the old rules (tool turns send `none`, a higher effort
+  refuses to start). The refusal now says to add the endpoint to `PINCER_RESPONSES_API_PROVIDERS` if it
+  serves `/v1/responses`. `pincer doctor` lists the API of every endpoint (`llm_endpoints`).
+
 #### One storage root, with `skills/` and `workspace/` under it
 
 - Everything the agent reads and writes now lives in `<storage root>/workspace`:

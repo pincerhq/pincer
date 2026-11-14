@@ -732,6 +732,7 @@ All variables use `PINCER_` prefix.
 | `PINCER_OPENAI_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |
 | `PINCER_OPENAI_COMPATIBLE_API_KEY` | | Optional key for that endpoint |
 | `PINCER_OPENAI_COMPATIBLE_MODEL` | | Model for that endpoint (e.g. `grok-3`, `llama3.2`) |
+| `PINCER_RESPONSES_API_PROVIDERS` | `openai,azure,azure-openai` | Comma-separated OpenAI-wire providers that use the Responses API (`/responses`, stateless, encrypted reasoning kept across tool calls and turns). Every other endpoint stays on Chat Completions; `none` = no endpoint |
 | `PINCER_PROMPT_CACHE_KEY_PROVIDERS` | `openai,azure,azure-openai` | Comma-separated OpenAI-wire providers sent a per-conversation `prompt_cache_key`; other endpoints may reject the unknown field. A keyless endpoint never gets one |
 | `PINCER_ANTHROPIC_COMPATIBLE_PROVIDER` | | Name for an Anthropic-wire endpoint |
 | `PINCER_ANTHROPIC_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |

@@ -1,15 +1,20 @@
-"""Thinking blocks ride along within one agent turn and are gone by the next (issue #345)."""
+"""Thinking blocks ride along on every request of a conversation, and stay in the saved history (issue #358).
+
+The slice-2 sites (pair repair and tool re-selection still strip thinking) are tested at the end.
+"""
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
+from PIL import Image
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.session import SessionManager
@@ -20,7 +25,6 @@ from pincer.llm.base import (
     LLMResponse,
     MessageRole,
     StreamTurnEvent,
-    ThinkingBlock,
     ToolCall,
 )
 from pincer.llm.router import LLMRouter
@@ -74,9 +78,10 @@ def _assert_no_sentinel_in_logs(caplog: pytest.LogCaptureFixture) -> None:
         _assert_no_sentinel(f"log {record.name}", record.getMessage())
 
 
-async def test_thinking_rides_along_within_a_turn_and_is_gone_by_the_next(
+async def test_thinking_rides_along_across_turns_and_never_reaches_the_user_or_the_logs(
     settings, session_manager, cost_tracker, tools, caplog
 ):
+    """#345 sent turn 2 no thinking; now every later request carries it (D2)."""
     script = [
         (
             [
@@ -98,29 +103,25 @@ async def test_thinking_rides_along_within_a_turn_and_is_gone_by_the_next(
 
     assert tools.runs == ["Dentist"]
     assert len(llm.requests) == 3
-    assistant = [m for m in llm.requests[1]["messages"] if m["role"] == "assistant"]
-    assert assistant[-1]["content"][:2] == [
-        {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
-        {"type": "redacted_thinking", "data": _REDACTED},
-    ]
-    # Turn 2 runs on the same cached session object, and sends no thinking
+    assert "thinking" not in _block_types(llm.requests[0])  # precondition: nothing was sent before the first response
+    for request in llm.requests[1:]:  # within the turn, then turn 2
+        assistant = [m for m in request["messages"] if m["role"] == "assistant"]
+        assert assistant[0]["content"][:2] == [
+            {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+            {"type": "redacted_thinking", "data": _REDACTED},
+        ]
+    # Turn 2 runs on the same cached session object
     assert await session_manager.get_or_create("user1", "test") is session
-    assert "thinking" not in _block_types(llm.requests[2])
-    assert "redacted_thinking" not in _block_types(llm.requests[2])
-    _assert_no_sentinel("turn 2's request", llm.raw_requests[2])
-    assert all(not m.thinking_blocks for m in session.messages)
-    # Never visible: channel text, saved session, logs
+    # Never visible: channel text, logs
     _assert_no_sentinel("channel text", first.text + second.text)
-    stored = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
-    assert stored is not None
-    _assert_no_sentinel("saved session", json.dumps(stored["messages"]))
     _assert_no_sentinel_in_logs(caplog)
 
 
 _THINKING = [
-    ThinkingBlock("thinking", thinking=_THOUGHT, signature=_SIGNATURE),
-    ThinkingBlock("redacted_thinking", data=_REDACTED),
+    {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
+    {"type": "redacted_thinking", "data": _REDACTED},
 ]
+_WIRE = "test:test-model"
 _DONE = LLMResponse(content="done", model="test-model", input_tokens=10, output_tokens=5, stop_reason="end_turn")
 
 
@@ -132,16 +133,17 @@ def _thinking_tool_response(tool_id: str = "tc1") -> LLMResponse:
         input_tokens=50,
         output_tokens=40,
         stop_reason="tool_use",
-        thinking_blocks=list(_THINKING),
+        raw=[*_THINKING, {"type": "tool_use", "id": tool_id, "name": "create_event", "input": {"title": "Dentist"}}],
+        wire=_WIRE,
     )
 
 
-def _sent_thinking(messages: list[LLMMessage]) -> list[ThinkingBlock]:
-    """The thinking blocks a request carried, read when it was made."""
-    return [block for m in messages for block in m.thinking_blocks]
+def _sent_thinking(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+    """The thinking blocks the messages carry, read when a request is made."""
+    return [block for m in messages for block in m.raw if block["type"] in ("thinking", "redacted_thinking")]
 
 
-def _streamed(responses: list[LLMResponse], sent: list[list[ThinkingBlock]]):
+def _streamed(responses: list[LLMResponse], sent: list[list[dict[str, Any]]]):
     """A `stream_turn` answering each request with the next response, recording the thinking it carried."""
 
     async def stream_turn(messages, **kwargs):
@@ -158,7 +160,7 @@ async def test_streaming_chat_follow_up_request_gets_the_turns_thinking(
     settings, mock_llm, session_manager, cost_tracker, tools, caplog
 ):
     """Every step sends the turn's tools, so nothing edits the history under its thinking (Q2c, slice 13)."""
-    streamed_with: list[list[ThinkingBlock]] = []
+    streamed_with: list[list[dict[str, Any]]] = []
     mock_llm.stream_turn = _streamed([_thinking_tool_response(), _DONE], streamed_with)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
 
@@ -168,7 +170,7 @@ async def test_streaming_chat_follow_up_request_gets_the_turns_thinking(
     assert tools.runs == ["Dentist"]
     assert streamed_with == [[], _THINKING]
     session = await session_manager.get_or_create("user1", "web")
-    assert _sent_thinking(session.messages) == []
+    assert _sent_thinking(session.messages) == _THINKING  # the turn's end no longer drops it (D2)
     for chunk in chunks:
         _assert_no_sentinel(f"{chunk.type} chunk", chunk.content)
     _assert_no_sentinel_in_logs(caplog)
@@ -179,7 +181,7 @@ class _ScriptedVoice(BaseLLMProvider):
 
     def __init__(self, turns: list[list[StreamTurnEvent]]) -> None:
         self.turns = list(turns)
-        self.sent: list[list[ThinkingBlock]] = []
+        self.sent: list[list[dict[str, Any]]] = []
 
     async def complete(
         self,
@@ -234,7 +236,7 @@ async def test_voice_follow_up_request_gets_the_turns_thinking(settings, session
     assert tools.runs == ["Dentist"]
     assert provider.sent == [[], _THINKING]
     session = await session_manager.get_or_create("+4930111222", "voice")
-    assert _sent_thinking(session.messages) == []
+    assert _sent_thinking(session.messages) == _THINKING  # the turn's end no longer drops it (D2)
     # The phone channel speaks and transcribes only these chunks
     for chunk in chunks:
         _assert_no_sentinel(f"{chunk.type} chunk", chunk.content)
@@ -242,14 +244,15 @@ async def test_voice_follow_up_request_gets_the_turns_thinking(settings, session
 
 
 async def test_voice_cut_off_retry_never_sends_the_discarded_thinking(settings, session_manager, cost_tracker, tools):
-    discarded = [ThinkingBlock("thinking", thinking="DISCARDED-THOUGHT", signature="DISCARDED-SIG")]
+    discarded = [{"type": "thinking", "thinking": "DISCARDED-THOUGHT", "signature": "DISCARDED-SIG"}]
     cut_off = LLMResponse(
         content="",
         model="test-model",
         input_tokens=50,
         output_tokens=220,
         stop_reason="max_tokens",
-        thinking_blocks=discarded,
+        raw=discarded,
+        wire=_WIRE,
     )
     provider = _ScriptedVoice(
         [
@@ -267,7 +270,7 @@ async def test_voice_cut_off_retry_never_sends_the_discarded_thinking(settings, 
 
 
 @pytest.mark.parametrize("entry", ["chat", "stream", "voice"])
-async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
+async def test_a_turn_looks_its_session_up_once_and_writes_to_the_one_it_looked_up(
     settings, mock_llm, session_manager, cost_tracker, tools, entry
 ):
     """turn() yields the session; the inner method must use it, not look the key up again."""
@@ -285,22 +288,14 @@ async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
         else Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
     )
     lookups: list[Any] = []
-    ended: list[Any] = []
-    real_get, real_end = session_manager.get_or_create, session_manager.end_turn
+    real_get = session_manager.get_or_create
 
     async def get_or_create(*args, **kwargs):
         session = await real_get(*args, **kwargs)
         lookups.append(session)
         return session
 
-    async def end_turn(session):
-        ended.append(session)
-        await real_end(session)
-
-    with (
-        patch.object(session_manager, "get_or_create", get_or_create),
-        patch.object(session_manager, "end_turn", end_turn),
-    ):
+    with patch.object(session_manager, "get_or_create", get_or_create):
         if entry == "chat":
             await agent.handle_message("user1", "test", "hi", memory=False)
         elif entry == "stream":
@@ -309,12 +304,12 @@ async def test_a_turn_looks_its_session_up_once_and_ends_the_one_it_wrote_to(
             _chunks = [c async for c in agent.stream_voice_turn("+4930111222", "voice", "hi")]
 
     assert len(lookups) == 1
-    assert len(ended) == 1
-    assert ended[0] is lookups[0]
-    assert any(m.role is MessageRole.ASSISTANT and m.content == "done" for m in ended[0].messages)  # it holds the reply
+    assert any(
+        m.role is MessageRole.ASSISTANT and m.content == "done" for m in lookups[0].messages
+    )  # it holds the reply
 
 
-async def test_chat_turn_strips_thinking_when_it_fails(settings, mock_llm, session_manager, cost_tracker, tools):
+async def test_chat_turn_keeps_its_thinking_when_it_fails(settings, mock_llm, session_manager, cost_tracker, tools):
     mock_llm.complete.side_effect = [_thinking_tool_response(), LLMError("Anthropic API error: 500 overloaded"), _DONE]
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tools.registry)
 
@@ -323,17 +318,17 @@ async def test_chat_turn_strips_thinking_when_it_fails(settings, mock_llm, sessi
 
     session = await session_manager.get_or_create("user1", "test")
     assert any(m.tool_calls for m in session.messages)  # precondition: the thinking message was saved
-    assert _sent_thinking(session.messages) == []
+    assert _sent_thinking(session.messages) == _THINKING  # the failed turn's end no longer drops it (D2)
 
 
-async def test_streaming_chat_strips_thinking_on_a_budget_stop(settings, mock_llm, session_manager, tools, tmp_path):
+async def test_streaming_chat_keeps_its_thinking_on_a_budget_stop(settings, mock_llm, session_manager, tools, tmp_path):
     """The thinking request crosses the budget ($7/MTok x 1,000 = the whole $0.007); the next one is refused."""
     from pincer.config.pricing import load_price_table
     from pincer.llm.cost_tracker import CostTracker
 
     crossing = _thinking_tool_response()
     crossing.request_model, crossing.input_tokens, crossing.output_tokens = "test-fixture-model", 1_000, 0
-    streamed_with: list[list[ThinkingBlock]] = []
+    streamed_with: list[list[dict[str, Any]]] = []
     mock_llm.stream_turn = _streamed([crossing, _DONE], streamed_with)
     tracker = CostTracker(tmp_path / "test.db", daily_budget=0.007, prices=load_price_table())
     await tracker.initialize()
@@ -351,10 +346,12 @@ async def test_streaming_chat_strips_thinking_on_a_budget_stop(settings, mock_ll
     assert len(streamed_with) == 1
     session = await session_manager.get_or_create("user1", "web")
     assert any(m.tool_calls for m in session.messages)
-    assert _sent_thinking(session.messages) == []
+    assert _sent_thinking(session.messages) == _THINKING  # the stopped turn's end no longer drops it (D2)
+    assert session.messages[-1].role is MessageRole.ASSISTANT  # and the budget marker closes the history
+    assert session.messages[-1].content.startswith("(Stopped before answering")
 
 
-async def test_voice_turn_strips_thinking_when_the_caller_hangs_up_mid_turn(
+async def test_voice_turn_keeps_its_thinking_when_the_caller_hangs_up_mid_turn(
     settings, session_manager, cost_tracker, tools
 ):
     provider = _ScriptedVoice(
@@ -374,40 +371,34 @@ async def test_voice_turn_strips_thinking_when_the_caller_hangs_up_mid_turn(
     assert len(provider.sent) == 1  # precondition: closed before the follow-up request
     session = await session_manager.get_or_create("+4930111222", "voice")
     assert any(m.tool_calls for m in session.messages)
-    assert _sent_thinking(session.messages) == []
+    assert _sent_thinking(session.messages) == _THINKING  # the closed turn's end no longer drops it (D2)
 
 
-async def test_saved_session_is_unchanged_by_thinking(session_manager, tmp_path):
-    def history(thinking_blocks: list[ThinkingBlock]) -> list[LLMMessage]:
-        call = ToolCall(id="tc1", name="create_event", arguments={"title": "Dentist"})
-        return [
-            LLMMessage(role=MessageRole.USER, content="Book the dentist"),
-            LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[call], thinking_blocks=thinking_blocks),
-            LLMMessage(role=MessageRole.TOOL_RESULT, content="created", tool_call_id="tc1"),
-        ]
+async def test_saved_session_holds_the_models_raw_output_and_a_reload_restores_it(session_manager, tmp_path):
+    """#345 saved a session identical with or without thinking; the raw output is now part of the row (D2)."""
+    call = ToolCall(id="tc1", name="create_event", arguments={"title": "Dentist"})
+    history = [
+        LLMMessage(role=MessageRole.USER, content="Book the dentist"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[call], raw=list(_THINKING), wire=_WIRE),
+        LLMMessage(role=MessageRole.TOOL_RESULT, content="created", tool_call_id="tc1"),
+    ]
+    session = await session_manager.get_or_create("with", "test")
+    for message in history:
+        await session_manager.add_message(session, message)
+    assert _sent_thinking(session.messages) == _THINKING  # precondition
 
-    for user_id, blocks in (("with", list(_THINKING)), ("without", [])):
-        session = await session_manager.get_or_create(user_id, "test")
-        for message in history(blocks):
-            await session_manager.add_message(session, message)
-    assert _sent_thinking((await session_manager.get_or_create("with", "test")).messages) == _THINKING  # precondition
-
-    rows = {
-        user_id: await session_manager._store.load(
-            f"test:{user_id}", user_id=user_id, channel="test", legacy_fallback=False
-        )
-        for user_id in ("with", "without")
-    }
-    assert rows["with"] is not None and rows["without"] is not None
-    assert rows["with"]["messages"] == rows["without"]["messages"]
-    _assert_no_sentinel("saved session", rows["with"]["messages"])
+    row = await session_manager._store.load("test:with", user_id="with", channel="test", legacy_fallback=False)
+    assert row is not None
+    saved = json.loads(row["messages"])
+    assert [(m.get("raw"), m.get("wire")) for m in saved] == [(None, None), (_THINKING, _WIRE), (None, None)]
 
     reloaded = SessionManager(tmp_path / "test.db")
     await reloaded.initialize()
     try:
         session = await reloaded.get_or_create("with", "test")
         assert len(session.messages) == 3
-        assert _sent_thinking(session.messages) == []
+        assert _sent_thinking(session.messages) == _THINKING
+        assert session.messages[1].wire == _WIRE
     finally:
         await reloaded.close()
 
@@ -421,31 +412,33 @@ def test_repaired_tool_call_message_drops_its_stale_thinking():
             role=MessageRole.ASSISTANT,
             content="Booking.",
             tool_calls=[answered, orphaned],
-            thinking_blocks=list(_THINKING),
+            raw=list(_THINKING),
+            wire=_WIRE,
         ),
         LLMMessage(role=MessageRole.TOOL_RESULT, content="created", tool_call_id="tc1"),
-        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[orphaned], thinking_blocks=list(_THINKING)),
+        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[orphaned], raw=list(_THINKING), wire=_WIRE),
         LLMMessage(role=MessageRole.USER, content="And?"),
     ]
 
     clean = _sanitize_tool_pairs(messages)
 
     assert [m.tool_calls for m in clean if m.role is MessageRole.ASSISTANT] == [[answered]]  # precondition: repaired
+    assert _sent_thinking(messages) == [*_THINKING, *_THINKING]  # precondition: the originals held thinking
     assert _sent_thinking(clean) == []
 
 
 # ── Stable history within a turn (slice 4, Q2c) ──────
 
-_CAP = 20  # the session_manager fixture's max_messages
+_EARLIER = 20  # earlier messages a long session already holds; nothing cuts them (slice 5)
 
 
-async def _fill_to_cap(session_manager, user_id: str, channel: str, session_key: str | None = None) -> None:
-    """Earlier turns, outside any turn, up to the session cap."""
+async def _fill_long_history(session_manager, user_id: str, channel: str, session_key: str | None = None) -> None:
+    """Earlier turns, outside any turn: a long history."""
     session = await session_manager.get_or_create(user_id, channel, session_key=session_key)
-    for index in range(_CAP):
+    for index in range(_EARLIER):
         role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
         await session_manager.add_message(session, LLMMessage(role=role, content=f"earlier message {index}"))
-    assert len(session.messages) == _CAP  # precondition: at the cap
+    assert len(session.messages) == _EARLIER  # precondition: the earlier messages are all there
 
 
 def _assert_extends(earlier: dict[str, Any], later: dict[str, Any]) -> None:
@@ -467,8 +460,8 @@ _TOOL_THEN_TEXT = [
 ]
 
 
-async def test_voice_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
-    await _fill_to_cap(session_manager, "+4930111222", "voice")
+async def test_voice_turn_with_a_long_history_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
+    await _fill_long_history(session_manager, "+4930111222", "voice")
     async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = _voice_agent(settings, llm.provider, session_manager, cost_tracker, tools)
         chunks = [c async for c in agent.stream_voice_turn("+4930111222", "voice", "Termin beim Zahnarzt")]
@@ -477,12 +470,12 @@ async def test_voice_turn_at_the_cap_sends_an_unchanged_prefix(settings, session
     assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("+4930111222", "voice")
-    assert len(session.messages) <= _CAP
-    assert await _stored_length(session_manager, "voice:+4930111222", "+4930111222", "voice") <= _CAP
+    assert len(session.messages) == _EARLIER + 4  # the history stays whole: the turn's user, tool call, result, reply
+    assert await _stored_length(session_manager, "voice:+4930111222", "+4930111222", "voice") == _EARLIER + 4
 
 
-async def test_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
-    await _fill_to_cap(session_manager, "user1", "test")
+async def test_chat_turn_with_a_long_history_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
+    await _fill_long_history(session_manager, "user1", "test")
     async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         result = await agent.handle_message("user1", "test", "Book the dentist", memory=False)
@@ -491,12 +484,14 @@ async def test_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_
     assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "test")
-    assert len(session.messages) <= _CAP
-    assert await _stored_length(session_manager, "test:user1", "user1", "test") <= _CAP
+    assert len(session.messages) == _EARLIER + 4  # the history stays whole: the turn's user, tool call, result, reply
+    assert await _stored_length(session_manager, "test:user1", "user1", "test") == _EARLIER + 4
 
 
-async def test_streaming_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings, session_manager, cost_tracker, tools):
-    await _fill_to_cap(session_manager, "user1", "web")
+async def test_streaming_chat_turn_with_a_long_history_sends_an_unchanged_prefix(
+    settings, session_manager, cost_tracker, tools
+):
+    await _fill_long_history(session_manager, "user1", "web")
     async with ScriptedAnthropic(settings, _TOOL_THEN_TEXT) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         chunks = [c async for c in agent.handle_message_stream("user1", "web", "Book the dentist", memory=False)]
@@ -505,11 +500,17 @@ async def test_streaming_chat_turn_at_the_cap_sends_an_unchanged_prefix(settings
     assert len(llm.requests) == 2
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "web")
-    assert len(session.messages) <= _CAP
-    assert await _stored_length(session_manager, "web:user1", "user1", "web") <= _CAP
+    assert len(session.messages) == _EARLIER + 4  # the history stays whole: the turn's user, tool call, result, reply
+    assert await _stored_length(session_manager, "web:user1", "user1", "web") == _EARLIER + 4
 
 
-_IMAGE = (b"\x89PNG fake image bytes", "image/png")
+def _tiny_png() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (4, 4), (10, 120, 200)).save(out, "PNG")
+    return out.getvalue()
+
+
+_IMAGE = (_tiny_png(), "image/png")  # a photo the session keeps, so it must be one the models can read
 
 
 def _image_blocks(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -531,7 +532,7 @@ async def test_chat_turn_keeps_its_images_on_every_request(settings, session_man
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "test")
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # the turn's end keeps it (slice 3)
 
 
 async def test_streaming_chat_turn_keeps_its_images_on_every_request(settings, session_manager, cost_tracker, tools):
@@ -544,7 +545,7 @@ async def test_streaming_chat_turn_keeps_its_images_on_every_request(settings, s
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     _assert_extends(llm.requests[0], llm.requests[1])
     session = await session_manager.get_or_create("user1", "web")
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # the turn's end keeps it (slice 3)
 
 
 _TOOL_THEN_TEXT_NO_THINKING = [
@@ -564,7 +565,7 @@ async def test_chat_turn_without_thinking_keeps_its_image_through_a_tool_call(
     assert len(_image_blocks(llm.requests[0])) == 1  # precondition: the image was sent
     assert len(_image_blocks(llm.requests[1])) == 1  # the step after the tool call still sees it
     session = await session_manager.get_or_create("user1", "test")
-    assert all(not m.images for m in session.messages)  # end_turn dropped it
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # end_turn keeps it (slice 3)
 
 
 async def test_streaming_chat_turn_without_thinking_keeps_its_image_through_a_tool_call(
@@ -582,7 +583,7 @@ async def test_streaming_chat_turn_without_thinking_keeps_its_image_through_a_to
     assert len(llm.requests) == 2
     assert [len(_image_blocks(r)) for r in llm.requests] == [1, 1]  # the step after the tool call still sees it
     session = await session_manager.get_or_create("user1", "web")
-    assert all(not m.images for m in session.messages)
+    assert [len(m.images) for m in session.messages if m.images] == [1]  # the turn's end keeps it (slice 3)
 
 
 async def test_streaming_chat_turn_with_a_text_only_reply_sends_its_image(
@@ -643,16 +644,65 @@ def _tool_names(request: dict[str, Any]) -> list[str]:
     return [t["name"] for t in request.get("tools", [])]
 
 
-async def test_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
-        agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
+_DROP_BLOCK = {"prefix_mismatch_behavior": "drop_block"}
+
+
+def _on_haiku_5_5(settings):
+    """Settings whose Anthropic model takes the binding controls (so a request carries drop_block)."""
+    return settings.model_copy(update={"anthropic_model": "claude-haiku-5-5"})
+
+
+def _assert_thinking_kept(request: dict[str, Any]) -> None:
+    """The request after a change carries the turn's thinking as it was and asks the API to drop what no longer fits."""
+    assistant = [m for m in request["messages"] if m["role"] == "assistant"]
+    assert assistant[-1]["content"][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
+    assert request["thinking"]["block_binding"] == _DROP_BLOCK
+
+
+async def test_reselected_tools_keep_the_turns_thinking(settings, session_manager, cost_tracker):
+    """#345 stripped it here (the tools no longer fit it); drop_block decides now (D8)."""
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(_on_haiku_5_5(settings), llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         await agent.handle_message("user1", "test", "Check my budget", memory=False)
 
     assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
-    assert "thinking" not in _block_types(llm.requests[1])
-    _assert_no_sentinel("the request after re-selection", llm.raw_requests[1])
+    _assert_thinking_kept(llm.requests[1])
+
+
+async def test_a_language_change_mid_turn_keeps_the_turns_thinking(settings, session_manager, cost_tracker):
+    """The rebuild after a skill load reads the language again; the system prompt changes and the thinking stays."""
+    stored = ["de"]
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+
+    async def list_memories(**kwargs: Any) -> list[SimpleNamespace]:
+        if kwargs.get("category") != "profile":
+            return []
+        language = stored[0]
+        stored[0] = "uk"  # set_preferred_language ran during the turn
+        return [SimpleNamespace(id="p1", content=f"Preferred language: {language}.")]
+
+    memory.list_memories.side_effect = list_memories
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(
+            _on_haiku_5_5(settings),
+            llm.provider,
+            session_manager,
+            cost_tracker,
+            _skill_tools().registry,
+            memory_store=memory,
+        )
+        agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
+        await agent.handle_message("user1", "test", "Check my budget")
+
+    def system_text(request: dict[str, Any]) -> str:
+        return "".join(block["text"] for block in request["system"])
+
+    assert "[User preferred language: de]" in system_text(llm.requests[0])  # precondition: the language changed
+    assert "[User preferred language: uk]" in system_text(llm.requests[1])
+    _assert_thinking_kept(llm.requests[1])
 
 
 async def test_same_tools_after_reselection_keep_the_thinking(settings, session_manager, cost_tracker):
@@ -669,17 +719,15 @@ async def test_same_tools_after_reselection_keep_the_thinking(settings, session_
     assert assistant[-1]["content"][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
 
 
-async def test_streaming_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
-        agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
+async def test_streaming_reselected_tools_keep_the_turns_thinking(settings, session_manager, cost_tracker):
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(_on_haiku_5_5(settings), llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         _chunks = [c async for c in agent.handle_message_stream("user1", "web", "Check my budget", memory=False)]
 
     assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
-    for request, raw in zip(llm.requests[1:], llm.raw_requests[1:], strict=True):
-        assert "thinking" not in _block_types(request)
-        _assert_no_sentinel("a request after re-selection", raw)
+    _assert_thinking_kept(llm.requests[1])
 
 
 async def test_headless_follow_up_carries_the_turns_thinking(settings, session_manager, cost_tracker, tools):
@@ -694,20 +742,22 @@ async def test_headless_follow_up_carries_the_turns_thinking(settings, session_m
     assert assistant[-1]["content"][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
 
 
-async def test_headless_reselected_tools_drop_the_turns_thinking(settings, session_manager, cost_tracker):
-    async with ScriptedAnthropic(settings, _SKILL_THEN_TEXT) as llm:
-        agent = Agent(settings, llm.provider, session_manager, cost_tracker, _skill_tools().registry)
+async def test_headless_reselected_tools_keep_the_turns_thinking(settings, session_manager, cost_tracker):
+    async with ScriptedAnthropic(_on_haiku_5_5(settings), _SKILL_THEN_TEXT) as llm:
+        agent = Agent(_on_haiku_5_5(settings), llm.provider, session_manager, cost_tracker, _skill_tools().registry)
         agent.tool_selector = _Selector(settings, _FIRST_PICK, {"load_skill", "search_drive"})
         await agent.run_headless("Check my budget", "user1", "telegram")
 
     assert len(llm.requests) == 2
     assert _tool_names(llm.requests[0]) != _tool_names(llm.requests[1])  # precondition: the tools changed
-    assert "thinking" not in _block_types(llm.requests[1])
-    _assert_no_sentinel("the request after re-selection", llm.raw_requests[1])
+    _assert_thinking_kept(llm.requests[1])
 
 
-async def test_mid_turn_pair_repair_drops_the_turns_thinking(settings, session_manager, cost_tracker, tools):
-    """A compatible server repeating a tool_use id makes the next iteration's repair rewrite history."""
+async def test_mid_turn_pair_repair_keeps_the_thinking_of_the_messages_it_did_not_rewrite(
+    settings, session_manager, cost_tracker, tools
+):
+    """A compatible server repeating a tool_use id makes the next iteration's repair rewrite one message.
+    #345 stripped the whole history's thinking; now only the rewritten message loses its raw output (D8)."""
     script = [
         ([thinking(_THOUGHT, _SIGNATURE), tool_use("toolu_1", "create_event", {"title": "Dentist"})], "tool_use"),
         (
@@ -727,9 +777,10 @@ async def test_mid_turn_pair_repair_drops_the_turns_thinking(settings, session_m
     assert result.text == "Both booked."
     assert len(llm.requests) == 3
     assert "thinking" in _block_types(llm.requests[1])  # precondition: thinking rode along before the repair
-    assert "thinking" not in _block_types(llm.requests[2])
-    for sentinel in (*_SENTINELS, "SECOND-THOUGHT-7f3a"):
-        assert sentinel not in llm.raw_requests[2]
+    assistant = [m["content"] for m in llm.requests[2]["messages"] if m["role"] == "assistant"]
+    assert [[b["type"] for b in blocks] for blocks in assistant] == [["thinking", "tool_use"], ["tool_use"]]
+    assert assistant[0][0] == {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE}
+    assert "SECOND-THOUGHT-7f3a" not in llm.raw_requests[2]  # the rewritten message is rebuilt without it
 
 
 def _failover_router(primary: BaseLLMProvider, failover: BaseLLMProvider) -> LLMRouter:
@@ -746,7 +797,8 @@ def _failover_router(primary: BaseLLMProvider, failover: BaseLLMProvider) -> LLM
     return router
 
 
-async def test_failover_mid_turn_sends_the_thinking_unchanged(settings, session_manager, cost_tracker, tools):
+async def test_failover_mid_turn_to_another_model_sends_no_thinking(settings, session_manager, cost_tracker, tools):
+    """#345 sent the blocks on unchanged; the other model's wire differs, so its message is rebuilt (D9)."""
     script_a = [
         ([thinking(_THOUGHT, _SIGNATURE), redacted(_REDACTED), tool_use("toolu_1", "create_event", {})], "tool_use"),
         400,  # provider A fails mid-turn
@@ -762,35 +814,11 @@ async def test_failover_mid_turn_sends_the_thinking_unchanged(settings, session_
 
     assert result.text == "Done."
     assert [r["model"] for r in (*a.requests, *b.requests)] == ["claude-a", "claude-a", "claude-b"]  # precondition
-    assert b.requests[0]["messages"] == a.requests[1]["messages"]  # the blocks went on unchanged
+    assert "thinking" in _block_types(a.requests[1])  # precondition: its own wire got the blocks
     assistant = [m for m in b.requests[0]["messages"] if m["role"] == "assistant"]
-    assert assistant[-1]["content"][:2] == [
-        {"type": "thinking", "thinking": _THOUGHT, "signature": _SIGNATURE},
-        {"type": "redacted_thinking", "data": _REDACTED},
-    ]
-
-
-@pytest.mark.parametrize("loop", ["chat", "stream", "voice"])
-async def test_a_failed_turn_leaves_no_turn_open(settings, session_manager, cost_tracker, tools, loop):
-    """A turn that fails right after it began still ends: the session trims again on its next add."""
-    agent = _voice_agent(settings, _ScriptedVoice([]), session_manager, cost_tracker, tools)
-    open_when_failing: list[bool] = []
-
-    async def failing_add(session, message):
-        open_when_failing.append(session._turn_open)
-        raise RuntimeError("database is locked")
-
-    with patch.object(session_manager, "add_message", side_effect=failing_add), pytest.raises(RuntimeError):
-        if loop == "chat":
-            await agent.handle_message("user1", loop, "hi", memory=False)
-        elif loop == "stream":
-            _chunks = [c async for c in agent.handle_message_stream("user1", loop, "hi", memory=False)]
-        else:
-            _chunks = [c async for c in agent.stream_voice_turn("user1", loop, "hi")]
-
-    assert open_when_failing == [True]  # precondition: it failed inside the turn
-    session = await session_manager.get_or_create("user1", loop)
-    assert session._turn_open is False
+    assert assistant[-1]["content"] == [{"type": "tool_use", "id": "toolu_1", "name": "create_event", "input": {}}]
+    for sentinel in _SENTINELS:
+        assert sentinel not in b.raw_requests[0]
 
 
 _INTERLEAVED = (
@@ -839,12 +867,15 @@ async def test_voice_turn_replays_an_interleaved_response_in_its_own_order(
     assert [b["type"] for b in replayed["content"]] == ["thinking", "text", "thinking", "tool_use"]
 
 
-async def test_a_session_trimmed_at_the_end_of_a_turn_keeps_no_recorded_blocks(
+async def test_a_session_keeps_the_recorded_output_of_a_response_after_the_turn_ends(
     settings, session_manager, cost_tracker, tools
 ):
+    """#345 dropped the recorded blocks when the turn ended; the raw output now stays, in its order (D2)."""
     async with ScriptedAnthropic(settings, [_INTERLEAVED, ([text("Erledigt.")], "end_turn")]) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, tools.registry)
         await agent.handle_message("user1", "test", "Book the dentist", memory=False)
 
     session = await session_manager.get_or_create("user1", "test")
-    assert all(not m.content_blocks for m in session.messages)
+    tool_message = next(m for m in session.messages if m.tool_calls)
+    assert [b["type"] for b in tool_message.raw] == ["thinking", "text", "thinking", "tool_use"]
+    assert tool_message.wire == "anthropic:claude-haiku-4-5-20251001"

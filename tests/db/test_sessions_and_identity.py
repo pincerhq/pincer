@@ -16,7 +16,7 @@ from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
-from pincer.models.sessions import ChatSession
+from pincer.models.sessions import ChatSession, SessionImage
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
@@ -34,6 +34,7 @@ _TABLES = [
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
+    SessionImage.__table__,
     Onboarding.__table__,
 ]
 
@@ -213,7 +214,7 @@ async def _say(url: str, user_id: str, channel: str, text: str) -> None:
     """Store a message the way the main message path does."""
     # Attached to `url` directly rather than through `initialize()`, which
     # only takes a SQLite path, so this runs on either dialect.
-    manager = SessionManager(Path(), max_messages=20)
+    manager = SessionManager(Path())
     manager._service = SessionService(url)
     session = await manager.get_or_create(user_id, channel)
     await manager.add_message(session, LLMMessage(role=MessageRole.USER, content=text))
