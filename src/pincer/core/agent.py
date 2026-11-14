@@ -833,8 +833,7 @@ class Agent:
     async def _close_interrupted_tool_calls(self, session: Session) -> None:
         """Start a turn by answering the tool calls an earlier turn left open (see `_interrupted_results`),
         before the user's message is appended."""
-        for result in _interrupted_results(session.messages):
-            await self._sessions.add_message(session, result)
+        await self._sessions.add_messages(session, _interrupted_results(session.messages))
 
     async def _recover_from_rejected_history(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
         """Decide how a turn continues after `error`, given `attempts` retries so far.

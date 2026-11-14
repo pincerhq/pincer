@@ -293,6 +293,15 @@ class SessionManager:
         session.updated_at = time.time()
         await self._persist(session)
 
+    async def add_messages(self, session: Session, messages: list[LLMMessage]) -> None:
+        """Add several messages to the session and save them in one write (every save writes the whole
+        session, so one call is cheaper than a call per message)."""
+        if not messages:
+            return
+        session.messages.extend(messages)
+        session.updated_at = time.time()
+        await self._persist(session)
+
     async def append_note(self, session_key: str, user_id: str, channel: str, text: str) -> None:
         """Add an assistant message to a session from outside any turn (a
         phone call's final report), in turn order with the user's own turns.

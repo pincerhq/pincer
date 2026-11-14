@@ -205,6 +205,56 @@ async def test_the_error_results_are_saved_with_their_flag_and_plain_results_sta
         await reloaded.close()
 
 
+async def test_the_error_results_of_five_open_calls_are_saved_in_one_write(
+    settings, session_manager, cost_tracker, registry_plain
+):
+    """Every save writes the whole session: closing 5 calls is one write, not 5 back to back."""
+    ids = [f"toolu_{n}" for n in range(5)]
+    calls = [ToolCall(id=call_id, name="create_event", arguments={}) for call_id in ids]
+    session = await session_manager.get_or_create("user1", "test")
+    for message in (
+        LLMMessage(role=MessageRole.USER, content="Book five"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=calls),
+    ):
+        await session_manager.add_message(session, message)
+    saved_sizes: list[int] = []
+    real_save = session_manager._store.save
+
+    async def spy(**kwargs: Any) -> Any:
+        saved_sizes.append(len(json.loads(kwargs["messages"])))
+        return await real_save(**kwargs)
+
+    session_manager._store.save = spy  # type: ignore[method-assign]
+    async with ScriptedAnthropic(settings, [([text("Done.")], "end_turn")]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry_plain)
+        await agent.handle_message("user1", "test", "Never mind", memory=False)
+
+    # The five results in one write (2 + 5 messages), then the user's message, then the reply
+    assert saved_sizes == [7, 8, 9]
+    results = [m for m in session.messages if m.role == MessageRole.TOOL_RESULT]
+    assert [(m.tool_call_id, m.content, m.is_error) for m in results] == [(i, _INTERRUPTED, True) for i in ids]
+
+
+async def test_a_turn_with_no_open_calls_saves_nothing_for_them(
+    settings, session_manager, cost_tracker, registry_plain
+):
+    session = await session_manager.get_or_create("user1", "test")
+    saved_sizes: list[int] = []
+    real_save = session_manager._store.save
+
+    async def spy(**kwargs: Any) -> Any:
+        saved_sizes.append(len(json.loads(kwargs["messages"])))
+        return await real_save(**kwargs)
+
+    session_manager._store.save = spy  # type: ignore[method-assign]
+    async with ScriptedAnthropic(settings, [([text("Done.")], "end_turn")]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry_plain)
+        await agent.handle_message("user1", "test", "Hello", memory=False)
+
+    assert saved_sizes == [1, 2]  # the user's message, then the reply: no write for the calls there were none of
+    assert len(session.messages) == 2
+
+
 @pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
 async def test_a_budget_refused_turn_leaves_an_unanswered_tail_as_it_was(
     settings, mock_llm, session_manager, registry_plain, tmp_path, streaming
