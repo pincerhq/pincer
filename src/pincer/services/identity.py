@@ -27,6 +27,7 @@ from pincer.repositories.onboarding import OnboardingRepository
 from pincer.repositories.sessions import SessionRepository
 from pincer.services.base import DatabaseService
 from pincer.services.onboarding import forget_user
+from pincer.services.sessions import forget_identity
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -424,6 +425,7 @@ class IdentityService(DatabaseService):
             await OnboardingRepository(session).reassign_user(old_id, new_id)
         forget_user(self._url, old_id)
         forget_user(self._url, new_id)
+        forget_identity(self._url, old_id, new_id)
 
     async def touch_active_channel(self, pincer_user_id: str, channel: str) -> None:
         async with session_scope(self._url) as session:

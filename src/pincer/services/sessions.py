@@ -6,14 +6,43 @@ is only the reading and writing of rows.
 
 from __future__ import annotations
 
-from typing import Any
+import weakref
+from typing import Any, Protocol
 
 from pincer.db.session import session_scope
 from pincer.repositories.sessions import SessionRepository
 from pincer.services.base import DatabaseService
 
 
+class SessionCache(Protocol):
+    def forget_identity(self, url: str | None, old_user_id: str, new_user_id: str) -> None: ...
+
+
+# The in-memory session caches of this process (the agent's and the web chat's
+# `SessionManager`), told when an identity rename rewrites their rows.
+_caches: weakref.WeakSet[SessionCache] = weakref.WeakSet()
+
+
+def register_cache(cache: SessionCache) -> None:
+    _caches.add(cache)
+
+
+def forget_identity(url: str | None, old_user_id: str, new_user_id: str) -> None:
+    """Drop both ids' cached sessions after a rename moved or merged their rows,
+    so the next turn reads the rewritten row instead of saving a stale copy over it.
+
+    Only this process's caches: a rename made by another process reaches them
+    when that process restarts.
+    """
+    for cache in list(_caches):
+        cache.forget_identity(url, old_user_id, new_user_id)
+
+
 class SessionService(DatabaseService):
+    @property
+    def url(self) -> str | None:
+        return self._url
+
     async def load(
         self, session_id: str, *, user_id: str, channel: str, legacy_fallback: bool = True
     ) -> dict[str, Any] | None:

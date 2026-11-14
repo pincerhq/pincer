@@ -6,6 +6,7 @@ sessions follow it to its new id.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
-from pincer.models.sessions import ChatSession
+from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
@@ -53,15 +54,24 @@ async def url(db_url: str):
 
 
 async def _store_session(
-    url: str, session_id: str, *, user_id: str, channel: str = "telegram", at: float = 1.0, messages: str = "[]"
+    url: str,
+    session_id: str,
+    *,
+    user_id: str,
+    channel: str = "telegram",
+    at: float = 1.0,
+    messages: str = "[]",
+    metadata: str = "{}",
+    created_at: float | None = None,
 ):
+    """A stored row, updated `at` and created then too unless `created_at` says otherwise."""
     await SessionService(url).save(
         session_id=session_id,
         user_id=user_id,
         channel=channel,
         messages=messages,
-        metadata="{}",
-        created_at=at,
+        metadata=metadata,
+        created_at=at if created_at is None else created_at,
         updated_at=at,
     )
 
@@ -225,32 +235,158 @@ async def _messages(url: str, session_id: str) -> str:
     return row["messages"]
 
 
-@pytest.mark.parametrize("newest", ["usr_hash", "alice"])
-async def test_merging_keeps_the_more_recent_channel_session(url, newest):
+@pytest.mark.parametrize(
+    ("source_at", "target_at", "joined"),
+    [
+        (100.0, 200.0, ["from usr_hash", "from alice"]),
+        (200.0, 100.0, ["from alice", "from usr_hash"]),
+        (100.0, 100.0, ["from alice", "from usr_hash"]),  # the target first on a tie
+    ],
+)
+async def test_merging_joins_colliding_channel_sessions(url, source_at, target_at, joined):
+    """Neither id's conversation is dropped: both land in the target, oldest first."""
     service = IdentityService(url)
     await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
     await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
-    older = "alice" if newest == "usr_hash" else "usr_hash"
-    await _say(url, older, "whatsapp", f"from {older}")
-    await _say(url, newest, "whatsapp", f"from {newest}")
+    await _store_session(url, "whatsapp:usr_hash", user_id="usr_hash", at=source_at, messages='["from usr_hash"]')
+    await _store_session(url, "whatsapp:alice", user_id="alice", at=target_at, messages='["from alice"]')
 
     await service.rename_identity("usr_hash", "alice")
 
     assert await _session_ids(url) == {"whatsapp:alice"}
-    assert f"from {newest}" in await _messages(url, "whatsapp:alice")
+    assert json.loads(await _messages(url, "whatsapp:alice")) == joined
 
 
-async def test_merging_keeps_the_target_s_session_on_a_tie(url):
+async def test_a_merge_is_not_undone_by_a_cached_session(url):
+    """#274 through the message path: both halves of a conversation were said
+    and saved by a running `SessionManager`, which still caches them. The next
+    turn after the merge continues the merged row instead of saving its stale
+    copy over it, and the source's key does not come back."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    manager = SessionManager(Path(), max_messages=20)
+    manager._service = SessionService(url)
+    source, target = f"web:usr_hash:{_CONVERSATION}", f"web:alice:{_CONVERSATION}"
+    for user_id, key, text in [("usr_hash", source, "anonymous half"), ("alice", target, "signed-in half")]:
+        session = await manager.get_or_create(user_id, "web", session_key=key)
+        await manager.add_message(session, LLMMessage(role=MessageRole.USER, content=text))
+
+    await service.rename_identity("usr_hash", "alice")
+    session = await manager.get_or_create("alice", "web", session_key=target)
+    await manager.add_message(session, LLMMessage(role=MessageRole.USER, content="next"))
+    await manager.close()
+
+    assert await _session_ids(url) == {target}
+    stored = [m["content"] for m in json.loads(await _messages(url, target))]
+    assert stored == ["anonymous half", "signed-in half", "next"]
+
+
+@pytest.mark.parametrize("source_newer", [True, False])
+async def test_merging_combines_metadata_and_spans_both_times(url, source_newer):
+    """The more recently updated row's metadata wins a shared key; the other
+    row's own keys are kept. The merged row spans both rows' times."""
     service = IdentityService(url)
     await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
     await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
-    await _store_session(url, "whatsapp:usr_hash", user_id="usr_hash", at=100.0, messages='["old"]')
-    await _store_session(url, "whatsapp:alice", user_id="alice", at=100.0, messages='["target"]')
+    spans = [(100.0, 400.0), (200.0, 300.0)]
+    (source_created, source_at), (target_created, target_at) = spans if source_newer else spans[::-1]
+    await _store_session(
+        url,
+        "whatsapp:usr_hash",
+        user_id="usr_hash",
+        created_at=source_created,
+        at=source_at,
+        metadata=json.dumps({"flag": "source", "only_source": 1}),
+    )
+    await _store_session(
+        url,
+        "whatsapp:alice",
+        user_id="alice",
+        created_at=target_created,
+        at=target_at,
+        metadata=json.dumps({"flag": "target", "only_target": 2}),
+    )
+
+    await service.rename_identity("usr_hash", "alice")
+
+    row = await SessionService(url).load("whatsapp:alice", user_id="", channel="", legacy_fallback=False)
+    assert row is not None
+    assert json.loads(row["metadata"]) == {
+        "flag": "source" if source_newer else "target",
+        "only_source": 1,
+        "only_target": 2,
+    }
+    assert row["created_at"] == 100.0
+    assert row["updated_at"] == 400.0
+
+
+@pytest.mark.parametrize("memory_free_side", ["usr_hash", "alice"])
+async def test_merging_a_memory_free_conversation_keeps_it_memory_free(url, memory_free_side):
+    """What was said off the record stays off it, whichever side said it."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    for user_id, at in [("usr_hash", 100.0), ("alice", 200.0)]:
+        metadata = {MEMORY_FREE_KEY: "true"} if user_id == memory_free_side else {}
+        key = f"web:{user_id}:{_CONVERSATION}"
+        await _store_session(url, key, user_id=user_id, channel="web", at=at, metadata=json.dumps(metadata))
+
+    await service.rename_identity("usr_hash", "alice")
+
+    row = await SessionService(url).load(f"web:alice:{_CONVERSATION}", user_id="", channel="", legacy_fallback=False)
+    assert row is not None
+    assert json.loads(row["metadata"]) == {MEMORY_FREE_KEY: "true"}
+
+
+@pytest.mark.parametrize(
+    ("messages", "metadata"), [("not json", "not json"), ("null", "null"), ('{"a": 1}', '["a"]'), ("", "")]
+)
+async def test_merging_drops_a_side_whose_stored_content_is_unreadable(url, messages, metadata):
+    """A corrupt row must not roll back the whole rename: the readable side is kept."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _store_session(url, "whatsapp:usr_hash", user_id="usr_hash", at=100.0, messages=messages, metadata=metadata)
+    await _store_session(url, "whatsapp:alice", user_id="alice", at=200.0, messages='["kept"]')
 
     await service.rename_identity("usr_hash", "alice")
 
     assert await _session_ids(url) == {"whatsapp:alice"}
-    assert await _messages(url, "whatsapp:alice") == '["target"]'
+    row = await SessionService(url).load("whatsapp:alice", user_id="", channel="", legacy_fallback=False)
+    assert row is not None
+    assert json.loads(row["messages"]) == ["kept"]
+    assert json.loads(row["metadata"]) == {}
+
+
+async def test_merging_joins_main_and_nested_collisions_in_one_rename(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    nested_source, nested_target = f"web:usr_hash:{_CONVERSATION}", f"web:alice:{_CONVERSATION}"
+    await _store_session(url, "web:usr_hash", user_id="usr_hash", channel="web", at=100.0, messages='["main source"]')
+    await _store_session(url, "web:alice", user_id="alice", channel="web", at=200.0, messages='["main target"]')
+    await _store_session(url, nested_source, user_id="usr_hash", channel="web", at=100.0, messages='["nested source"]')
+    await _store_session(url, nested_target, user_id="alice", channel="web", at=200.0, messages='["nested target"]')
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == {"web:alice", nested_target}
+    assert json.loads(await _messages(url, "web:alice")) == ["main source", "main target"]
+    assert json.loads(await _messages(url, nested_target)) == ["nested source", "nested target"]
+
+
+async def test_rewrite_session_ids_counts_merges_and_moves(url):
+    """A merge updates the target and removes the source (2); a move is 1."""
+    await _store_session(url, "whatsapp:usr_hash", user_id="usr_hash", at=100.0, messages='["a"]')
+    await _store_session(url, "whatsapp:alice", user_id="alice", at=200.0, messages='["b"]')
+    await _store_session(url, "telegram:usr_hash", user_id="usr_hash", at=100.0)
+
+    async with session_scope(url) as session:
+        changed = await SessionRepository(session).rewrite_session_ids("usr_hash", "alice")
+
+    assert changed == 3
+    assert await _session_ids(url) == {"whatsapp:alice", "telegram:alice"}
 
 
 async def test_renaming_moves_only_keys_ending_in_the_identity(url):
@@ -305,9 +441,13 @@ async def test_renaming_moves_conversations_nested_under_the_identity(url):
     assert await _session_ids(url) == {"web:alice", f"web:alice:{_CONVERSATION}"}
 
 
-@pytest.mark.parametrize(("source_at", "kept"), [(200.0, '["source"]'), (100.0, '["target"]')])
-async def test_merging_keeps_the_more_recent_nested_conversation(url, source_at, kept):
-    """Both ids hold the same conversation: the newer survives, the target on a tie."""
+@pytest.mark.parametrize(
+    ("source_at", "target_at", "joined"),
+    [(100.0, 200.0, ["source", "target"]), (200.0, 100.0, ["target", "source"])],
+)
+async def test_merging_joins_a_nested_conversation(url, source_at, target_at, joined):
+    """#274: a visitor chats in a conversation, signs in and keeps it, and the
+    signed-in id gets its own row for it. The merge keeps both halves."""
     service = IdentityService(url)
     await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
     await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
@@ -315,13 +455,13 @@ async def test_merging_keeps_the_more_recent_nested_conversation(url, source_at,
         url, f"web:usr_hash:{_CONVERSATION}", user_id="usr_hash", channel="web", at=source_at, messages='["source"]'
     )
     await _store_session(
-        url, f"web:alice:{_CONVERSATION}", user_id="alice", channel="web", at=100.0, messages='["target"]'
+        url, f"web:alice:{_CONVERSATION}", user_id="alice", channel="web", at=target_at, messages='["target"]'
     )
 
     await service.rename_identity("usr_hash", "alice")
 
     assert await _session_ids(url) == {f"web:alice:{_CONVERSATION}"}
-    assert await _messages(url, f"web:alice:{_CONVERSATION}") == kept
+    assert json.loads(await _messages(url, f"web:alice:{_CONVERSATION}")) == joined
 
 
 async def test_renaming_moves_nested_conversations_only_for_the_whole_id(url):

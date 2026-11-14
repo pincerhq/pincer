@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +20,8 @@ from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+logger = logging.getLogger(__name__)
 
 
 def rekeyed_session_id(session_id: str, old_user_id: str, new_user_id: str) -> str | None:
@@ -46,6 +50,46 @@ def _is_conversation_id(segment: str) -> bool:
         return str(uuid.UUID(segment)) == segment
     except ValueError:
         return False
+
+
+def _merged_session(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    """One row's content from two that collide on a key during an identity merge.
+
+    `source` and `target` hold `messages`, `session_metadata`, `created_at`
+    and `updated_at` as stored. Messages carry no timestamps, so the
+    conversations are joined whole: the one created first goes first (the
+    target on a tie). A list saved mid-turn may end on a tool call with no
+    result; the agent's tool-pair repair drops it on the next turn wherever it
+    now sits. Metadata is combined with the more recently updated row's keys
+    winning (the target's on a tie), so a `memory_free` flag on either side
+    stays: the joined conversation holds what was said off the record. The
+    times span both rows. A side whose stored text is not a JSON list (or
+    object, for metadata) contributes nothing, rather than failing the rename.
+    """
+    first, second = (source, target) if source["created_at"] < target["created_at"] else (target, source)
+    older, newer = (target, source) if source["updated_at"] > target["updated_at"] else (source, target)
+    # The stored format, as `core.session._serialized` writes it: plain `json.dumps`.
+    return {
+        "messages": json.dumps(_parsed(first["messages"], list) + _parsed(second["messages"], list)),
+        "session_metadata": json.dumps(
+            {**_parsed(older["session_metadata"], dict), **_parsed(newer["session_metadata"], dict)}
+        ),
+        "created_at": min(source["created_at"], target["created_at"]),
+        "updated_at": max(source["updated_at"], target["updated_at"]),
+    }
+
+
+def _parsed[T: (list[Any], dict[str, Any])](text: str | None, kind: type[T]) -> T:
+    """`text` parsed as `kind`, or an empty one when it is missing, corrupt or another type."""
+    try:
+        value = json.loads(text) if text else None
+    except ValueError:
+        value = None
+    if isinstance(value, kind):
+        return value
+    if text:
+        logger.warning("Dropping a merged session's stored %s that is not one: %.80r", kind.__name__, text)
+    return kind()
 
 
 class SessionRepository(BaseRepository[ChatSession, str]):
@@ -117,9 +161,9 @@ class SessionRepository(BaseRepository[ChatSession, str]):
     async def rewrite_session_ids(self, old_user_id: str, new_user_id: str) -> int:
         """Re-key the old id's sessions to the new id (`rekeyed_session_id`).
 
-        When a merge finds the target key taken, the more recently updated
-        conversation is kept (the target's on a tie) and the other dropped.
-        Returns the number of rows changed or removed.
+        When a merge finds the target key taken, the two conversations are
+        joined into the target (`_merged_session`) and the old row removed, so
+        neither conversation is dropped. Returns the number of rows changed or removed.
         """
         suffix = f":{old_user_id}"
         keys = select(ChatSession.session_id).where(
@@ -139,17 +183,34 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             return 0
         # Plain columns, not ORM objects: re-keying a row the session holds
         # would leave its identity map pointing at the old key.
-        stmt = select(ChatSession.session_id, ChatSession.updated_at).where(
-            col(ChatSession.session_id).in_([*moves, *moves.values()])
+        # Locked until the rename commits, so a turn saved to a target meanwhile
+        # waits rather than being overwritten by the merge. SQLite has no row
+        # locks; the rename's earlier writes already hold its database write lock.
+        times = (
+            select(ChatSession.session_id, ChatSession.created_at, ChatSession.updated_at)
+            .where(col(ChatSession.session_id).in_([*moves, *moves.values()]))
+            .with_for_update()
         )
-        updated = dict((await self.session.exec(stmt)).all())
+        rows: dict[str, dict[str, Any]] = {
+            key: {"created_at": created_at, "updated_at": updated_at}
+            for key, created_at, updated_at in (await self.session.exec(times)).all()
+        }
+        collisions = {old: new for old, new in moves.items() if new in rows}
+        if collisions:
+            # Only colliding rows' histories are read; a plain move needs none.
+            content = select(ChatSession.session_id, ChatSession.messages, ChatSession.session_metadata).where(
+                col(ChatSession.session_id).in_([*collisions, *collisions.values()])
+            )
+            for key, messages, metadata in (await self.session.exec(content)).all():
+                rows[key] |= {"messages": messages, "session_metadata": metadata}
         changed = 0
         for old_key, new_key in moves.items():
-            if new_key in updated:
-                if updated[new_key] >= updated[old_key]:
-                    changed += await self.delete_where(col(ChatSession.session_id) == old_key)
-                    continue
-                changed += await self.delete_where(col(ChatSession.session_id) == new_key)
+            if old_key in collisions:
+                merged = _merged_session(rows[old_key], rows[new_key])
+                target = update(ChatSession).where(col(ChatSession.session_id) == new_key).values(**merged)
+                changed += int((await self.session.exec(target)).rowcount)
+                changed += await self.delete_where(col(ChatSession.session_id) == old_key)
+                continue
             rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
             changed += int((await self.session.exec(rekey)).rowcount)
         return changed
