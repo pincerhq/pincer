@@ -744,7 +744,7 @@ async def test_compact_reports_the_outcome_of_every_exit_on_a_responses_endpoint
         assert session.messages == before and all(a is b for a, b in zip(session.messages, before, strict=True))
 
 
-async def test_the_emergency_cut_drops_a_stored_window_with_the_oldest_messages(
+async def test_the_emergency_cut_keeps_a_stored_window_and_drops_the_turns_after_it(
     openai_settings, session_manager, cost_tracker, caplog
 ):
     caplog.set_level(logging.WARNING, logger="pincer.core.compaction")
@@ -771,9 +771,10 @@ async def test_the_emergency_cut_drops_a_stored_window_with_the_oldest_messages(
     assert await compactor.compact(session, last) is CompactionOutcome.CUT
 
     assert llm.paths == ["/v1/responses/compact"]  # the compaction was tried first
-    assert not any(m.role == MessageRole.SYSTEM for m in session.messages)
-    assert "ENC-CMP-1" not in json.dumps(await _stored(session_manager, "user1", "test"))
-    assert "prompt of 170000 tokens is over the hard limit of 160000 and compaction failed; dropped the oldest 9" in (
+    assert [m.role for m in session.messages if m.role == MessageRole.SYSTEM] == [MessageRole.SYSTEM]
+    assert session.messages[0].raw == _WINDOW  # the window is the memory of everything before: it stays
+    assert "ENC-CMP-1" in json.dumps(await _stored(session_manager, "user1", "test"))
+    assert "prompt of 170000 tokens is over the hard limit of 160000 and compaction failed; dropped the oldest 8" in (
         caplog.text
     )
 

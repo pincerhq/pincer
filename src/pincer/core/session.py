@@ -164,10 +164,11 @@ class SessionManager:
         """
         return await self._replace_prefix(session, prefix, replacement, kept_ok)
 
-    async def cut(self, session: Session, prefix: list[LLMMessage]) -> bool:
+    async def cut(self, session: Session, prefix: list[LLMMessage], keep: LLMMessage | None = None) -> bool:
         """Drop the session's oldest messages `prefix` (the emergency cut), between turns, on the
-        same terms as `compact`. The photos only they showed are deleted with them."""
-        return await self._replace_prefix(session, prefix, None, None)
+        same terms as `compact`, except `keep`: a message of the prefix that stays at the head (the
+        leading summary). The photos only the dropped messages showed are deleted with them."""
+        return await self._replace_prefix(session, prefix, keep, None)
 
     async def _replace_prefix(
         self,

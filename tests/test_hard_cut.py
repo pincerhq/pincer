@@ -417,3 +417,80 @@ async def test_the_built_compactor_enables_the_hard_cut_from_the_settings(settin
         outcome = await compactor.compact(session, _last(130_000, sent, server=True))  # over 120K, under 160K
 
     assert outcome is CompactionOutcome.CUT
+
+
+# ── the leading summary survives the cut (PR #379 review) ────────────────────
+
+_SUMMARY_KINDS = {
+    "client summary": {},
+    "anthropic compaction block": {
+        "raw": [{"type": "compaction", "content": "SUM", "signature": "SIG"}],
+        "wire": "anthropic:claude-haiku-5-5",
+    },
+    "openai window": {"raw": [{"type": "compaction", "encrypted_content": "ENC"}], "wire": "openai:gpt-6"},
+}
+
+
+def _summary(kind: str) -> LLMMessage:
+    return LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\nSUM", **_SUMMARY_KINDS[kind])
+
+
+def test_the_hard_cut_starts_after_the_leading_summary():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = [_summary("client summary")]
+    for _turn in range(6):
+        messages.append(LLMMessage(role=MessageRole.USER, content="u" * 2_000))
+        messages.append(LLMMessage(role=MessageRole.ASSISTANT, content="a" * 2_000))
+    last = LastRequest.measure(1_000_000, messages, overhead_chars=0)
+    whole = last.tokens_per_char * sum(len(m.content) for m in messages)
+
+    cut = choose_hard_cut(messages, last, target_tokens=int(whole) - 1)  # one message too many
+
+    assert cut == 3  # the summary stays: the first turn goes (its user message, its reply)
+    assert messages[cut].role is MessageRole.USER
+
+
+def test_nothing_but_the_summary_to_drop_means_no_cut():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = [
+        _summary("client summary"),
+        LLMMessage(role=MessageRole.USER, content="u" * 90_000),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 90_000),
+    ]
+    last = LastRequest.measure(170_000, messages, overhead_chars=0)
+
+    assert choose_hard_cut(messages, last, target_tokens=50_000) == 0
+
+
+@pytest.mark.parametrize("kind", list(_SUMMARY_KINDS))
+async def test_the_emergency_cut_keeps_the_summary_of_the_conversation_before_it(
+    settings, session_manager, cost_tracker, caplog, kind
+):
+    caplog.set_level(logging.WARNING, logger="pincer.core.compaction")
+    session = await session_manager.get_or_create("user1", "test")
+    summary = _summary(kind)
+    await session_manager.add_message(session, summary)
+    for index in range(10):
+        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
+        await session_manager.add_message(session, LLMMessage(role=role, content=_earlier(index)))
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="turn 1"))
+    sent = list(session.messages)
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="Reply 1"))
+    last = _last(170_000, sent, server=False)
+
+    outcome = await _compactor(
+        settings, cost_tracker, session_manager, llm=_Summarizer(fail=True), hard=160_000
+    ).compact(session, last)
+
+    assert outcome is CompactionOutcome.CUT
+    assert session.messages[0] is summary  # the condensed memory of the earlier conversation survives
+    assert [r.getMessage() for r in caplog.records if "hard limit" in r.getMessage()] == [_CUT_WARNING]  # 8 dropped
+    assert [m.content[:9] for m in session.messages[1:]] == ["message 8", "message 9", "turn 1", "Reply 1"]
+    row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
+    assert row is not None
+    stored = json.loads(row["messages"])
+    assert [m["role"] for m in stored][:2] == ["system", "user"]
+    assert stored[0]["content"] == summary.content
+    assert stored[0].get("raw", []) == summary.raw
