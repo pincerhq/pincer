@@ -9,7 +9,6 @@ here, and this is the only place a wire mismatch removes reasoning.
 
 from __future__ import annotations
 
-import copy
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -22,8 +21,12 @@ def wire_tag(provider: str, model: str) -> str:
 
 
 def replayable_raw(message: LLMMessage, target_wire: str) -> list[dict[str, Any]] | None:
-    """A copy of the message's raw output when it goes back verbatim to ``target_wire``, else None
-    (rebuild the message from its content and tool calls)."""
+    """The message's raw output when it goes back verbatim to ``target_wire``, else None (rebuild the
+    message from its content and tool calls).
+
+    A new list of the stored blocks themselves: a request is built from the whole history every time, so
+    the blocks (thinking, signatures, encrypted reasoning) are not copied. A converter may drop or reorder
+    items of its list, and must treat the blocks as read-only."""
     if not message.raw or message.wire != target_wire:
         return None
-    return copy.deepcopy(message.raw)
+    return list(message.raw)

@@ -59,6 +59,7 @@ SUITES: dict[str, list[str]] = {
         "test_server_compaction",
         "test_hard_cut",
         "test_context_length_recovery",
+        "test_replay_sharing",
         "test_pricing*",
         "test_router",
         "test_image_router",
