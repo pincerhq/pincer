@@ -144,20 +144,24 @@ async def test_a_history_far_over_the_window_is_halved_again_until_it_fits(
     assert sizes[3] < sizes[0] / 5  # about an eighth: three halvings
 
 
-async def test_it_gives_up_after_four_cuts_and_raises_the_endpoints_error(
+async def test_it_gives_up_after_four_cuts_and_raises_the_endpoints_error_with_the_history_as_it_was(
     settings, session_manager, cost_tracker, registry
 ):
+    """The cuts are saved only once a request goes through: a wrong guess (an endpoint that rejects for another
+    reason, in words that look like a window error) must not cost the history."""
     session = await _long_session(session_manager, pairs=100)  # 201 messages: a fifth halving would still cut
+    before = list(session.messages)
     async with ScriptedAnthropic(settings, [Reject(400, _TOO_LONG)] * 6) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
         with pytest.raises(LLMError, match="prompt is too long"):
             await agent.handle_message("user1", "test", "hello", memory=False)
 
     assert len(llm.requests) == 5  # the first and four retries
-    assert 10 < len(session.messages) < 25  # 201 halved four times, plus the question; not a clear
+    assert session.messages[: len(before)] == before  # nothing was cut for good...
+    assert [m.content for m in session.messages[len(before) :]] == ["hello"]  # ...only the question was added
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    assert len(json.loads(row["messages"])) == len(session.messages)  # every cut was saved, the turn failed anyway
+    assert len(json.loads(row["messages"])) == len(session.messages)
 
 
 async def test_one_giant_turn_cannot_be_cut_and_the_error_is_raised(settings, session_manager, cost_tracker, registry):
@@ -214,6 +218,27 @@ async def test_the_recovery_does_not_depend_on_the_wire(settings, session_manage
         ("azure API error: 400 Your input exceeds the context window of this model.", True),
         ("groq API error: 400 Please reduce the length of the messages or completion.", True),
         ("Anthropic API error: 413 Request exceeds the maximum allowed number of bytes.", True),
+        (
+            "grok API error: 400 This model's maximum prompt length is 131072 but the request contains 150000 tokens.",
+            True,
+        ),
+        (
+            "gemini API error: 400 The input token count (1196265) exceeds the maximum number of tokens allowed "
+            "(1048575).",
+            True,
+        ),
+        (
+            "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested "
+            "40000 tokens (39000 in the messages, 1000 in the completion). Please reduce the length of the messages "
+            "or completion.",
+            True,
+        ),
+        (  # the history fits; the completion budget is what is too big, and cutting history cannot help
+            "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested "
+            "33000 tokens (1000 in the messages, 32000 in the completion). Please reduce the length of the messages "
+            "or completion.",
+            False,
+        ),
         ("Anthropic API error: 400 messages.1: `tool_use` ids were found without `tool_result` blocks", False),
         ("Anthropic API error: 429 rate limited", False),
         ("openai API error: 400 tool name is too long", False),
@@ -317,3 +342,102 @@ async def test_the_voice_path_counts_cuts_and_repairs_apart_too(
 
     assert (recovery.shrinks, recovery.repairs) == (2, 1)
     assert len(session.messages) > 8  # not cleared
+
+
+_VLLM_COMPLETION_TOO_BIG = (
+    "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested 33000 tokens "
+    "(1000 in the messages, 32000 in the completion). Please reduce the length of the messages or completion."
+)
+
+
+async def test_an_error_that_blames_the_completion_budget_cuts_nothing_and_saves_nothing(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    session = await _long_session(session_manager)
+    before = list(session.messages)
+    sizes = _script(mock_llm, [_VLLM_COMPLETION_TOO_BIG] * 5)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    with pytest.raises(LLMError, match="in the completion"):
+        await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert sizes == [len(before) + 1]  # one request: halving could not have helped
+    assert session.messages[: len(before)] == before
+    row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
+    assert row is not None
+    assert len(json.loads(row["messages"])) == len(before) + 1
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_a_cut_that_let_a_request_through_stays_when_a_later_request_of_the_turn_fails(
+    settings, session_manager, cost_tracker, registry, mock_llm, tool_registry, streaming
+):
+    """The history put back on a give-up is the one before the cuts, but only while no request has gone
+    through: after one did, a later error (a tool round's) must not undo cuts the turn already built on."""
+    session = await _long_session(session_manager)
+    before = len(session.messages)
+    call = ToolCall(id="t1", name="greet", arguments={"name": "Ann"})
+    requests = 0
+
+    async def complete(**_kwargs: object) -> LLMResponse:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise LLMError(_TOO_LONG)
+        if requests == 2:
+            return LLMResponse(
+                content="", model="m", input_tokens=1, output_tokens=1, stop_reason="tool_use", tool_calls=[call]
+            )
+        raise LLMError("openai API error: 500 server error")
+
+    async def stream_turn(**kwargs):
+        response = await complete(**kwargs)
+        yield StreamTurnEvent(response=response)
+
+    mock_llm.complete.side_effect = complete
+    mock_llm.stream_turn = stream_turn
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError, match="server error"):
+        await _turn(agent, streaming=streaming)
+
+    assert requests == 3
+    assert len(session.messages) < before * 0.6  # the cut stayed
+    assert [m.role for m in session.messages[-3:]] == [MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL_RESULT]
+    row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
+    assert row is not None
+    assert len(json.loads(row["messages"])) == len(session.messages)
+
+
+async def test_a_turn_that_gives_up_on_the_cuts_for_another_error_puts_the_history_back(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    """The retry after a cut fails with something else (a rate limit): the cut was never shown to work."""
+    session = await _long_session(session_manager)
+    before = list(session.messages)
+    _script(mock_llm, [_TOO_LONG, "openai API error: 429 rate limited"])
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    with pytest.raises(LLMError, match="rate limited"):
+        await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert session.messages[: len(before)] == before
+
+
+async def test_a_voice_cut_that_let_a_request_through_stays_when_a_later_request_fails(
+    settings, session_manager, cost_tracker, tool_registry
+):
+    from anthropic_sse import tool_use
+
+    await session_manager.onboarding.complete("user1", "voice", now=1.0)
+    session = await _long_session(session_manager, key="voice:CA_long")
+    before = len(session.messages)
+    script = [Reject(400, _TOO_LONG), ([tool_use("t1", "greet", {"name": "Ann"})], "tool_use"), Reject(400, "boom")]
+    async with ScriptedAnthropic(settings, script) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, tool_registry)
+        with pytest.raises(LLMError):
+            _ = [c async for c in agent.stream_voice_turn("user1", "voice", "hello", session_key="voice:CA_long")]
+
+    assert len(llm.requests) == 3
+    assert len(session.messages) < before * 0.6  # the cut stayed
+    assert session.messages[-1].role is MessageRole.TOOL_RESULT

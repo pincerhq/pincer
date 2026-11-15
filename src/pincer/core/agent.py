@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field, replace
@@ -122,7 +123,8 @@ _MAX_SANITIZE_ATTEMPTS = 2
 _MAX_SHRINK_ATTEMPTS = 4
 # What the providers say when a request is over the model's window (lowercase): Anthropic's 400
 # "prompt is too long" and its 413 on size, OpenAI / Azure / vLLM "context_length_exceeded" and its
-# wordings, Groq's "reduce the length"
+# wordings, Groq's "reduce the length", xAI's "maximum prompt length", Gemini's "maximum number of tokens
+# allowed"
 _CONTEXT_LENGTH_PHRASES = (
     "prompt is too long",
     "context_length_exceeded",
@@ -130,7 +132,13 @@ _CONTEXT_LENGTH_PHRASES = (
     "exceeds the context window",
     "reduce the length of the messages",
     "maximum allowed number of bytes",
+    "maximum prompt length",
+    "exceeds the maximum number of tokens allowed",
 )
+# OpenAI's (and vLLM's) wording says how the request was made up: "maximum context length is 32768 tokens.
+# However, you requested 33000 tokens (1000 in the messages, 32000 in the completion)"
+_CONTEXT_WINDOW = re.compile(r"maximum context length is (\d+) tokens")
+_MESSAGE_TOKENS = re.compile(r"\((\d+) in the messages")
 # The result that closes a tool call whose turn died before the tool finished (sent as an error)
 _UNREADABLE_PHOTOS_NOTE = "[{count} photo(s) sent with this message could not be read and are not attached]"
 _INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
@@ -337,6 +345,13 @@ class _Recovery:
 
     repairs: int = 0
     shrinks: int = 0
+    # The history as it was before the turn's first cut, until a request goes through: a cut is saved
+    # (with the reply that follows it) only then, and put back when the turn gives up instead
+    unshrunk: list[LLMMessage] | None = None
+
+    def settled(self) -> None:
+        """A request went through: the cuts made so far were right and are kept."""
+        self.unshrunk = None
 
 
 class StreamEventType(StrEnum):
@@ -620,10 +635,16 @@ def _is_tool_pair_error(e: Exception) -> bool:
 
 
 def _is_context_length_error(e: Exception) -> bool:
-    """True when a provider rejected the request because it is over the model's context window (or size
-    limit), whatever its wording (see `_CONTEXT_LENGTH_PHRASES`)."""
+    """True when a provider rejected the request because the history is over the model's context window (or
+    size limit), whatever its wording (see `_CONTEXT_LENGTH_PHRASES`). False when the error itself says the
+    messages fit and the completion budget is the problem."""
     message = str(e).lower()
-    return any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES)
+    if not any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES):
+        return False
+    window, in_messages = _CONTEXT_WINDOW.search(message), _MESSAGE_TOKENS.search(message)
+    # The messages fit the window on their own: the completion budget is what is too big, and
+    # cutting history cannot help
+    return not (window and in_messages and int(in_messages[1]) <= int(window[1]))
 
 
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
@@ -852,15 +873,28 @@ class Agent:
 
         A history over the endpoint's window is cut in half (see `_shrink_history`) and sent again, up
         to `_MAX_SHRINK_ATTEMPTS` times: compaction runs only after a request succeeded, so nothing else
-        would ever shrink a history no request can carry.
+        would ever shrink a history no request can carry. The cuts are in memory until a request goes
+        through (`_Recovery.settled`); a turn that gives up puts the history back as it was.
 
         A tool pairing error retries while stripping still changes the history. Once it can't, the
         same request would fail on every later turn too — e.g. Anthropic's "must define tools" for a
         history with tool pairs sent with no tools — so the session is cleared instead.
         """
+        outcome = await self._decide_recovery(session, error, recovery)
+        if outcome is _PairRecovery.RAISE and recovery.unshrunk is not None:
+            session.messages = recovery.unshrunk
+            logger.warning("Session %s: the cuts did not help; its history is kept as it was", session.session_id)
+        if outcome is not _PairRecovery.RETRY:
+            recovery.unshrunk = None
+        return outcome
+
+    async def _decide_recovery(self, session: Session, error: LLMError, recovery: _Recovery) -> _PairRecovery:
         if _is_context_length_error(error):
-            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and await self._shrink_history(session):
+            before = session.messages
+            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and self._shrink_history(session):
                 recovery.shrinks += 1
+                if recovery.unshrunk is None:
+                    recovery.unshrunk = before
                 return _PairRecovery.RETRY
             return _PairRecovery.RAISE
         if not _is_tool_pair_error(error):
@@ -874,11 +908,12 @@ class Agent:
         await self._sessions.save(session)
         return _PairRecovery.CLEARED
 
-    async def _shrink_history(self, session: Session) -> bool:
-        """Drop about the oldest half of the session's history (whole turns, the leading summary kept) and
-        save it. Runs inside the turn, which holds the session's lock, so it edits the session itself
-        (`SessionManager.cut` takes that lock). The photos only the dropped messages showed go with them.
-        False when no earlier turn can be dropped."""
+    @staticmethod
+    def _shrink_history(session: Session) -> bool:
+        """Drop about the oldest half of the session's history (whole turns, the leading summary kept), in
+        memory: the turn saves it with its next message once a request goes through. Runs inside the turn,
+        which holds the session's lock, so it edits the session itself. The photos only the dropped messages
+        showed go with them when it is saved. False when no earlier turn can be dropped."""
         cut = choose_halving_cut(session.messages)
         if not cut:
             logger.warning(
@@ -887,8 +922,6 @@ class Agent:
             return False
         keep = leading_summary(session.messages)
         session.messages = [*([keep] if keep else []), *session.messages[cut:]]
-        session.updated_at = time.time()
-        await self._sessions.save(session)
         logger.warning(
             "Session %s: the endpoint rejected the history as too long; dropped the oldest %d messages",
             session.session_id,
@@ -1149,6 +1182,7 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
+                recovery.settled()
                 self._note_request(session, response, system_prompt, tool_schemas)
                 # The image stays in the history for good (see `_image_contents`): dropping
                 # it would change the history under the turn's thinking blocks.
@@ -1664,6 +1698,7 @@ class Agent:
                     reply = step_text
                     break
                 response = step
+                recovery.settled()
                 self._note_request(session, response, system_prompt, tool_schemas)
                 total_cost += await self._record_cost(response, session.session_id)
                 turn_usage += response.usage
@@ -2025,6 +2060,7 @@ class Agent:
                     )
                 if response is None:  # provider stream ended without a final event
                     raise LLMError("stream_turn ended without a final response")
+                recovery.settled()
                 self._note_request(
                     session, response, system_prompt, tool_schemas, reasoning_effort=reasoning_effort, thinking=thinking
                 )
