@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 telemetry = [
-    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
+    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@0.1.0"
 ]
 
 [project.scripts]

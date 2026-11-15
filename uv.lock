@@ -1057,7 +1057,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "opencv-python-headless", specifier = ">=4.5.0,<5.0.0" },
     { name = "pillow", specifier = ">=10.1.0" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
     { name = "pydantic", specifier = ">=2.4.1,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
@@ -2938,7 +2938,7 @@ name = "opencv-python"
 version = "4.13.0.92"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "sys_platform != 'darwin'" },
+    { name = "numpy" },
 ]
 
 [[package]]
@@ -3392,7 +3392,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.60.0" },
     { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "tasks-redis", "postgres", "remote-skills"], marker = "extra == 'all'" },
     { name = "pincer-mcps", marker = "extra == 'mcp'", editable = "src/pincer-mcps" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49.0" },
     { name = "pomodoro-mcp", marker = "extra == 'mcp'", editable = "src/pomodoro-mcp" },
     { name = "protobuf", specifier = ">=7.34.1,<8.0" },
@@ -3460,7 +3460,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastmcp", specifier = "==3.4.10" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
     { name = "pydantic", specifier = ">=2.4.1,<2.13" },
     { name = "tavily-python", specifier = ">=0.5.0" },
     { name = "youtube-transcript-api", specifier = ">=0.6.3" },
@@ -3470,7 +3470,7 @@ provides-extras = ["telemetry"]
 [[package]]
 name = "pincer-telemetry"
 version = "0.1.0"
-source = { git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main#b5c8b7821a6dd7a82ab05f571c1a251ee1a94519" }
+source = { git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0#b5c8b7821a6dd7a82ab05f571c1a251ee1a94519" }
 dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -3535,7 +3535,7 @@ telemetry = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastmcp", specifier = "==3.4.10" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
     { name = "pydantic", specifier = ">=2.4.1,<2.13" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
@@ -4495,8 +4495,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'darwin'" },
-    { name = "jeepney", marker = "sys_platform != 'darwin'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
@@ -4666,7 +4666,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "fastembed", specifier = ">=0.4.0" },
     { name = "fastmcp", specifier = "==3.4.10" },
-    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?branch=main" },
+    { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.1.0" },
     { name = "pydantic", specifier = ">=2.4.1,<2.13" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
     { name = "uvicorn", specifier = ">=0.34.0" },
@@ -4835,13 +4835,13 @@ resolution-markers = [
     "python_full_version < '3.15' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "filelock", marker = "sys_platform == 'darwin'" },
-    { name = "fsspec", marker = "sys_platform == 'darwin'" },
-    { name = "jinja2", marker = "sys_platform == 'darwin'" },
-    { name = "networkx", marker = "sys_platform == 'darwin'" },
-    { name = "setuptools", marker = "sys_platform == 'darwin'" },
-    { name = "sympy", marker = "sys_platform == 'darwin'" },
-    { name = "typing-extensions", marker = "sys_platform == 'darwin'" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "setuptools" },
+    { name = "sympy" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/04/ff26bb464e61f83e0176deca01e72fffa779190bbb476011e89c45791589/torch-2.15.0-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:0d2b2d9674fa0b9b3f50e83231aa6545a0b19e437a52f0af939a224faaa45515", size = 138575002, upload-time = "2026-10-28T15:17:58.526Z" },
@@ -4859,13 +4859,13 @@ resolution-markers = [
     "python_full_version < '3.15' and sys_platform != 'darwin'",
 ]
 dependencies = [
-    { name = "filelock", marker = "sys_platform != 'darwin'" },
-    { name = "fsspec", marker = "sys_platform != 'darwin'" },
-    { name = "jinja2", marker = "sys_platform != 'darwin'" },
-    { name = "networkx", marker = "sys_platform != 'darwin'" },
-    { name = "setuptools", marker = "sys_platform != 'darwin'" },
-    { name = "sympy", marker = "sys_platform != 'darwin'" },
-    { name = "typing-extensions", marker = "sys_platform != 'darwin'" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "setuptools" },
+    { name = "sympy" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp314-cp314-linux_s390x.whl", hash = "sha256:ef810702df4dd70fe1b8ebee9e7394c6491f779841571a71433829e44927eaa5", upload-time = "2026-10-28T13:19:19Z" },
@@ -4893,9 +4893,9 @@ resolution-markers = [
     "python_full_version < '3.15' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "numpy", marker = "sys_platform == 'darwin'" },
-    { name = "pillow", marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" } },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/ec/ce97c46e5322b588b95be388f2c21878d014ca20838478e7aab59edd128a/torchvision-0.29.2-py3-none-macosx_14_0_arm64.whl", hash = "sha256:d412494ff011f24c884a3cffd33eba1cb45a0299d4e26c1e175113f9d3b3ebc7", size = 1823414, upload-time = "2026-10-28T15:21:31.892Z" },
@@ -4910,9 +4910,9 @@ resolution-markers = [
     "python_full_version < '3.15' and sys_platform != 'darwin'",
 ]
 dependencies = [
-    { name = "numpy", marker = "sys_platform != 'darwin'" },
-    { name = "pillow", marker = "sys_platform != 'darwin'" },
-    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" } },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.2%2Bcpu-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:0be2f85933012cb487f844c7483665191653ee8684da89d6d0e34fd63c3a0a88", upload-time = "2026-10-28T14:18:50Z" },

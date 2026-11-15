@@ -218,14 +218,24 @@ async def test_a_cut_keeps_the_photo_a_kept_message_still_shows(url):
 # ── identity merge ───────────────────────────────────────────────────
 
 
-async def store(url: str, session_id: str, *, user_id: str, at: float, channel: str = "whatsapp", photos=()) -> None:
-    """A session as the main message path leaves it: one user message showing `photos`."""
+def reply_of(user_id: str) -> dict:
+    """An assistant message as the agent saves it: its text and the provider's own output, with its wire."""
+    block = {"type": "thinking", "thinking": f"thought of {user_id}", "signature": f"SIG-{user_id}"}
+    return {"role": "assistant", "content": f"answer to {user_id}", "raw": [block], "wire": "anthropic:claude-x"}
+
+
+async def store(
+    url: str, session_id: str, *, user_id: str, at: float, channel: str = "whatsapp", photos=(), reply: bool = False
+) -> None:
+    """A session as the main message path leaves it: one user message showing `photos` (and, with `reply`,
+    the assistant's answer holding its raw output)."""
     refs = [p.to_ref() for p in photos]
+    messages = [{"role": "user", "content": f"from {user_id}", "images": refs}]
     await SessionService(url).save(
         session_id=session_id,
         user_id=user_id,
         channel=channel,
-        messages=json.dumps([{"role": "user", "content": f"from {user_id}", "images": refs}]),
+        messages=json.dumps([*messages, *([reply_of(user_id)] if reply else [])]),
         metadata="{}",
         created_at=at,
         updated_at=at,
@@ -260,19 +270,74 @@ async def test_a_merge_moves_the_photos_with_the_session(url):
 
 
 @pytest.mark.parametrize(
-    ("old_at", "target_at", "winner"), [(2.0, 1.0, "old"), (1.0, 2.0, "target"), (1.0, 1.0, "target")]
+    ("old_at", "target_at", "order"),
+    [(1.0, 2.0, ["usr_hash", "alice"]), (2.0, 1.0, ["alice", "usr_hash"]), (1.0, 1.0, ["alice", "usr_hash"])],
+    ids=["old session created first", "target created first", "tie: target first"],
 )
-async def test_a_merge_collision_keeps_the_photos_of_the_session_it_keeps(url, old_at, target_at, winner):
+async def test_a_merge_collision_joins_the_photos_and_the_raw_output_of_both_sessions(url, old_at, target_at, order):
+    """Dev's #377 joins two colliding conversations instead of deleting one: the photos their messages show
+    go with them (a photo both show is stored once) and every message keeps its raw output and wire."""
     service = await merge_setup(url)
-    await store(url, "whatsapp:usr_hash", user_id="usr_hash", at=old_at, photos=[photo(1)])
-    await store(url, "whatsapp:alice", user_id="alice", at=target_at, photos=[photo(2)])
+    await store(url, "whatsapp:usr_hash", user_id="usr_hash", at=old_at, photos=[photo(1), photo(2)], reply=True)
+    await store(url, "whatsapp:alice", user_id="alice", at=target_at, photos=[photo(2), photo(3)], reply=True)
     assert set(await photo_rows(url)) == {"whatsapp:usr_hash", "whatsapp:alice", "whatsapp:carol"}  # precondition
 
     await service.rename_identity("usr_hash", "alice")
 
-    kept = photo(1) if winner == "old" else photo(2)
-    assert await photo_rows(url) == {"whatsapp:alice": {kept.sha256}, "whatsapp:carol": {photo(9).sha256}}
-    assert await stored_refs(url, "whatsapp:alice") == [[kept.sha256]]
+    every = {photo(n).sha256 for n in (1, 2, 3)}
+    assert await photo_rows(url) == {"whatsapp:alice": every, "whatsapp:carol": {photo(9).sha256}}
+    refs = {"usr_hash": [photo(1).sha256, photo(2).sha256], "alice": [photo(2).sha256, photo(3).sha256]}
+    assert await stored_refs(url, "whatsapp:alice") == [refs[order[0]], [], refs[order[1]], []]
+    row = await SessionService(url).load("whatsapp:alice", user_id="alice", channel="whatsapp", legacy_fallback=False)
+    assert row is not None
+    joined = json.loads(row["messages"])
+    assert [m for m in joined if m["role"] == "assistant"] == [reply_of(user) for user in order]  # raw and wire intact
+    async with session_scope(url) as session:
+        moved = (await SessionImageRepository(session).get(("whatsapp:alice", photo(1).sha256))).data
+    assert moved == base64.b64decode(photo(1).data)  # the bytes came over, not just the hash
+
+
+async def test_a_merged_session_loads_every_photo_and_keeps_them_when_it_is_saved_again(url, caplog):
+    service = await merge_setup(url)
+    await store(url, "whatsapp:usr_hash", user_id="usr_hash", at=1.0, photos=[photo(1)])
+    await store(url, "whatsapp:alice", user_id="alice", at=2.0, photos=[photo(2)])
+    await service.rename_identity("usr_hash", "alice")
+
+    manager = manager_on(url)
+    with caplog.at_level(logging.WARNING, logger="pincer.core.session"):
+        session = await manager.get_or_create("alice", "whatsapp")
+    assert [[i.sha256 for i in m.images] for m in session.messages] == [[photo(1).sha256], [photo(2).sha256]]
+    assert [r for r in caplog.records if "image store lacks" in r.getMessage()] == []  # no ref left without its row
+    await say(manager, session, "next")  # a later save must not prune photos the joined messages still show
+
+    assert await photo_rows(url) == {
+        "whatsapp:alice": {photo(1).sha256, photo(2).sha256},
+        "whatsapp:carol": {photo(9).sha256},
+    }
+
+
+async def test_a_merge_is_not_undone_by_a_cached_session_with_photos(url):
+    """The cached halves of a conversation (photos included) are dropped by the rename: the next turn
+    continues the joined row and its photos, and the source's key does not come back."""
+    import uuid
+
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    conversation = str(uuid.uuid4())
+    source, target = f"web:usr_hash:{conversation}", f"web:alice:{conversation}"
+    manager = manager_on(url)
+    for user_id, key, n in [("usr_hash", source, 1), ("alice", target, 2)]:
+        session = await manager.get_or_create(user_id, "web", session_key=key)
+        await say(manager, session, f"half {n}", photo(n))
+
+    await service.rename_identity("usr_hash", "alice")
+    session = await manager.get_or_create("alice", "web", session_key=target)
+    await say(manager, session, "next")
+    await manager.close()
+
+    assert await photo_rows(url) == {target: {photo(1).sha256, photo(2).sha256}}
+    assert [[i.sha256 for i in m.images] for m in session.messages] == [[photo(1).sha256], [photo(2).sha256], []]
 
 
 # ── the foreign key ──────────────────────────────────────────────────

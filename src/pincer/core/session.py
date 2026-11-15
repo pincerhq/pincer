@@ -20,8 +20,9 @@ from typing import TYPE_CHECKING
 
 from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 from pincer.models.sessions import MEMORY_FREE_KEY
+from pincer.repositories.sessions import rekeyed_session_id
 from pincer.services.onboarding import OnboardingService
-from pincer.services.sessions import ImageSet, SessionService, StoredImage
+from pincer.services.sessions import ImageSet, SessionService, StoredImage, register_cache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -122,6 +123,7 @@ class SessionManager:
         self._onboarding: OnboardingService | None = None
         self._cache: OrderedDict[str, Session] = OrderedDict()
         self._turn_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        register_cache(self)
 
     @asynccontextmanager
     async def turn(
@@ -322,6 +324,21 @@ class SessionManager:
         session.updated_at = time.time()
         await self._persist(session, force_images=True)
 
+    def forget_identity(self, url: str | None, old_user_id: str, new_user_id: str) -> None:
+        """Drop, unsaved, the cached sessions of both ids of a rename on `url`'s database.
+
+        `IdentityService.rename_identity` has moved the old id's rows to the
+        new id and merged any that collided, so a cached copy of either side
+        is stale: saved again, it would overwrite the merged row or bring back
+        the removed one. The next turn loads the row as it now is. A turn
+        already running on such a session still saves its own copy; renames
+        run only during startup seeding, which turns wait for.
+        """
+        if self._service is None or self._service.url != url:
+            return
+        for key in [key for key in self._cache if _belongs_to(key, old_user_id) or _belongs_to(key, new_user_id)]:
+            del self._cache[key]
+
     async def evict(self, key: str) -> None:
         """Persist and drop one session from the cache (a phone call's, at
         hangup — a key per call would otherwise grow the cache forever).
@@ -429,6 +446,11 @@ def _image_set(session: Session, *, force: bool) -> ImageSet | None:
         if sha not in session._synced_images
     )
     return ImageSet(keep, add)
+
+
+def _belongs_to(key: str, user_id: str) -> bool:
+    """True when `key` is one of `user_id`'s sessions, as a rename sees it (`rekeyed_session_id`)."""
+    return rekeyed_session_id(key, user_id, user_id) is not None
 
 
 def _changed(session: Session) -> bool:
