@@ -17,6 +17,7 @@ os.environ.setdefault("PINCER_DATA_DIR", "/tmp/pincer-test")
 from pincer.api.server import create_app
 from pincer.api.skills import _build_index, _skill_detail, _skill_entries
 from pincer.services.skills import SkillService, reset_skill_service
+from pincer.tasks import TASK_CHANNEL
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -329,7 +330,7 @@ def test_rebuild_endpoint_rebuilds_in_app_then_queues_the_job(api_settings, tmp_
     assert body["cache_cleared"] is True
     assert body["job"] == {"queued": True, "topic": "rebuild_skill_index"}
     queued_jobs.assert_awaited_once_with(
-        channel="pincer_tasks",
+        channel=TASK_CHANNEL,
         payload={"generation": body["generation"], "clear_cache": True, "disk_id": get_skill_service().disk_id},
         headers={"topic": "rebuild_skill_index"},
     )

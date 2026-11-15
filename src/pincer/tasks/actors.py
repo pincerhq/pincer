@@ -4,9 +4,9 @@ Repid has no built-in retry policy, so each actor wraps its handler call in
 a `tenacity` retry (bounded by `settings.task_max_retries`). `on_error="nack"`
 below is the second layer: once tenacity's retries are exhausted and the actor
 re-raises, repid nacks the message — this acks and discards it (the Redis
-broker additionally writes it once to a `repid:{channel}:dlq` stream by
-default), it does *not* redeliver. repid's `reject()` is the requeue action;
-it's unused here.
+broker additionally writes it once to the `<prefix>:stream:{channel}:dlq`
+stream, see `pincer.redis_keys`), it does *not* redeliver. repid's `reject()`
+is the requeue action; it's unused here.
 """
 
 from __future__ import annotations

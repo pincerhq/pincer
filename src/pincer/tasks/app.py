@@ -12,10 +12,13 @@ import logging
 from repid import InMemoryServer, Repid, Router
 
 from pincer.config import get_settings
+from pincer.redis_keys import RedisKeys
 
 logger = logging.getLogger(__name__)
 
-TASK_CHANNEL = "pincer_tasks"
+# Logical channel name used by repid for routing/AsyncAPI. The Redis stream
+# name is built from it by `RedisKeys` (e.g. `production:pincer:stream:tasks`).
+TASK_CHANNEL = "tasks"
 
 app = Repid(title="pincer-tasks")
 router = Router(channel=TASK_CHANNEL)
@@ -33,8 +36,15 @@ def register_default_server() -> None:
     if settings.task_broker == "redis":
         from repid import RedisServer
 
-        app.servers.register_server("default", RedisServer(settings.task_broker_url), is_default=True)
-        logger.info("Task broker registered: redis")
+        keys = RedisKeys.from_settings(settings)
+        server = RedisServer(
+            settings.task_broker_url,
+            stream_name_strategy=keys.stream,
+            consumer_group_strategy=keys.stream_group,
+            dlq_stream_strategy=keys.stream_dlq,
+        )
+        app.servers.register_server("default", server, is_default=True)
+        logger.info("Task broker registered: redis (prefix=%s)", keys.prefix)
     else:
         app.servers.register_server("default", InMemoryServer(), is_default=True)
         logger.info("Task broker registered: memory")

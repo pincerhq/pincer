@@ -27,8 +27,8 @@ of owning two things repid deliberately doesn't provide out of the box:
 - **A retry policy.** repid acks or nacks a message; it doesn't retry a
   handler internally. Pincer wraps each actor body in a `tenacity` retry, then
   falls back to `on_error="nack"` if retries are exhausted — nack acks and
-  discards the message (the Redis broker additionally writes it once to a
-  `repid:{channel}:dlq` stream by default). This is *not* redelivery: repid's
+  discards the message (the Redis broker additionally writes it once to the
+  `<prefix>:stream:tasks:dlq` stream, see [Redis key layout](#redis-key-layout)). This is *not* redelivery: repid's
   `reject()` is the requeue action, and Pincer's actors don't use it.
 
 ## The pieces
@@ -164,10 +164,73 @@ All variables use the `PINCER_` prefix (source: `config/tasks.py`,
 | `PINCER_TASK_BROKER` | `memory` | Broker for background task execution: in-process `memory` (zero infra) or `redis` |
 | `PINCER_TASK_BROKER_URL` | (empty) | Broker connection URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
 | `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up (repid has no built-in retry) |
+| `PINCER_REDIS_PREFIX` | `{environment}:{service}` | Template for the prefix of every Redis name; see [Redis key layout](#redis-key-layout) |
 | `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
 | `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
 | `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |
 | `PINCER_MIN_SCHEDULE_INTERVAL_MINUTES` | `15` | Reject schedules that would fire more often than this |
+
+## Redis key layout
+
+With `task_broker=redis`, every Redis name pincer uses is built by
+`pincer.redis_keys.RedisKeys` under one prefix, `PINCER_REDIS_PREFIX`. Several
+deployments can then share one Redis without reading each other's tasks or
+results. This matters most for pub/sub, which ignores the DB index in the URL.
+
+The prefix is a template with two placeholders:
+
+- `{environment}`: `PINCER_ENVIRONMENT`, lowercased (default `development`)
+- `{service}`: always `pincer`
+
+The default is `{environment}:{service}`. You can append custom segments
+(`{environment}:{service}:custom`) or set a fully literal prefix
+(`prod:pincer:custom`). Startup fails with a validation error on an unknown
+placeholder, a positional `{}`, a conversion or format spec, whitespace, an
+empty segment, a leading/trailing `:`, or any literal brace. With
+`task_broker=redis` the template is also rendered with the real
+`PINCER_ENVIRONMENT`, so a value such as `my env` or an empty string fails at
+startup too, not later when the broker connects. Braces are
+rejected because Redis Cluster (Azure Managed Redis `EnterpriseCluster`)
+treats `{...}` as a hash tag.
+
+Names with the default prefix and `PINCER_ENVIRONMENT=production`:
+
+| Kind | Name |
+|---|---|
+| Task stream | `production:pincer:stream:tasks` |
+| Consumer group | `production:pincer:stream:tasks:group` |
+| DLQ stream | `production:pincer:stream:tasks:dlq` |
+| Result pub/sub | `production:pincer:pubsub:task_results` |
+| Key-value (future use) | `production:pincer:kv:<namespace>:<id>` |
+
+The type segment (`stream` / `pubsub` / `kv`) keeps scans and ACLs simple:
+`SCAN MATCH production:pincer:kv:*`, or an ACL user limited to
+`~production:pincer:* &production:pincer:*`.
+
+The `pincer run` and `pincer run tasks` processes must run the same version
+with the same prefix. Otherwise the worker reads a different stream and task
+results are published to a channel nobody subscribes to. `pincer run tasks`
+prints the active prefix in its startup banner.
+
+### Upgrading from the `repid:pincer_tasks` names
+
+Before this layout, pincer used repid's built-in names: the stream
+`repid:pincer_tasks`, group `repid:pincer_tasks:group`, DLQ
+`repid:pincer_tasks:dlq` and the pub/sub channel `pincer_task_results`. The
+new version does not read the old stream, and `RENAME` across hash slots fails
+on a cluster, so upgrade like this:
+
+1. Before deploying, check the backlog:
+   `XLEN repid:pincer_tasks` and
+   `XPENDING repid:pincer_tasks repid:pincer_tasks:group`. This is normally
+   about 0: the dispatcher only enqueues due schedules and the worker drains
+   them right away.
+2. Deploy. Anything left in the old stream is abandoned. A recurring schedule
+   fires again at its next due time. A one-off fire that was still queued is
+   lost.
+3. Optional cleanup: `DEL repid:pincer_tasks repid:pincer_tasks:dlq`.
+
+Pub/sub keeps no state, so it needs no migration.
 
 ## Operational notes
 
