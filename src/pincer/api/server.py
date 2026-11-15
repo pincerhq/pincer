@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -309,6 +309,11 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}")
         async def _spa(full_path: str) -> FileResponse:
+            # An unknown API path is a client calling a wrong or removed endpoint:
+            # answer 404 like any other API miss. The app shell's 200 would read
+            # as success (an empty event stream, a non-JSON list) and hide the bug.
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status_code=404)
             # Only files inside the build are served; anything else is a
             # client-side route and gets the app shell.
             try:
