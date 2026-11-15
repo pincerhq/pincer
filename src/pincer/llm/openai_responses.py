@@ -46,12 +46,23 @@ def convert_messages_to_responses(messages: list[LLMMessage], wire: str) -> list
     An assistant message goes back as the provider's own output items (reasoning included) while it was
     produced by this provider and model (see `llm.replay`); any other is rebuilt from its text and tool
     calls. A compacted window (a SYSTEM message holding what `/responses/compact` returned) goes back the
-    same way, and as `WINDOW_NOTICE` text on any other wire.
+    same way, and as `WINDOW_NOTICE` text on any other wire. Only the last window of a history goes back as
+    items, any earlier one (a history joined from two by an identity rename has two) as the notice: the docs
+    call the most recent compaction item the one that carries the context and say nothing of several in one
+    input.
     """
     items: list[dict[str, Any]] = []
-    for msg in messages:
-        if msg.role == MessageRole.SYSTEM and (window := replayable_raw(msg, wire)) is not None:
-            items.extend(window)  # a compacted window goes back as the API returned it, in its order
+    last_window = max(
+        (
+            index
+            for index, msg in enumerate(messages)
+            if msg.role == MessageRole.SYSTEM and replayable_raw(msg, wire) is not None
+        ),
+        default=-1,
+    )
+    for index, msg in enumerate(messages):
+        if index == last_window:
+            items.extend(replayable_raw(msg, wire) or [])  # the window goes back as the API returned it
         elif msg.role == MessageRole.TOOL_RESULT:
             items.append({"type": "function_call_output", "call_id": msg.tool_call_id or "", "output": msg.content})
         elif msg.role == MessageRole.ASSISTANT:

@@ -807,3 +807,55 @@ async def test_streamed_and_voice_turns_compact_what_their_last_request_sent(
     assert request == {"model": "gpt-5.2", "input": turn["input"]}
     session = await session_manager.get_or_create("user1", path)
     assert session.messages[0].raw == _WINDOW
+
+
+async def test_only_the_last_window_of_a_joined_history_is_sent_as_items_the_earlier_ones_as_the_notice(
+    openai_settings, session_manager, cost_tracker, registry
+):
+    """Two histories joined by an identity rename each bring a window. The docs name "the most recent compaction
+    item" as the one that carries the context and say nothing of several in one input, so one goes as items and
+    the other as its notice (the same shape as the one block of the Anthropic wire)."""
+    second = [user_item("Which coffee?", "msg_u2"), compaction_item("cmp_2", "ENC-CMP-2")]
+    session = await session_manager.get_or_create("user1", "test")
+    await session_manager.add_messages(
+        session,
+        [
+            LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=_WINDOW, wire=_WIRE),
+            LLMMessage(role=MessageRole.USER, content="first side question"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="first side answer"),
+            LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=second, wire=_WIRE),
+            LLMMessage(role=MessageRole.USER, content="second side question"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="second side answer"),
+        ],
+    )
+    llm = ScriptedOpenAI(openai_settings, [[message_item("Reply", "msg_r")]])
+
+    await _agent(openai_settings, llm, session_manager, cost_tracker, registry).handle_message(
+        "user1", "test", "next", memory=False
+    )
+
+    items = llm.requests[0]["input"]
+    sent = json.dumps(items)
+    assert "ENC-CMP-2" in sent  # the last window goes as it was returned
+    assert "ENC-CMP-1" not in sent  # the earlier one does not
+    assert items[0] == {"role": "system", "content": _NOTICE}
+    assert items[1:4] == [
+        {"role": "user", "content": "first side question"},
+        {"role": "assistant", "content": "first side answer"},
+        second[0],
+    ]
+    assert second[1] in items
+
+
+async def test_a_single_window_still_goes_as_items(openai_settings, session_manager, cost_tracker, registry):
+    session = await session_manager.get_or_create("user1", "test")
+    await session_manager.add_message(
+        session, LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=_WINDOW, wire=_WIRE)
+    )
+    llm = ScriptedOpenAI(openai_settings, [[message_item("Reply", "msg_r")]])
+
+    await _agent(openai_settings, llm, session_manager, cost_tracker, registry).handle_message(
+        "user1", "test", "next", memory=False
+    )
+
+    assert llm.requests[0]["input"][:2] == _WINDOW
