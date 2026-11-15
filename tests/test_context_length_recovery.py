@@ -282,17 +282,20 @@ def _orphaned_call() -> LLMMessage:
     )
 
 
-def _script(mock_llm, errors: list[str], *, orphan_on: frozenset[int] = frozenset()) -> list[int]:
+def _script(
+    mock_llm, errors: list[str], *, orphan_on: frozenset[int] = frozenset(), session: Session | None = None
+) -> list[int]:
     """`mock_llm` rejects its first requests with `errors` in turn, then answers. The requests numbered `orphan_on`
     (0-based) find an orphaned tool call in the history, as when a concurrent turn wrote one between the
-    proactive repair and the call. Returns the history sizes of the requests, as they were sent."""
+    proactive repair and the call: it is written to `session`, which a cut request is not built from. Returns the
+    history sizes of the requests, as they were sent."""
     sizes: list[int] = []
 
     async def complete(*, messages: list[LLMMessage], **_kwargs: object) -> LLMResponse:
         number = len(sizes)
         sizes.append(len(messages))
         if number in orphan_on:
-            messages.append(_orphaned_call())
+            (session.messages if session is not None else messages).append(_orphaned_call())
         if number < len(errors):
             raise LLMError(errors[number])
         return _DONE
@@ -320,7 +323,7 @@ async def test_a_pairing_error_after_two_cuts_is_repaired_and_does_not_clear_the
 ):
     """The cuts and the pair repair have their own retries: two cuts leave the repair its whole allowance."""
     session = await _long_session(session_manager)
-    sizes = _script(mock_llm, [_TOO_LONG, _TOO_LONG, _PAIR_ERROR], orphan_on=frozenset({2}))
+    sizes = _script(mock_llm, [_TOO_LONG, _TOO_LONG, _PAIR_ERROR], orphan_on=frozenset({2}), session=session)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
 
     reply = await _turn(agent, streaming=streaming)
@@ -333,8 +336,10 @@ async def test_a_pairing_error_after_two_cuts_is_repaired_and_does_not_clear_the
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
 async def test_two_repairs_leave_all_four_cuts(settings, session_manager, cost_tracker, registry, mock_llm, streaming):
-    await _long_session(session_manager, pairs=100)
-    sizes = _script(mock_llm, [_PAIR_ERROR, _PAIR_ERROR] + [_TOO_LONG] * 4, orphan_on=frozenset({0, 1}))
+    session = await _long_session(session_manager, pairs=100)
+    sizes = _script(
+        mock_llm, [_PAIR_ERROR, _PAIR_ERROR] + [_TOO_LONG] * 4, orphan_on=frozenset({0, 1}), session=session
+    )
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
 
     reply = await _turn(agent, streaming=streaming)
@@ -481,3 +486,87 @@ async def test_messages_that_fit_on_their_own_but_not_with_the_completion_are_cu
     assert len(sizes) == 2
     assert sizes[1] < sizes[0] * 0.6
     assert len(session.messages) < before * 0.6
+
+
+# ── a cut is applied to the session only once a request goes through (PR #379 review, round 3) ──
+
+
+async def _stored_messages(sessions: SessionManager, key: str = "test:user1", channel: str = "test") -> int:
+    row = await sessions._store.load(key, user_id="user1", channel=channel, legacy_fallback=False)
+    assert row is not None
+    return len(json.loads(row["messages"]))
+
+
+async def test_a_cut_is_not_saved_by_the_pair_repair_or_by_a_turn_that_ends_in_an_exception(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    """The pair repair at the top of every attempt saves the session; it must save the history, not the cut."""
+    session = await _long_session(session_manager, photo=True)
+    before = list(session.messages)
+    requests = 0
+
+    async def complete(*, messages: list[LLMMessage], **_kwargs: object) -> LLMResponse:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            messages.append(_orphaned_call())  # the repair has something to save at the next attempt
+            raise LLMError(_TOO_LONG)
+        raise RuntimeError("boom")
+
+    mock_llm.complete.side_effect = complete
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert requests == 2
+    assert session.messages[: len(before)] == before
+    assert await _stored_messages(session_manager) == len(before) + 1  # the question; the orphan was repaired away
+    assert await _stored_photos(session_manager, "test:user1") == 1  # the photo of the turn the cut would drop
+
+
+async def test_a_turn_that_runs_out_of_rounds_after_cuts_saves_its_reply_on_the_whole_history(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    settings.max_tool_iterations = 2
+    session = await _long_session(session_manager, photo=True)
+    before = list(session.messages)
+    _script(mock_llm, [_TOO_LONG, _TOO_LONG])
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    await agent.handle_message("user1", "test", "hello", memory=False)  # ends with its "no answer" reply
+
+    assert session.messages[: len(before)] == before
+    assert await _stored_photos(session_manager, "test:user1") == 1
+
+
+@pytest.mark.parametrize("path", ["stream", "voice"])
+async def test_a_stream_that_ends_without_a_final_response_after_a_cut_leaves_the_history_whole(
+    settings, session_manager, cost_tracker, registry, mock_llm, path
+):
+    key = "voice:CA_long" if path == "voice" else None
+    if path == "voice":
+        await session_manager.onboarding.complete("user1", "voice", now=1.0)
+    session = await _long_session(session_manager, key=key)
+    before = list(session.messages)
+    requests = 0
+
+    async def stream_turn(**_kwargs: object):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise LLMError(_TOO_LONG)
+        return
+        yield  # pragma: no cover - makes this an async generator that ends at once
+
+    mock_llm.stream_turn = stream_turn
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    with pytest.raises(LLMError, match="without a final response"):
+        if path == "stream":
+            _ = [c async for c in agent.handle_message_stream("user1", "test", "hello", memory=False)]
+        else:
+            _ = [c async for c in agent.stream_voice_turn("user1", "voice", "hello", session_key=key)]
+
+    assert requests == 2
+    assert session.messages[: len(before)] == before

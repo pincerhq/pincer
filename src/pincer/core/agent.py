@@ -340,18 +340,35 @@ class _PairRecovery(StrEnum):
 
 @dataclass
 class _Recovery:
-    """How often a turn has already retried after a rejected history, one count per kind of recovery:
-    the cuts and the tool-pair repair do not draw on each other's allowance."""
+    """How a turn has recovered so far from a history the endpoint rejected: how often it retried, one count
+    per kind of recovery (the cuts and the tool-pair repair do not draw on each other's allowance), and the
+    cut it made.
+
+    A cut is not made on the session: requests are built from `view`, which leaves out the dropped messages
+    (and so is a new list each time, from the session as it is), and `settled` cuts the session itself once a
+    request went through. A turn that ends any other way, whatever the exit, finds its session as it was."""
 
     repairs: int = 0
     shrinks: int = 0
-    # The history as it was before the turn's first cut, until a request goes through: a cut is saved
-    # (with the reply that follows it) only then, and put back when the turn gives up instead
-    unshrunk: list[LLMMessage] | None = None
+    first_kept: LLMMessage | None = None  # the first message of the session that the cut keeps
+    kept_summaries: list[LLMMessage] = field(default_factory=list)  # the summaries kept before it
 
-    def settled(self) -> None:
-        """A request went through: the cuts made so far were right and are kept."""
-        self.unshrunk = None
+    def view(self, session: Session) -> list[LLMMessage]:
+        """The messages a request is built from: the session's, less what the cut drops."""
+        if self.first_kept is not None:
+            for index, message in enumerate(session.messages):
+                if message is self.first_kept:
+                    return [*self.kept_summaries, *session.messages[index:]]
+        return session.messages
+
+    def settled(self, session: Session) -> None:
+        """A request went through with the cut: the session is cut too (saved with the next message)."""
+        session.messages = self.view(session)
+        self.reset()
+
+    def reset(self) -> None:
+        self.first_kept = None
+        self.kept_summaries = []
 
 
 class StreamEventType(StrEnum):
@@ -873,28 +890,16 @@ class Agent:
 
         A history over the endpoint's window is cut in half (see `_shrink_history`) and sent again, up
         to `_MAX_SHRINK_ATTEMPTS` times: compaction runs only after a request succeeded, so nothing else
-        would ever shrink a history no request can carry. The cuts are in memory until a request goes
-        through (`_Recovery.settled`); a turn that gives up puts the history back as it was.
+        would ever shrink a history no request can carry. The cut reaches the session only once a request
+        goes through (`_Recovery.settled`).
 
         A tool pairing error retries while stripping still changes the history. Once it can't, the
         same request would fail on every later turn too — e.g. Anthropic's "must define tools" for a
         history with tool pairs sent with no tools — so the session is cleared instead.
         """
-        outcome = await self._decide_recovery(session, error, recovery)
-        if outcome is _PairRecovery.RAISE and recovery.unshrunk is not None:
-            session.messages = recovery.unshrunk
-            logger.warning("Session %s: the cuts did not help; its history is kept as it was", session.session_id)
-        if outcome is not _PairRecovery.RETRY:
-            recovery.unshrunk = None
-        return outcome
-
-    async def _decide_recovery(self, session: Session, error: LLMError, recovery: _Recovery) -> _PairRecovery:
         if _is_context_length_error(error):
-            before = session.messages
-            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and self._shrink_history(session):
+            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and self._shrink_history(session, recovery):
                 recovery.shrinks += 1
-                if recovery.unshrunk is None:
-                    recovery.unshrunk = before
                 return _PairRecovery.RETRY
             return _PairRecovery.RAISE
         if not _is_tool_pair_error(error):
@@ -905,23 +910,25 @@ class Agent:
             return _PairRecovery.RETRY
         logger.warning("Tool pairing still rejected after %d sanitize attempt(s), clearing session", recovery.repairs)
         session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
+        recovery.reset()
         await self._sessions.save(session)
         return _PairRecovery.CLEARED
 
     @staticmethod
-    def _shrink_history(session: Session) -> bool:
-        """Drop about the oldest half of the session's history (whole turns, the leading summary kept), in
-        memory: the turn saves it with its next message once a request goes through. Runs inside the turn,
-        which holds the session's lock, so it edits the session itself. The photos only the dropped messages
-        showed go with them when it is saved. False when no earlier turn can be dropped."""
-        cut = choose_halving_cut(session.messages)
+    def _shrink_history(session: Session, recovery: _Recovery) -> bool:
+        """Cut about the oldest half off the history the next request is built from (whole turns, the leading
+        summary kept): `recovery` remembers the cut, the session is not touched until it works. Runs inside
+        the turn, which holds the session's lock. False when no earlier turn can be dropped."""
+        view = recovery.view(session)
+        cut = choose_halving_cut(view)
         if not cut:
             logger.warning(
                 "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id
             )
             return False
-        keep = leading_summary(session.messages)
-        session.messages = [*([keep] if keep else []), *session.messages[cut:]]
+        keep = leading_summary(view)
+        recovery.first_kept = view[cut]
+        recovery.kept_summaries = [keep] if keep else []
         logger.warning(
             "Session %s: the endpoint rejected the history as too long; dropped the oldest %d messages",
             session.session_id,
@@ -1176,12 +1183,12 @@ class Agent:
 
             try:
                 response: LLMResponse = await self._llm.complete(
-                    messages=session.messages,
+                    messages=recovery.view(session),
                     tools=tool_schemas,
                     system=system_prompt,
                 )
                 last_response = response
-                recovery.settled()
+                recovery.settled(session)
                 self._note_request(session, response, system_prompt, tool_schemas)
                 # The image stays in the history for good (see `_image_contents`): dropping
                 # it would change the history under the turn's thinking blocks.
@@ -1662,7 +1669,7 @@ class Agent:
                 step: LLMResponse | None = None
                 try:
                     async for event in self._llm.stream_turn(
-                        messages=session.messages, tools=tool_schemas, system=system_prompt
+                        messages=recovery.view(session), tools=tool_schemas, system=system_prompt
                     ):
                         if event.response is not None:
                             step = event.response
@@ -1696,7 +1703,7 @@ class Agent:
                     reply = step_text
                     break
                 response = step
-                recovery.settled()
+                recovery.settled(session)
                 self._note_request(session, response, system_prompt, tool_schemas)
                 total_cost += await self._record_cost(response, session.session_id)
                 turn_usage += response.usage
@@ -2022,7 +2029,7 @@ class Agent:
                     turn_trace.stamp(_TelemetryEvent.LLM_REQUEST, model=voice_model or "", iteration=_iteration + 1)
                 try:
                     async for event in voice_llm.stream_turn(
-                        messages=session.messages,
+                        messages=recovery.view(session),
                         tools=tool_schemas,
                         system=system_prompt,
                         model=voice_model,
@@ -2057,7 +2064,7 @@ class Agent:
                     )
                 if response is None:  # provider stream ended without a final event
                     raise LLMError("stream_turn ended without a final response")
-                recovery.settled()
+                recovery.settled(session)
                 self._note_request(
                     session, response, system_prompt, tool_schemas, reasoning_effort=reasoning_effort, thinking=thinking
                 )
