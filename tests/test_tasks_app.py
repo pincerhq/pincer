@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from repid import InMemoryServer, RedisServer
 
-from pincer.tasks.app import app, register_default_server
+from pincer.tasks.app import TASK_CHANNEL, app, register_default_server
 
 # `pincer.tasks/__init__.py` re-exports the `app` Repid instance under the
 # name `app`, shadowing the `pincer.tasks.app` submodule on the package
@@ -18,6 +18,8 @@ def test_register_default_server_uses_redis_when_configured(monkeypatch):
     mock_settings = MagicMock()
     mock_settings.task_broker = "redis"
     mock_settings.task_broker_url = "redis://localhost:6379/0"
+    mock_settings.environment = "development"
+    mock_settings.redis_prefix = "{environment}:{service}"
     monkeypatch.setattr(task_app_module, "get_settings", lambda: mock_settings)
 
     register_default_server()
@@ -35,3 +37,23 @@ def test_register_default_server_defaults_to_memory(monkeypatch):
 
     server = app.servers.get_default_server()
     assert isinstance(server, InMemoryServer)
+
+
+def test_register_default_server_passes_prefixed_stream_strategies(monkeypatch):
+    mock_settings = MagicMock()
+    mock_settings.task_broker = "redis"
+    mock_settings.task_broker_url = "redis://localhost:6379/0"
+    mock_settings.environment = "production"
+    mock_settings.redis_prefix = "{environment}:{service}:custom"
+    monkeypatch.setattr(task_app_module, "get_settings", lambda: mock_settings)
+    server_cls = MagicMock(spec=RedisServer)
+    monkeypatch.setattr("repid.RedisServer", server_cls)
+
+    register_default_server()
+
+    server_cls.assert_called_once()
+    args, kwargs = server_cls.call_args
+    assert args == ("redis://localhost:6379/0",)
+    assert kwargs["stream_name_strategy"](TASK_CHANNEL) == "production:pincer:custom:stream:tasks"
+    assert kwargs["consumer_group_strategy"](TASK_CHANNEL) == "production:pincer:custom:stream:tasks:group"
+    assert kwargs["dlq_stream_strategy"](TASK_CHANNEL) == "production:pincer:custom:stream:tasks:dlq"

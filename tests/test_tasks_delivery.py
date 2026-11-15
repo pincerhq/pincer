@@ -19,6 +19,8 @@ from pincer.tasks.delivery import (
     create_delivery_backend,
 )
 
+CHANNEL = "test:pincer:pubsub:task_results"
+
 
 @pytest.mark.asyncio
 class TestInMemoryDeliveryBackend:
@@ -39,11 +41,11 @@ class TestRedisDeliveryBackend:
             mock_client = AsyncMock()
             mock_redis_cls.from_url.return_value = mock_client
 
-            backend = RedisDeliveryBackend("redis://localhost:6379/0")
+            backend = RedisDeliveryBackend("redis://localhost:6379/0", CHANNEL)
             envelope = {"pincer_user_id": "u1", "text": "hi", "prefer": "telegram", "max_active_age_seconds": None}
             await backend.publish(envelope)
 
-            mock_client.publish.assert_awaited_once_with(TASK_RESULTS_CHANNEL, json.dumps(envelope))
+            mock_client.publish.assert_awaited_once_with(CHANNEL, json.dumps(envelope))
 
     async def test_subscribe_yields_parsed_messages_and_skips_non_message_types(self) -> None:
         envelope = {"pincer_user_id": "u1", "text": "hi", "prefer": None, "max_active_age_seconds": None}
@@ -64,10 +66,14 @@ class TestRedisDeliveryBackend:
             # the AsyncMock auto-attribute so calling it doesn't return a coroutine.
             mock_client.pubsub = MagicMock(return_value=mock_pubsub)
 
-            backend = RedisDeliveryBackend("redis://localhost:6379/0")
-            received = await asyncio.wait_for(backend.subscribe().__anext__(), timeout=1)
+            backend = RedisDeliveryBackend("redis://localhost:6379/0", CHANNEL)
+            stream = backend.subscribe()
+            received = await asyncio.wait_for(stream.__anext__(), timeout=1)
+            await stream.aclose()
 
             assert received == envelope
+            mock_pubsub.subscribe.assert_awaited_once_with(CHANNEL)
+            mock_pubsub.unsubscribe.assert_awaited_once_with(CHANNEL)
 
     async def test_subscribe_drops_malformed_json_without_raising(self) -> None:
         envelope = {"pincer_user_id": "u1", "text": "hi", "prefer": None, "max_active_age_seconds": None}
@@ -88,7 +94,7 @@ class TestRedisDeliveryBackend:
             # the AsyncMock auto-attribute so calling it doesn't return a coroutine.
             mock_client.pubsub = MagicMock(return_value=mock_pubsub)
 
-            backend = RedisDeliveryBackend("redis://localhost:6379/0")
+            backend = RedisDeliveryBackend("redis://localhost:6379/0", CHANNEL)
             received = await asyncio.wait_for(backend.subscribe().__anext__(), timeout=1)
 
             assert received == envelope
@@ -98,7 +104,7 @@ class TestRedisDeliveryBackend:
             mock_client = AsyncMock()
             mock_redis_cls.from_url.return_value = mock_client
 
-            backend = RedisDeliveryBackend("redis://localhost:6379/0")
+            backend = RedisDeliveryBackend("redis://localhost:6379/0", CHANNEL)
             await backend.aclose()
 
             mock_client.aclose.assert_awaited_once()
@@ -110,8 +116,31 @@ def test_create_delivery_backend_selects_by_broker() -> None:
 
     with patch("redis.asyncio.Redis") as mock_redis_cls:
         mock_redis_cls.from_url.return_value = AsyncMock()
-        redis_settings = SimpleNamespace(task_broker="redis", task_broker_url="redis://localhost:6379/0")
+        redis_settings = SimpleNamespace(
+            task_broker="redis",
+            task_broker_url="redis://localhost:6379/0",
+            environment="development",
+            redis_prefix="{environment}:{service}",
+        )
         assert isinstance(create_delivery_backend(redis_settings), RedisDeliveryBackend)
+
+
+@pytest.mark.asyncio
+async def test_create_delivery_backend_uses_prefixed_channel_from_settings() -> None:
+    with patch("redis.asyncio.Redis") as mock_redis_cls:
+        mock_client = AsyncMock()
+        mock_redis_cls.from_url.return_value = mock_client
+        settings = SimpleNamespace(
+            task_broker="redis",
+            task_broker_url="redis://localhost:6379/0",
+            environment="Production",
+            redis_prefix="{environment}:{service}:custom",
+        )
+        backend = create_delivery_backend(settings)
+        await backend.publish({"text": "hi"})
+
+        expected = f"production:pincer:custom:pubsub:{TASK_RESULTS_CHANNEL}"
+        mock_client.publish.assert_awaited_once_with(expected, json.dumps({"text": "hi"}))
 
 
 @pytest.mark.asyncio

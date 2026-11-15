@@ -172,6 +172,36 @@ def test_task_broker_redis_with_url_is_valid() -> None:
     assert s.task_broker_url == "redis://localhost:6379/0"
 
 
+def test_redis_prefix_defaults_to_environment_service_template() -> None:
+    assert TaskSettings().redis_prefix == "{environment}:{service}"
+
+
+@pytest.mark.parametrize("value", ["{environment}:{service}:custom", "prod:pincer:custom", "{service}"])
+def test_redis_prefix_accepts_valid_templates(value: str) -> None:
+    assert TaskSettings(redis_prefix=value).redis_prefix == value
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("{foo}:{service}", "unknown placeholder"),
+        ("{}:{service}", "positional"),
+        ("{environment!r}:{service}", "conversion or format spec"),
+        ("{environment:>10}", "conversion or format spec"),
+        ("", "must not be empty"),
+        ("{environment}:{service}:", "start or end with ':'"),
+        (":{environment}", "start or end with ':'"),
+        ("{environment}::{service}", "empty segments"),
+        ("{{tag}}:{service}", "literal braces"),
+        ("{environment} {service}", "whitespace"),
+        ("{environment", "not a valid template"),
+    ],
+)
+def test_redis_prefix_rejects_invalid_templates(value: str, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        TaskSettings(redis_prefix=value)
+
+
 def test_tool_settings_zero_fields() -> None:
     from pincer.config import ToolSettings
 

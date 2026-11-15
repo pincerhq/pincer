@@ -1988,6 +1988,7 @@ async def _run_tasks_worker(settings: Settings) -> None:
     the main `pincer run` process picks them up and delivers via its own,
     already-started channels.
     """
+    from pincer.redis_keys import RedisKeys
     from pincer.scheduler import EventTriggerManager, ProactiveAgent
     from pincer.tasks import TASK_CHANNEL, register_default_server
     from pincer.tasks import app as task_app
@@ -2027,9 +2028,12 @@ async def _run_tasks_worker(settings: Settings) -> None:
     )
 
     console.print(f"[bold green]{settings.agent_name} tasks worker starting...[/bold green]")
+    redis_keys = RedisKeys.from_settings(settings)
     console.print(f"   Broker: redis ({settings.task_broker_url})")
+    console.print(f"   Redis prefix: {redis_keys.prefix}")
     console.print(
-        f"[green]Task worker running (channel={TASK_CHANNEL}, results relayed via {TASK_RESULTS_CHANNEL})[/green]"
+        f"[green]Task worker running (stream={redis_keys.stream(TASK_CHANNEL)}, "
+        f"results relayed via {redis_keys.pubsub(TASK_RESULTS_CHANNEL)})[/green]"
     )
     console.print("\n[bold green]Tasks worker is running![/bold green] Press Ctrl+C to stop.\n")
 

@@ -6,6 +6,28 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ## [0.9.0] — Upcoming
 
+### Redis: one configurable prefix for every Redis name
+
+All Redis streams, consumer groups and pub/sub channels now start with
+`PINCER_REDIS_PREFIX` (default `{environment}:{service}`, e.g.
+`production:pincer`). Two deployments sharing one Redis no longer receive each
+other's task results. See
+[Redis key layout](../core-components/background-tasks.md#redis-key-layout).
+
+- Task stream: `repid:pincer_tasks` → `<prefix>:stream:tasks` (group
+  `…:group`, DLQ `…:dlq`). Result channel: `pincer_task_results` →
+  `<prefix>:pubsub:task_results`.
+- Custom segments (`{environment}:{service}:custom`) or a literal prefix
+  (`prod:pincer:custom`) are allowed. An invalid template, such as an unknown
+  placeholder or literal braces, fails at startup.
+- `pincer run tasks` prints the active prefix.
+
+> **Breaking key rename.** Messages still in the old `repid:pincer_tasks`
+> stream are not read after the upgrade. Check `XLEN repid:pincer_tasks`
+> before deploying (normally about 0). Recurring schedules fire again at their
+> next due time. Then optionally `DEL repid:pincer_tasks repid:pincer_tasks:dlq`.
+> The app and the worker must run the same version and prefix.
+
 ### Calendar: one Google Workspace toolset, stored times in the calendar's zone (#297)
 
 Creating, moving and renaming calendar events now go through the Google
