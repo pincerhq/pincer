@@ -15,6 +15,14 @@ Internet ──443──▶ Caddy (TLS, Let's Encrypt, WSS passthrough)
                   volume: pincer-prod-data (SQLite, WAL mode)
 ```
 
+`pincer` and `pincer-tasks` share Redis through names under
+`PINCER_REDIS_PREFIX` (default `{environment}:{service}`, so
+`production:pincer:…` with `PINCER_ENVIRONMENT=production`). Both containers
+must use the same value. If several deployments share one Redis, give each a
+distinct prefix. See
+[Redis key layout](../core-components/background-tasks.md#redis-key-layout),
+which also covers upgrading from the old `repid:pincer_tasks` stream.
+
 ## First deploy (T7.1–T7.3)
 
 1. **Host**: EU VM (Hetzner/OVH, 2 vCPU / 4 GB), Docker + compose plugin,
@@ -118,9 +126,11 @@ can be the thing that breaks.
 
 ```bash
 # .env.production
-PINCER_TELEMETRY_DSN=https://<token>@otlp.uptrace.dev
+PINCER_TELEMETRY_UPTRACE_DSN=https://<token>@api.uptrace.dev?grpc=4317
+# or, instead (never both): PINCER_TELEMETRY_POSTHOG_DSN=https://<phc_api_key>@eu.i.posthog.com
 ```
-`pincer run` initialises OpenTelemetry from this DSN; without it every metric
+`pincer run` initialises OpenTelemetry from this DSN and refuses to start when
+both are set or the DSN is malformed; without it every metric
 call is a cheap no-op and nothing else changes. Import
 `deploy/grafana/voice-ops-dashboard.json` into Grafana (or the equivalent
 Uptrace view) and point it at the Prometheus-compatible datasource fed by your

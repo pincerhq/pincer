@@ -330,7 +330,11 @@ def test_no_config_returns_empty(tmp_path: Path) -> None:
 
 
 def test_legacy_env_var_is_found_in_the_environment_and_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.config.main import Settings
+
     monkeypatch.delenv("PINCER_IDENTITY_MAP", raising=False)
+    # The .env files Settings reads (the test suite turns them off by default).
+    monkeypatch.setitem(Settings.model_config, "env_file", ("../.env", ".env"))
     config_dir = tmp_path / "app"
     config_dir.mkdir()
     assert legacy_identity_map(config_dir) is None

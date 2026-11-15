@@ -172,6 +172,74 @@ def test_task_broker_redis_with_url_is_valid() -> None:
     assert s.task_broker_url == "redis://localhost:6379/0"
 
 
+def test_redis_prefix_defaults_to_environment_service_template() -> None:
+    assert TaskSettings().redis_prefix == "{environment}:{service}"
+
+
+@pytest.mark.parametrize("value", ["{environment}:{service}:custom", "prod:pincer:custom", "{service}"])
+def test_redis_prefix_accepts_valid_templates(value: str) -> None:
+    assert TaskSettings(redis_prefix=value).redis_prefix == value
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("{foo}:{service}", "unknown placeholder"),
+        ("{}:{service}", "positional"),
+        ("{environment!r}:{service}", "conversion or format spec"),
+        ("{environment:>10}", "conversion or format spec"),
+        ("", "must not be empty"),
+        ("{environment}:{service}:", "start or end with ':'"),
+        (":{environment}", "start or end with ':'"),
+        ("{environment}::{service}", "empty segments"),
+        ("{{tag}}:{service}", "literal braces"),
+        ("{environment} {service}", "whitespace"),
+        ("{environment", "not a valid template"),
+    ],
+)
+def test_redis_prefix_rejects_invalid_templates(value: str, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        TaskSettings(redis_prefix=value)
+
+
+@pytest.mark.parametrize(
+    ("environment", "match"),
+    [("my env", "whitespace"), ("", "start or end with ':'"), ("a::b", "empty segments"), ("{x}", "braces")],
+)
+def test_redis_broker_rejects_environment_that_renders_a_bad_prefix(
+    tmp_path: Path, environment: str, match: str
+) -> None:
+    with pytest.raises(ValidationError, match=match):
+        Settings(
+            anthropic_api_key="sk-test",  # type: ignore[arg-type]
+            data_dir=tmp_path,
+            task_broker="redis",
+            task_broker_url="redis://localhost:6379/0",
+            environment=environment,
+        )
+
+
+def test_redis_broker_renders_prefix_from_real_environment(tmp_path: Path) -> None:
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        task_broker="redis",
+        task_broker_url="redis://localhost:6379/0",
+        environment="Production",
+    )
+    assert s.environment == "Production"
+
+
+def test_memory_broker_does_not_render_redis_prefix(tmp_path: Path) -> None:
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        task_broker="memory",
+        environment="my env",
+    )
+    assert s.environment == "my env"
+
+
 def test_tool_settings_zero_fields() -> None:
     from pincer.config import ToolSettings
 

@@ -758,6 +758,7 @@ See [Background Tasks](background-tasks.md) for the full architecture.
 | `PINCER_TASK_BROKER` | `memory` | `memory` (single-process, zero infra) or `redis` (required for `pincer run tasks`) |
 | `PINCER_TASK_BROKER_URL` | | Broker URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
 | `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up |
+| `PINCER_REDIS_PREFIX` | `{environment}:{service}` | Template for the prefix of every Redis stream, group, pub/sub channel and key ([layout](background-tasks.md#redis-key-layout)) |
 | `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
 | `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
 | `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |

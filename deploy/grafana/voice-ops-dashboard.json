@@ -25,7 +25,7 @@
     "to": "now"
   },
   "editable": true,
-  "description": "Sprint 9 golden signals for the Pincer voice surface. Metric names are the OTLP instruments from pincer/observability/metrics.py after Prometheus normalisation (dots -> underscores, counters get _total). If a panel is empty, check that PINCER_TELEMETRY_DSN is set and the collector is exporting to this datasource \u2014 `pincer voice ops status` computes the same signals straight from SQLite and works without any of this.",
+  "description": "Sprint 9 golden signals for the Pincer voice surface. Metric names are the OTLP instruments from pincer/observability/metrics.py after Prometheus normalisation (dots -> underscores, counters get _total). If a panel is empty, check that PINCER_TELEMETRY_UPTRACE_DSN (or PINCER_TELEMETRY_POSTHOG_DSN) is set and the collector is exporting to this datasource \u2014 `pincer voice ops status` computes the same signals straight from SQLite and works without any of this.",
   "templating": {
     "list": [
       {

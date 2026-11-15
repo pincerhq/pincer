@@ -29,6 +29,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pincer.channels.base import ChannelType
+from pincer.redis_keys import RedisKeys
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -37,7 +38,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-TASK_RESULTS_CHANNEL = "pincer_task_results"
+# Logical name; the real pub/sub channel is `RedisKeys.pubsub(TASK_RESULTS_CHANNEL)`,
+# e.g. `production:pincer:pubsub:task_results`. Pub/sub ignores the DB index, so
+# the prefix is what keeps deployments sharing one Redis apart.
+TASK_RESULTS_CHANNEL = "task_results"
 
 
 class Deliverer(Protocol):
@@ -93,19 +97,21 @@ class RedisDeliveryBackend:
     and a `pubsub()` subscription takes over its own connection anyway.
     """
 
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, channel: str) -> None:
         # Imported here so the default in-memory broker works without the
         # `tasks-redis` extra installed.
         from redis.asyncio import Redis
 
         self._redis: Redis = Redis.from_url(redis_url)
+        # Fully-qualified (prefixed) channel name.
+        self._channel = channel
 
     async def publish(self, envelope: dict[str, Any]) -> None:
-        await self._redis.publish(TASK_RESULTS_CHANNEL, json.dumps(envelope))
+        await self._redis.publish(self._channel, json.dumps(envelope))
 
     async def subscribe(self) -> AsyncIterator[dict[str, Any]]:
         pubsub = self._redis.pubsub()
-        await pubsub.subscribe(TASK_RESULTS_CHANNEL)
+        await pubsub.subscribe(self._channel)
         try:
             async for message in pubsub.listen():
                 if message["type"] != "message":
@@ -115,7 +121,7 @@ class RedisDeliveryBackend:
                 except (TypeError, ValueError):
                     logger.warning("Dropping malformed task result envelope: %r", message["data"])
         finally:
-            await pubsub.unsubscribe(TASK_RESULTS_CHANNEL)
+            await pubsub.unsubscribe(self._channel)
             await pubsub.aclose()  # type: ignore[no-untyped-call]
 
     async def aclose(self) -> None:
@@ -125,7 +131,8 @@ class RedisDeliveryBackend:
 def create_delivery_backend(settings: Any) -> DeliveryBackend:
     """Select the delivery backend matching `settings.task_broker`, mirroring `register_default_server`."""
     if settings.task_broker == "redis":
-        return RedisDeliveryBackend(settings.task_broker_url)
+        channel = RedisKeys.from_settings(settings).pubsub(TASK_RESULTS_CHANNEL)
+        return RedisDeliveryBackend(settings.task_broker_url, channel)
     return InMemoryDeliveryBackend()
 
 

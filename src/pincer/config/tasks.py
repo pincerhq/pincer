@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from pincer.redis_keys import DEFAULT_PREFIX_TEMPLATE, validate_prefix_template
 
 
 class TaskSettings(BaseModel):
@@ -25,6 +27,18 @@ class TaskSettings(BaseModel):
         ge=5,
         description="Seconds between checks for due cron schedules (repid has no native scheduler)",
     )
+
+    redis_prefix: str = Field(
+        default=DEFAULT_PREFIX_TEMPLATE,
+        description="Template for the Redis key/stream/channel prefix. Placeholders: "
+        "{environment} (PINCER_ENVIRONMENT), {service} ('pincer'). "
+        "Custom segments may be appended, e.g. '{environment}:{service}:custom'.",
+    )
+
+    @field_validator("redis_prefix")
+    @classmethod
+    def _validate_redis_prefix(cls, value: str) -> str:
+        return validate_prefix_template(value)
 
     @model_validator(mode="after")
     def _validate_redis_url(self) -> Self:
