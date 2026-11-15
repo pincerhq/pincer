@@ -912,6 +912,13 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
+  When the dashboard build is served, its catch-all route answered every unknown
+  `GET` with `index.html` and status 200, `/api/*` included. A client calling a
+  missing endpoint saw a success: a dashboard that requested a non-existent
+  approvals event stream got the page, read it as a stream that had ended, and
+  reconnected about once a second per tab. Unknown `/api/*` paths now return
+  `404 {"detail": "Not Found"}`; client-side routes still get the dashboard.
 - **Onboarding: an answer sent more than a day after the question is read
   instead of dropped (#272).** Before, the first message after the 24-hour
   answer window closed the gate without being read, so a late "I'm Ana,
