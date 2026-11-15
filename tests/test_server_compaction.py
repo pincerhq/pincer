@@ -778,3 +778,102 @@ async def test_a_last_request_that_sent_nothing_is_not_compacted(settings, sessi
         assert outcome is CompactionOutcome.SKIPPED
 
     assert llm.requests == []  # the API would answer 400 compaction_nothing_to_summarize
+
+
+# ── a block goes back only where the API takes it: first in the request, and once (PR #379 review, round 2) ──
+
+
+def _stored_block(summary: str, signature: str, wire: str) -> LLMMessage:
+    block = compaction(summary, signature)
+    return LLMMessage(
+        role=MessageRole.SYSTEM, content=f"[Previous conversation summary]\n{summary}", raw=[block], wire=wire
+    )
+
+
+async def _history(session_manager, *messages: LLMMessage) -> None:
+    session = await session_manager.get_or_create("user1", "test")
+    await session_manager.add_messages(session, list(messages))
+
+
+def _blocks(request: dict[str, Any]) -> list[tuple[int, int]]:
+    """(message index, block index) of every compaction block the request carries."""
+    return [
+        (m, b)
+        for m, message in enumerate(request["messages"])
+        if isinstance(message["content"], list)
+        for b, block in enumerate(message["content"])
+        if block.get("type") == "compaction"
+    ]
+
+
+async def _next_request(settings, session_manager, cost_tracker, registry) -> dict[str, Any]:
+    async with ScriptedAnthropic(settings, [_reply("Reply", 1, thought=False)]) as llm:
+        await Agent(settings, llm.provider, session_manager, cost_tracker, registry).handle_message(
+            "user1", "test", "next", memory=False
+        )
+    return llm.requests[0]
+
+
+async def test_a_second_compaction_block_in_the_history_goes_as_its_text(
+    settings, session_manager, cost_tracker, registry
+):
+    """Two conversations joined by an identity rename: each side's summary is in the history. The API takes one
+    block, first (400 `compaction_block_misplaced` for messages before it): the second goes as its summary text."""
+    settings.default_model = _HAIKU
+    wire = f"anthropic:{_HAIKU}"
+    await _history(
+        session_manager,
+        _stored_block("FIRST-SUMMARY", "SIG-1", wire),
+        LLMMessage(role=MessageRole.USER, content="first side question"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="first side answer"),
+        _stored_block("SECOND-SUMMARY", "SIG-2", wire),
+        LLMMessage(role=MessageRole.USER, content="second side question"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="second side answer"),
+    )
+
+    request = await _next_request(settings, session_manager, cost_tracker, registry)
+
+    assert _blocks(request) == [(0, 0)]  # one block, first
+    assert request["messages"][0]["content"][0]["content"] == "FIRST-SUMMARY"
+    assert "SECOND-SUMMARY" in json.dumps(request["messages"])  # not lost: it is read as text
+    assert "second side question" in json.dumps(request["messages"])
+
+
+async def test_a_compaction_block_after_other_messages_goes_as_its_text(
+    settings, session_manager, cost_tracker, registry
+):
+    settings.default_model = _HAIKU
+    wire = f"anthropic:{_HAIKU}"
+    await _history(
+        session_manager,
+        LLMMessage(role=MessageRole.USER, content="earlier question"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="earlier answer"),
+        _stored_block("LATE-SUMMARY", "SIG-late", wire),
+        LLMMessage(role=MessageRole.USER, content="later question"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="later answer"),
+    )
+
+    request = await _next_request(settings, session_manager, cost_tracker, registry)
+
+    assert _blocks(request) == []
+    assert "LATE-SUMMARY" in json.dumps(request["messages"])
+
+
+async def test_a_compaction_block_at_the_head_still_goes_back_as_the_api_returned_it(
+    settings, session_manager, cost_tracker, registry
+):
+    settings.default_model = _HAIKU
+    await _history(
+        session_manager,
+        _stored_block("HEAD-SUMMARY", "SIG-head", f"anthropic:{_HAIKU}"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="kept answer"),
+        LLMMessage(role=MessageRole.USER, content="kept question"),
+    )
+
+    request = await _next_request(settings, session_manager, cost_tracker, registry)
+
+    assert request["messages"][0] == {
+        "role": "assistant",
+        "content": [{"type": "compaction", "content": "HEAD-SUMMARY", "signature": "SIG-head"}],
+    }
+    assert _blocks(request) == [(0, 0)]

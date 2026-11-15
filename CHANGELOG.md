@@ -91,6 +91,10 @@ from the variable name.
   `PINCER_COMPACT_TO_TOKENS`.
   A summary of the earlier conversation at the start of the history stays when the oldest turns
   are dropped.
+- A Claude compaction block is sent to the API only as the first message of a request, and only
+  once: the API answers 400 `compaction_block_misplaced` to messages in front of it. A block that is
+  not first (two histories joined by an identity rename each bring their own summary) is sent as its
+  summary text, so a session already joined that way works again.
 - When an endpoint rejects a request as too long for the model (Anthropic "prompt is too long",
   OpenAI and Azure `context_length_exceeded`, a request over the size limit), the turn drops about
   the oldest half of the history (whole turns, the summary kept) and retries, up to four times.

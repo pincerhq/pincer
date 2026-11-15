@@ -343,8 +343,10 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         for msg in messages:
             if msg.role == MessageRole.SYSTEM:
                 # A server compaction's block goes back as the API returned it, as an assistant message of
-                # its own, while this wire produced it
-                replayed = replayable_raw(msg, wire) if self._takes_compaction() else None
+                # its own, while this wire produced it, and only as the first message of the request: the
+                # API takes one block and answers 400 `compaction_block_misplaced` to messages in front of
+                # it. A later one (a history joined from two, by an identity rename) is read as text.
+                replayed = replayable_raw(msg, wire) if self._takes_compaction() and not result else None
                 if replayed is not None:
                     result.append({"role": "assistant", "content": replayed})
                     continue
