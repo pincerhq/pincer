@@ -743,3 +743,108 @@ def test_the_cut_of_a_photo_turn_saves_what_the_photo_cost():
     last = LastRequest.measure(16_600, messages, overhead_chars=0)
 
     assert choose_hard_cut(messages, last, target_tokens=1_000) == 2  # the photo turn only
+
+
+def test_a_photo_inside_a_stored_window_counts_as_a_photo_not_as_its_data_url():
+    """A Responses window keeps the user items it was made from, photos included: the base64 of a photo
+    is not text, and counts what a photo costs (PR #379 review, round 2)."""
+    from pincer.core.compaction import PHOTO_CHARS
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    data_url = "data:image/jpeg;base64," + "D" * 4_000_000
+    window = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "w" * 2_000},
+                {"type": "input_image", "image_url": data_url, "detail": "auto"},
+            ],
+        },
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000},
+    ]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    assert _rate(42_000 + PHOTO_CHARS, message) == 1.0
+
+
+def test_an_anthropic_image_block_inside_stored_raw_counts_as_a_photo_too():
+    from pincer.core.compaction import PHOTO_CHARS
+
+    block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "D" * 900_000}}
+    message = LLMMessage(role=MessageRole.SYSTEM, content="[summary]", raw=[block, {"type": "x", "v": "v" * 100}])
+
+    assert _rate(PHOTO_CHARS + 100, message) == 1.0
+
+
+def _sent_to(provider: str, model: str):
+    from pincer.core.compaction import SentRequest
+
+    return SentRequest(provider, model, None, None)
+
+
+def test_the_raw_output_of_another_wire_is_not_counted_because_it_is_not_sent():
+    """A message is replayed with its thinking only on the wire that made it (`llm.replay`): on another one
+    only its text goes out, and the rate must not divide the prompt over characters that were not in it."""
+    thought = {"type": "thinking", "thinking": "t" * 5_000, "signature": "sig"}
+    sent = [LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, raw=[thought], wire="anthropic:x")]
+
+    same = LastRequest.measure(6_003, sent, 0, request=_sent_to("anthropic", "x"))
+    other = LastRequest.measure(1_000, sent, 0, request=_sent_to("anthropic", "y"))
+
+    assert same.tokens_per_char == 1.0
+    assert other.tokens_per_char == 1.0  # the text only
+
+
+def test_a_window_of_another_wire_counts_as_its_notice():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    window = [{"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000}]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    foreign = LastRequest.measure(len(WINDOW_NOTICE), [message], 0, request=_sent_to("anthropic", "claude"))
+    own = LastRequest.measure(40_000, [message], 0, request=_sent_to("openai", "gpt-6"))
+
+    assert foreign.tokens_per_char == 1.0
+    assert own.tokens_per_char == 1.0
+
+
+def test_the_hard_cut_does_not_credit_the_thinking_a_request_to_another_wire_never_carried():
+    from pincer.core.compaction import choose_hard_cut
+
+    thought = {"type": "thinking", "thinking": "t" * 50_000, "signature": ""}
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100, raw=[thought], wire="other:x"),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(800, messages, 0, request=_sent_to("anthropic", "a"))
+
+    assert last.tokens_per_char == 1.0  # 800 characters of text were sent
+    # 800 -> under 500 takes two turns (200 each); the old thinking was never in the prompt, so it saves nothing
+    assert choose_hard_cut(messages, last, target_tokens=500) == 4
+
+
+def test_the_summary_cut_does_not_credit_the_thinking_a_request_to_another_wire_never_carried():
+    from pincer.core.compaction import _SUMMARY_MAX_TOKENS, choose_cut
+
+    thought = {"type": "thinking", "thinking": "t" * 50_000, "signature": ""}
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100, raw=[thought], wire="other:x"),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(800, messages, 0, request=_sent_to("anthropic", "a"))
+
+    # 800 characters + the room for the summary, down to 450 + that room: four messages of 100
+    assert choose_cut(messages, last, target_tokens=_SUMMARY_MAX_TOKENS + 450) == 4

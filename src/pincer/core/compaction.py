@@ -42,6 +42,7 @@ from pincer.llm.base import STOP_REASON_COMPACTION, LLMMessage, MessageRole
 from pincer.llm.capabilities import endpoint_capabilities
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.llm.openai_responses import WINDOW_NOTICE
+from pincer.llm.replay import wire_tag
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -85,35 +86,45 @@ PHOTO_CHARS = 16_000
 # Responses names), and the fields of a block that are names, not payload
 _REPEATED_BLOCKS = frozenset({"text", "tool_use", "message", "function_call"})
 _NOT_PAYLOAD = frozenset({"type", "id", "name", "call_id", "role", "status"})
+# Blocks that hold a photo (a Responses `input_image` item, an Anthropic `image` block): base64 is not text
+_PHOTO_BLOCKS = frozenset({"input_image", "image"})
 
 
 def _text_len(value: Any) -> int:
-    """The characters of every string held in a stored provider block, without its names and types."""
+    """The characters of every string held in a stored provider block, without its names and types; a photo
+    in it weighs `PHOTO_CHARS`, whatever the size of its base64."""
     if isinstance(value, str):
         return len(value)
     if isinstance(value, dict):
+        if value.get("type") in _PHOTO_BLOCKS:
+            return PHOTO_CHARS
         return sum(_text_len(item) for key, item in value.items() if key not in _NOT_PAYLOAD)
     if isinstance(value, list):
         return sum(_text_len(item) for item in value)
     return 0
 
 
-def _chars(message: LLMMessage) -> int:
-    """The characters a request carries for `message`: its text, tool calls, photos and what the provider's
-    own output adds to them, all of which go out again on every request.
+def _raw_chars(message: LLMMessage) -> int:
+    """The characters of a message's stored provider output that go out beside its text: for an assistant
+    message its thinking, redacted thinking and encrypted reasoning (its text and tool-call blocks repeat
+    `content` and `tool_calls`); for a SYSTEM message everything it holds."""
+    if message.role == MessageRole.SYSTEM:
+        return _text_len(message.raw)
+    return sum(_text_len(block) for block in message.raw if block.get("type") not in _REPEATED_BLOCKS)
 
-    An assistant message's raw output adds its thinking (with signatures), redacted thinking and encrypted
-    reasoning; its text and tool-call blocks repeat `content` and `tool_calls`, so they are not counted
-    twice. A SYSTEM message (a summary, a compaction block, or a compacted window) is the larger of its
-    text and its raw: a window's text is a short notice while its items are what is sent.
+
+def _chars(message: LLMMessage, wire: str | None = None) -> int:
+    """The characters a request to `wire` carries for `message`: its text, tool calls, photos and what the
+    provider's own output adds to them, all of which go out again on every request.
+
+    The stored provider output goes out only to the wire that made it (see `llm.replay`); to any other, a
+    message is its text. None means the wire is not known (no request to look at): the output counts.
+    A SYSTEM message (a summary, a compaction block, or a compacted window) is the larger of its text and
+    its output: a window's text is a short notice while its items are what is sent.
     """
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
-    if message.role == MessageRole.SYSTEM:
-        text = max(len(message.content), _text_len(message.raw))
-    else:
-        text = len(message.content) + sum(
-            _text_len(block) for block in message.raw if block.get("type") not in _REPEATED_BLOCKS
-        )
+    raw = _raw_chars(message) if message.raw and (wire is None or message.wire == wire) else 0
+    text = max(len(message.content), raw) if message.role == MessageRole.SYSTEM else len(message.content) + raw
     return len(message.context) + text + len(calls) + PHOTO_CHARS * len(message.images)
 
 
@@ -144,6 +155,11 @@ class LastRequest:
     sent: tuple[LLMMessage, ...] = field(default=(), compare=False, repr=False)
     request: SentRequest | None = field(default=None, compare=False, repr=False)
 
+    @property
+    def wire(self) -> str | None:
+        """The wire the request went to (None when it is not known); the next one is taken to go there too."""
+        return wire_tag(self.request.provider, self.request.model) if self.request else None
+
     @classmethod
     def measure(
         cls, prompt_tokens: int, sent: list[LLMMessage], overhead_chars: int, *, request: SentRequest | None = None
@@ -155,7 +171,8 @@ class LastRequest:
         photos and reasoning stay in the history, so every later request of the conversation carries them
         too (issue #358).
         """
-        sent_chars = overhead_chars + sum(_chars(m) for m in sent)
+        wire = wire_tag(request.provider, request.model) if request else None
+        sent_chars = overhead_chars + sum(_chars(m, wire) for m in sent)
         return cls(prompt_tokens, prompt_tokens / max(1, sent_chars), overhead_chars, tuple(sent), request)
 
 
@@ -168,11 +185,12 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     latest exchange stays verbatim. 0 means nothing to cut.
     """
     per_char = last.tokens_per_char
-    estimate = per_char * (last.overhead_chars + sum(_chars(m) for m in messages)) + _SUMMARY_MAX_TOKENS
+    wire = last.wire
+    estimate = per_char * (last.overhead_chars + sum(_chars(m, wire) for m in messages)) + _SUMMARY_MAX_TOKENS
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
     cut = 0
     while estimate > target_tokens and cut < floor:
-        estimate -= per_char * _chars(messages[cut])
+        estimate -= per_char * _chars(messages[cut], wire)
         cut += 1
     while cut < floor and messages[cut].role == MessageRole.TOOL_RESULT:
         cut += 1
@@ -196,12 +214,13 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
     `leading_summary`). 0 means there is no earlier turn to drop.
     """
     per_char = last.tokens_per_char
-    estimate = per_char * (last.overhead_chars + sum(_chars(m) for m in messages))
+    wire = last.wire
+    estimate = per_char * (last.overhead_chars + sum(_chars(m, wire) for m in messages))
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
     start = 1 if leading_summary(messages) else 0
     cut = start
     while estimate > target_tokens and cut < floor:
-        estimate -= per_char * _chars(messages[cut])
+        estimate -= per_char * _chars(messages[cut], wire)
         cut += 1
     while cut < floor and messages[cut].role != MessageRole.USER:
         cut += 1
