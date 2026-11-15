@@ -17,6 +17,7 @@ from pincer.config.tasks import TaskSettings
 from pincer.config.tools import ToolSettings
 from pincer.core.log_once import LogOncePerKey
 from pincer.integrations.google.token_source import CREDENTIALS_FILE, TOKEN_FILES
+from pincer.redis_keys import render_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,17 @@ class Settings(
                 "(PINCER_ANTHROPIC_API_KEY / PINCER_OPENAI_API_KEY) or a compatible "
                 "base URL (PINCER_OPENAI_COMPATIBLE_BASE_URL / PINCER_ANTHROPIC_COMPATIBLE_BASE_URL)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_rendered_redis_prefix(self) -> Settings:
+        """Render `redis_prefix` with the real `environment`, so a bad value fails at startup.
+
+        `TaskSettings` can only check the template: `environment` lives in
+        `APISettings`. Skipped for the memory broker, which builds no Redis names.
+        """
+        if self.task_broker == "redis":
+            render_prefix(self.redis_prefix, self.environment)
         return self
 
     @model_validator(mode="after")

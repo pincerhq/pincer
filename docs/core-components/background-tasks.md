@@ -186,7 +186,10 @@ The default is `{environment}:{service}`. You can append custom segments
 (`{environment}:{service}:custom`) or set a fully literal prefix
 (`prod:pincer:custom`). Startup fails with a validation error on an unknown
 placeholder, a positional `{}`, a conversion or format spec, whitespace, an
-empty segment, a leading/trailing `:`, or any literal brace. Braces are
+empty segment, a leading/trailing `:`, or any literal brace. With
+`task_broker=redis` the template is also rendered with the real
+`PINCER_ENVIRONMENT`, so a value such as `my env` or an empty string fails at
+startup too, not later when the broker connects. Braces are
 rejected because Redis Cluster (Azure Managed Redis `EnterpriseCluster`)
 treats `{...}` as a hash tag.
 

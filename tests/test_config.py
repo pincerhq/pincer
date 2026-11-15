@@ -202,6 +202,44 @@ def test_redis_prefix_rejects_invalid_templates(value: str, match: str) -> None:
         TaskSettings(redis_prefix=value)
 
 
+@pytest.mark.parametrize(
+    ("environment", "match"),
+    [("my env", "whitespace"), ("", "start or end with ':'"), ("a::b", "empty segments"), ("{x}", "braces")],
+)
+def test_redis_broker_rejects_environment_that_renders_a_bad_prefix(
+    tmp_path: Path, environment: str, match: str
+) -> None:
+    with pytest.raises(ValidationError, match=match):
+        Settings(
+            anthropic_api_key="sk-test",  # type: ignore[arg-type]
+            data_dir=tmp_path,
+            task_broker="redis",
+            task_broker_url="redis://localhost:6379/0",
+            environment=environment,
+        )
+
+
+def test_redis_broker_renders_prefix_from_real_environment(tmp_path: Path) -> None:
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        task_broker="redis",
+        task_broker_url="redis://localhost:6379/0",
+        environment="Production",
+    )
+    assert s.environment == "Production"
+
+
+def test_memory_broker_does_not_render_redis_prefix(tmp_path: Path) -> None:
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path,
+        task_broker="memory",
+        environment="my env",
+    )
+    assert s.environment == "my env"
+
+
 def test_tool_settings_zero_fields() -> None:
     from pincer.config import ToolSettings
 
