@@ -12,7 +12,7 @@ from test_photos_stay import jpeg
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.exceptions import LLMError
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -224,3 +224,96 @@ def test_which_errors_say_the_history_is_too_long(message, expected):
     from pincer.core.agent import _is_context_length_error
 
     assert _is_context_length_error(LLMError(message)) is expected
+
+
+_PAIR_ERROR = (
+    "openai API error: 400 An assistant message with 'tool_calls' must be followed by tool messages "
+    "responding to each 'tool_call_id'. The following tool_call_ids did not have response messages: late"
+)
+_DONE = LLMResponse(content="ok", model="m", input_tokens=10, output_tokens=5, stop_reason="end_turn")
+
+
+def _orphaned_call() -> LLMMessage:
+    return LLMMessage(
+        role=MessageRole.ASSISTANT, content="", tool_calls=[ToolCall(id="late", name="greet", arguments={})]
+    )
+
+
+def _script(mock_llm, errors: list[str], *, orphan_on: frozenset[int] = frozenset()) -> list[int]:
+    """`mock_llm` rejects its first requests with `errors` in turn, then answers. The requests numbered `orphan_on`
+    (0-based) find an orphaned tool call in the history, as when a concurrent turn wrote one between the
+    proactive repair and the call. Returns the history sizes of the requests, as they were sent."""
+    sizes: list[int] = []
+
+    async def complete(*, messages: list[LLMMessage], **_kwargs: object) -> LLMResponse:
+        number = len(sizes)
+        sizes.append(len(messages))
+        if number in orphan_on:
+            messages.append(_orphaned_call())
+        if number < len(errors):
+            raise LLMError(errors[number])
+        return _DONE
+
+    async def stream_turn(**kwargs):
+        response = await complete(**kwargs)
+        yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
+
+    mock_llm.complete.side_effect = complete
+    mock_llm.stream_turn = stream_turn
+    return sizes
+
+
+async def _turn(agent: Agent, *, streaming: bool) -> str:
+    if not streaming:
+        return (await agent.handle_message("user1", "test", "hello", memory=False)).text
+    chunks = [c async for c in agent.handle_message_stream("user1", "test", "hello", memory=False)]
+    return "".join(c.content for c in chunks if c.type == StreamEventType.DONE)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_a_pairing_error_after_two_cuts_is_repaired_and_does_not_clear_the_session(
+    settings, session_manager, cost_tracker, registry, mock_llm, streaming
+):
+    """The cuts and the pair repair have their own retries: two cuts leave the repair its whole allowance."""
+    session = await _long_session(session_manager)
+    sizes = _script(mock_llm, [_TOO_LONG, _TOO_LONG, _PAIR_ERROR], orphan_on=frozenset({2}))
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    reply = await _turn(agent, streaming=streaming)
+
+    assert reply == "ok"
+    assert len(sizes) == 4  # two cuts, one repair, then it goes through
+    assert len(session.messages) > 8  # a quarter of the history and the turn, not a clear (SYSTEM only)
+    assert "late" not in [tc.id for m in session.messages for tc in m.tool_calls]
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_two_repairs_leave_all_four_cuts(settings, session_manager, cost_tracker, registry, mock_llm, streaming):
+    await _long_session(session_manager, pairs=100)
+    sizes = _script(mock_llm, [_PAIR_ERROR, _PAIR_ERROR] + [_TOO_LONG] * 4, orphan_on=frozenset({0, 1}))
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    reply = await _turn(agent, streaming=streaming)
+
+    assert reply == "ok"
+    assert len(sizes) == 7  # two repairs, four cuts, then it goes through
+
+
+async def test_the_voice_path_counts_cuts_and_repairs_apart_too(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    """A voice utterance retries through the same `_recover_from_rejected_history`, with the counts of its own turn."""
+    from pincer.core.agent import _PairRecovery, _Recovery
+
+    session = await _long_session(session_manager)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+    recovery = _Recovery()
+
+    for _ in range(2):
+        assert await agent._recover_from_rejected_history(session, LLMError(_TOO_LONG), recovery) is _PairRecovery.RETRY
+    session.messages.append(_orphaned_call())
+    assert await agent._recover_from_rejected_history(session, LLMError(_PAIR_ERROR), recovery) is _PairRecovery.RETRY
+
+    assert (recovery.shrinks, recovery.repairs) == (2, 1)
+    assert len(session.messages) > 8  # not cleared

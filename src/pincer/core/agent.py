@@ -330,6 +330,15 @@ class _PairRecovery(StrEnum):
     RAISE = "raise"  # not a tool-pairing error
 
 
+@dataclass
+class _Recovery:
+    """How often a turn has already retried after a rejected history, one count per kind of recovery:
+    the cuts and the tool-pair repair do not draw on each other's allowance."""
+
+    repairs: int = 0
+    shrinks: int = 0
+
+
 class StreamEventType(StrEnum):
     TEXT = "text"
     TOOL_START = "tool_start"
@@ -835,8 +844,11 @@ class Agent:
         before the user's message is appended."""
         await self._sessions.add_messages(session, _interrupted_results(session.messages))
 
-    async def _recover_from_rejected_history(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
-        """Decide how a turn continues after `error`, given `attempts` retries so far.
+    async def _recover_from_rejected_history(
+        self, session: Session, error: LLMError, recovery: _Recovery
+    ) -> _PairRecovery:
+        """Decide how a turn continues after `error`, given the retries `recovery` counts so far; a RETRY
+        is counted here.
 
         A history over the endpoint's window is cut in half (see `_shrink_history`) and sent again, up
         to `_MAX_SHRINK_ATTEMPTS` times: compaction runs only after a request succeeded, so nothing else
@@ -847,15 +859,17 @@ class Agent:
         history with tool pairs sent with no tools — so the session is cleared instead.
         """
         if _is_context_length_error(error):
-            if attempts < _MAX_SHRINK_ATTEMPTS and await self._shrink_history(session):
+            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and await self._shrink_history(session):
+                recovery.shrinks += 1
                 return _PairRecovery.RETRY
             return _PairRecovery.RAISE
         if not _is_tool_pair_error(error):
             return _PairRecovery.RAISE
-        if attempts < _MAX_SANITIZE_ATTEMPTS and await self._repair_tool_pairs(session):
-            logger.warning("Orphaned tool pair detected, sanitized session (attempt %d)", attempts + 1)
+        if recovery.repairs < _MAX_SANITIZE_ATTEMPTS and await self._repair_tool_pairs(session):
+            recovery.repairs += 1
+            logger.warning("Orphaned tool pair detected, sanitized session (attempt %d)", recovery.repairs)
             return _PairRecovery.RETRY
-        logger.warning("Tool pairing still rejected after %d sanitize attempt(s), clearing session", attempts)
+        logger.warning("Tool pairing still rejected after %d sanitize attempt(s), clearing session", recovery.repairs)
         session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
         await self._sessions.save(session)
         return _PairRecovery.CLEARED
@@ -1114,7 +1128,7 @@ class Agent:
         last_response: LLMResponse | None = None
         reply_response: LLMResponse | None = None  # the response whose text is the final answer
         consecutive_errors = 0
-        sanitize_attempts = 0
+        recovery = _Recovery()
         repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
 
         # ── ReAct Loop ───────────────────────────────────
@@ -1139,11 +1153,10 @@ class Agent:
                 # The image stays in the history for good (see `_image_contents`): dropping
                 # it would change the history under the turn's thinking blocks.
             except LLMError as e:
-                recovery = await self._recover_from_rejected_history(session, e, sanitize_attempts)
-                if recovery is _PairRecovery.RETRY:
-                    sanitize_attempts += 1
+                outcome = await self._recover_from_rejected_history(session, e, recovery)
+                if outcome is _PairRecovery.RETRY:
                     continue
-                if recovery is _PairRecovery.CLEARED:
+                if outcome is _PairRecovery.CLEARED:
                     final_text = _SESSION_CLEARED_TEXT
                     break
                 if call_sids:
@@ -1589,7 +1602,7 @@ class Agent:
         system_prompt = await build_prompt(_schema_names(tool_schemas), language)
         consecutive_errors = 0
         circuit_broken = False
-        sanitize_attempts = 0
+        recovery = _Recovery()
         response: LLMResponse | None = None
         call_sids: list[str] = []
         total_cost = 0.0
@@ -1630,11 +1643,10 @@ class Agent:
                             yield StreamChunk(StreamEventType.TEXT, event.text)
                 except Exception as e:
                     if isinstance(e, LLMError) and not step_text:
-                        recovery = await self._recover_from_rejected_history(session, e, sanitize_attempts)
-                        if recovery is _PairRecovery.RETRY:
-                            sanitize_attempts += 1
+                        outcome = await self._recover_from_rejected_history(session, e, recovery)
+                        if outcome is _PairRecovery.RETRY:
                             continue
-                        if recovery is _PairRecovery.CLEARED:
+                        if outcome is _PairRecovery.CLEARED:
                             yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
                             return
                     logger.exception("Stream failed after %d chars", len(step_text))
@@ -1948,7 +1960,7 @@ class Agent:
         full_text = ""
         ended_turn: LLMResponse | None = None  # the response that ended the turn with text
         consecutive_errors = 0
-        sanitize_attempts = 0
+        recovery = _Recovery()
         repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
 
         for _iteration in range(self._settings.max_tool_iterations):
@@ -1999,8 +2011,7 @@ class Agent:
                         llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
                     # CLEARED raises too: this utterance fails, but the cleared
                     # session lets the call's next one go through.
-                    if await self._recover_from_rejected_history(session, e, sanitize_attempts) is _PairRecovery.RETRY:
-                        sanitize_attempts += 1
+                    if await self._recover_from_rejected_history(session, e, recovery) is _PairRecovery.RETRY:
                         recover_pairs = True
                         break
                     raise
