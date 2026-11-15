@@ -377,7 +377,12 @@ class SessionManager:
         so the next one in line is tried; the request goes on, and the cache
         stays over the cap until later evictions succeed. A session hit or
         replaced while its save was awaited is kept too. At most the overflow
-        plus `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
+        (and the sessions that hold photos, when they are over budget) plus
+        `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
+
+        Over the photo budget only, the sessions dropped are the oldest ones that hold photos: a session
+        with none frees nothing, and once what holds the photos is `keep` or a session in a turn, nothing is
+        dropped at all.
         """
         # Known race: a turn still holding a session evicted after its save
         # keeps writing that object while the next request loads a second
@@ -385,14 +390,34 @@ class SessionManager:
         # other keys within one turn, so only a client minting new
         # conversation ids gets near it.
         # Summed once per request (a cache hit never gets here), then reduced by each session dropped
-        photos = sum(cached.photo_bytes() for cached in self._cache.values())
-        over_photos = photos > self._max_cached_photo_bytes
-        attempts = (len(self._cache) if over_photos else len(self._cache) - self._max_cached) + _EVICTION_SPARE_ATTEMPTS
-        while (len(self._cache) > self._max_cached or photos > self._max_cached_photo_bytes) and attempts > 0:
+        sizes = {key: cached.photo_bytes() for key, cached in self._cache.items()}
+        photos = sum(sizes.values())
+        attempts = _EVICTION_SPARE_ATTEMPTS + max(len(self._cache) - self._max_cached, 0)
+        if photos > self._max_cached_photo_bytes:
+            attempts += sum(1 for size in sizes.values() if size)
+        while attempts > 0:
+            if len(self._cache) > self._max_cached:
+                key, session = next(iter(self._cache.items()))
+                if key == keep:
+                    return  # everything older was tried
+            elif photos > self._max_cached_photo_bytes:
+                # Only the photos are over: drop the oldest session that holds some. One that holds none frees
+                # nothing, and when what is left is the session being used or one in a turn, there is no one to drop
+                found = next(
+                    (
+                        (key, cached)
+                        for key, cached in self._cache.items()
+                        if sizes.get(key) and key != keep and key not in self._turn_locks
+                    ),
+                    None,
+                )
+                if found is None:
+                    return
+                key, session = found
+                self._cache.move_to_end(key, last=False)  # the next in line, for the checks below
+            else:
+                return
             attempts -= 1
-            key, session = next(iter(self._cache.items()))
-            if key == keep:
-                return  # everything older was tried
             if key in self._turn_locks:
                 self._cache.move_to_end(key)
                 continue
@@ -415,7 +440,7 @@ class SessionManager:
                 and not _changed(session)
             ):
                 del self._cache[key]
-                photos -= session.photo_bytes()
+                photos -= sizes.pop(key, 0)
 
     async def _persist(self, session: Session, *, only_if_changed: bool = False, force_images: bool = False) -> None:
         """Write the session out (with ``only_if_changed``, only when its

@@ -522,3 +522,73 @@ async def test_a_photo_two_messages_show_counts_once(photo_budget: SessionManage
         await photo_budget.add_message(session, LLMMessage(role=MessageRole.USER, content="again", images=[photo]))
 
     assert session.photo_bytes() == len(photo.data)
+
+
+# ── eviction for photos frees photos, and stops when only the session being used holds them (round 3) ──
+
+
+async def _plain(sm: SessionManager, user: str) -> None:
+    """A session of `user` with one message and no photo (so it has something to save when evicted)."""
+    session = await sm.get_or_create(user, "web")
+    await sm.add_message(session, LLMMessage(role=MessageRole.USER, content="hello"))
+
+
+async def _with_photos(sm: SessionManager, user: str, count: int) -> None:
+    session = await sm.get_or_create(user, "web")
+    for n in range(count):
+        photo = ImageContent.from_bytes(f"{user}{n}".encode() * (_PHOTO_BYTES // 2), "image/jpeg")
+        await sm.add_message(session, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+
+
+def _count_saves(sm: SessionManager) -> list[str]:
+    saved: list[str] = []
+    real = sm._store.save
+
+    async def spy(**kwargs):
+        saved.append(kwargs["session_id"])
+        return await real(**kwargs)
+
+    sm._store.save = spy  # type: ignore[method-assign]
+    return saved
+
+
+async def test_the_session_being_loaded_holding_all_the_photos_does_not_empty_the_cache(photo_budget: SessionManager):
+    await _with_photos(photo_budget, "big", 3)  # 3 x 4,000 characters: over the 9,000 on its own
+    await photo_budget.evict("web:big")
+    for user in ("p1", "p2", "p3", "p4", "p5"):
+        await _plain(photo_budget, user)
+    saved = _count_saves(photo_budget)
+
+    big = await photo_budget.get_or_create("big", "web")  # a miss: loaded with its photos, over the budget
+
+    assert list(photo_budget._cache) == ["web:p1", "web:p2", "web:p3", "web:p4", "web:p5", "web:big"]
+    assert photo_budget._cache["web:big"] is big
+    assert saved == []  # nobody was saved or dropped for photos they do not hold
+
+
+async def test_a_session_in_a_turn_holding_all_the_photos_does_not_empty_the_cache(photo_budget: SessionManager):
+    big = await photo_budget.get_or_create("big", "web")  # the oldest
+    for user in ("p1", "p2", "p3"):
+        await _plain(photo_budget, user)
+    for n in range(3):  # photos arrive in its turn: 12,000 characters, over the 9,000
+        photo = ImageContent.from_bytes(f"big{n}".encode() * (_PHOTO_BYTES // 2), "image/jpeg")
+        await photo_budget.add_message(big, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+    saved = _count_saves(photo_budget)
+
+    async with photo_budget._locked("web:big"):  # in a turn: it cannot go
+        await photo_budget.get_or_create("d", "web")
+
+    assert sorted(photo_budget._cache) == ["web:big", "web:d", "web:p1", "web:p2", "web:p3"]
+    assert saved == []
+
+
+async def test_eviction_for_photos_takes_the_oldest_session_that_holds_some_and_leaves_the_others(
+    photo_budget: SessionManager,
+):
+    await _plain(photo_budget, "p")  # the oldest, no photo
+    for user in ("a", "b", "c"):
+        await _with_photos(photo_budget, user, 1)  # 12,000 characters in all, over the 9,000
+
+    await photo_budget.get_or_create("d", "web")
+
+    assert list(photo_budget._cache) == ["web:p", "web:b", "web:c", "web:d"]
