@@ -848,3 +848,47 @@ def test_the_summary_cut_does_not_credit_the_thinking_a_request_to_another_wire_
 
     # 800 characters + the room for the summary, down to 450 + that room: four messages of 100
     assert choose_cut(messages, last, target_tokens=_SUMMARY_MAX_TOKENS + 450) == 4
+
+
+def test_the_size_of_a_stored_output_is_worked_out_once_per_message_not_after_every_request():
+    """`LastRequest.measure` sizes the whole history after each request of a tool loop; a stored message never
+    changes, so the walk over its blocks is not repeated (PR #379 review, round 2)."""
+    from pincer.core import compaction
+
+    thought = {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"}
+    history = [
+        LLMMessage(role=MessageRole.ASSISTANT, content="a", raw=[thought], wire="anthropic:x") for _ in range(50)
+    ] + [LLMMessage(role=MessageRole.USER, content="no raw")]
+    walks = 0
+    real = compaction._text_len
+
+    def counting(value):
+        nonlocal walks
+        walks += 1
+        return real(value)
+
+    compaction._text_len = counting
+    try:
+        first = [compaction._chars(m) for m in history]
+        walks_first = walks
+        second = [compaction._chars(m) for m in history]
+    finally:
+        compaction._text_len = real
+
+    assert first == second == [3_004] * 50 + [len("no raw")]
+    assert walks_first > 0  # precondition: the first pass did walk the blocks
+    assert walks == walks_first  # the second one did not
+
+
+def test_the_cached_size_is_not_part_of_a_message_its_saved_form_or_its_equality():
+    from pincer.core.compaction import _chars
+
+    raw = [{"type": "thinking", "thinking": "t" * 100, "signature": "s"}]
+    measured = LLMMessage(role=MessageRole.ASSISTANT, content="a", raw=raw, wire="anthropic:x")
+    fresh = LLMMessage(role=MessageRole.ASSISTANT, content="a", raw=raw, wire="anthropic:x")
+    _chars(measured)
+
+    assert measured == fresh
+    assert measured.to_dict() == fresh.to_dict()
+    assert "raw_chars" not in repr(measured)
+    assert LLMMessage.from_dict(measured.to_dict()) == fresh

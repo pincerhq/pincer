@@ -108,9 +108,12 @@ def _raw_chars(message: LLMMessage) -> int:
     """The characters of a message's stored provider output that go out beside its text: for an assistant
     message its thinking, redacted thinking and encrypted reasoning (its text and tool-call blocks repeat
     `content` and `tool_calls`); for a SYSTEM message everything it holds."""
-    if message.role == MessageRole.SYSTEM:
-        return _text_len(message.raw)
-    return sum(_text_len(block) for block in message.raw if block.get("type") not in _REPEATED_BLOCKS)
+    if message.raw_chars is None:
+        if message.role == MessageRole.SYSTEM:
+            message.raw_chars = _text_len(message.raw)
+        else:
+            message.raw_chars = sum(_text_len(b) for b in message.raw if b.get("type") not in _REPEATED_BLOCKS)
+    return message.raw_chars
 
 
 def _chars(message: LLMMessage, wire: str | None = None) -> int:
