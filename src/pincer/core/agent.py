@@ -138,7 +138,7 @@ _CONTEXT_LENGTH_PHRASES = (
 # OpenAI's (and vLLM's) wording says how the request was made up: "maximum context length is 32768 tokens.
 # However, you requested 33000 tokens (1000 in the messages, 32000 in the completion)"
 _CONTEXT_WINDOW = re.compile(r"maximum context length is (\d+) tokens")
-_MESSAGE_TOKENS = re.compile(r"\((\d+) in the messages")
+_COMPLETION_TOKENS = re.compile(r"(\d+) in the completion")
 # The result that closes a tool call whose turn died before the tool finished (sent as an error)
 _UNREADABLE_PHOTOS_NOTE = "[{count} photo(s) sent with this message could not be read and are not attached]"
 _INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
@@ -637,14 +637,14 @@ def _is_tool_pair_error(e: Exception) -> bool:
 def _is_context_length_error(e: Exception) -> bool:
     """True when a provider rejected the request because the history is over the model's context window (or
     size limit), whatever its wording (see `_CONTEXT_LENGTH_PHRASES`). False when the error itself says the
-    messages fit and the completion budget is the problem."""
+    completion alone fills the window: no history can be cut small enough."""
     message = str(e).lower()
     if not any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES):
         return False
-    window, in_messages = _CONTEXT_WINDOW.search(message), _MESSAGE_TOKENS.search(message)
-    # The messages fit the window on their own: the completion budget is what is too big, and
-    # cutting history cannot help
-    return not (window and in_messages and int(in_messages[1]) <= int(window[1]))
+    window, completion = _CONTEXT_WINDOW.search(message), _COMPLETION_TOKENS.search(message)
+    # A completion as big as the window leaves no room for any history: cutting cannot help. Anything less
+    # does (the usual case: the messages still fit on their own, but not with the completion beside them)
+    return not (window and completion and int(completion[1]) >= int(window[1]))
 
 
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:

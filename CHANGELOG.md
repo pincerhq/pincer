@@ -101,7 +101,7 @@ from the variable name.
   Compaction only runs after a request succeeded, so without this a history no request can carry
   would fail on every later message. The wording of xAI Grok and Gemini is recognized too. The cut is
   saved only once a request goes through, and the history is put back when the turn gives up, and an
-  error that says the messages fit and the completion budget is too big (`max_tokens`) cuts nothing.
+  error that says the completion budget (`max_tokens`) alone is as big as the window cuts nothing.
   Cutting and repairing tool pairs each have their own retries.
 - A photo a chat sends stays in the conversation, so it is checked when it arrives: it gets the media
   type of its bytes (whatever the channel claimed), a format the models do not take (BMP, TIFF) is

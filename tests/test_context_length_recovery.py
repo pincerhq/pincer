@@ -233,9 +233,27 @@ async def test_the_recovery_does_not_depend_on_the_wire(settings, session_manage
             "or completion.",
             True,
         ),
-        (  # the history fits; the completion budget is what is too big, and cutting history cannot help
+        (  # the usual case: the history still fits on its own, history and completion together do not
+            "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested "
+            "33192 tokens (25000 in the messages, 8192 in the completion). Please reduce the length of the messages "
+            "or completion.",
+            True,
+        ),
+        (  # a small history over by a little: half of it makes the request fit
             "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested "
             "33000 tokens (1000 in the messages, 32000 in the completion). Please reduce the length of the messages "
+            "or completion.",
+            True,
+        ),
+        (  # no history can make room for a completion as big as the window: cutting cannot help
+            "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested "
+            "41768 tokens (1000 in the messages, 40768 in the completion). Please reduce the length of the messages "
+            "or completion.",
+            False,
+        ),
+        (  # the completion is exactly the window: not even an empty history fits
+            "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested "
+            "33768 tokens (1000 in the messages, 32768 in the completion). Please reduce the length of the messages "
             "or completion.",
             False,
         ),
@@ -344,18 +362,22 @@ async def test_the_voice_path_counts_cuts_and_repairs_apart_too(
     assert len(session.messages) > 8  # not cleared
 
 
-_VLLM_COMPLETION_TOO_BIG = (
-    "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested 33000 tokens "
-    "(1000 in the messages, 32000 in the completion). Please reduce the length of the messages or completion."
+_COMPLETION_BIGGER_THAN_THE_WINDOW = (
+    "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested 41768 tokens "
+    "(1000 in the messages, 40768 in the completion). Please reduce the length of the messages or completion."
+)
+_MESSAGES_FIT_BUT_NOT_WITH_THE_COMPLETION = (
+    "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested 33192 tokens "
+    "(25000 in the messages, 8192 in the completion). Please reduce the length of the messages or completion."
 )
 
 
-async def test_an_error_that_blames_the_completion_budget_cuts_nothing_and_saves_nothing(
+async def test_a_completion_budget_no_history_can_make_room_for_cuts_nothing_and_saves_nothing(
     settings, session_manager, cost_tracker, registry, mock_llm
 ):
     session = await _long_session(session_manager)
     before = list(session.messages)
-    sizes = _script(mock_llm, [_VLLM_COMPLETION_TOO_BIG] * 5)
+    sizes = _script(mock_llm, [_COMPLETION_BIGGER_THAN_THE_WINDOW] * 5)
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
 
     with pytest.raises(LLMError, match="in the completion"):
@@ -441,3 +463,21 @@ async def test_a_voice_cut_that_let_a_request_through_stays_when_a_later_request
     assert len(llm.requests) == 3
     assert len(session.messages) < before * 0.6  # the cut stayed
     assert session.messages[-1].role is MessageRole.TOOL_RESULT
+
+
+async def test_messages_that_fit_on_their_own_but_not_with_the_completion_are_cut_and_go_through(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    """The usual first failure of a growing history: 25,000 tokens in a 32K window with 8,192 reserved for the
+    reply. Every later turn adds a little, so a turn that raised here would raise on every later one."""
+    session = await _long_session(session_manager)
+    before = len(session.messages)
+    sizes = _script(mock_llm, [_MESSAGES_FIT_BUT_NOT_WITH_THE_COMPLETION])
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    reply = await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert reply.text == "ok"
+    assert len(sizes) == 2
+    assert sizes[1] < sizes[0] * 0.6
+    assert len(session.messages) < before * 0.6
