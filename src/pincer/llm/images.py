@@ -22,8 +22,9 @@ JPEG_QUALITY = 85
 # for every 3, so 3,750,000 raw bytes is exactly 5,000,000 characters.
 MAX_ENCODED_BYTES = 3_750_000
 
-# The formats Claude and OpenAI take, by the name Pillow gives them, with their media type
-_API_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png", "GIF": "image/gif", "WEBP": "image/webp"}
+# The formats Claude and OpenAI take, by the name Pillow gives them, with their media type (MPO is a JPEG file with
+# more pictures after the first, as many phone cameras write it; a decoder reads it as a JPEG)
+_API_FORMATS = {"JPEG": "image/jpeg", "MPO": "image/jpeg", "PNG": "image/png", "GIF": "image/gif", "WEBP": "image/webp"}
 _OPAQUE_MEDIA_TYPE = "image/jpeg"
 _ALPHA_MEDIA_TYPE = "image/png"
 _ALPHA_MODES = ("RGBA", "LA", "PA")

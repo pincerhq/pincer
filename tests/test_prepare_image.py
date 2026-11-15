@@ -231,3 +231,19 @@ def test_a_format_the_models_do_not_take_is_re_encoded(fmt):
     assert prepared.media_type == "image/jpeg"
     assert size_of(prepared.data) == (600, 400)
     assert prepared.sha256 == hashlib.sha256(prepared.data).hexdigest()
+
+
+def test_a_phone_photo_in_the_multi_picture_jpeg_format_keeps_its_bytes():
+    """Pillow names many iPhone and Samsung camera JPEGs "MPO" (a JPEG with more pictures after the first). The
+    APIs take them as the JPEG they are, so a small one is not re-encoded, which would cost quality and EXIF."""
+    frames = [striped(2_000, 1_500), striped(2_000, 1_500)]
+    raw = encode(frames[0], "MPO", save_all=True, append_images=frames[1:])
+    with Image.open(io.BytesIO(raw)) as probe:
+        assert probe.format == "MPO"  # precondition: this is the format the review is about
+    assert len(raw) <= MAX_ENCODED_BYTES
+
+    prepared = prepare_image(raw)
+
+    assert prepared.data == raw
+    assert prepared.media_type == "image/jpeg"
+    assert prepared.sha256 == hashlib.sha256(raw).hexdigest()
