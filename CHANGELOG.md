@@ -44,9 +44,9 @@ Always on, without setting anything:
 
 ### Changed
 
-#### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.2.1)
+#### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.3.0)
 
-Telemetry moves to pincer-telemetry 0.2.1, which adds PostHog next to Uptrace.
+Telemetry moves to pincer-telemetry 0.3.0, which adds PostHog next to Uptrace.
 Each provider has one DSN with the token in the URL, and the provider is picked
 from the variable name.
 
