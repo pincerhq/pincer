@@ -110,7 +110,8 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     settings.dashboard_host = "127.0.0.1"
     settings.dashboard_port = free_port()
     settings.log_level.value = "WARNING"
-    settings.telemetry_dsn = None
+    settings.telemetry_uptrace_dsn = None
+    settings.telemetry_posthog_dsn = None
     settings.daily_budget_usd = 5.0
     monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
