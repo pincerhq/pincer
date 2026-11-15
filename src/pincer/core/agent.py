@@ -860,10 +860,10 @@ class Agent:
         await self._sessions.save(session)
         return True
 
-    async def _close_interrupted_tool_calls(self, session: Session) -> None:
-        """Start a turn by answering the tool calls an earlier turn left open (see `_interrupted_results`),
-        before the user's message is appended."""
-        await self._sessions.add_messages(session, _interrupted_results(session.messages))
+    async def _open_turn(self, session: Session, user_msg: LLMMessage) -> None:
+        """Start a turn: answer the tool calls an earlier turn left open (see `_interrupted_results`), then
+        add the user's message, all in one write (every save writes the whole session)."""
+        await self._sessions.add_messages(session, [*_interrupted_results(session.messages), user_msg])
 
     async def _recover_from_rejected_history(
         self, session: Session, error: LLMError, recovery: _Recovery
@@ -1114,8 +1114,7 @@ class Agent:
             images=img_contents,
             context=_with_unreadable_photos(context, unreadable),
         )
-        await self._close_interrupted_tool_calls(session)
-        await self._sessions.add_message(session, user_msg)
+        await self._open_turn(session, user_msg)
 
         # Inject the onboarding followup instruction only on the turn that
         # handles the user's reply.
@@ -1615,8 +1614,7 @@ class Agent:
             images=img_contents,
             context=_with_unreadable_photos(context, unreadable),
         )
-        await self._close_interrupted_tool_calls(session)
-        await self._sessions.add_message(session, user_msg)
+        await self._open_turn(session, user_msg)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
         tool_schemas = (
@@ -1922,8 +1920,7 @@ class Agent:
         # prompt stays the same while its extra_system does (Q15).
         context = await self._turn_context(user_id, text, memory=True, user_timezone=turn.timezone)
         user_msg = LLMMessage(role=MessageRole.USER, content=text, context=context)
-        await self._close_interrupted_tool_calls(session)
-        await self._sessions.add_message(session, user_msg)
+        await self._open_turn(session, user_msg)
         # Growth within one turn is bounded by max_tool_iterations. Compaction runs after
         # the turn, off the call's critical path (see stream_voice_turn).
 

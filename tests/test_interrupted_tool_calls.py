@@ -205,13 +205,17 @@ async def test_the_error_results_are_saved_with_their_flag_and_plain_results_sta
         await reloaded.close()
 
 
-async def test_the_error_results_of_five_open_calls_are_saved_in_one_write(
-    settings, session_manager, cost_tracker, registry_plain
+@pytest.mark.parametrize("path", ["chat", "stream", "voice"])
+async def test_the_error_results_of_five_open_calls_and_the_users_message_are_saved_in_one_write(
+    settings, session_manager, cost_tracker, registry_plain, path
 ):
-    """Every save writes the whole session: closing 5 calls is one write, not 5 back to back."""
+    """Every save writes the whole session: closing 5 calls and adding the question is one write, not 6."""
     ids = [f"toolu_{n}" for n in range(5)]
     calls = [ToolCall(id=call_id, name="create_event", arguments={}) for call_id in ids]
-    session = await session_manager.get_or_create("user1", "test")
+    key = "voice:CA_open" if path == "voice" else None
+    if path == "voice":
+        await session_manager.onboarding.complete("user1", "voice", now=1.0)
+    session = await session_manager.get_or_create("user1", "voice" if path == "voice" else "test", session_key=key)
     for message in (
         LLMMessage(role=MessageRole.USER, content="Book five"),
         LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=calls),
@@ -227,10 +231,15 @@ async def test_the_error_results_of_five_open_calls_are_saved_in_one_write(
     session_manager._store.save = spy  # type: ignore[method-assign]
     async with ScriptedAnthropic(settings, [([text("Done.")], "end_turn")]) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry_plain)
-        await agent.handle_message("user1", "test", "Never mind", memory=False)
+        if path == "chat":
+            await agent.handle_message("user1", "test", "Never mind", memory=False)
+        elif path == "stream":
+            _ = [c async for c in agent.handle_message_stream("user1", "test", "Never mind", memory=False)]
+        else:
+            _ = [c async for c in agent.stream_voice_turn("user1", "voice", "Never mind", session_key=key)]
 
-    # The five results in one write (2 + 5 messages), then the user's message, then the reply
-    assert saved_sizes == [7, 8, 9]
+    # The five results and the user's message in one write (2 + 5 + 1 messages), then the reply
+    assert saved_sizes == [8, 9]
     results = [m for m in session.messages if m.role == MessageRole.TOOL_RESULT]
     assert [(m.tool_call_id, m.content, m.is_error) for m in results] == [(i, _INTERRUPTED, True) for i in ids]
 
