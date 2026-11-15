@@ -89,8 +89,8 @@ from the variable name.
   the limit a failed compaction changes nothing and is tried again after a later turn. At startup
   the limits must run `PINCER_COMPACT_HARD_TOKENS` (when set) > `PINCER_COMPACT_AT_TOKENS` >
   `PINCER_COMPACT_TO_TOKENS`.
-  A summary of the earlier conversation at the start of the history stays when the oldest turns
-  are dropped.
+  A summary of the earlier conversation stays when the oldest turns are dropped, wherever it sits: a
+  history joined from two (an identity rename) holds a second summary in its middle, and it stays too.
 - A Claude compaction block is sent to the API only as the first message of a request, and only
   once: the API answers 400 `compaction_block_misplaced` to messages in front of it. A block that is
   not first (two histories joined by an identity rename each bring their own summary) is sent as its

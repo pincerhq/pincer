@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
-from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, leading_summary
+from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, kept_summaries
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -926,13 +926,13 @@ class Agent:
                 "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id
             )
             return False
-        keep = leading_summary(view)
+        keep = kept_summaries(view[:cut])
         recovery.first_kept = view[cut]
-        recovery.kept_summaries = [keep] if keep else []
+        recovery.kept_summaries = keep
         logger.warning(
             "Session %s: the endpoint rejected the history as too long; dropped the oldest %d messages",
             session.session_id,
-            cut - (keep is not None),
+            cut - len(keep),
         )
         return True
 

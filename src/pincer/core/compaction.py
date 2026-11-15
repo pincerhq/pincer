@@ -200,10 +200,13 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     return cut if cut >= _MIN_CUT else 0
 
 
-def leading_summary(messages: list[LLMMessage]) -> LLMMessage | None:
-    """The summary at the head of a history: a SYSTEM-role message (a client summary, a server compaction
-    block or a compacted window), the only kind a history holds. None when it starts with anything else."""
-    return messages[0] if messages and messages[0].role == MessageRole.SYSTEM else None
+def kept_summaries(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """The summaries among `messages`, in order: SYSTEM-role messages (a client summary, a server compaction
+    block, a compacted window), the only kind a history holds. A summary is the condensed memory of what comes
+    before it, so when the oldest turns are cut, every one in the dropped range stays at the head: a history
+    joined from two (an identity rename) holds a second summary in its middle, and a cut that ends inside
+    the second conversation drops its old turns, not what was kept of the ones before them."""
+    return [m for m in messages if m.role == MessageRole.SYSTEM]
 
 
 def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int) -> int:
@@ -212,22 +215,22 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
     Same estimate as `choose_cut`, with no room kept for a summary: nothing is written. The cut moves
     on to the next user message, so it always lands on a turn boundary (a tool call and its results sit
     between two user messages: no pair is split, and what is kept starts with a user message), and it
-    never reaches the last user message. A leading summary is not what made the prompt big and is the
-    condensed memory of everything before: it stays (the count includes it, the caller keeps it, see
-    `leading_summary`). 0 means there is no earlier turn to drop.
+    never reaches the last user message. A summary was not what made the prompt big and is the condensed
+    memory of what came before it: it stays (it saves nothing in the estimate, the count includes it, the
+    caller keeps it, see `kept_summaries`). 0 means there is no earlier turn to drop.
     """
     per_char = last.tokens_per_char
     wire = last.wire
     estimate = per_char * (last.overhead_chars + sum(_chars(m, wire) for m in messages))
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
-    start = 1 if leading_summary(messages) else 0
-    cut = start
+    cut = 0
     while estimate > target_tokens and cut < floor:
-        estimate -= per_char * _chars(messages[cut], wire)
+        if messages[cut].role != MessageRole.SYSTEM:
+            estimate -= per_char * _chars(messages[cut], wire)
         cut += 1
     while cut < floor and messages[cut].role != MessageRole.USER:
         cut += 1
-    return cut if cut > start else 0
+    return cut if any(m.role != MessageRole.SYSTEM for m in messages[:cut]) else 0
 
 
 def choose_halving_cut(messages: list[LLMMessage]) -> int:
@@ -377,7 +380,7 @@ class Compactor:
                 self._hard_tokens,
             )
             return outcome
-        keep = leading_summary(session.messages)
+        keep = kept_summaries(session.messages[:cut])
         if not await self._sessions.cut(session, list(session.messages[:cut]), keep=keep):
             logger.info("Session %s changed while it was being cut; the cut is discarded", session.session_id)
             return outcome
@@ -387,7 +390,7 @@ class Compactor:
             session.session_id,
             last.prompt_tokens,
             self._hard_tokens,
-            cut - (keep is not None),
+            cut - len(keep),
         )
         return CompactionOutcome.CUT
 

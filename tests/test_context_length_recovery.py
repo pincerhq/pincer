@@ -570,3 +570,28 @@ async def test_a_stream_that_ends_without_a_final_response_after_a_cut_leaves_th
 
     assert requests == 2
     assert session.messages[: len(before)] == before
+
+
+async def test_a_turn_that_cuts_a_joined_history_keeps_the_summaries_of_both_conversations(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    """Two histories joined by an identity rename: [summary, first turns, summary, second turns]."""
+    session = await session_manager.get_or_create("user1", "test")
+    first = LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\nFIRST")
+    second = LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\nSECOND")
+    turns = []
+    for label in ("one", "two"):
+        for n in range(10):
+            turns.append(LLMMessage(role=MessageRole.USER, content=f"{label} question {n} " + "q" * 380))
+            turns.append(LLMMessage(role=MessageRole.ASSISTANT, content=f"{label} answer {n} " + "a" * 380))
+    await session_manager.add_messages(session, [first, *turns[:20], second, *turns[20:]])
+    _script(mock_llm, [_TOO_LONG])
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert session.messages[0] is first
+    assert session.messages[1] is second
+    assert session.messages[2].role is MessageRole.USER
+    assert session.messages[2].content.startswith("two question ")  # the cut went past the second summary
+    assert len(session.messages) < 30

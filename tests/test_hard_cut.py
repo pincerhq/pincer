@@ -539,3 +539,115 @@ async def test_the_emergency_cut_keeps_the_summary_of_the_conversation_before_it
     assert [m["role"] for m in stored][:2] == ["system", "user"]
     assert stored[0]["content"] == summary.content
     assert stored[0].get("raw", []) == summary.raw
+
+
+# ── every summary in the dropped range survives the cut: two histories joined by a rename (round 3) ──
+
+
+def _turns(count: int, size: int, label: str) -> list[LLMMessage]:
+    """`count` user/assistant pairs of `size` characters each message."""
+    messages: list[LLMMessage] = []
+    for turn in range(count):
+        messages.append(LLMMessage(role=MessageRole.USER, content=f"{label} question {turn} " + "q" * size))
+        messages.append(LLMMessage(role=MessageRole.ASSISTANT, content=f"{label} answer {turn} " + "a" * size))
+    return messages
+
+
+def _tag(summary: LLMMessage) -> str:
+    """Which summary it is: the last line of its text."""
+    return summary.content.rsplit("\n", 1)[-1]
+
+
+def _second_summary(kind: str) -> LLMMessage:
+    return LLMMessage(
+        role=MessageRole.SYSTEM, content="[Previous conversation summary]\nSECOND", **_SUMMARY_KINDS[kind]
+    )
+
+
+def _joined(kind: str, *, first_has_summary: bool = True) -> list[LLMMessage]:
+    """[S1, turns of the first conversation, S2, turns of the second]: what an identity rename leaves."""
+    head = [_summary("client summary")] if first_has_summary else []
+    return [*head, *_turns(2, 100, "first"), _second_summary(kind), *_turns(4, 2_000, "second")]
+
+
+@pytest.mark.parametrize("kind", list(_SUMMARY_KINDS))
+@pytest.mark.parametrize("first_has_summary", [True, False], ids=["both sides summarized", "second side only"])
+def test_the_hard_cut_keeps_the_summary_of_the_second_conversation_too(kind, first_has_summary):
+    from pincer.core.compaction import choose_hard_cut, kept_summaries
+
+    messages = _joined(kind, first_has_summary=first_has_summary)
+    last = LastRequest.measure(1_000_000, messages, overhead_chars=0)
+
+    cut = choose_hard_cut(messages, last, target_tokens=1)  # everything but the last turn has to go
+
+    assert messages[cut].role is MessageRole.USER
+    assert messages[cut].content.startswith("second question 3 ")  # the last user message stays
+    kept = kept_summaries(messages[:cut])
+    assert [_tag(m) for m in kept] == (["SUM", "SECOND"] if first_has_summary else ["SECOND"])
+    assert kept[-1].raw == _SUMMARY_KINDS[kind].get("raw", [])
+
+
+@pytest.mark.parametrize("kind", list(_SUMMARY_KINDS))
+def test_the_halving_cut_keeps_the_summary_of_the_second_conversation_too(kind):
+    from pincer.core.compaction import choose_halving_cut, kept_summaries
+
+    messages = _joined(kind)
+    second = next(i for i, m in enumerate(messages) if m.content.endswith("SECOND"))
+
+    cut = choose_halving_cut(messages)
+
+    assert cut > second  # precondition: the cut goes past the second summary, into the second conversation
+    assert messages[cut].role is MessageRole.USER
+    assert [_tag(m) for m in kept_summaries(messages[:cut])] == ["SUM", "SECOND"]
+
+
+def test_a_cut_that_stops_before_a_summary_keeps_only_the_ones_it_passed():
+    from pincer.core.compaction import kept_summaries
+
+    messages = _joined("client summary")
+    second = next(i for i, m in enumerate(messages) if m.content.endswith("SECOND"))
+
+    assert [_tag(m) for m in kept_summaries(messages[:second])] == ["SUM"]
+    assert kept_summaries(messages[:0]) == []
+
+
+def test_only_summaries_to_drop_means_no_cut_even_when_there_are_two():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = [
+        _summary("client summary"),
+        _second_summary("client summary"),
+        LLMMessage(role=MessageRole.USER, content="u" * 90_000),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 90_000),
+    ]
+    last = LastRequest.measure(170_000, messages, overhead_chars=0)
+
+    assert choose_hard_cut(messages, last, target_tokens=50_000) == 0
+
+
+@pytest.mark.parametrize("kind", list(_SUMMARY_KINDS))
+async def test_the_emergency_cut_keeps_both_summaries_of_a_joined_history(
+    settings, session_manager, cost_tracker, kind
+):
+    session = await session_manager.get_or_create("user1", "test")
+    joined = _joined(kind)
+    first, second = joined[0], next(m for m in joined if m.content.endswith("SECOND"))
+    await session_manager.add_messages(session, joined)
+    sent = list(session.messages)
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="Reply"))
+    last = _last(170_000, sent, server=False)
+
+    outcome = await _compactor(
+        settings, cost_tracker, session_manager, llm=_Summarizer(fail=True), hard=160_000
+    ).compact(session, last)
+
+    assert outcome is CompactionOutcome.CUT
+    assert session.messages[0] is first
+    assert session.messages[1] is second
+    assert session.messages[2].role is MessageRole.USER
+    stored = json.loads(
+        (await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False))[
+            "messages"
+        ]
+    )
+    assert [m["role"] for m in stored][:3] == ["system", "system", "user"]

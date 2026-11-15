@@ -183,19 +183,19 @@ class SessionManager:
         only if `kept_ok` accepts the messages that would follow the replacement, judged under
         the turn lock, when no turn can add to them. True if the history changed.
         """
-        return await self._replace_prefix(session, prefix, replacement, kept_ok)
+        return await self._replace_prefix(session, prefix, [replacement], kept_ok)
 
-    async def cut(self, session: Session, prefix: list[LLMMessage], keep: LLMMessage | None = None) -> bool:
+    async def cut(self, session: Session, prefix: list[LLMMessage], keep: list[LLMMessage] | None = None) -> bool:
         """Drop the session's oldest messages `prefix` (the emergency cut), between turns, on the
-        same terms as `compact`, except `keep`: a message of the prefix that stays at the head (the
-        leading summary). The photos only the dropped messages showed are deleted with them."""
-        return await self._replace_prefix(session, prefix, keep, None)
+        same terms as `compact`, except `keep`: the messages of the prefix that stay at the head (its
+        summaries). The photos only the dropped messages showed are deleted with them."""
+        return await self._replace_prefix(session, prefix, keep or [], None)
 
     async def _replace_prefix(
         self,
         session: Session,
         prefix: list[LLMMessage],
-        replacement: LLMMessage | None,
+        replacement: list[LLMMessage],
         kept_ok: Callable[[list[LLMMessage]], bool] | None,
     ) -> bool:
         async with self._locked(session.session_id):
@@ -206,7 +206,7 @@ class SessionManager:
                 return False
             if kept_ok is not None and not kept_ok(session.messages[len(prefix) :]):
                 return False
-            session.messages = [*([replacement] if replacement else []), *session.messages[len(prefix) :]]
+            session.messages = [*replacement, *session.messages[len(prefix) :]]
             session.updated_at = time.time()
             await self._persist(session)
             return True
