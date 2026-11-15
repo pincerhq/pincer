@@ -41,7 +41,9 @@ _LEGACY_SECTION_KEY = "dsn"
 def _read(path: Path) -> dict[str, Any]:
     try:
         return read_toml_raw(path) or {}
-    except ValueError as e:  # tomllib.TOMLDecodeError: reported by the loaders that own the file
+    # TOMLDecodeError (a ValueError) or OSError (unreadable, a directory): this source runs in
+    # every Settings(), so a bad file must not crash it; the loaders that own the file report it.
+    except (ValueError, OSError) as e:
         logger.warning("Ignoring the [telemetry] section of unreadable %s: %s", path, e)
         return {}
 

@@ -1713,6 +1713,14 @@ def test_telemetry_config_skipped_when_unset(tmp_path):
     assert _telemetry_check(tmp_path, telemetry_uptrace_dsn=None).status == CheckStatus.SKIPPED
 
 
+def test_telemetry_config_warns_on_otel_dsn(tmp_path, monkeypatch):
+    monkeypatch.setenv("OTEL_DSN", "https://s3cr3t@api.uptrace.dev")
+    result = _telemetry_check(tmp_path, telemetry_uptrace_dsn=None)
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_TELEMETRY_UPTRACE_DSN" in result.fix_hint
+    assert "s3cr3t" not in result.message
+
+
 def test_telemetry_config_critical_on_two_providers(tmp_path):
     """Doctor reports the conflict `pincer run` refuses on, instead of crashing."""
     result = _telemetry_check(tmp_path, telemetry_posthog_dsn=SecretStr("https://phc_secret@us.i.posthog.com"))

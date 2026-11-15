@@ -499,7 +499,7 @@ same problems as a critical `telemetry_config` check.
 The removed variables are not read any more:
 
 - `PINCER_TELEMETRY_DSN` (environment or `.env`), and `telemetry_dsn` or `[telemetry] dsn` in `pincer.toml` / `pincer.local.toml`: `pincer run` refuses to start while it is set and tells you to rename it to `PINCER_TELEMETRY_UPTRACE_DSN`.
-- `OTEL_DSN`: MCP servers log a warning naming `TELEMETRY_UPTRACE_DSN` and start without telemetry.
+- `OTEL_DSN`: MCP servers log a warning naming `TELEMETRY_UPTRACE_DSN` and start without telemetry. When the agent has no DSN set and finds `OTEL_DSN` (environment or `.env`), `pincer run` prints a warning naming `PINCER_TELEMETRY_UPTRACE_DSN` and starts without telemetry; `pincer doctor` reports it as a `telemetry_config` warning. It only warns, because other services sharing the `.env` may still read `OTEL_DSN`.
 
 ### Pincer agent
 

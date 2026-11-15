@@ -250,7 +250,7 @@ def _telemetry_provider_or_exit(settings: Settings) -> Provider | None:
     Exits 1, before any other start step, on the removed PINCER_TELEMETRY_DSN
     (Settings ignores unknown variables, so starting would silently stop
     exporting) and on a misconfiguration (both providers set, a malformed DSN).
-    A configured DSN without the `telemetry` extra only warns.
+    A configured DSN without the `telemetry` extra, or only `OTEL_DSN`, only warns.
     """
     from rich.text import Text
 
@@ -270,6 +270,8 @@ def _telemetry_provider_or_exit(settings: Settings) -> Provider | None:
                 f"[yellow]{UPTRACE_ENV} or {POSTHOG_ENV} is set but pincer-telemetry is not installed — "
                 'skipping. Install with: pip install "pincer-agent[telemetry]"[/yellow]'
             )
+        case TelemetryState.UNREAD:
+            console.print(Text(setup.message, style="yellow"), soft_wrap=True)
     return setup.provider
 
 

@@ -60,7 +60,9 @@ from the variable name.
 >    `TELEMETRY_POSTHOG_DSN`. A leftover `OTEL_DSN` logs a warning and the
 >    server starts without telemetry.
 > 3. The docker-compose agent services no longer map `PINCER_TELEMETRY_DSN=${OTEL_DSN}`;
->    set `PINCER_TELEMETRY_*_DSN` in `.env`.
+>    set `PINCER_TELEMETRY_*_DSN` in `.env`. An agent with no DSN but an
+>    `OTEL_DSN` (environment or `.env`) starts without telemetry and warns;
+>    `pincer doctor` reports it as a warning.
 
 - DSN formats: Uptrace `https://<token>@api.uptrace.dev?grpc=4317`;
   PostHog `https://<phc_api_key>@us.i.posthog.com` (or `eu.i.posthog.com`).

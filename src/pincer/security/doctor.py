@@ -515,6 +515,7 @@ class SecurityDoctor:
         """`pincer run` refuses to start on a bad telemetry config; report it rather than crash."""
         from pincer.observability.telemetry import (
             LEGACY_DSN_ENV,
+            OTEL_DSN_ENV,
             POSTHOG_ENV,
             UPTRACE_ENV,
             TelemetryState,
@@ -546,6 +547,12 @@ class SecurityDoctor:
                     CheckStatus.WARNING,
                     "A telemetry DSN is set but pincer-telemetry is not installed — nothing is exported",
                     'pip install "pincer-agent[telemetry]"',
+                )
+            case TelemetryState.UNREAD:
+                return result(
+                    CheckStatus.WARNING,
+                    setup.message,
+                    f"Rename {OTEL_DSN_ENV} to {UPTRACE_ENV} ([telemetry] uptrace_dsn in pincer.toml)",
                 )
             case TelemetryState.ENABLED:
                 assert setup.provider is not None

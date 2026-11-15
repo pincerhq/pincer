@@ -22,11 +22,11 @@ class APISettings(BaseModel):
     # ── Telemetry ─────────────────────────────────────────
     # One provider at most; `pincer.observability.telemetry` validates the pair.
     telemetry_uptrace_dsn: SecretStr | None = Field(
-        None,
+        default=None,
         description="Uptrace DSN, https://<token>@api.uptrace.dev?grpc=4317 (unset = no Uptrace export)",
     )
     telemetry_posthog_dsn: SecretStr | None = Field(
-        None,
+        default=None,
         description="PostHog DSN, https://<phc_api_key>@us.i.posthog.com or eu.i.posthog.com "
         "(unset = no PostHog export)",
     )

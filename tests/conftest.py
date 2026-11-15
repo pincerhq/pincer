@@ -66,7 +66,7 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     # a developer's real database URL could otherwise reach a later test.
     monkeypatch.delenv("PINCER_DATABASE_URL", raising=False)
     # A developer's telemetry config would make `pincer run` tests export, or refuse to start.
-    for var in ("PINCER_TELEMETRY_DSN", "PINCER_TELEMETRY_UPTRACE_DSN", "PINCER_TELEMETRY_POSTHOG_DSN"):
+    for var in ("PINCER_TELEMETRY_DSN", "PINCER_TELEMETRY_UPTRACE_DSN", "PINCER_TELEMETRY_POSTHOG_DSN", "OTEL_DSN"):
         monkeypatch.delenv(var, raising=False)
     # ...and so would a [telemetry] section in the repo's pincer.toml / pincer.local.toml.
     monkeypatch.setattr("pincer.config.telemetry.TELEMETRY_TOML_FILES", ())

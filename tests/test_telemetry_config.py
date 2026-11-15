@@ -194,6 +194,27 @@ def test_unreadable_toml_does_not_break_settings(toml_dir: Path) -> None:
     assert Settings().telemetry_uptrace_dsn is None  # type: ignore[call-arg]
 
 
+@pytest.mark.parametrize("make_unreadable", ["directory", "permissions"])
+def test_unopenable_toml_does_not_break_settings(toml_dir: Path, make_unreadable: str) -> None:
+    import os
+
+    from pincer.config.main import Settings
+
+    path = toml_dir / "pincer.toml"
+    if make_unreadable == "directory":
+        path.mkdir()
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root reads files regardless of permissions")
+        path.write_text('[telemetry]\nuptrace_dsn = "https://s3cr3t@api.uptrace.dev"\n')
+        path.chmod(0)
+    try:
+        assert Settings().telemetry_uptrace_dsn is None  # type: ignore[call-arg]
+    finally:
+        if path.is_file():
+            path.chmod(0o600)
+
+
 # ── inspect_telemetry ────────────────────────────────────
 
 
@@ -223,6 +244,36 @@ def test_inspect_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setitem(sys.modules, "pincer_telemetry", None)
     assert inspect_telemetry(_settings(uptrace=_UPTRACE), tmp_path).state is TelemetryState.NOT_INSTALLED
     assert inspect_telemetry(_settings(), tmp_path).state is TelemetryState.OFF
+
+
+def test_inspect_otel_dsn_in_environment_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_DSN", _UPTRACE)
+    setup = inspect_telemetry(_settings(), tmp_path)
+    assert setup.state is TelemetryState.UNREAD
+    assert "OTEL_DSN in the environment" in setup.message
+    assert "PINCER_TELEMETRY_UPTRACE_DSN" in setup.message
+    assert "s3cr3t" not in setup.message
+
+
+def test_inspect_otel_dsn_in_dotenv_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.config.main import Settings
+
+    monkeypatch.setitem(Settings.model_config, "env_file", (".env",))
+    (tmp_path / ".env").write_text(f"OTEL_DSN={_UPTRACE}\n")
+    assert inspect_telemetry(_settings(), tmp_path).state is TelemetryState.UNREAD
+
+
+def test_inspect_otel_dsn_is_quiet_when_the_agent_has_a_dsn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_DSN", _UPTRACE)
+    assert inspect_telemetry(_settings(uptrace=_UPTRACE), tmp_path).state is TelemetryState.ENABLED
+
+
+def test_inspect_otel_dsn_warns_without_the_extra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pincer_telemetry", None)
+    monkeypatch.setenv("OTEL_DSN", _UPTRACE)
+    assert inspect_telemetry(_settings(), tmp_path).state is TelemetryState.UNREAD
 
 
 def test_unknown_agent_keys_are_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,3 +366,18 @@ def test_run_starts_without_telemetry(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert steps["_run_agent"].called
     assert not init.called
     assert "Telemetry" not in result.output
+
+
+def test_run_warns_on_otel_dsn_and_starts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    init = MagicMock()
+    monkeypatch.setattr("pincer_telemetry.init", init)
+    steps = _mock_run(monkeypatch, tmp_path)
+    monkeypatch.setenv("OTEL_DSN", _UPTRACE)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0, result.output
+    assert steps["_run_agent"].called
+    assert not init.called
+    assert "OTEL_DSN in the environment is not read" in result.output
+    assert "s3cr3t" not in result.output

@@ -30,6 +30,9 @@ ENV_PREFIX = "PINCER_TELEMETRY_"
 UPTRACE_ENV = f"{ENV_PREFIX}UPTRACE_DSN"
 POSTHOG_ENV = f"{ENV_PREFIX}POSTHOG_DSN"
 LEGACY_DSN_ENV = f"{ENV_PREFIX}DSN"
+#: The pre-0.2 DSN docker-compose used to map into the agent. Still read by other
+#: tools sharing the `.env`, so unlike `LEGACY_DSN_ENV` it only warns.
+OTEL_DSN_ENV = "OTEL_DSN"
 
 #: Environment variable → settings field, for the variables the library validates.
 _DSN_SETTING_BY_ENV = {UPTRACE_ENV: "telemetry_uptrace_dsn", POSTHOG_ENV: "telemetry_posthog_dsn"}
@@ -42,6 +45,7 @@ class TelemetryState(StrEnum):
     ENABLED = "enabled"
     NOT_INSTALLED = "not_installed"
     LEGACY = "legacy"
+    UNREAD = "unread"
     INVALID = "invalid"
 
 
@@ -52,7 +56,7 @@ class TelemetrySetup:
     Attributes:
         state: The classification.
         provider: The provider to start, set only for `ENABLED`.
-        message: Why, for `LEGACY` and `INVALID`. Names keys, never values.
+        message: Why, for `LEGACY`, `UNREAD` and `INVALID`. Names keys, never values.
     """
 
     state: TelemetryState
@@ -127,6 +131,22 @@ def _legacy_message(location: SettingLocation) -> str:
     )
 
 
+def _off(config_dir: Path | None) -> TelemetrySetup:
+    """`OFF`, or `UNREAD` when `OTEL_DSN` suggests the user expects telemetry."""
+    from pincer.config.legacy_env import find_env_setting
+
+    otel = find_env_setting(OTEL_DSN_ENV, config_dir)
+    if otel is None:
+        return TelemetrySetup(TelemetryState.OFF)
+    return TelemetrySetup(
+        TelemetryState.UNREAD,
+        message=(
+            f"{otel} is not read by the agent, so telemetry is off. To export to Uptrace, set {UPTRACE_ENV} "
+            "to the same DSN (the bundled MCP servers read TELEMETRY_UPTRACE_DSN)."
+        ),
+    )
+
+
 def inspect_telemetry(settings: Settings, config_dir: Path | None = None) -> TelemetrySetup:
     """Classify the telemetry configuration, without raising.
 
@@ -137,7 +157,8 @@ def inspect_telemetry(settings: Settings, config_dir: Path | None = None) -> Tel
     Returns:
         `LEGACY` when the removed setting is still configured (checked first);
         `NOT_INSTALLED` when a DSN is set but pincer-telemetry is missing;
-        `INVALID` on a configuration error; `ENABLED` with the provider; else `OFF`.
+        `INVALID` on a configuration error; `ENABLED` with the provider;
+        `UNREAD` when no DSN is set but `OTEL_DSN` is; else `OFF`.
     """
     legacy = legacy_telemetry_dsn(config_dir)
     if legacy is not None:
@@ -145,12 +166,13 @@ def inspect_telemetry(settings: Settings, config_dir: Path | None = None) -> Tel
     try:
         from pincer_telemetry import TelemetryConfigError
     except ImportError:
-        state = TelemetryState.NOT_INSTALLED if telemetry_configured(settings) else TelemetryState.OFF
-        return TelemetrySetup(state)
+        if telemetry_configured(settings):
+            return TelemetrySetup(TelemetryState.NOT_INSTALLED)
+        return _off(config_dir)
     try:
         provider = resolve_telemetry_provider(settings)
     except TelemetryConfigError as e:
         return TelemetrySetup(TelemetryState.INVALID, message=str(e))
     if provider is None:
-        return TelemetrySetup(TelemetryState.OFF)
+        return _off(config_dir)
     return TelemetrySetup(TelemetryState.ENABLED, provider=provider)
