@@ -92,6 +92,10 @@ class Session:
     # The hashes of the photos the image store holds for this session, as last saved or loaded;
     # `_persist` brings the store to the photos the messages hold now.
     _synced_images: frozenset[str] = field(default=frozenset(), init=False, repr=False, compare=False)
+    # `photo_bytes()` as of the last save or load, for the cache's photo budget: summing it over every message of
+    # every cached session on every cache miss would be the cost of the cache; stale only between an edit in memory
+    # and the save that follows it
+    _photo_bytes: int = field(default=0, init=False, repr=False, compare=False)
     # What the latest LLM request of the session's turn sent, for compaction; never saved
     last_request: LastRequest | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -298,6 +302,7 @@ class SessionManager:
             )
 
         session._saved_hash = hash(_serialized(session))
+        session._photo_bytes = session.photo_bytes()
         if row and row["session_id"] == key:  # a session left under the old key stores its photos anew
             session._synced_images = frozenset(photo.sha256 for photo in row["images"])
         self._cache[key] = session
@@ -390,7 +395,7 @@ class SessionManager:
         # other keys within one turn, so only a client minting new
         # conversation ids gets near it.
         # Summed once per request (a cache hit never gets here), then reduced by each session dropped
-        sizes = {key: cached.photo_bytes() for key, cached in self._cache.items()}
+        sizes = {key: cached._photo_bytes for key, cached in self._cache.items()}
         photos = sum(sizes.values())
         attempts = _EVICTION_SPARE_ATTEMPTS + max(len(self._cache) - self._max_cached, 0)
         if photos > self._max_cached_photo_bytes:
@@ -454,6 +459,7 @@ class SessionManager:
         if only_if_changed and hash(state) == session._saved_hash:
             return
         messages, metadata = state
+        session._photo_bytes = session.photo_bytes()
         images = _image_set(session, force=force_images)
         await self._store.save(
             session_id=session.session_id,

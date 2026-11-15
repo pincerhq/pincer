@@ -592,3 +592,41 @@ async def test_eviction_for_photos_takes_the_oldest_session_that_holds_some_and_
     await photo_budget.get_or_create("d", "web")
 
     assert list(photo_budget._cache) == ["web:p", "web:b", "web:c", "web:d"]
+
+
+async def test_a_cache_miss_does_not_walk_the_messages_of_the_cached_sessions(
+    photo_budget: SessionManager, monkeypatch: pytest.MonkeyPatch
+):
+    """The photo total is kept from what each session's last save counted, not summed over every message of every
+    cached session on every miss (PR #379 review, round 3)."""
+    from pincer.core.session import Session
+
+    for n in range(20):
+        await _plain(photo_budget, f"u{n}")
+    walks = 0
+    real = Session.photo_bytes
+
+    def counting(self: Session) -> int:
+        nonlocal walks
+        walks += 1
+        return real(self)
+
+    monkeypatch.setattr(Session, "photo_bytes", counting)
+
+    await photo_budget.get_or_create("new", "web")
+
+    assert walks <= 1  # the session just loaded, not the 20 cached
+
+
+async def test_the_photo_total_follows_a_clear_and_a_cut(photo_budget: SessionManager):
+    sessions = {}
+    for user in ("a", "b", "c"):
+        await _with_photos(photo_budget, user, 1)  # 12,000 characters in all, over the 9,000
+        sessions[user] = photo_budget._cache[f"web:{user}"]
+    # a clear and a cut free two photos: 4,000 left, within the budget
+    await photo_budget.clear(sessions["a"])
+    await photo_budget.cut(sessions["b"], list(sessions["b"].messages))
+
+    await photo_budget.get_or_create("d", "web")
+
+    assert list(photo_budget._cache) == ["web:a", "web:b", "web:c", "web:d"]  # nothing went
