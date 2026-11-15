@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 # Sessions held in memory at once; past it the least recently used is
 # persisted and dropped, and reloads from the database on its next turn.
 _DEFAULT_MAX_CACHED_SESSIONS = 1024
+# The photos the cached sessions hold at once, in base64 characters (about 192 MB of image bytes): every cached
+# session keeps its photos in memory, up to 5 MB each, so a count cap alone does not bound what the cache costs
+_DEFAULT_MAX_CACHED_PHOTO_BYTES = 256 * 1024 * 1024
 # Eviction tries this many sessions beyond the overflow per request, so a few
 # that cannot be saved are stepped over without one request retrying them all.
 _EVICTION_SPARE_ATTEMPTS = 2
@@ -112,13 +115,25 @@ class Session:
         """Flag the session memory-free; saved with its next message."""
         self.metadata[MEMORY_FREE_KEY] = "true"
 
+    def photo_bytes(self) -> int:
+        """What the session's photos take in memory, in base64 characters; a photo shown by several
+        messages is one."""
+        held = {image.sha256 or id(image): len(image.data) for m in self.messages for image in m.images}
+        return sum(held.values())
+
 
 class SessionManager:
     """Async SQLite-backed session store."""
 
-    def __init__(self, db_path: Path, max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS,
+        max_cached_photo_bytes: int = _DEFAULT_MAX_CACHED_PHOTO_BYTES,
+    ) -> None:
         self._db_path = db_path
         self._max_cached = max_cached
+        self._max_cached_photo_bytes = max_cached_photo_bytes
         self._service: SessionService | None = None
         self._onboarding: OnboardingService | None = None
         self._cache: OrderedDict[str, Session] = OrderedDict()
@@ -354,7 +369,8 @@ class SessionManager:
             del self._cache[key]
 
     async def _evict_overflow(self, keep: str) -> None:
-        """Persist and drop least recently used sessions past the cap.
+        """Persist and drop least recently used sessions past the cap, or while their photos pass the
+        byte budget (`max_cached_photo_bytes`; the session `keep` stays even if its own photos pass it).
 
         Runs inside the request for `keep`, which is never evicted here. A
         session whose save fails is logged and kept, moved to the recent end
@@ -368,8 +384,11 @@ class SessionManager:
         # copy, and the last write wins. It takes more than `max_cached`
         # other keys within one turn, so only a client minting new
         # conversation ids gets near it.
-        attempts = len(self._cache) - self._max_cached + _EVICTION_SPARE_ATTEMPTS
-        while len(self._cache) > self._max_cached and attempts > 0:
+        # Summed once per request (a cache hit never gets here), then reduced by each session dropped
+        photos = sum(cached.photo_bytes() for cached in self._cache.values())
+        over_photos = photos > self._max_cached_photo_bytes
+        attempts = (len(self._cache) if over_photos else len(self._cache) - self._max_cached) + _EVICTION_SPARE_ATTEMPTS
+        while (len(self._cache) > self._max_cached or photos > self._max_cached_photo_bytes) and attempts > 0:
             attempts -= 1
             key, session = next(iter(self._cache.items()))
             if key == keep:
@@ -396,6 +415,7 @@ class SessionManager:
                 and not _changed(session)
             ):
                 del self._cache[key]
+                photos -= session.photo_bytes()
 
     async def _persist(self, session: Session, *, only_if_changed: bool = False, force_images: bool = False) -> None:
         """Write the session out (with ``only_if_changed``, only when its

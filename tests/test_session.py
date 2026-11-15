@@ -443,3 +443,82 @@ async def test_a_turn_yields_the_cached_session(session_manager):
     async with session_manager.turn("user1", "test") as session:
         assert await session_manager.get_or_create("user1", "test") is session
         assert session.session_id in session_manager._turn_locks
+
+
+# ── the cache is bounded by the photos it holds, not only by how many sessions (PR #379 review, round 2) ──
+
+_PHOTO_BYTES = 3_000  # 4,000 base64 characters
+
+
+async def _with_photo(sm: SessionManager, user: str) -> None:
+    """A session of `user` whose one message shows a photo of its own."""
+    session = await sm.get_or_create(user, "web")
+    photo = ImageContent.from_bytes(user.encode() * (_PHOTO_BYTES // len(user)), "image/jpeg")
+    await sm.add_message(session, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+
+
+@pytest.fixture
+async def photo_budget(tmp_path: Path):
+    """A manager that caches many sessions but holds the photos of about two of them."""
+    sm = SessionManager(tmp_path / "test.db", max_cached=100, max_cached_photo_bytes=9_000)
+    await sm.initialize()
+    yield sm
+    await sm.close()
+
+
+async def test_the_cache_drops_the_least_recently_used_session_when_its_photos_pass_the_budget(
+    photo_budget: SessionManager,
+):
+    for user in ("a", "b", "c"):
+        await _with_photo(photo_budget, user)  # 3 x 4,000 characters: over the 9,000
+    assert len(photo_budget._cache) == 3  # precondition: only the count cap (100) applies so far
+
+    await photo_budget.get_or_create("d", "web")
+
+    assert list(photo_budget._cache) == ["web:b", "web:c", "web:d"]
+
+
+async def test_an_evicted_session_reloads_with_its_photo(photo_budget: SessionManager):
+    for user in ("a", "b", "c"):
+        await _with_photo(photo_budget, user)
+    await photo_budget.get_or_create("d", "web")
+    assert "web:a" not in photo_budget._cache
+
+    again = await photo_budget.get_or_create("a", "web")
+
+    assert [len(m.images) for m in again.messages] == [1]
+    assert again.messages[0].images[0].data  # the bytes are back
+
+
+async def test_a_session_in_a_turn_is_not_evicted_for_its_photos(photo_budget: SessionManager):
+    for user in ("a", "b", "c"):
+        await _with_photo(photo_budget, user)
+
+    async with photo_budget._locked("web:a"):  # a turn on a: it is the least recently used, and pinned
+        await photo_budget.get_or_create("d", "web")
+
+        assert sorted(photo_budget._cache) == ["web:a", "web:c", "web:d"]  # b went instead
+
+
+async def test_the_session_being_loaded_stays_even_when_its_own_photos_pass_the_budget(tmp_path: Path):
+    sm = SessionManager(tmp_path / "test.db", max_cached=100, max_cached_photo_bytes=1_000)
+    await sm.initialize()
+    try:
+        await _with_photo(sm, "a")
+        await sm.evict("web:a")
+
+        again = await sm.get_or_create("a", "web")
+
+        assert sm._cache["web:a"] is again
+        assert len(again.messages[0].images) == 1
+    finally:
+        await sm.close()
+
+
+async def test_a_photo_two_messages_show_counts_once(photo_budget: SessionManager):
+    session = await photo_budget.get_or_create("a", "web")
+    photo = ImageContent.from_bytes(b"x" * _PHOTO_BYTES, "image/jpeg")
+    for _ in range(3):
+        await photo_budget.add_message(session, LLMMessage(role=MessageRole.USER, content="again", images=[photo]))
+
+    assert session.photo_bytes() == len(photo.data)

@@ -103,6 +103,8 @@ from the variable name.
   type of its bytes (whatever the channel claimed), a format the models do not take (BMP, TIFF) is
   converted, and one that cannot be read (HEIC, a corrupt or cut-short file) is left out with a note to
   the model. It used to be kept and could make every later request of the session fail.
+  The sessions kept in memory are also limited by the photos they hold (256 MiB of base64 at most):
+  past it the least recently used session is saved and dropped, and loaded again on its next message.
 - `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
   warning at startup and `pincer doctor` reports it. Remove it from `.env`.
 
