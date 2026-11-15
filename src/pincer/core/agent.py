@@ -898,7 +898,7 @@ class Agent:
         history with tool pairs sent with no tools — so the session is cleared instead.
         """
         if _is_context_length_error(error):
-            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and self._shrink_history(session, recovery):
+            if recovery.shrinks < _MAX_SHRINK_ATTEMPTS and self._shrink_history(session, recovery, error):
                 recovery.shrinks += 1
                 return _PairRecovery.RETRY
             return _PairRecovery.RAISE
@@ -915,12 +915,14 @@ class Agent:
         return _PairRecovery.CLEARED
 
     @staticmethod
-    def _shrink_history(session: Session, recovery: _Recovery) -> bool:
+    def _shrink_history(session: Session, recovery: _Recovery, error: LLMError) -> bool:
         """Cut about the oldest half off the history the next request is built from (whole turns, the leading
         summary kept): `recovery` remembers the cut, the session is not touched until it works. Runs inside
-        the turn, which holds the session's lock. False when no earlier turn can be dropped."""
+        the turn, which holds the session's lock. `error` says which wire refused the history, when it is known: what is
+        stored from another wire is not sent there, and does not count towards half. False when no earlier turn can
+        be dropped."""
         view = recovery.view(session)
-        cut = choose_halving_cut(view)
+        cut = choose_halving_cut(view, error.wire or None)
         if not cut:
             logger.warning(
                 "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id

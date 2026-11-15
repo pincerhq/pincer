@@ -219,12 +219,14 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
     memory of what came before it: it stays (it saves nothing in the estimate, the count includes it, the
     caller keeps it, see `kept_summaries`). 0 means there is no earlier turn to drop.
     """
-    per_char = last.tokens_per_char
-    wire = last.wire
-    estimate = per_char * (last.overhead_chars + sum(_chars(m, wire) for m in messages))
+    return _hard_cut(messages, last.tokens_per_char, last.overhead_chars, target_tokens, last.wire)
+
+
+def _hard_cut(messages: list[LLMMessage], per_char: float, overhead_chars: int, target: int, wire: str | None) -> int:
+    estimate = per_char * (overhead_chars + sum(_chars(m, wire) for m in messages))
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
     cut = 0
-    while estimate > target_tokens and cut < floor:
+    while estimate > target and cut < floor:
         if messages[cut].role != MessageRole.SYSTEM:
             estimate -= per_char * _chars(messages[cut], wire)
         cut += 1
@@ -233,12 +235,14 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
     return cut if any(m.role != MessageRole.SYSTEM for m in messages[:cut]) else 0
 
 
-def choose_halving_cut(messages: list[LLMMessage]) -> int:
+def choose_halving_cut(messages: list[LLMMessage], wire: str | None = None) -> int:
     """How many of the oldest messages to drop so about half of the history's characters are left, on the
     rules of `choose_hard_cut`. For a request the endpoint refused as too long: no request succeeded, so
-    there is no measured rate and no known window, and half is the step that is retried until it fits."""
-    total = sum(_chars(m) for m in messages)
-    return choose_hard_cut(messages, LastRequest(total, 1.0, 0), total // 2)
+    there is no measured rate and no known window, and half is the step that is retried until it fits.
+    `wire` is the one the refused request went to (None when it is not known): what is stored from another
+    wire is not sent there, so it is not half of anything."""
+    total = sum(_chars(m, wire) for m in messages)
+    return _hard_cut(messages, 1.0, 0, total // 2, wire)
 
 
 def _follows_a_summary(kept: list[LLMMessage]) -> bool:

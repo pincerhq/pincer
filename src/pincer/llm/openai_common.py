@@ -463,7 +463,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 if attempt == 0 and responses and learn_from_error(self._settings, self._provider_name, e, caps):
                     continue  # the endpoint has no /responses: the same request goes to Chat Completions
                 message = f"{self._provider_name} API error: {e.status_code} {e.message}"
-                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+                wire = wire_tag(self._provider_name, kwargs["model"])
+                raise LLMError(message, retryable=transient_status(e.status_code), wire=wire) from e
             except openai.APIConnectionError as e:
                 raise LLMError(f"{self._provider_name} connection error: {e}") from e
             break
@@ -691,7 +692,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 await self._wait_after_rate_limit(e, started=started, attempt=attempt, attempts=attempts)
             except openai.APIStatusError as e:
                 message = f"{self._provider_name} stream error: {e.status_code} {e.message}"
-                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+                wire = wire_tag(self._provider_name, kwargs["model"])
+                raise LLMError(message, retryable=transient_status(e.status_code), wire=wire) from e
             except openai.APIConnectionError as e:
                 raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
@@ -753,7 +755,10 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             except (openai.APIError, _StreamFailed) as e:
                 rate_limited, retryable, detail = _stream_failure(e)
                 if not rate_limited:
-                    raise LLMError(f"{self._provider_name} stream error: {detail}", retryable=retryable) from e
+                    wire = wire_tag(self._provider_name, kwargs["model"])
+                    raise LLMError(
+                        f"{self._provider_name} stream error: {detail}", retryable=retryable, wire=wire
+                    ) from e
                 await self._wait_after_rate_limit(e, started=started, attempt=attempt, attempts=attempts)
 
         if terminal is None:

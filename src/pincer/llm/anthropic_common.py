@@ -182,7 +182,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                 if attempt == 0 and learn_from_error(self._settings, self._provider_name, e, caps):
                     continue  # the endpoint rejected a beta: the same request goes without it
                 message = f"Anthropic API error: {e.status_code} {e.message}"
-                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+                wire = wire_tag(self._provider_name, kwargs["model"])
+                raise LLMError(message, retryable=transient_status(e.status_code), wire=wire) from e
             except anthropic.APIConnectionError as e:
                 raise LLMError(f"Anthropic connection error: {e}") from e
             break
@@ -239,7 +240,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                     learned = True
                     continue  # the endpoint rejected a beta: the same turn streams without it
                 message = f"Anthropic stream error: {e.status_code} {e.message}"
-                raise LLMError(message, retryable=transient_status(e.status_code)) from e
+                wire = wire_tag(self._provider_name, kwargs["model"])
+                raise LLMError(message, retryable=transient_status(e.status_code), wire=wire) from e
             except anthropic.APIConnectionError as e:
                 raise LLMError(f"Anthropic connection error: {e}") from e
 

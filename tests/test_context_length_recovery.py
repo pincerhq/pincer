@@ -595,3 +595,78 @@ async def test_a_turn_that_cuts_a_joined_history_keeps_the_summaries_of_both_con
     assert session.messages[2].role is MessageRole.USER
     assert session.messages[2].content.startswith("two question ")  # the cut went past the second summary
     assert len(session.messages) < 30
+
+
+# ── "half" means half of what goes on the wire: stored output of another wire is not sent (round 3) ──
+
+
+async def _session_after_a_model_switch(sessions: SessionManager, wire: str, raw: list[dict[str, Any]]) -> Session:
+    """A summary kept from another provider (its stored output is big, and sent to no one else), then 20 pairs."""
+    session = await sessions.get_or_create("user1", "test")
+    summary = LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\nSUM", raw=raw, wire=wire)
+    await sessions.add_message(session, summary)
+    for pair in range(_PAIRS):
+        await sessions.add_message(session, LLMMessage(role=MessageRole.USER, content=f"question {pair} " + "q" * 380))
+        await sessions.add_message(
+            session, LLMMessage(role=MessageRole.ASSISTANT, content=f"answer {pair} " + "a" * 380)
+        )
+    return session
+
+
+_BIG_WINDOW = [{"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 400_000}]
+_BIG_BLOCK = [{"type": "compaction", "content": "S" * 400_000, "signature": "SIG"}]
+
+
+def _about_half_went(session: Session, before: int) -> None:
+    kept = len(session.messages) - 2  # without the new question and the reply
+    assert before * 0.4 < kept < before * 0.6, f"{kept} of {before} kept"
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_the_halving_on_an_anthropic_endpoint_ignores_the_window_of_another_provider(
+    settings, session_manager, cost_tracker, registry, streaming
+):
+    session = await _session_after_a_model_switch(session_manager, "openai:gpt-6", _BIG_WINDOW)
+    before = len(session.messages)
+    async with ScriptedAnthropic(settings, [Reject(400, _TOO_LONG), _OK]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+        reply = await _turn(agent, streaming=streaming)
+
+    assert reply == "Done."
+    assert len(llm.requests) == 2
+    _about_half_went(session, before)  # the 400,000 characters of the window were never going out
+
+
+@pytest.mark.parametrize("path", ["complete", "stream responses", "stream chat"])
+async def test_the_halving_on_an_openai_endpoint_ignores_the_block_of_another_provider(
+    settings, session_manager, cost_tracker, registry, path
+):
+    from openai_wire import ScriptedOpenAI, Status, message_item
+    from pydantic import SecretStr
+
+    openai_settings = settings.model_copy(
+        update={
+            "default_provider": "openai",
+            "openai_model": "gpt-5.2",
+            "openai_api_key": SecretStr("sk-test"),
+            "reasoning_effort": "",
+            "thinking": "",
+            **({"responses_api_providers": []} if path == "stream chat" else {}),
+        }
+    )
+    session = await _session_after_a_model_switch(session_manager, "anthropic:claude-haiku-5-5", _BIG_BLOCK)
+    before = len(session.messages)
+    too_long = Status(400, {"error": {"message": "context_length_exceeded", "type": "invalid_request_error"}})
+    llm = ScriptedOpenAI(openai_settings, [too_long, "Done." if path == "stream chat" else [message_item("Done.")]])
+    agent = Agent(openai_settings, llm.provider, session_manager, cost_tracker, registry)
+
+    reply = await _turn(agent, streaming=path != "complete")
+
+    assert reply == "Done."
+    assert len(llm.requests) == 2
+    _about_half_went(session, before)
+
+
+def test_an_llm_error_says_which_wire_it_came_from_when_the_provider_knows():
+    assert LLMError("x").wire == ""
+    assert LLMError("x", wire="anthropic:claude-haiku-5-5").wire == "anthropic:claude-haiku-5-5"
