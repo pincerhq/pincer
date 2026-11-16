@@ -103,7 +103,7 @@ teams = [
     "microsoft-teams-apps[graph]>=2.0.13.4",
 ]
 local = [
-    "pyngrok>=7.0",
+    "pyngrok>=9.0",
 ]
 telemetry = [
     # Real location declared in [tool.uv.sources]; kept as a bare name here so the
