@@ -25,6 +25,7 @@ def mock_engine():
     engine.on_speech_input = AsyncMock()
     engine.interrupt_speech = AsyncMock()
     engine.end_call = AsyncMock()
+    engine.finish_abandoned_transfer = AsyncMock(return_value=False)
     return engine
 
 

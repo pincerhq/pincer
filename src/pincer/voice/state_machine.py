@@ -438,6 +438,22 @@ class CallStateMachine:
         _trace_phase(self._state.call_sid, current, phase, reason, forced=True)
         logger.info("State forced terminal [%s]: %s -> %s (%s)", self._state.call_sid, current, phase, reason)
 
+    def force_phase(self, to_phase: CallPhase, reason: str = "forced") -> None:
+        """Move to ``to_phase`` bypassing the transition table, for a phase the
+        call is already in on the provider's side (a transfer that went live
+        late, whatever phase the conversation had reached). Recorded in the
+        transition history like any jump. No-op once the machine is terminal."""
+        if self.is_terminal:
+            return
+        current = self._state.phase
+        self._state.transitions.append(PhaseTransition(from_phase=current, to_phase=to_phase, reason=reason))
+        self._state.phase = to_phase
+        self._state.phase_entered_at = time.monotonic()
+        if to_phase != CallPhase.EXECUTE:
+            self._state.pending_action = None
+        _trace_phase(self._state.call_sid, current, to_phase, reason, forced=True)
+        logger.info("State forced [%s]: %s -> %s (%s)", self._state.call_sid, current, to_phase, reason)
+
 
 # English view of the localized phase instructions (canonical text in prompts/en.py)
 _PHASE_INSTRUCTIONS: dict[CallPhase, str] = {

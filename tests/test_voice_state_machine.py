@@ -178,6 +178,30 @@ class TestUntimedPhases:
         sm._state.phase_entered_at = time.monotonic() - 100_000
         assert sm.check_timeout() is False
 
+    @pytest.mark.parametrize("phase", [CallPhase.CONFIRM, CallPhase.VERIFY, CallPhase.EXECUTE])
+    def test_force_phase_reaches_a_phase_the_table_has_no_edge_to(self, phase):
+        """A transfer applied late from any phase: forced past the table,
+        recorded as a jump, and its clock starts afresh."""
+        assert CallPhase.TRANSFERRING not in VALID_TRANSITIONS[phase]
+        sm = CallStateMachine("CA123")
+        sm._state.phase = phase
+        sm._state.phase_entered_at = time.monotonic() - 1_000
+        sm.set_pending_action("book", {}, "Book it")
+        sm.force_phase(CallPhase.TRANSFERRING, "transfer_applied_late")
+        assert sm.phase == CallPhase.TRANSFERRING
+        last = sm.state.transitions[-1]
+        assert (last.from_phase, last.to_phase, last.reason) == (phase, CallPhase.TRANSFERRING, "transfer_applied_late")
+        assert time.monotonic() - sm.state.phase_entered_at < 5
+        assert sm.state.pending_action is None
+
+    def test_force_phase_leaves_a_terminal_machine_alone(self):
+        sm = CallStateMachine("CA123")
+        sm.force_terminal(CallPhase.COMPLETED, "done")
+        count = len(sm.state.transitions)
+        sm.force_phase(CallPhase.TRANSFERRING, "transfer_applied_late")
+        assert sm.phase == CallPhase.COMPLETED
+        assert len(sm.state.transitions) == count
+
     @pytest.mark.parametrize(("phase", "timeout"), sorted(PHASE_TIMEOUTS.items()))
     def test_timed_phases_unchanged(self, phase, timeout):
         sm = CallStateMachine("CA123")

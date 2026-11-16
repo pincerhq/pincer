@@ -204,10 +204,12 @@ class VoiceChannel(BaseChannel):
         ``applied_late``: a redirect given up as not applied went live after all."""
         if outcome == "applied_late":
             # The redirect went live after all: back to the untimed phase, or
-            # the message-taking timeout would hang up a bridged call.
+            # the phase timeouts would hang up a bridged call. Forced: the
+            # conversation may have moved on (CONFIRM, VERIFY, EXECUTE) to a
+            # phase the transition table has no TRANSFERRING exit from.
             sm = self._state_machines.get(call_sid)
-            if sm is not None and sm.phase == CallPhase.TAKE_MESSAGE:
-                sm.transition(CallPhase.TRANSFERRING, "transfer_applied_late")
+            if sm is not None and not sm.is_terminal and sm.phase != CallPhase.TRANSFERRING:
+                sm.force_phase(CallPhase.TRANSFERRING, "transfer_applied_late")
             return
         session = self._reception_sessions.get(call_sid)
         if session is None:
