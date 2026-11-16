@@ -359,8 +359,8 @@ async def sandbox_streams(sandbox: MCPSandbox) -> Any:
     stdout_pipe = proc.stdout
 
     # Streams carry SessionMessage (the MCP SDK's transport wrapper type).
-    read_send, read_receive = anyio.create_memory_object_stream(max_buffer_size=100)
-    write_send, write_receive = anyio.create_memory_object_stream(max_buffer_size=100)
+    read_send, read_receive = anyio.create_memory_object_stream[SessionMessage | Exception](max_buffer_size=100)
+    write_send, write_receive = anyio.create_memory_object_stream[SessionMessage](max_buffer_size=100)
 
     async def _stdout_reader() -> None:
         """Read newline-delimited JSON from subprocess stdout, wrap as SessionMessage."""
