@@ -750,6 +750,39 @@ async def test_a_real_answer_in_another_session_completes(
     assert "de" in profiles[0].content
 
 
+@_PATHS
+async def test_an_answer_that_also_asks_for_a_task_completes(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """An answer bundled with a request (a stub of what the prompt elicits for
+    it) still completes onboarding with that profile; no attempt is counted."""
+    llm = _scripted_llm(
+        "Hello!",
+        "Here is a draft.",
+        '{"answers_question": true, "name": "Anna", "use_case": "marketing", "language": null}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await _reply(agent, path, "user-m", "web", "Hi!", session_key=conversation_key("user-m", "web", "a"))
+    await _reply(
+        agent,
+        path,
+        "user-m",
+        "web",
+        "I'm Anna, I do marketing. Can you draft an email to my landlord?",
+        session_key=conversation_key("user-m", "web", "b"),
+    )
+
+    record = await _record(tmp_path, "user-m", "web")
+    assert record is not None
+    assert record.completed_at is not None
+    assert record.attempts == 0
+    profiles = await memory_store.list_memories(user_id="user-m", category="profile")
+    assert len(profiles) == 1
+    assert "Anna" in profiles[0].content
+    assert "marketing" in profiles[0].content
+
+
 async def test_an_answer_with_no_fields_is_an_empty_reply(
     tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
@@ -767,6 +800,13 @@ async def test_an_answer_with_no_fields_is_an_empty_reply(
 def test_the_extraction_prompt_asks_for_a_judgement_and_never_infers_language():
     assert '"answers_question"' in EXTRACTION_PROMPT_TEMPLATE
     assert "inferable from the language they wrote in" not in EXTRACTION_PROMPT_TEMPLATE
+
+
+def test_the_extraction_prompt_counts_an_answer_bundled_with_a_request():
+    prompt = " ".join(EXTRACTION_PROMPT_TEMPLATE.format(reply="x").split())
+    assert "even if it also contains a task or request" in prompt
+    assert "I'm Anna, I do marketing. Can you draft an email to my landlord?" in prompt
+    assert '{"answers_question": true, "name": "Anna", "use_case": "marketing", "language": null}' in prompt
 
 
 @_PATHS

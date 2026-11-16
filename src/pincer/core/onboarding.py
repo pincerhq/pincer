@@ -69,9 +69,10 @@ User message:
 \"\"\"{reply}\"\"\"
 
 Return a JSON object with these keys:
-- "answers_question": true if the message answers the question (gives their name,
-              what they want the assistant for in general, or a preferred language);
-              false if it is a task, a request or anything else. A request such as
+- "answers_question": true if the message gives their name, what they want the
+              assistant for in general, or a preferred language, even if it also
+              contains a task or request. False only if it gives none of these: a task
+              or request alone, small talk or anything else. A request such as
               "Summarize this contract" is false.
 - "name":     the user's name, as a short string. null if not stated.
 - "use_case": what they say they want to use the assistant for in general, as a short
@@ -79,6 +80,9 @@ Return a JSON object with these keys:
 - "language": ISO 639-1 code of a language the user SAYS they prefer ("German please").
               null if they do not say. Never infer it from the language the message is
               written in.
+
+Example: "I'm Anna, I do marketing. Can you draft an email to my landlord?" ->
+{{"answers_question": true, "name": "Anna", "use_case": "marketing", "language": null}}
 
 Output ONLY the JSON object. No prose, no markdown fences.
 """
