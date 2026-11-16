@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlmodel import select
 
 from pincer.core.session import SessionManager
 from pincer.db.engine import get_engine
@@ -18,6 +19,7 @@ from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage
+from pincer.repositories import sessions as sessions_repository
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
@@ -377,17 +379,83 @@ async def test_merging_joins_main_and_nested_collisions_in_one_rename(url):
     assert json.loads(await _messages(url, nested_target)) == ["nested source", "nested target"]
 
 
-async def test_rewrite_session_ids_counts_merges_and_moves(url):
-    """A merge updates the target and removes the source (2); a move is 1."""
+async def test_move_user_counts_merges_moves_and_reassignments(url):
+    """A merge updates the target and removes the source (2); a move is 1, and
+    reassigning the moved row's `user_id` is 1 more."""
     await _store_session(url, "whatsapp:usr_hash", user_id="usr_hash", at=100.0, messages='["a"]')
     await _store_session(url, "whatsapp:alice", user_id="alice", at=200.0, messages='["b"]')
     await _store_session(url, "telegram:usr_hash", user_id="usr_hash", at=100.0)
 
     async with session_scope(url) as session:
-        changed = await SessionRepository(session).rewrite_session_ids("usr_hash", "alice")
+        changed = await SessionRepository(session).move_user("usr_hash", "alice")
 
-    assert changed == 3
+    assert changed == 4
     assert await _session_ids(url) == {"whatsapp:alice", "telegram:alice"}
+    assert await _session_owners(url) == {"whatsapp:alice": "alice", "telegram:alice": "alice"}
+
+
+async def _session_owners(url: str) -> dict[str, str]:
+    async with session_scope(url) as session:
+        rows = await session.exec(select(ChatSession.session_id, ChatSession.user_id))
+        return dict(rows.all())
+
+
+async def test_renaming_leaves_another_user_s_sessions_whose_id_ends_in_it(url):
+    """#275: `teams:abc` is another user's id, so `web:teams:abc` is theirs,
+    even though its key ends in `:abc`. Renaming `abc` leaves it alone."""
+    service = IdentityService(url)
+    await service.create_identity("abc", channel="web", channel_user_id="12345")
+    await _store_session(url, "web:abc", user_id="abc", channel="web")
+    await _store_session(url, f"web:abc:{_CONVERSATION}", user_id="abc", channel="web")
+    await _store_session(url, "web:teams:abc", user_id="teams:abc", channel="web")
+    await _store_session(url, f"web:teams:abc:{_CONVERSATION}", user_id="teams:abc", channel="web")
+
+    await service.rename_identity("abc", "x")
+
+    assert await _session_owners(url) == {
+        "web:x": "x",
+        f"web:x:{_CONVERSATION}": "x",
+        "web:teams:abc": "teams:abc",
+        f"web:teams:abc:{_CONVERSATION}": "teams:abc",
+    }
+
+
+async def test_merging_into_an_id_with_a_colon_does_not_rekey_the_target_s_rows(url):
+    """Merging `abc` into `teams:abc`: the target's own `web:teams:abc` ends in
+    `:abc` too, but it is the merge target, not a row to move again."""
+    service = IdentityService(url)
+    await service.create_identity("abc", channel="web", channel_user_id="12345")
+    await service.create_identity("teams:abc", channel="teams", channel_user_id="aad-1")
+    await _store_session(url, "web:abc", user_id="abc", channel="web", at=100.0, messages='["source"]')
+    await _store_session(url, "web:teams:abc", user_id="teams:abc", channel="web", at=200.0, messages='["target"]')
+
+    await service.rename_identity("abc", "teams:abc")
+
+    assert await _session_owners(url) == {"web:teams:abc": "teams:abc"}
+    assert json.loads(await _messages(url, "web:teams:abc")) == ["source", "target"]
+
+
+async def test_a_rename_that_fails_while_moving_sessions_changes_nothing(url, monkeypatch):
+    """The session move runs in the rename's transaction: a failure part-way
+    rolls back the sessions, their owners and the profile together."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345", display_name="Alice")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    await _store_session(url, "telegram:usr_hash", user_id="usr_hash", at=100.0)
+    await _store_session(url, "web:usr_hash", user_id="usr_hash", channel="web", at=100.0)
+    await _store_session(url, "web:alice", user_id="alice", channel="web", at=200.0)
+    before = await _session_owners(url)
+
+    def collide(*_args, **_kwargs):
+        raise RuntimeError("merge failed")
+
+    monkeypatch.setattr(sessions_repository, "_merged_session", collide)
+    with pytest.raises(RuntimeError, match="merge failed"):
+        await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_owners(url) == before
+    assert (await service.profile("usr_hash"))["display_name"] == "Alice"
+    assert await service.user_for_channel("web", "12345") == "usr_hash"
 
 
 async def test_renaming_moves_only_keys_ending_in_the_identity(url):
