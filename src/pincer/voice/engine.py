@@ -94,6 +94,16 @@ CLAIMED_SID_KEY = "claimed_sid"
 #: cut before its first audio) is a deliberate cancellation. "" after a send
 #: that delivered. A call the engine does not know has no state to carry it.
 SPEECH_FAILURE_KEY = "last_speech_failure"
+#: Metadata key (Media Streams): the playout id of the call's latest
+#: `send_speech`, set as it starts so the channel can read it whether the send
+#: returned or was cancelled. Each id is also the name of the Twilio `mark`
+#: sent after the utterance's last audio.
+SPEECH_ID_KEY = "last_speech_id"
+#: Metadata key (Media Streams): `{playout id: "interrupted" | "cancelled"}`
+#: for utterances a `clear` flushed before Twilio echoed their mark — the one
+#: playing was cut off, the ones queued behind it were never heard. Filled at
+#: each clear; the channel applies it to the transcript.
+PLAYOUT_VERDICTS_KEY = "playout_verdicts"
 
 _ULAW_NS_PER_BYTE = 1_000_000_000 // MULAW_BYTES_PER_SECOND
 
@@ -221,6 +231,8 @@ class _SpeechProgress:
     epoch: int = 0
     #: A barge-in stopped the utterance before all of it was sent.
     cut: bool = False
+    #: The utterance's playout id (Media Streams; see SPEECH_ID_KEY).
+    playout_id: str = ""
 
 
 class VoiceEngine(ABC):
@@ -1411,7 +1423,12 @@ class MediaStreamEngine(VoiceEngine):
     async def setup_media_stream_stt(self, call_sid: str, stream_sid: str) -> None:
         """Create STT stream and transcript consumer when Media Streams WebSocket starts."""
         state = self._active_calls.get(call_sid)
-        if not state or not self._stt_provider:
+        if not state:
+            return
+        # A new stream never echoes the old one's marks: what was pending there
+        # keeps the state it was logged with.
+        state.metadata["playout_pending"] = []
+        if not self._stt_provider:
             return
         # A stream socket that took over the call starts STT again: close the
         # previous stream and its consumer, or they run until the provider
@@ -1713,7 +1730,42 @@ class MediaStreamEngine(VoiceEngine):
             raw = mulaw8k_to_pcm16k(raw)
         await stt_stream.send_audio(raw)
 
-    async def _clear_twilio_buffer(self, state: CallState) -> None:
+    @staticmethod
+    def _settle_playout(state: CallState, *, keep: str = "") -> None:
+        """Judge the utterances a `clear` is about to flush.
+
+        Twilio plays marks in order and echoes each once played, so the ids
+        still pending are exactly the utterances not yet heard in full: the
+        first was playing (interrupted), the rest were only buffered
+        (cancelled). Twilio echoes every pending mark on `clear`, so those
+        echoes must not count as played — the list is emptied here, and
+        `on_playout_mark` ignores names it no longer holds. `keep` stays
+        pending unjudged: the retry path re-sends that utterance from its start.
+        """
+        pending: list[str] = state.metadata.get("playout_pending") or []
+        flushed = [playout_id for playout_id in pending if playout_id != keep]
+        if flushed:
+            verdicts: dict[str, str] = state.metadata.setdefault(PLAYOUT_VERDICTS_KEY, {})
+            for index, playout_id in enumerate(pending):
+                if playout_id != keep:
+                    verdicts[playout_id] = "interrupted" if index == 0 else "cancelled"
+        state.metadata["playout_pending"] = [keep] if keep and keep in pending else []
+
+    def on_playout_mark(self, call_sid: str, name: str) -> None:
+        """Twilio echoed a `mark`: playout reached the end of that utterance.
+
+        Marks play in order, so every utterance queued before it has played
+        too. A name not pending is ignored — the flush echoes Twilio sends
+        after a `clear`, or a mark from a replaced stream.
+        """
+        state = self._active_calls.get(call_sid)
+        if state is None:
+            return
+        pending: list[str] = state.metadata.get("playout_pending") or []
+        if name in pending:
+            del pending[: pending.index(name) + 1]
+
+    async def _clear_twilio_buffer(self, state: CallState, *, keep: str = "") -> None:
         """Drop whatever Twilio still has buffered for playout.
 
         Note this flushes the WHOLE outbound buffer, not just the tail — so it
@@ -1722,6 +1774,7 @@ class MediaStreamEngine(VoiceEngine):
         ws = state.metadata.get("websocket")
         if not ws:
             return
+        self._settle_playout(state, keep=keep)
         msg = json.dumps({"event": "clear", "streamSid": state.metadata.get("stream_sid", "")})
         await ws.send_text(msg)
 
@@ -1759,7 +1812,11 @@ class MediaStreamEngine(VoiceEngine):
         if not segments:
             state.metadata[SPEECH_FAILURE_KEY] = "empty"
             return False
-        progress = _SpeechProgress(epoch=int(state.metadata.get("speech_epoch", 0)))
+        seq = int(state.metadata.get("speech_seq", 0)) + 1
+        state.metadata["speech_seq"] = seq
+        playout_id = f"s{seq}"
+        state.metadata[SPEECH_ID_KEY] = playout_id
+        progress = _SpeechProgress(epoch=int(state.metadata.get("speech_epoch", 0)), playout_id=playout_id)
 
         try:
             delivered = await self._synthesize_with_retry(call_sid, state, segments, progress)
@@ -1809,7 +1866,7 @@ class MediaStreamEngine(VoiceEngine):
                 # queued, which would silently swallow sentences the caller has
                 # not heard yet. Losing content is worse than one stutter.
                 with contextlib.suppress(Exception):
-                    await self._clear_twilio_buffer(state)
+                    await self._clear_twilio_buffer(state, keep=progress.playout_id)
             logger.warning(
                 "TTS synthesis failed [%s] after %d/%d segment(s) — resuming utterance",
                 call_sid,
@@ -1939,6 +1996,10 @@ class MediaStreamEngine(VoiceEngine):
                                     "media": {"payload": payload},
                                 }
                             )
+                            if not progress.wrote_audio:
+                                # Queued before the write, so a clear that
+                                # lands while it is in flight still judges it.
+                                state.metadata.setdefault("playout_pending", []).append(progress.playout_id)
                             await ws.send_text(msg)
                             if turn is not None and not progress.wrote_audio:
                                 # Written to the provider socket. SENT, not heard: Twilio
@@ -1986,7 +2047,23 @@ class MediaStreamEngine(VoiceEngine):
 
         if turn is not None:
             turn.stamp(EventName.TTS_DONE, segments=len(segments))
+        await self._send_playout_mark(call_sid, state, ws, stream_sid, progress.playout_id)
         return progress.wrote_audio
+
+    async def _send_playout_mark(
+        self, call_sid: str, state: CallState, ws: Any, stream_sid: str, playout_id: str
+    ) -> None:
+        """Follow an utterance's last audio with a `mark` Twilio echoes once it
+        has played. Only for one still pending: no audio, or already judged by
+        a clear, means nothing to confirm. A failed send leaves it pending —
+        the safe side, it can then only be judged not heard in full."""
+        if playout_id not in (state.metadata.get("playout_pending") or []):
+            return
+        msg = json.dumps({"event": "mark", "streamSid": stream_sid, "mark": {"name": playout_id}})
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            logger.debug("Playout mark %s not sent [%s]", playout_id, call_sid, exc_info=True)
 
     async def interrupt_speech(self, call_sid: str, *, by_caller: bool = True) -> None:
         state = self._active_calls.get(call_sid)
