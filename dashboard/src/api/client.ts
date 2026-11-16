@@ -174,10 +174,10 @@ function bearerOf(request: Request): string | null {
 
 export function createApiClient() {
   return ky.create({
-    prefixUrl: getBaseUrl(),
+    prefix: getBaseUrl(),
     hooks: {
       beforeRequest: [
-        (request) => {
+        ({ request }) => {
           const token = getToken()
           if (token) {
             request.headers.set("Authorization", `Bearer ${token}`)
@@ -185,7 +185,7 @@ export function createApiClient() {
         },
       ],
       afterResponse: [
-        async (request, _options, response) => {
+        async ({ request, response }) => {
           if (response.status !== 401) return
           if (AUTH_PATHS.some((path) => new URL(request.url).pathname.endsWith(path))) return
           if (await endSessionIfSignInNowRequired(response)) return
@@ -232,17 +232,15 @@ export function resetApiClient() {
  */
 export async function errorDetail(err: unknown, fallback: string): Promise<string> {
   if (!(err instanceof HTTPError)) return fallback
-  try {
-    const body = (await err.response.clone().json()) as { detail?: unknown }
-    if (typeof body.detail === "string" && body.detail) return body.detail
-    if (Array.isArray(body.detail)) {
-      const messages = body.detail
-        .map((item) => (item && typeof item === "object" ? (item as { msg?: unknown }).msg : null))
-        .filter((msg): msg is string => typeof msg === "string")
-      if (messages.length) return messages.join("; ")
-    }
-  } catch {
-    /* not JSON */
+  // ky 2 consumes the error body itself and exposes the parsed JSON as `data`.
+  if (typeof err.data !== "object" || err.data === null) return fallback
+  const { detail } = err.data as { detail?: unknown }
+  if (typeof detail === "string" && detail) return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item && typeof item === "object" ? (item as { msg?: unknown }).msg : null))
+      .filter((msg): msg is string => typeof msg === "string")
+    if (messages.length) return messages.join("; ")
   }
   return fallback
 }
