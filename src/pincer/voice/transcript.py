@@ -210,14 +210,17 @@ class TranscriptLogger:
                 marked += 1
         return marked
 
-    def apply_playout_verdicts(self, verdicts: Mapping[str, str]) -> int:
+    def apply_playout_verdicts(self, verdicts: Mapping[str, tuple[str, str]]) -> int:
         """Re-mark agent lines a Media Streams `clear` flushed before they played.
 
-        `verdicts` maps the engine's playout ids to INTERRUPTED (playing when
-        the clear landed) or CANCELLED (buffered, never heard). Lines are
-        matched by id, wherever they sit in the transcript, and only ever
-        downgraded: a line already INTERRUPTED may become CANCELLED, none goes
-        back up, and lines already marked as not played keep their state.
+        `verdicts` maps the engine's playout ids to `(state, reason)`: state
+        INTERRUPTED (playing when the clear landed) or CANCELLED (buffered,
+        never heard), reason the clear's cause (`barge_in`, `call_ended`,
+        `tts_retry`). Lines are matched by id, wherever they sit in the
+        transcript, and only ever downgraded: a line already INTERRUPTED may
+        become CANCELLED, none goes back up, and lines already marked as not
+        played keep their state. A line that already has a delivery reason
+        keeps it: it was set as the send was cut, by the cause the channel saw.
         Idempotent, so it is safe to apply the same verdicts more than once.
         Returns how many lines were re-marked.
         """
@@ -228,12 +231,14 @@ class TranscriptLogger:
             if entry.speaker != Speaker.AGENT or not entry.playout_id:
                 continue
             verdict = verdicts.get(entry.playout_id)
-            if verdict not in (INTERRUPTED, CANCELLED) or entry.state in NOT_PLAYED_STATES:
+            if verdict is None:
                 continue
-            if entry.state == verdict:
+            state, reason = verdict
+            if state not in (INTERRUPTED, CANCELLED) or entry.state in NOT_PLAYED_STATES or entry.state == state:
                 continue
-            entry.state = verdict
-            entry.delivery_reason = "barge_in"
+            entry.state = state
+            if not entry.delivery_reason:
+                entry.delivery_reason = reason
             marked += 1
         return marked
 
@@ -322,6 +327,13 @@ class TranscriptLogger:
         successful CallAction, and logs a WARNING for each. An empty list means
         the transcript is honest (or made no completion claims). Lines the
         caller never heard (NOT_PLAYED_STATES) made no claim to them.
+
+        On Media Streams, CANCELLED can also come from a `clear`
+        (`apply_playout_verdicts`). Only the first utterance still pending at
+        the clear is judged INTERRUPTED, and that one stays in this check. So a
+        mark echo still in transit when the clear goes out cannot drop a line
+        that played in full; it can only drop one that had started playing
+        within that round trip.
         """
         claims = [
             entry.text

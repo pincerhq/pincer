@@ -566,7 +566,7 @@ class TestPlayoutVerdicts:
     def test_flushed_lines_are_re_marked(self):
         t = self._reply(("s1", "intent_capture"), ("s2", "intent_capture"), ("s3", "intent_capture"))
 
-        assert t.apply_playout_verdicts({"s2": "interrupted", "s3": "cancelled"}) == 2
+        assert t.apply_playout_verdicts({"s2": ("interrupted", "barge_in"), "s3": ("cancelled", "barge_in")}) == 2
 
         states = [(e.state, e.delivery_reason) for e in t.entries if e.speaker == Speaker.AGENT]
         assert states == [("intent_capture", ""), ("interrupted", "barge_in"), ("cancelled", "barge_in")]
@@ -574,8 +574,13 @@ class TestPlayoutVerdicts:
     def test_only_downgrades(self):
         t = self._reply(("s1", "interrupted"), ("s2", "cancelled"), ("s3", "undelivered"), ("s4", "interrupted"))
 
-        assert t.apply_playout_verdicts({"s1": "cancelled", "s2": "interrupted", "s3": "interrupted"}) == 1
-        assert t.apply_playout_verdicts({"s4": "interrupted"}) == 0
+        assert (
+            t.apply_playout_verdicts(
+                {"s1": ("cancelled", "barge_in"), "s2": ("interrupted", "barge_in"), "s3": ("interrupted", "barge_in")}
+            )
+            == 1
+        )
+        assert t.apply_playout_verdicts({"s4": ("interrupted", "barge_in")}) == 0
 
         assert [e.state for e in t.entries if e.speaker == Speaker.AGENT] == [
             "cancelled",
@@ -586,15 +591,32 @@ class TestPlayoutVerdicts:
 
     def test_is_idempotent(self):
         t = self._reply(("s1", ""))
-        assert t.apply_playout_verdicts({"s1": "interrupted"}) == 1
-        assert t.apply_playout_verdicts({"s1": "interrupted"}) == 0
+        assert t.apply_playout_verdicts({"s1": ("interrupted", "barge_in")}) == 1
+        assert t.apply_playout_verdicts({"s1": ("interrupted", "barge_in")}) == 0
 
     def test_lines_without_an_id_are_left_alone(self):
         t = self._reply(("", "intent_capture"))
         t.log_utterance(Speaker.CALLER, "s1")  # a caller line is never judged
 
-        assert t.apply_playout_verdicts({"": "cancelled", "s1": "cancelled"}) == 0
+        assert t.apply_playout_verdicts({"": ("cancelled", "barge_in"), "s1": ("cancelled", "barge_in")}) == 0
         assert [e.state for e in t.entries] == ["", "intent_capture", ""]
+
+    def test_the_verdict_carries_the_clears_reason(self):
+        t = self._reply(("s1", "intent_capture"), ("s2", "intent_capture"))
+
+        t.apply_playout_verdicts({"s1": ("interrupted", "call_ended"), "s2": ("cancelled", "tts_retry")})
+
+        states = [(e.state, e.delivery_reason) for e in t.entries if e.speaker == Speaker.AGENT]
+        assert states == [("interrupted", "call_ended"), ("cancelled", "tts_retry")]
+
+    def test_a_reason_set_as_the_send_was_cut_is_kept(self):
+        # Shutdown: `_say` logs the cut line with `call_ended`; a later
+        # verdict downgrades its state but must not relabel it a barge-in.
+        t = TranscriptLogger("CA1")
+        t.log_utterance(Speaker.AGENT, "Satz.", state="interrupted", delivery_reason="call_ended", playout_id="s1")
+
+        assert t.apply_playout_verdicts({"s1": ("cancelled", "barge_in")}) == 1
+        assert [(e.state, e.delivery_reason) for e in t.entries] == [("cancelled", "call_ended")]
 
 
 # ── VoiceChannel hardening ────────────────────────────────────────────────────
