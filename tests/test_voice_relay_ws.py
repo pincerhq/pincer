@@ -474,6 +474,24 @@ class TestRelayWebSocketAuth:
         assert seen == [media_format]
         assert engine.media_connected == ["CA_fmt"]
 
+    def test_mark_echoes_reach_the_engine(self):
+        """Twilio echoes our playout marks; the engine settles playout on them."""
+        marks: list[tuple[str, str]] = []
+
+        class StreamEngine(FakeEngine):
+            def on_playout_mark(self, call_sid: str, name: str) -> None:
+                marks.append((call_sid, name))
+
+        engine = StreamEngine()
+        _register(engine, "CA_mark")
+        client = _app_with_engine(engine)
+        with client.websocket_connect(_signed("/api/apps/twilio/stream/CA_mark", WS_STREAM_PATH)) as ws:
+            ws.send_text(json.dumps({"event": "mark", "streamSid": "MZ1", "mark": {"name": "s1"}}))
+            ws.send_text(json.dumps({"event": "mark", "streamSid": "MZ1"}))
+            ws.send_text(json.dumps({"event": "stop"}))
+
+        assert marks == [("CA_mark", "s1"), ("CA_mark", "")]
+
     def test_auth_disabled_allows_unsigned_connect(self):
         """Dev escape hatch still works — and doctor reports it CRITICAL."""
         engine = FakeEngine()

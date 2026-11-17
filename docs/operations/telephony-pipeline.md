@@ -267,6 +267,19 @@ deliberate and never feed `no_audio`. The reason is stored per line in
 `pincer_call_transcripts.delivery_reason`; the values are listed in the
 [runbook](runbook.md#silent-agent).
 
+A line can also be judged after it was sent, because audio is written to the
+provider faster than it plays. ConversationRelay's `utteranceUntilInterrupt`
+re-marks the reply (`mark_interrupted`). On Media Streams, every utterance
+written in full is followed by a Twilio `mark`, and Twilio echoes it back
+once that audio has played. A `clear` settles the utterances whose marks had
+not echoed yet: the first was playing (`interrupted`) and the rest never played
+(`cancelled`). Each verdict carries the clear's cause as its `delivery_reason`:
+`barge_in`, `call_ended` (our own cut, e.g. shutdown) or `tts_retry`
+(`PLAYOUT_VERDICTS_KEY`). The channel applies these verdicts after a barge-in,
+as a cancelled line is logged, and at call end. It only ever downgrades a
+line, and a line that already has a reason keeps it. The truthfulness check
+skips `undelivered` and `cancelled` lines.
+
 A goodbye only counts as said when it played: `last_agent_said_farewell`
 skips `undelivered` and `cancelled` lines, and an `[END_CALL]` or caller-goodbye
 hangup is not scheduled when the farewell itself failed to play.

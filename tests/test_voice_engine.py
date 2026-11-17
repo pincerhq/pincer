@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -125,7 +126,8 @@ class TestMediaStreamEngine:
         state.metadata["websocket"] = AsyncMock()
         engine._tts_provider = _FakeTTS()
         assert await engine.send_speech("CA456", "Hello!") is True
-        state.metadata["websocket"].send_text.assert_called_once()
+        sent = [json.loads(c.args[0])["event"] for c in state.metadata["websocket"].send_text.call_args_list]
+        assert sent == ["media", "mark"]  # the audio, then the playout mark Twilio echoes
 
     async def test_send_speech_without_websocket_returns_false(self, engine):
         # Honest transcripts: no socket means the caller heard nothing, so

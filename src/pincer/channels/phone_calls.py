@@ -28,10 +28,12 @@ from pincer.voice.engine import (
     END_CODE_KEY,
     ENDED_BY_DASHBOARD,
     ENDED_BY_KEY,
+    PLAYOUT_VERDICTS_KEY,
     PROVIDER_STATUS_KEY,
     SPEECH_FAILURE_KEY,
     UTTERANCE_MARKERS,
     CallDirection,
+    current_playout_id,
     set_end_cause,
 )
 from pincer.voice.metrics import VoiceMetricsRegistry
@@ -1199,6 +1201,7 @@ class VoiceChannel(BaseChannel):
         if self._engine:
             with contextlib.suppress(Exception):
                 await self._engine.interrupt_speech(call_sid)
+        self._apply_playout_verdicts(call_sid)
         logger.info("Turn cancelled by barge-in [%s]", call_sid)
 
     async def _on_barge_in(self, call_sid: str, heard: str | None = None) -> None:
@@ -1224,6 +1227,10 @@ class VoiceChannel(BaseChannel):
         if self._engine:
             with contextlib.suppress(Exception):
                 await self._engine.interrupt_speech(call_sid)
+        # Media Streams: the clear judged which queued lines never played. The
+        # cancelled turn may unwind before or after this; `_say` applies the
+        # same verdicts as it does, so either order ends the same.
+        self._apply_playout_verdicts(call_sid)
         logger.info("Barge-in [%s]%s", call_sid, " — turn cancelled" if cancelled else "")
 
     def _turn_done(self, call_sid: str, trace: Any, turn: asyncio.Task[None]) -> None:
@@ -1822,6 +1829,7 @@ class VoiceChannel(BaseChannel):
         try:
             delivered = await self._engine.send_speech(call_sid, text, last=last)
         except asyncio.CancelledError:
+            playout_id = current_playout_id()
             if text and transcript is not None and self._transcripts.get(call_sid) is transcript:
                 interrupted = self._interrupted_turns.get(call_sid)
                 if interrupted is not None and interrupted[0] is asyncio.current_task():
@@ -1837,18 +1845,52 @@ class VoiceChannel(BaseChannel):
                     cause = self._cancel_causes.get(call_sid, "barge_in")
                     reason = "call_ended" if cause in ("call_ended", "shutdown") else "barge_in"
                     state = INTERRUPTED if self._speech_was_heard(call_sid) else CANCELLED
-                    transcript.log_utterance(Speaker.AGENT, text, state=state, position=mark, delivery_reason=reason)
+                    transcript.log_utterance(
+                        Speaker.AGENT,
+                        text,
+                        state=state,
+                        position=mark,
+                        delivery_reason=reason,
+                        playout_id=playout_id,
+                    )
+                    self._apply_playout_verdicts(call_sid)
             raise
+        playout_id = current_playout_id()
         transcript = self._transcripts.get(call_sid)
         if transcript is not None:
             if text:
                 reason = ""
                 if state is None:
                     state, reason = self._spoken_state(call_sid, delivered, sm)
-                transcript.log_utterance(Speaker.AGENT, text, state=state, delivery_reason=reason)
+                transcript.log_utterance(
+                    Speaker.AGENT, text, state=state, delivery_reason=reason, playout_id=playout_id
+                )
+                self._apply_playout_verdicts(call_sid)
             if last:
                 transcript.end_agent_utterance()
         return delivered
+
+    def _apply_playout_verdicts(
+        self,
+        call_sid: str,
+        *,
+        state: CallState | None = None,
+        transcript: TranscriptLogger | None = None,
+    ) -> None:
+        """Re-mark the agent lines a Media Streams `clear` flushed before they
+        played. Idempotent: called after every clear the channel triggers, as
+        a cancelled line is logged, and once at call end for the clears the
+        engine makes on its own (a re-ask, a TTS retry). Call end passes the
+        state and transcript it has already taken off the call."""
+        if state is None:
+            state = self._engine.get_call_state(call_sid) if self._engine else None
+        if transcript is None:
+            transcript = self._transcripts.get(call_sid)
+        if state is None or transcript is None:
+            return
+        verdicts = state.metadata.get(PLAYOUT_VERDICTS_KEY)
+        if verdicts:
+            transcript.apply_playout_verdicts(verdicts)
 
     def _speech_was_heard(self, call_sid: str) -> bool:
         """Did any of the utterance `send_speech` was just cancelled in reach
@@ -1992,6 +2034,7 @@ class VoiceChannel(BaseChannel):
         self._speech_locks.pop(call_sid, None)
         sm = self._state_machines.pop(call_sid, None)
         transcript = self._transcripts.pop(call_sid, None)
+        self._apply_playout_verdicts(call_sid, state=state, transcript=transcript)
         self._response_queues.pop(call_sid, None)
         # Sprint 15: the listen-in fork normally ends itself (Twilio stops the
         # stream when the call ends); this is the belt-and-braces close so no

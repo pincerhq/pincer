@@ -20,12 +20,23 @@ from voice_harness.transport_fakes import FakeSocket, FakeSTT, FakeSTTStream, Fa
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import scheduling
-from pincer.voice.engine import BARGE_IN_ARM_DELAY_MS, BARGE_IN_CONFIRM_WINDOW_MS, CallDirection, MediaStreamEngine
+from pincer.voice.engine import (
+    BARGE_IN_ARM_DELAY_MS,
+    BARGE_IN_CONFIRM_WINDOW_MS,
+    PLAYOUT_PENDING_KEY,
+    PLAYOUT_VERDICTS_KEY,
+    CallDirection,
+    MediaStreamEngine,
+    current_playout_id,
+)
 from pincer.voice.stt import DeepgramSTTStream, STTConfig, Transcript, TranscriptWord
 
 OLD_FIRST = "Der erste Satz der alten Antwort."
 OLD_NEVER = "Dieser Satz darf niemals gesprochen werden."
 NEW_REPLY = "Die neue Antwort auf die Unterbrechung."
+SENTENCE_1 = "Einen Moment, ich schaue im Kalender nach."
+SENTENCE_2 = "Am Dienstag um zehn Uhr ist noch frei."
+SENTENCE_3 = "Ihr Termin ist bestätigt."
 
 SPEECH_STARTED = Transcript(text="", speech_started=True, timestamp_s=1.2)
 
@@ -645,6 +656,224 @@ class TestPartialSegments:
         assert await engine.send_speech("CA_ms", OLD_FIRST) is True
         assert state.metadata["last_speech_cut"] is False
         assert state.metadata["tts_characters"] == len(OLD_FIRST)
+
+
+class TestPlayoutMarks:
+    """#281: Twilio mark echoes say which sentences a `clear` dropped."""
+
+    @staticmethod
+    async def _three_sent(engine: MediaStreamEngine) -> tuple[FakeSocket, Any]:
+        sock, _stt = await _call(engine, "CA_ms")
+        for text in (SENTENCE_1, SENTENCE_2, SENTENCE_3):
+            assert await engine.send_speech("CA_ms", text) is True
+        return sock, engine.get_call_state("CA_ms")
+
+    async def test_each_sent_utterance_is_followed_by_its_mark(self):
+        engine = _engine(FakeTTS())
+        sock, state = await self._three_sent(engine)
+
+        kinds = [(m["event"], m.get("mark", {}).get("name")) for m in sock.sent if m["event"] in ("media", "mark")]
+        assert kinds == [("media", None), ("media", None), ("mark", "s1")] + [
+            ("media", None),
+            ("media", None),
+            ("mark", "s2"),
+            ("media", None),
+            ("media", None),
+            ("mark", "s3"),
+        ]
+        assert all(m["streamSid"] == "MZ_CA_ms" for m in sock.events("mark"))
+        assert current_playout_id() == "s3"
+        assert state.metadata[PLAYOUT_PENDING_KEY] == ["s1", "s2", "s3"]
+
+    async def test_a_clear_judges_what_had_not_played(self):
+        engine = _engine(FakeTTS())
+        _sock, state = await self._three_sent(engine)
+
+        engine.on_playout_mark("CA_ms", "s1")  # sentence 1 played in full
+        await engine.interrupt_speech("CA_ms")
+
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {
+            "s2": ("interrupted", "barge_in"),
+            "s3": ("cancelled", "barge_in"),
+        }
+        assert state.metadata[PLAYOUT_PENDING_KEY] == []
+
+    async def test_a_clear_with_no_echoes_cuts_the_first_and_drops_the_rest(self):
+        engine = _engine(FakeTTS())
+        _sock, state = await self._three_sent(engine)
+
+        await engine.interrupt_speech("CA_ms")
+
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {
+            "s1": ("interrupted", "barge_in"),
+            "s2": ("cancelled", "barge_in"),
+            "s3": ("cancelled", "barge_in"),
+        }
+
+    async def test_a_later_echo_marks_every_earlier_utterance_played(self):
+        engine = _engine(FakeTTS())
+        _sock, state = await self._three_sent(engine)
+
+        engine.on_playout_mark("CA_ms", "s2")  # marks are FIFO: s1 played too
+        assert state.metadata[PLAYOUT_PENDING_KEY] == ["s3"]
+        await engine.interrupt_speech("CA_ms")
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {"s3": ("interrupted", "barge_in")}
+
+    async def test_flush_echoes_after_the_clear_and_unknown_marks_are_ignored(self):
+        engine = _engine(FakeTTS())
+        _sock, state = await self._three_sent(engine)
+
+        engine.on_playout_mark("CA_ms", "bogus")
+        await engine.interrupt_speech("CA_ms")
+        for name in ("s1", "s2", "s3"):  # Twilio echoes every pending mark on clear
+            engine.on_playout_mark("CA_ms", name)
+
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {
+            "s1": ("interrupted", "barge_in"),
+            "s2": ("cancelled", "barge_in"),
+            "s3": ("cancelled", "barge_in"),
+        }
+
+    async def test_a_new_stream_forgets_the_old_streams_marks(self):
+        engine = _engine(FakeTTS())
+        _sock, state = await self._three_sent(engine)
+
+        await engine.setup_media_stream_stt("CA_ms", "MZ_new")
+        await engine.interrupt_speech("CA_ms")
+
+        assert state.metadata[PLAYOUT_PENDING_KEY] == []
+        assert not state.metadata.get(PLAYOUT_VERDICTS_KEY)
+
+    async def test_an_utterance_cut_by_the_clear_sends_no_mark(self):
+        engine = _engine(FakeTTS(chunks=20, delay_s=0.05))
+        sock, _stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        speaking = asyncio.create_task(engine.send_speech("CA_ms", OLD_FIRST))
+        await sock.wait_sent(lambda sent: any(m.get("event") == "media" for m in sent))
+        await engine.interrupt_speech("CA_ms")
+        await asyncio.wait_for(speaking, timeout=2)
+
+        assert sock.events("mark") == []
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {"s1": ("interrupted", "barge_in")}
+
+    async def test_our_own_clear_judges_with_call_ended(self):
+        engine = _engine(FakeTTS())
+        _sock, state = await self._three_sent(engine)
+
+        await engine.interrupt_speech("CA_ms", by_caller=False)  # shutdown
+
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {
+            "s1": ("interrupted", "call_ended"),
+            "s2": ("cancelled", "call_ended"),
+            "s3": ("cancelled", "call_ended"),
+        }
+
+    async def test_a_tts_retry_clear_judges_the_queued_utterances_with_tts_retry(self):
+        class FailsOnce(FakeTTS):
+            async def synthesize_stream(self, text: str, voice: Any = None, model: Any = None):
+                fail = text == SENTENCE_2 and SENTENCE_2 not in self.synthesized
+                async for chunk in super().synthesize_stream(text, voice, model):
+                    yield chunk
+                    if fail:
+                        raise RuntimeError("TTS dropped")
+
+        engine = _engine(FailsOnce())
+        _sock, _stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+        assert await engine.send_speech("CA_ms", SENTENCE_1) is True
+        assert await engine.send_speech("CA_ms", SENTENCE_2) is True  # failed once, resumed
+
+        # The retry's clear flushed s1 too; s2 itself is re-sent and stays pending.
+        assert state.metadata[PLAYOUT_VERDICTS_KEY] == {"s1": ("interrupted", "tts_retry")}
+        assert state.metadata[PLAYOUT_PENDING_KEY] == ["s2"]
+
+    async def test_a_send_that_allocates_no_id_does_not_leave_the_previous_one(self):
+        engine = _engine(FakeTTS())
+        await self._three_sent(engine)
+        assert current_playout_id() == "s3"
+
+        assert await engine.send_speech("CA_ms", "") is False  # no segments: returns early
+        assert current_playout_id() == ""
+        assert await engine.send_speech("CA_unknown", SENTENCE_1) is False
+        assert current_playout_id() == ""
+
+    async def test_a_concurrent_send_does_not_change_this_sends_id(self):
+        """The id is the awaiting task's own, not a per-call slot: another
+        send on the same call (a re-ask, a tool's line) cannot hand it over."""
+        engine = _engine(FakeTTS(chunks=4, delay_s=0.01))
+        _sock, _stt = await _call(engine, "CA_ms")
+
+        async def send(text: str) -> str:
+            await engine.send_speech("CA_ms", text)
+            return current_playout_id()
+
+        first = asyncio.create_task(send(SENTENCE_1))
+        await asyncio.sleep(0)  # s1 allocated, now streaming
+        second = asyncio.create_task(send(SENTENCE_2))
+
+        assert await asyncio.gather(first, second) == ["s1", "s2"]
+
+    async def test_a_reply_cleared_during_its_first_sentence_is_marked_unheard(self):
+        """The issue's scenario end to end: all three sentences are at Twilio
+        within milliseconds, the caller cuts in during the first."""
+        engine = _engine(FakeTTS(), "interim")
+        channel, _agent = await _channel_for(
+            engine, [text_chunks(f"{SENTENCE_1} ", f"{SENTENCE_2} ", SENTENCE_3), text_chunks(NEW_REPLY)]
+        )
+        sock, stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        await _fed(stt, _final("Können Sie den Termin buchen?"))
+        await channel.wait_for_turn("CA_ms")
+        assert len(sock.events("mark")) == 3  # all sent, none echoed yet
+        state.metadata["playout_started_ns"] -= (BARGE_IN_ARM_DELAY_MS + 50) * 1_000_000
+        await _fed(stt, Transcript(text="Moment", words=[TranscriptWord("Moment", start=0.0, end=0.1)]))
+        assert len(sock.events("clear")) == 1
+
+        transcript = channel.get_transcript("CA_ms")
+        lines = {e.text: (e.state, e.delivery_reason) for e in transcript.entries if e.speaker == "agent"}
+        assert lines == {
+            SENTENCE_1: ("interrupted", "barge_in"),
+            SENTENCE_2: ("cancelled", "barge_in"),
+            SENTENCE_3: ("cancelled", "barge_in"),
+        }
+        assert transcript.verify_completion_claims() == []  # the claim in s3 was never heard
+        await channel.stop()
+
+    async def _cut_behind_a_playing_sentence(self, *, clear_first: bool) -> str:
+        """Sentence 1 is fully sent and still playing; sentence 2 is cut while
+        streaming. Whichever of the clear and the cancelled send lands first,
+        sentence 2 was never heard."""
+        tts = FakeTTS()
+        engine = _engine(tts)
+        channel, _agent = await _channel_for(engine, [])
+        sock, _stt = await _call(engine, "CA_ms")
+
+        assert await channel._say("CA_ms", SENTENCE_1) is True
+        tts.chunks, tts.delay_s = 20, 0.05
+        speaking = asyncio.create_task(channel._say("CA_ms", SENTENCE_2))
+        await sock.wait_sent(lambda sent: len(sock.events("media")) > 2)
+        if clear_first:
+            await engine.interrupt_speech("CA_ms")
+            speaking.cancel()
+            await asyncio.gather(speaking, return_exceptions=True)
+        else:
+            speaking.cancel()
+            await asyncio.gather(speaking, return_exceptions=True)
+            await channel._on_barge_in("CA_ms")
+
+        entries = {e.text: e for e in channel.get_transcript("CA_ms").entries}
+        assert entries[SENTENCE_1].state == "interrupted"
+        tts.delay_s = 0
+        await channel.stop()
+        return entries[SENTENCE_2].state
+
+    async def test_a_cut_sentence_queued_behind_a_playing_one_is_cancelled_clear_first(self):
+        assert await self._cut_behind_a_playing_sentence(clear_first=True) == "cancelled"
+
+    async def test_a_cut_sentence_queued_behind_a_playing_one_is_cancelled_unwind_first(self):
+        assert await self._cut_behind_a_playing_sentence(clear_first=False) == "cancelled"
 
 
 class TestPerCallStop:

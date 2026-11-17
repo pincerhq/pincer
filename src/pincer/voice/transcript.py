@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,10 @@ class TranscriptEntry:
     # send_speech failure (`send_error`, `tts_failed`, …), `barge_in` or
     # `call_ended`. Empty for a line that played.
     delivery_reason: str = ""
+    # Media Streams: the engine's playout id for the send that carried this
+    # line, which a `clear` may later judge (see apply_playout_verdicts).
+    # In memory only, never persisted.
+    playout_id: str = ""
 
 
 @dataclass
@@ -120,6 +126,7 @@ class TranscriptLogger:
         state: str = "",
         position: int | None = None,
         delivery_reason: str = "",
+        playout_id: str = "",
     ) -> None:
         """Append a line, or with `position` insert it there: a line whose
         send was cancelled is logged where the send began, before whatever
@@ -131,6 +138,7 @@ class TranscriptLogger:
             is_final=is_final,
             state=state,
             delivery_reason=delivery_reason,
+            playout_id=playout_id,
         )
         if position is None:
             self._entries.append(entry)
@@ -200,6 +208,38 @@ class TranscriptLogger:
                 entry.delivery_reason = "barge_in"
                 cut = True
                 marked += 1
+        return marked
+
+    def apply_playout_verdicts(self, verdicts: Mapping[str, tuple[str, str]]) -> int:
+        """Re-mark agent lines a Media Streams `clear` flushed before they played.
+
+        `verdicts` maps the engine's playout ids to `(state, reason)`: state
+        INTERRUPTED (playing when the clear landed) or CANCELLED (buffered,
+        never heard), reason the clear's cause (`barge_in`, `call_ended`,
+        `tts_retry`). Lines are matched by id, wherever they sit in the
+        transcript, and only ever downgraded: a line already INTERRUPTED may
+        become CANCELLED, none goes back up, and lines already marked as not
+        played keep their state. A line that already has a delivery reason
+        keeps it: it was set as the send was cut, by the cause the channel saw.
+        Idempotent, so it is safe to apply the same verdicts more than once.
+        Returns how many lines were re-marked.
+        """
+        if not verdicts:
+            return 0
+        marked = 0
+        for entry in self._entries:
+            if entry.speaker != Speaker.AGENT or not entry.playout_id:
+                continue
+            verdict = verdicts.get(entry.playout_id)
+            if verdict is None:
+                continue
+            state, reason = verdict
+            if state not in (INTERRUPTED, CANCELLED) or entry.state in NOT_PLAYED_STATES or entry.state == state:
+                continue
+            entry.state = state
+            if not entry.delivery_reason:
+                entry.delivery_reason = reason
+            marked += 1
         return marked
 
     def log_action(
@@ -285,12 +325,23 @@ class TranscriptLogger:
 
         Returns agent utterances that claim task completion without a matching
         successful CallAction, and logs a WARNING for each. An empty list means
-        the transcript is honest (or made no completion claims).
+        the transcript is honest (or made no completion claims). Lines the
+        caller never heard (NOT_PLAYED_STATES) made no claim to them.
+
+        On Media Streams, CANCELLED can also come from a `clear`
+        (`apply_playout_verdicts`). Only the first utterance still pending at
+        the clear is judged INTERRUPTED, and that one stays in this check. So a
+        mark echo still in transit when the clear goes out cannot drop a line
+        that played in full; it can only drop one that had started playing
+        within that round trip.
         """
         claims = [
             entry.text
             for entry in self._entries
-            if entry.is_final and entry.speaker == Speaker.AGENT and COMPLETION_CLAIM_PATTERNS.search(entry.text)
+            if entry.is_final
+            and entry.speaker == Speaker.AGENT
+            and entry.state not in NOT_PLAYED_STATES
+            and COMPLETION_CLAIM_PATTERNS.search(entry.text)
         ]
         if not claims:
             return []

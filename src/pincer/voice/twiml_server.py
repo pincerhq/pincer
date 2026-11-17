@@ -1497,6 +1497,11 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
                     last_frame_ns = now_ns
                     await _engine.on_speech_input(call_sid, payload)
 
+            elif event == "mark":
+                # Playout reached one of our marks: that utterance was heard.
+                if hasattr(_engine, "on_playout_mark"):
+                    _engine.on_playout_mark(call_sid, str((msg.get("mark") or {}).get("name", "")))
+
             elif event == "stop":
                 logger.info("Stream stopped: %s", call_sid)
                 break

@@ -152,8 +152,8 @@ play in full has one of three states, and its `delivery_reason` says why:
 | `state` | meaning | `delivery_reason` |
 |---|---|---|
 | `undelivered` | a **failure**: `send_speech` returned False | `no_websocket`, `send_error` (CR socket send raised), `unknown_call`, `no_tts`, `tts_failed` (retry failed, spoken fallback taken), `empty`, `no_audio` (TTS produced nothing), `unknown` |
-| `cancelled` | a **deliberate cut** before any of it played | `barge_in` (the caller talked over it), `call_ended` (hangup or shutdown) |
-| `interrupted` | played in part, then cut | `barge_in`, `call_ended` |
+| `cancelled` | a **deliberate cut** before any of it played | `barge_in` (the caller talked over it), `call_ended` (hangup or shutdown), `tts_retry` (Media Streams: queued behind an utterance whose TTS failed, and dropped when its retry cleared the buffer) |
+| `interrupted` | played in part, then cut | `barge_in`, `call_ended`, `tts_retry` |
 
 Only `undelivered` counts toward `no_audio`: a call whose lines were all
 `cancelled` is a caller who kept interrupting, not a silent agent. The failure
