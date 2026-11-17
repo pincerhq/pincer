@@ -116,6 +116,17 @@ def test_caller_talking_into_dead_air_is_still_no_audio(settings):
     assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NO_AUDIO
 
 
+def test_a_hangup_during_the_greeting_is_not_no_audio(settings):
+    """The callee hangs up mid-greeting: the greeting is cancelled by the hangup
+    and the next queued send fails for want of a socket. That is teardown, not a
+    silent agent."""
+    channel = _channel(settings)
+    transcript = TranscriptLogger("CA_hangup")
+    transcript.log_utterance(Speaker.AGENT, "Guten Tag, hier ist", state="cancelled", delivery_reason="call_ended")
+    transcript.log_utterance(Speaker.AGENT, "Wie kann ich helfen?", state="undelivered", delivery_reason="no_websocket")
+    assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NONE
+
+
 def test_partially_delivered_call_is_not_no_audio(settings):
     """One undelivered turn in an otherwise audible call is not a silent call."""
     channel = _channel(settings)

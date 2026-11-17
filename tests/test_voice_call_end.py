@@ -114,6 +114,34 @@ def test_the_callers_own_goodbye_line_is_skipped():
     assert call_end.last_agent_said_farewell(transcript, "de")
 
 
+def test_a_goodbye_split_over_two_caller_lines_is_still_mutual():
+    """The caller's goodbye arrives as two lines ("Danke." then "Tschüss."):
+    the agent's heard goodbye before them still answers it."""
+    from pincer.voice.transcript import Speaker
+
+    transcript = _transcript_with(("Schönen Tag noch!", "freeform"))
+    transcript.log_utterance(Speaker.CALLER, "Danke.")
+    transcript.log_utterance(Speaker.CALLER, "Tschüss.")
+    assert call_end.last_agent_said_farewell(transcript, "de")
+
+
+def test_current_reply_is_the_agent_lines_after_the_latest_caller_line():
+    from pincer.voice.transcript import Speaker, TranscriptLogger
+
+    transcript = TranscriptLogger("CA_t")
+    transcript.log_utterance(Speaker.AGENT, "Guten Tag.")
+    transcript.log_utterance(Speaker.CALLER, "Hallo.")
+    transcript.log_utterance(Speaker.AGENT, "Wie kann")
+    transcript.log_utterance(Speaker.SYSTEM, "tool call")
+    transcript.log_utterance(Speaker.AGENT, "ich helfen?")
+    assert [e.text for e in transcript.current_reply()] == ["Wie kann", "ich helfen?"]
+
+    transcript.log_utterance(Speaker.CALLER, "Danke.")
+    transcript.log_utterance(Speaker.CALLER, "Tschüss.")
+    assert transcript.current_reply() == []
+    assert [e.text for e in transcript.current_reply(skip_trailing_caller=True)] == ["Wie kann", "ich helfen?"]
+
+
 def test_estimate_speech_seconds():
     assert _REAL_ESTIMATE("") == 0.0
     assert 0.7 < _REAL_ESTIMATE("Goodbye!") < 1.0

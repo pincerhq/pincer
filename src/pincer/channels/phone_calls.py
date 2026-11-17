@@ -42,6 +42,7 @@ from pincer.voice.transcript import (
     CANCELLED,
     INTERRUPTED,
     NOT_PLAYED_STATES,
+    TEARDOWN_REASONS,
     UNDELIVERED,
     Speaker,
     TranscriptLogger,
@@ -939,12 +940,7 @@ class VoiceChannel(BaseChannel):
         transcript = self._transcripts.get(call_sid)
         if transcript is None:
             return False
-        reply = []
-        for entry in reversed(transcript.entries):
-            if entry.speaker == Speaker.CALLER:
-                break
-            if entry.speaker == Speaker.AGENT:
-                reply.append(entry)
+        reply = transcript.current_reply()
         state = self._engine.get_call_state(call_sid) if self._engine else None
         language = str(getattr(state, "language", "") or "en")[:2]
         goodbyes = [e for e in reply if call_end.contains_farewell(e.text, language)] or reply
@@ -2246,13 +2242,15 @@ class VoiceChannel(BaseChannel):
 
         A caller talking into the dead air cancels lines too, so cancelled
         lines count as unplayed; only an all-cancelled call (every line
-        barged in, nothing failed) is not silent.
+        barged in, nothing failed) is not silent. A send that failed because
+        the call was already gone (TEARDOWN_REASONS) is a hang-up, not a
+        failure to speak.
         """
         agent_entries = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.is_final]
         if not agent_entries:
             return False
         return all(e.state in NOT_PLAYED_STATES for e in agent_entries) and any(
-            e.state == UNDELIVERED for e in agent_entries
+            e.state == UNDELIVERED and e.delivery_reason not in TEARDOWN_REASONS for e in agent_entries
         )
 
     async def _record_call_telemetry(

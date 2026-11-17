@@ -156,7 +156,9 @@ play in full has one of three states, and its `delivery_reason` says why:
 | `interrupted` | played in part, then cut | `barge_in`, `call_ended`, `tts_retry` |
 
 Only `undelivered` counts toward `no_audio`: a call whose lines were all
-`cancelled` is a caller who kept interrupting, not a silent agent. The failure
+`cancelled` is a caller who kept interrupting, not a silent agent. Teardown
+failures (`no_websocket`, `unknown_call`: the call was already gone, e.g. the
+callee hung up during the greeting) don't count either. The failure
 itself is in the logs next to the line (`CR websocket send failed`,
 `TTS retry failed`, `send_speech with no … websocket`). The dashboard shows `⚠`
 only for `undelivered`; the other two get a muted "not played" marker.
