@@ -638,6 +638,7 @@ async def test_a_second_compaction_takes_the_first_window_as_input_and_replaces_
 # ── compact() outcomes and the emergency cut on this path ────────────────────
 
 _NO_ITEM = Compaction([user_item("Which tea?")], usage(500, 20))
+_EMPTY_ITEM = Compaction([user_item("Which tea?"), compaction_item("cmp_1", "")], usage(500, 20))
 _EXITS = [
     # (id, outcome, scenario)
     ("a window replaced the oldest", CompactionOutcome.COMPACTED, {"script": [Compaction(_WINDOW)]}),
@@ -651,6 +652,7 @@ _EXITS = [
     ("swap discarded", CompactionOutcome.SKIPPED, {"script": [Compaction(_WINDOW)], "edit": True}),
     ("budget reached", CompactionOutcome.FAILED, {"script": [], "budget": True}),
     ("no compaction item", CompactionOutcome.FAILED, {"script": [_NO_ITEM]}),
+    ("a compaction item with nothing in it", CompactionOutcome.FAILED, {"script": [_EMPTY_ITEM]}),
     ("call raised", CompactionOutcome.FAILED, {"script": [400]}),
     ("budget reached above the hard limit", CompactionOutcome.CUT, {"script": [], "budget": True, "prompt": 170_000}),
     ("no compaction item above the hard limit", CompactionOutcome.CUT, {"script": [_NO_ITEM], "prompt": 170_000}),
@@ -912,6 +914,50 @@ async def test_a_cut_after_a_rejected_request_drops_an_earlier_windows_messages_
     assert (session.messages[0].content, session.messages[0].raw) == (_NOTICE, [])  # the cut reached the session
     assert session.messages[1].content == "second question"  # the cut ended before the second window
     assert session.messages[3].raw == second
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"type": "compaction", "encrypted_content": "E"}, True),
+        ({"type": "compaction", "encrypted_content": ""}, False),
+        ({"type": "compaction", "encrypted_content": None}, False),
+        ({"type": "compaction"}, False),
+        ({"type": "reasoning", "encrypted_content": "E"}, False),
+    ],
+    ids=["encrypted", "empty", "none", "missing", "not a compaction item"],
+)
+def test_a_window_has_a_compaction_item_with_something_in_it(item, expected):
+    """`compact()` stores a window as one only when its item carries encrypted content; the converter and the
+    size estimate ask the same question."""
+    from pincer.llm.openai_responses import is_window
+
+    assert is_window(LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=[item], wire=_WIRE)) is expected
+
+
+async def test_a_compaction_item_with_nothing_in_it_does_not_make_the_last_window_of_a_joined_history(
+    openai_settings, session_manager, cost_tracker, registry
+):
+    """The converter and `compact()` disagreed on an empty `encrypted_content`: the empty item counted as the
+    last window and pushed the real one before it into notice-only mode, dropping its encrypted item."""
+    session = await session_manager.get_or_create("user1", "test")
+    hollow = [user_item("Which coffee?", "msg_u2"), compaction_item("cmp_2", "")]
+    await session_manager.add_messages(
+        session,
+        [
+            LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=_WINDOW, wire=_WIRE),
+            LLMMessage(role=MessageRole.USER, content="side question"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="side answer"),
+            LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=hollow, wire=_WIRE),
+        ],
+    )
+    llm = ScriptedOpenAI(openai_settings, [[message_item("Reply", "msg_r")]])
+
+    await _agent(openai_settings, llm, session_manager, cost_tracker, registry).handle_message(
+        "user1", "test", "next", memory=False
+    )
+
+    assert "ENC-CMP-1" in json.dumps(llm.requests[0]["input"])  # the real window goes as it was returned
 
 
 async def test_a_single_window_still_goes_as_items(openai_settings, session_manager, cost_tracker, registry):

@@ -45,6 +45,7 @@ from pincer.llm.model_params import (
 from pincer.llm.openai_responses import (
     convert_messages_to_responses,
     convert_tools_to_responses,
+    is_compaction_item,
     parse_responses_response,
 )
 from pincer.llm.replay import wire_tag
@@ -548,7 +549,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         # The SDK types the retained user messages as output messages (`input_text` parts) and warns on dump
         window = [item.model_dump(mode="json", exclude_none=True, warnings=False) for item in response.output]
         counts = _responses_usage_counts(response.usage)
-        has_item = any(item.get("type") == "compaction" and item.get("encrypted_content") for item in window)
+        has_item = any(is_compaction_item(item) for item in window)
         return LLMResponse(
             model=model,
             provider=self._provider_name,

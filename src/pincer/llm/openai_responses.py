@@ -40,12 +40,16 @@ def convert_tools_to_responses(tools: list[dict[str, Any]]) -> list[dict[str, An
     ]
 
 
+def is_compaction_item(item: dict[str, Any]) -> bool:
+    """True for a compaction item that carries something: `/responses/compact` has returned a window only
+    when it has one (`OpenAICompatibleProvider.compact`), and a stored window is told by the same check."""
+    return item.get("type") == "compaction" and bool(item.get("encrypted_content"))
+
+
 def is_window(msg: LLMMessage) -> bool:
     """True for a compacted window: a SYSTEM message holding what `/responses/compact` returned, which has
     an encrypted compaction item (a Claude compaction block has none)."""
-    return msg.role == MessageRole.SYSTEM and any(
-        item.get("type") == "compaction" and "encrypted_content" in item for item in msg.raw
-    )
+    return msg.role == MessageRole.SYSTEM and any(is_compaction_item(item) for item in msg.raw)
 
 
 def last_window_index(messages: list[LLMMessage], wire: str) -> int:
