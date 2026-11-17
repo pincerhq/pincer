@@ -716,3 +716,33 @@ def test_the_halving_cut_does_not_count_the_current_turn_as_something_it_can_dro
 
     kept_turns = (len(earlier) - cut) // 2
     assert 4 <= kept_turns <= 6, f"{kept_turns} of 10 earlier turns kept"
+
+
+async def test_the_emergency_cut_keeps_an_earlier_window_as_its_notice_when_a_later_window_stays(
+    settings, session_manager, cost_tracker
+):
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    def window(kept: str) -> LLMMessage:
+        raw = [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": kept}]},
+            {"type": "compaction", "id": "cmp", "encrypted_content": "ENC"},
+        ]
+        return LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=raw, wire="openai:gpt-6")
+
+    first, second = window("w1 " * 300), window("w2")
+    session = await session_manager.get_or_create("user1", "test")
+    joined = [first, *_turns(4, 20_000, "first"), second, *_turns(2, 100, "second"), _last_question()]
+    await session_manager.add_messages(session, joined)
+    sent = list(session.messages)
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="Reply"))
+
+    outcome = await _compactor(
+        settings, cost_tracker, session_manager, llm=_Summarizer(fail=True), hard=160_000
+    ).compact(session, _last(170_000, sent, server=False))
+
+    assert outcome is CompactionOutcome.CUT
+    assert session.messages[0] is not first  # its retained messages went with the cut
+    assert (session.messages[0].content, session.messages[0].raw) == (WINDOW_NOTICE, [])
+    kept_second = next(i for i, m in enumerate(session.messages) if m is second)  # still whole, after the cut
+    assert session.messages[kept_second - 1].content.startswith("first answer 3")  # the cut ended inside conversation 1

@@ -969,8 +969,9 @@ def test_the_hard_cut_of_a_joined_history_saves_what_a_turn_really_sends():
     sent = _characters_sent(messages)
     last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
 
-    # W1 saves nothing (a summary stays), the first two turn messages 1,000 each: the target is met at the 3rd
-    assert choose_hard_cut(messages, last, sent - 1_500) == 3
+    # W1 saves its 2,000 retained characters (it stays as its notice), the first two turn messages 1,000 each: the
+    # target is met at the 3rd message
+    assert choose_hard_cut(messages, last, sent - 3_500) == 3
 
 
 def test_a_single_window_counts_in_full():
@@ -980,3 +981,41 @@ def test_a_single_window_counts_in_full():
 
     assert _characters_sent(messages) > 62_000
     assert last.tokens_per_char == 1.0
+
+
+# ── a cut drops an earlier window's retained messages, keeping its notice (round 5) ──
+
+
+def _two_windows_with_turns() -> list[LLMMessage]:
+    """[W1 (50,000 kept), 2 pairs, W2 (1,000 kept), 2 pairs, the last question]; every turn message is 1,000."""
+    last = LLMMessage(role=MessageRole.USER, content="last")
+    return [_window(50_000, 10), *_pair(1_000), *_pair(1_000), _window(1_000, 10), *_pair(1_000), *_pair(1_000), last]
+
+
+def test_a_cut_keeps_an_earlier_window_as_its_notice_and_the_last_one_whole():
+    from pincer.core.compaction import kept_summaries
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    messages = _two_windows_with_turns()
+    first, second = messages[0], messages[5]
+
+    both = kept_summaries(messages[:7], messages[7:])  # the cut passes both windows
+
+    assert [m.content for m in both] == [WINDOW_NOTICE, WINDOW_NOTICE]
+    assert both[0].raw == [] and both[0].wire == ""  # the first one's retained messages went with the cut
+    assert both[1] is second  # the last window of the history stays whole
+    only_first = kept_summaries(messages[:3], messages[3:])  # a later window is still in the history
+    assert [m.raw for m in only_first] == [[]]
+    alone = kept_summaries([first, *_pair(10)])  # nothing after it: it is the last
+    assert alone == [first] and alone[0] is first
+
+
+def test_the_hard_cut_counts_the_retained_messages_of_an_earlier_window_as_saved_by_the_cut():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = _two_windows_with_turns()
+    sent = _characters_sent(messages)
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    # W1's 50,000 retained characters go with the cut, and two turn messages (1,000 each) more are enough
+    assert choose_hard_cut(messages, last, sent - 51_500) == 3

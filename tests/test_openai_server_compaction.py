@@ -21,6 +21,7 @@ from anthropic_sse import ScriptedAnthropic, text
 from openai_wire import (
     Compaction,
     ScriptedOpenAI,
+    Status,
     Turn,
     compaction_item,
     message_item,
@@ -872,6 +873,45 @@ async def test_the_compaction_of_a_joined_history_summarizes_the_messages_an_ear
     assert _WINDOW[0] in body
     assert "ENC-CMP-1" not in json.dumps(body)
     assert "ENC-CMP-2" in json.dumps(body)
+
+
+async def test_a_cut_after_a_rejected_request_drops_an_earlier_windows_messages_and_keeps_its_notice(
+    openai_settings, session_manager, cost_tracker, registry
+):
+    """The retained messages of an earlier window go out on every request, and the window is a summary that no cut
+    drops: two windows with many of them could alone be over the model's window. A cut drops them and keeps the
+    notice; the last window stays whole."""
+    second = [user_item("Which coffee?", "msg_u2"), compaction_item("cmp_2", "ENC-CMP-2")]
+    session = await session_manager.get_or_create("user1", "test")
+    await session_manager.add_messages(
+        session,
+        [
+            LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=_WINDOW, wire=_WIRE),
+            LLMMessage(role=MessageRole.USER, content="first question " + "q" * 2_000),  # the half to drop ends here,
+            LLMMessage(role=MessageRole.ASSISTANT, content="first answer " + "a" * 2_000),  # before the second window
+            LLMMessage(role=MessageRole.USER, content="second question"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="second answer"),
+            LLMMessage(role=MessageRole.SYSTEM, content=_NOTICE, raw=second, wire=_WIRE),
+            LLMMessage(role=MessageRole.USER, content="third question"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="third answer"),
+        ],
+    )
+    too_long = Status(400, {"error": {"message": "context_length_exceeded", "type": "invalid_request_error"}})
+    llm = ScriptedOpenAI(openai_settings, [too_long, [message_item("Reply", "msg_r")]])
+
+    await _agent(openai_settings, llm, session_manager, cost_tracker, registry).handle_message(
+        "user1", "test", "next", memory=False
+    )
+
+    assert len(llm.requests) == 2  # precondition: the first was rejected, the cut one went through
+    first, retry = (json.dumps(request["input"]) for request in llm.requests)
+    assert "Which tea?" in first  # precondition: the first window's retained message was sent
+    assert "Which tea?" not in retry
+    assert {"role": "system", "content": _NOTICE} in llm.requests[1]["input"]
+    assert second[1] in llm.requests[1]["input"]  # the last window, with its encrypted item
+    assert (session.messages[0].content, session.messages[0].raw) == (_NOTICE, [])  # the cut reached the session
+    assert session.messages[1].content == "second question"  # the cut ended before the second window
+    assert session.messages[3].raw == second
 
 
 async def test_a_single_window_still_goes_as_items(openai_settings, session_manager, cost_tracker, registry):

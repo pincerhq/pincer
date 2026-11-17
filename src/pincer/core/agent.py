@@ -941,7 +941,7 @@ class Agent:
                 "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id
             )
             return False
-        keep = kept_summaries(view[:cut])
+        keep = kept_summaries(view[:cut], view[cut:])
         recovery.first_kept = view[cut]
         recovery.kept_summaries = keep
         logger.warning(

@@ -96,7 +96,9 @@ from the variable name.
   not first (two histories joined by an identity rename each bring their own summary) is sent as its
   summary text, so a session already joined that way works again. On a Responses endpoint only the
   last compacted window of a history sends its encrypted item; an earlier one still sends the user
-  messages it kept, with its notice where the encrypted item was.
+  messages it kept, with its notice where the encrypted item was; a cut that drops the turns after it
+  (the emergency cut, or the retry after a request the endpoint refused as too long) drops those kept
+  messages too and leaves the notice.
 - When an endpoint rejects a request as too long for the model (Anthropic "prompt is too long",
   OpenAI and Azure `context_length_exceeded`, a request over the size limit), the turn drops about
   the oldest half of the history (whole turns, the summary kept) and retries, up to four times.

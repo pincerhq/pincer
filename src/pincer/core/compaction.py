@@ -220,13 +220,30 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     return cut if cut >= _MIN_CUT else 0
 
 
-def kept_summaries(messages: list[LLMMessage]) -> list[LLMMessage]:
-    """The summaries among `messages`, in order: SYSTEM-role messages (a client summary, a server compaction
-    block, a compacted window), the only kind a history holds. A summary is the condensed memory of what comes
-    before it, so when the oldest turns are cut, every one in the dropped range stays at the head: a history
-    joined from two (an identity rename) holds a second summary in its middle, and a cut that ends inside
-    the second conversation drops its old turns, not what was kept of the ones before them."""
-    return [m for m in messages if m.role == MessageRole.SYSTEM]
+def kept_summaries(messages: list[LLMMessage], rest: list[LLMMessage] | None = None) -> list[LLMMessage]:
+    """The summaries among `messages` (the dropped range), in order: SYSTEM-role messages (a client summary, a
+    server compaction block, a compacted window), the only kind a history holds. A summary is the condensed
+    memory of what comes before it, so when the oldest turns are cut, every one in the dropped range stays at
+    the head: a history joined from two (an identity rename) holds a second summary in its middle, and a cut
+    that ends inside the second conversation drops its old turns, not what was kept of the ones before them.
+
+    `rest` is what stays after the dropped range. A window with another window after it (in `messages` or in
+    `rest`) comes back as its notice alone: the user messages it retained go out on every request and no
+    other cut could ever drop them, so with two windows holding many they could be over the model's window
+    by themselves. The last window of the history is kept whole. (A cut that passes no turn at all drops
+    nothing, so a history of windows alone is not helped by this.)
+    """
+    last_window = max((i for i, m in enumerate([*messages, *(rest or [])]) if is_window(m)), default=-1)
+    return [
+        _notice_only(m) if is_window(m) and i != last_window else m
+        for i, m in enumerate(messages)
+        if m.role == MessageRole.SYSTEM
+    ]
+
+
+def _notice_only(window: LLMMessage) -> LLMMessage:
+    """A window as the notice alone: what is left of it once its retained messages and encrypted item are gone."""
+    return LLMMessage(role=MessageRole.SYSTEM, content=window.content)
 
 
 def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int) -> int:
@@ -248,14 +265,28 @@ def _floor(messages: list[LLMMessage]) -> int:
     return max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
 
 
+def _savings(messages: list[LLMMessage], sizes: list[int]) -> list[int]:
+    """What dropping each message takes off the request: its size; for a summary nothing (it is kept, see
+    `kept_summaries`), except a window that is not the last one, which is kept as its notice alone."""
+    last_window = max((i for i, m in enumerate(messages) if is_window(m)), default=-1)
+    return [
+        size
+        if m.role != MessageRole.SYSTEM
+        else max(size - len(m.content), 0)
+        if is_window(m) and index != last_window
+        else 0
+        for index, (m, size) in enumerate(zip(messages, sizes, strict=True))
+    ]
+
+
 def _hard_cut(messages: list[LLMMessage], per_char: float, overhead_chars: int, target: int, wire: str | None) -> int:
     sizes = _sizes(messages, wire)
+    savings = _savings(messages, sizes)
     estimate = per_char * (overhead_chars + sum(sizes))
     floor = _floor(messages)
     cut = 0
     while estimate > target and cut < floor:
-        if messages[cut].role != MessageRole.SYSTEM:
-            estimate -= per_char * sizes[cut]
+        estimate -= per_char * savings[cut]
         cut += 1
     while cut < floor and messages[cut].role != MessageRole.USER:
         cut += 1
@@ -266,14 +297,14 @@ def choose_halving_cut(messages: list[LLMMessage], wire: str | None = None) -> i
     """How many of the oldest messages to drop so about half of the characters that can be dropped are gone,
     on the rules of `choose_hard_cut`. For a request the endpoint refused as too long: no request succeeded,
     so there is no measured rate and no known window, and half is the step that is retried until it fits.
-    A summary is never dropped, and neither is the last user message or what follows it (the current turn,
-    which may hold a huge tool result): half is taken of the earlier turns only. Half of a total that includes
+    A summary is never dropped (an earlier window only loses its retained messages, see `kept_summaries`), and
+    neither is the last user message or what follows it (the current turn, which may hold a huge tool result):
+    half is taken of what the earlier turns and those windows hold. Half of a total that includes
     them could be less than they weigh alone, and the cut would drop every turn.
     `wire` is the one the refused request went to (None when it is not known): what is stored from another
     wire is not sent there, so it is not half of anything."""
     sizes = _sizes(messages, wire)
-    floor = _floor(messages)
-    droppable = sum(size for m, size in zip(messages[:floor], sizes, strict=False) if m.role != MessageRole.SYSTEM)
+    droppable = sum(_savings(messages, sizes)[: _floor(messages)])
     return _hard_cut(messages, 1.0, 0, sum(sizes) - droppable // 2, wire)
 
 
@@ -416,7 +447,7 @@ class Compactor:
                 self._hard_tokens,
             )
             return outcome
-        keep = kept_summaries(session.messages[:cut])
+        keep = kept_summaries(session.messages[:cut], session.messages[cut:])
         if not await self._sessions.cut(session, list(session.messages[:cut]), keep=keep):
             logger.info("Session %s changed while it was being cut; the cut is discarded", session.session_id)
             return outcome
