@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.config.pricing import TokenUsage
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
-from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, kept_summaries
+from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, droppable_share, kept_summaries
 from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
@@ -140,6 +140,7 @@ _CONTEXT_LENGTH_PHRASES = (
 # However, you requested 33000 tokens (1000 in the messages, 32000 in the completion)"
 _CONTEXT_WINDOW = re.compile(r"maximum context length is (\d+) tokens")
 _COMPLETION_TOKENS = re.compile(r"(\d+) in the completion")
+_MESSAGE_TOKENS = re.compile(r"(\d+) in the messages")
 # Claude's wording: "input length and `max_tokens` exceed context limit: 175000 + 32000 > 200000" (the input,
 # `max_tokens` (the completion), the window)
 _INPUT_PLUS_COMPLETION = re.compile(r"(\d+) \+ (\d+) > (\d+)")
@@ -662,19 +663,37 @@ def _is_context_length_error(e: Exception) -> bool:
     message = str(e).lower()
     if not any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES):
         return False
-    sizes = _window_and_completion(message)
+    numbers = _context_numbers(message)
     # A completion as big as the window leaves no room for any history: cutting cannot help. Anything less
     # does (the usual case: the messages still fit on their own, but not with the completion beside them)
-    return sizes is None or sizes[1] < sizes[0]
+    return numbers is None or numbers.completion < numbers.window
 
 
-def _window_and_completion(message: str) -> tuple[int, int] | None:
-    """The window and the completion budget (`max_tokens`) a context-length error names, in tokens; None
-    when it does not say."""
+@dataclass(frozen=True, slots=True)
+class _ContextNumbers:
+    """What a context-length error says about the request, in tokens: the window, the completion budget
+    (`max_tokens`) and, when it says, the input."""
+
+    window: int
+    completion: int
+    input: int | None
+
+    @property
+    def over(self) -> int | None:
+        """How far the request is over the window, None when the input is not named."""
+        return None if self.input is None else self.input + self.completion - self.window
+
+
+def _context_numbers(message: str) -> _ContextNumbers | None:
+    """The numbers a (lowercased) context-length error names; None when it does not name the window and the
+    completion budget."""
     if claude := _INPUT_PLUS_COMPLETION.search(message):
-        return int(claude[3]), int(claude[2])
+        return _ContextNumbers(int(claude[3]), int(claude[2]), int(claude[1]))
     window, completion = _CONTEXT_WINDOW.search(message), _COMPLETION_TOKENS.search(message)
-    return (int(window[1]), int(completion[1])) if window and completion else None
+    if not (window and completion):
+        return None
+    messages = _MESSAGE_TOKENS.search(message)
+    return _ContextNumbers(int(window[1]), int(completion[1]), int(messages[1]) if messages else None)
 
 
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
@@ -933,9 +952,27 @@ class Agent:
         summary kept): `recovery` remembers the cut, the session is not touched until it works. Runs inside
         the turn, which holds the session's lock. `error` says which wire refused the history, when it is known: what is
         stored from another wire is not sent there, and does not count towards half. False when no earlier turn can
-        be dropped."""
+        be dropped, or when the error says the request is over by more than the earlier turns could take off."""
         view = recovery.view(session)
-        cut = choose_halving_cut(view, error.wire or None)
+        wire = error.wire or None
+        numbers = _context_numbers(str(error).lower())
+        # The earlier turns are all a cut can take off (the system prompt and tools, inside the input, make this
+        # an upper bound): when they are too small a part of the input, every retry would burn a request
+        if (
+            numbers
+            and numbers.input
+            and numbers.over is not None
+            and numbers.over > numbers.input * droppable_share(view, wire)
+        ):
+            logger.warning(
+                "Session %s: the endpoint rejected the history as too long, over by %d tokens of %d; the earlier "
+                "turns are too small a part of it for a cut to take that off",
+                session.session_id,
+                numbers.over,
+                numbers.input,
+            )
+            return False
+        cut = choose_halving_cut(view, wire)
         if not cut:
             logger.warning(
                 "Session %s: the endpoint rejected the history as too long; no earlier turn to drop", session.session_id

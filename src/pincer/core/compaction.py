@@ -316,6 +316,14 @@ def choose_halving_cut(messages: list[LLMMessage], wire: str | None = None) -> i
     return _hard_cut(messages, 1.0, 0, sum(sizes) - droppable // 2, wire)
 
 
+def droppable_share(messages: list[LLMMessage], wire: str | None = None) -> float:
+    """The share of the history's characters a cut can take off: what the earlier turns hold (and what an earlier
+    window holds beyond its notice), over everything the request carries for the history. The system prompt and
+    the tools are not in it, so this is an upper bound on what a cut saves of the whole input."""
+    sizes = _sizes(messages, wire)
+    return sum(_savings(messages, sizes)[: _floor(messages)]) / max(1, sum(sizes))
+
+
 def _follows_a_summary(kept: list[LLMMessage]) -> bool:
     """True when `kept` can follow a server compaction block: it is empty, or it starts with an
     assistant message. The API merges a first kept message of the summarized messages' last role

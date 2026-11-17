@@ -733,3 +733,52 @@ async def test_the_halving_on_an_openai_endpoint_ignores_the_block_of_another_pr
 def test_an_llm_error_says_which_wire_it_came_from_when_the_provider_knows():
     assert LLMError("x").wire == ""
     assert LLMError("x", wire="anthropic:claude-haiku-5-5").wire == "anthropic:claude-haiku-5-5"
+
+
+# ── no cut when the cuts cannot take off what the endpoint says is over (PR #379 review, round 5) ──
+
+_OVER_BY_2000_CLAUDE = (
+    "Anthropic API error: 400 input length and `max_tokens` exceed context limit: 3000 + 199000 > 200000, "
+    "decrease input length or `max_tokens` and try again"
+)
+_OVER_BY_2232_OPENAI = (
+    "openai API error: 400 This model's maximum context length is 32768 tokens. However, you requested 35000 tokens "
+    "(3000 in the messages, 32000 in the completion). Please reduce the length of the messages or completion."
+)
+
+
+@pytest.mark.parametrize("error", [_OVER_BY_2000_CLAUDE, _OVER_BY_2232_OPENAI], ids=["claude", "openai"])
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_a_history_that_is_nearly_all_current_turn_is_not_cut_for_a_request_over_by_more_than_the_rest(
+    settings, session_manager, cost_tracker, registry, mock_llm, error, streaming
+):
+    """The request is over by 2,000+ tokens of a 3,000-token input, but 150K characters of that input are the user's
+    message of this turn, which no cut reaches: the earlier turns are a few percent of the history, so halving
+    them cannot help and every turn would burn four rejected requests."""
+    session = await _long_session(session_manager)
+    before = list(session.messages)
+    sizes = _script(mock_llm, [error] * 5)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    with pytest.raises(LLMError, match="exceed context limit|in the completion"):
+        if streaming:
+            _ = [c async for c in agent.handle_message_stream("user1", "test", "x" * 150_000, memory=False)]
+        else:
+            await agent.handle_message("user1", "test", "x" * 150_000, memory=False)
+
+    assert sizes == [len(before) + 1]  # one request: nothing a cut could remove would have been enough
+    assert session.messages[: len(before)] == before
+
+
+async def test_a_request_over_by_less_than_the_earlier_turns_hold_is_still_cut(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    session = await _long_session(session_manager)
+    before = len(session.messages)
+    sizes = _script(mock_llm, [_OVER_BY_2000_CLAUDE.replace("3000 + 199000", "175000 + 32000")])
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert len(sizes) == 2 and sizes[1] < sizes[0] * 0.6  # the control: it halved and went through
+    assert len(session.messages) < before
