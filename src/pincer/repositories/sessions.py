@@ -154,12 +154,28 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             )
         )
 
-    async def reassign_user(self, old_user_id: str, new_user_id: str) -> int:
-        stmt = update(ChatSession).where(col(ChatSession.user_id) == old_user_id).values(user_id=new_user_id)
-        return int((await self.session.exec(stmt)).rowcount)
+    async def move_user(self, old_user_id: str, new_user_id: str) -> int:
+        """Move the old id's sessions to the new id: re-key them, then reassign `user_id`.
 
-    async def rewrite_session_ids(self, old_user_id: str, new_user_id: str) -> int:
-        """Re-key the old id's sessions to the new id (`rekeyed_session_id`).
+        Must run inside the rename's transaction; it does not commit, so a
+        failure in either step rolls both back with the rest of the rename.
+
+        The order matters. Canonical ids can contain colons (`teams:{aad_id}`),
+        so key text alone cannot tell whose row a key is: renaming `abc` would
+        also match another user's `web:teams:abc`. Re-keying only rows whose
+        `user_id` is still the old id, before it is reassigned, picks out
+        exactly the renamed identity's rows. Filtering on the new id afterwards
+        would also catch the target's own rows in a merge (`web:teams:abc`
+        when merging `abc` into `teams:abc`).
+
+        Returns the number of rows changed or removed.
+        """
+        changed = await self._rekey_sessions(old_user_id, new_user_id)
+        reassign = update(ChatSession).where(col(ChatSession.user_id) == old_user_id).values(user_id=new_user_id)
+        return changed + int((await self.session.exec(reassign)).rowcount)
+
+    async def _rekey_sessions(self, old_user_id: str, new_user_id: str) -> int:
+        """Re-key the old id's own sessions to the new id (`rekeyed_session_id`).
 
         When a merge finds the target key taken, the two conversations are
         joined into the target (`_merged_session`) and the old row removed, so
@@ -167,6 +183,7 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         """
         suffix = f":{old_user_id}"
         keys = select(ChatSession.session_id).where(
+            col(ChatSession.user_id) == old_user_id,
             or_(
                 col(ChatSession.session_id).endswith(suffix, autoescape=True),
                 col(ChatSession.session_id).contains(f"{suffix}:", autoescape=True),

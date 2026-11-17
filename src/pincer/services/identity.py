@@ -419,9 +419,7 @@ class IdentityService(DatabaseService):
                 await credentials.delete_by_id(old_id)
             await profiles.delete_by_id(old_id)
 
-            sessions = SessionRepository(session)
-            await sessions.reassign_user(old_id, new_id)
-            await sessions.rewrite_session_ids(old_id, new_id)
+            await SessionRepository(session).move_user(old_id, new_id)
             await OnboardingRepository(session).reassign_user(old_id, new_id)
         forget_user(self._url, old_id)
         forget_user(self._url, new_id)
