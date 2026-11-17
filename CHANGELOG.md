@@ -101,9 +101,11 @@ from the variable name.
   OpenAI and Azure `context_length_exceeded`, a request over the size limit), the turn drops about
   the oldest half of the history (whole turns, the summary kept) and retries, up to four times.
   Compaction only runs after a request succeeded, so without this a history no request can carry
-  would fail on every later message. The wording of xAI Grok and Gemini is recognized too. The cut
-  reaches the session only once a request goes through, however else the turn ends, and an
-  error that says the completion budget (`max_tokens`) alone is as big as the window cuts nothing.
+  would fail on every later message. The wording of xAI Grok and Gemini is recognized too, and so is
+  Claude's "input length and `max_tokens` exceed context limit" (a history that fits alone, but not
+  beside `max_tokens`). The cut reaches the session only once a request goes through, however else
+  the turn ends, and an error that says the completion budget (`max_tokens`) alone is as big as the
+  window cuts nothing.
   Cutting and repairing tool pairs each have their own retries.
 - A photo a chat sends stays in the conversation, so it is checked when it arrives: it gets the media
   type of its bytes (whatever the channel claimed), a format the models do not take (BMP, TIFF) is

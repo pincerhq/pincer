@@ -257,6 +257,26 @@ async def test_the_recovery_does_not_depend_on_the_wire(settings, session_manage
             "or completion.",
             False,
         ),
+        (  # Claude: a 175K history and a 32K max_tokens on a 200K window, the history fits on its own
+            "Anthropic API error: 400 input length and `max_tokens` exceed context limit: 175000 + 32000 > 200000, "
+            "decrease input length or `max_tokens` and try again",
+            True,
+        ),
+        (  # max_tokens just under the window: a small enough history still fits
+            "Anthropic API error: 400 input length and `max_tokens` exceed context limit: 3000 + 199000 > 200000, "
+            "decrease input length or `max_tokens` and try again",
+            True,
+        ),
+        (  # max_tokens as big as the window: not even an empty history fits
+            "Anthropic API error: 400 input length and `max_tokens` exceed context limit: 3000 + 200000 > 200000, "
+            "decrease input length or `max_tokens` and try again",
+            False,
+        ),
+        (  # max_tokens bigger than the window
+            "Anthropic API error: 400 input length and `max_tokens` exceed context limit: 3000 + 250000 > 200000, "
+            "decrease input length or `max_tokens` and try again",
+            False,
+        ),
         ("Anthropic API error: 400 messages.1: `tool_use` ids were found without `tool_result` blocks", False),
         ("Anthropic API error: 429 rate limited", False),
         ("openai API error: 400 tool name is too long", False),
@@ -393,6 +413,49 @@ async def test_a_completion_budget_no_history_can_make_room_for_cuts_nothing_and
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
     assert len(json.loads(row["messages"])) == len(before) + 1
+
+
+_CLAUDE_HISTORY_PLUS_MAX_TOKENS = (
+    "input length and `max_tokens` exceed context limit: 175000 + 32000 > 200000, "
+    "decrease input length or `max_tokens` and try again"
+)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_claudes_input_plus_max_tokens_error_cuts_the_history_and_goes_through(
+    settings, session_manager, cost_tracker, registry, streaming
+):
+    """A 175K history fits a 200K window alone, but not beside a 32K `max_tokens`: Claude says so in its own
+    words, and halving the history is what makes the request fit."""
+    session = await _long_session(session_manager)
+    before = len(session.messages)
+    async with ScriptedAnthropic(settings, [Reject(400, _CLAUDE_HISTORY_PLUS_MAX_TOKENS), _OK]) as llm:
+        agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
+        reply = await _turn(agent, streaming=streaming)
+
+    assert reply == "Done."
+    assert len(llm.requests) == 2
+    assert _sent(llm.requests[1]) < _sent(llm.requests[0]) * 0.6
+    assert len(session.messages) < before * 0.6 + 2
+
+
+async def test_claudes_max_tokens_as_big_as_the_window_cuts_nothing_and_saves_nothing(
+    settings, session_manager, cost_tracker, registry, mock_llm
+):
+    session = await _long_session(session_manager)
+    before = list(session.messages)
+    no_room = (
+        "Anthropic API error: 400 input length and `max_tokens` exceed context limit: 3000 + 200000 > 200000, "
+        "decrease input length or `max_tokens` and try again"
+    )
+    sizes = _script(mock_llm, [no_room] * 5)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+
+    with pytest.raises(LLMError, match="max_tokens"):
+        await agent.handle_message("user1", "test", "hello", memory=False)
+
+    assert sizes == [len(before) + 1]  # one request: halving could not have helped
+    assert session.messages[: len(before)] == before
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])

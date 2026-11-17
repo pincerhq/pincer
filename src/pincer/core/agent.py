@@ -124,7 +124,7 @@ _MAX_SHRINK_ATTEMPTS = 4
 # What the providers say when a request is over the model's window (lowercase): Anthropic's 400
 # "prompt is too long" and its 413 on size, OpenAI / Azure / vLLM "context_length_exceeded" and its
 # wordings, Groq's "reduce the length", xAI's "maximum prompt length", Gemini's "maximum number of tokens
-# allowed"
+# allowed", Claude's "input length and `max_tokens` exceed context limit"
 _CONTEXT_LENGTH_PHRASES = (
     "prompt is too long",
     "context_length_exceeded",
@@ -134,11 +134,15 @@ _CONTEXT_LENGTH_PHRASES = (
     "maximum allowed number of bytes",
     "maximum prompt length",
     "exceeds the maximum number of tokens allowed",
+    "exceed context limit",
 )
 # OpenAI's (and vLLM's) wording says how the request was made up: "maximum context length is 32768 tokens.
 # However, you requested 33000 tokens (1000 in the messages, 32000 in the completion)"
 _CONTEXT_WINDOW = re.compile(r"maximum context length is (\d+) tokens")
 _COMPLETION_TOKENS = re.compile(r"(\d+) in the completion")
+# Claude's wording: "input length and `max_tokens` exceed context limit: 175000 + 32000 > 200000" (the input,
+# `max_tokens` (the completion), the window)
+_INPUT_PLUS_COMPLETION = re.compile(r"(\d+) \+ (\d+) > (\d+)")
 # The result that closes a tool call whose turn died before the tool finished (sent as an error)
 _UNREADABLE_PHOTOS_NOTE = "[{count} photo(s) sent with this message could not be read and are not attached]"
 _INTERRUPTED_TOOL_RESULT = "(interrupted: the tool did not finish)"
@@ -658,10 +662,19 @@ def _is_context_length_error(e: Exception) -> bool:
     message = str(e).lower()
     if not any(phrase in message for phrase in _CONTEXT_LENGTH_PHRASES):
         return False
-    window, completion = _CONTEXT_WINDOW.search(message), _COMPLETION_TOKENS.search(message)
+    sizes = _window_and_completion(message)
     # A completion as big as the window leaves no room for any history: cutting cannot help. Anything less
     # does (the usual case: the messages still fit on their own, but not with the completion beside them)
-    return not (window and completion and int(completion[1]) >= int(window[1]))
+    return sizes is None or sizes[1] < sizes[0]
+
+
+def _window_and_completion(message: str) -> tuple[int, int] | None:
+    """The window and the completion budget (`max_tokens`) a context-length error names, in tokens; None
+    when it does not say."""
+    if claude := _INPUT_PLUS_COMPLETION.search(message):
+        return int(claude[3]), int(claude[2])
+    window, completion = _CONTEXT_WINDOW.search(message), _COMPLETION_TOKENS.search(message)
+    return (int(window[1]), int(completion[1])) if window and completion else None
 
 
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
