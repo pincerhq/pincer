@@ -413,7 +413,7 @@ class _Onboarding:
 
     prompt: bool  # append the question to this turn's reply
     ingest: bool  # read this message for an answer to the question
-    followup: bool = False  # this session showed the question: say so to the model
+    followup: bool = False  # the last reply in this session asked the question: say so to the model
     last_chance: bool = False  # with ingest, past the answer window: close the gate unless this is an answer
 
 
@@ -444,7 +444,7 @@ def _log_turn(session_id: str, requests: int, usage: TokenUsage, cost: float) ->
 
 def _reading_onboarding(session: Session, *, last_chance: bool = False) -> _Onboarding:
     """A turn that reads its message for an answer to the question already asked."""
-    return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session), last_chance=last_chance)
+    return _Onboarding(prompt=False, ingest=True, followup=_question_was_last_reply(session), last_chance=last_chance)
 
 
 def _with_onboarding_question(text: str, *, streamed: bool) -> str:
@@ -623,11 +623,10 @@ def _clean_profile_value(v: Any) -> str | None:
     return s
 
 
-def _shows_onboarding_question(session: Session) -> bool:
-    """True when the session's history still holds the onboarding question."""
-    return any(
-        m.role == MessageRole.ASSISTANT and ONBOARDING_QUESTION_EN in (m.content or "") for m in session.messages
-    )
+def _question_was_last_reply(session: Session) -> bool:
+    """True when the session's last assistant message is the one that asked the onboarding question."""
+    last = next((m for m in reversed(session.messages) if m.role == MessageRole.ASSISTANT), None)
+    return last is not None and ONBOARDING_QUESTION_EN in (last.content or "")
 
 
 def _safe_json_loads(raw: str) -> Any:
@@ -1175,8 +1174,8 @@ class Agent:
         )
         await self._open_turn(session, user_msg)
 
-        # Inject the onboarding followup instruction only on the turn that
-        # handles the user's reply.
+        # Inject the onboarding followup instruction only on the turn right
+        # after the reply that asked the question.
         extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
         if extra_system:
             extra_parts.append(extra_system)

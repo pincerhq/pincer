@@ -315,6 +315,53 @@ async def test_a_reply_with_no_profile_leaves_the_gate_open_once(
 
 
 @_PATHS
+async def test_followup_instruction_only_on_the_turn_after_the_question(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """After an empty reply the gate stays open, but the next message is not
+    introduced to the model as the reply to the question (issue #276)."""
+    llm = _scripted_llm("Hello!", "Here is your summary.", _EMPTY, "Here is your calendar.", _EMPTY)
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    key = conversation_key("user-f", "web", "a")
+
+    await _reply(agent, path, "user-f", "web", "Hi!", session_key=key)
+    await _reply(agent, path, "user-f", "web", "summarize my emails", session_key=key)
+
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[1].kwargs["system"]
+    record = await _record(tmp_path, "user-f", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (1, None)
+
+    await _reply(agent, path, "user-f", "web", "and my calendar", session_key=key)
+
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args_list[3].kwargs["system"]
+    assert llm.complete.call_count == 5  # the message was still read for an answer
+
+
+@_PATHS
+async def test_legacy_followup_instruction_only_on_the_turn_after_the_question(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry
+):
+    """The legacy-flag path: an empty reply keeps the question in history, but the
+    turn after it gets no "you just asked" instruction."""
+    llm = _scripted_llm("Here is your summary.", _EMPTY, "Here is your calendar.", _EMPTY)
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry)
+    await _store_history(
+        session_manager,
+        "user-lf",
+        "web",
+        reply=f"Hello!\n\n{ONBOARDING_QUESTION_EN}",
+        **{ONBOARDING_PROMPT_SENT_KEY: "true"},
+    )
+
+    await _reply(agent, path, "user-lf", "web", "summarize my emails")
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[0].kwargs["system"]
+
+    await _reply(agent, path, "user-lf", "web", "and my calendar")
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args_list[2].kwargs["system"]
+
+
+@_PATHS
 async def test_two_empty_replies_close_the_gate(
     path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
