@@ -443,6 +443,18 @@ def test_spa_answers_client_side_routes_with_the_app_shell(spa):
         assert resp.headers["cache-control"] == "no-cache", path
 
 
+def test_spa_answers_unknown_api_paths_with_404(spa):
+    """A missing endpoint must fail visibly, not return the app shell with 200 (#382)."""
+    client, _ = spa
+    for path in ("/api", "/api/", "/api/approvals/stream", "/api/voice/approvals/pending"):
+        resp = client.get(path)
+        assert resp.status_code == 404, path
+        assert resp.json() == {"detail": "Not Found"}, path
+    # Real API routes and client-side routes that merely start with "api" are unaffected.
+    assert client.get("/api/status").status_code == 200
+    assert client.get("/apis-overview").text == "<html>app shell</html>"
+
+
 def test_spa_only_serves_files_inside_dist(spa):
     client, outside = spa
     absolute = str(outside)  # starts with "/"
