@@ -257,13 +257,16 @@ def _hard_cut(messages: list[LLMMessage], per_char: float, overhead_chars: int, 
 
 
 def choose_halving_cut(messages: list[LLMMessage], wire: str | None = None) -> int:
-    """How many of the oldest messages to drop so about half of the history's characters are left, on the
-    rules of `choose_hard_cut`. For a request the endpoint refused as too long: no request succeeded, so
-    there is no measured rate and no known window, and half is the step that is retried until it fits.
+    """How many of the oldest messages to drop so about half of the characters that can be dropped are gone,
+    on the rules of `choose_hard_cut`. For a request the endpoint refused as too long: no request succeeded,
+    so there is no measured rate and no known window, and half is the step that is retried until it fits.
+    A summary is never dropped, so half is taken of the turns: half of a total that includes big summaries
+    could be less than they weigh alone, and the cut would drop every turn.
     `wire` is the one the refused request went to (None when it is not known): what is stored from another
     wire is not sent there, so it is not half of anything."""
-    total = sum(_sizes(messages, wire))
-    return _hard_cut(messages, 1.0, 0, total // 2, wire)
+    sizes = _sizes(messages, wire)
+    droppable = sum(size for m, size in zip(messages, sizes, strict=True) if m.role != MessageRole.SYSTEM)
+    return _hard_cut(messages, 1.0, 0, sum(sizes) - droppable // 2, wire)
 
 
 def _follows_a_summary(kept: list[LLMMessage]) -> bool:

@@ -601,6 +601,48 @@ def test_the_halving_cut_keeps_the_summary_of_the_second_conversation_too(kind):
     assert [_tag(m) for m in kept_summaries(messages[:cut])] == ["SUM", "SECOND"]
 
 
+def _turn_chars(messages: list[LLMMessage]) -> int:
+    return sum(len(m.content) for m in messages if m.role is not MessageRole.SYSTEM)
+
+
+def _big_summaries_joined() -> list[LLMMessage]:
+    """The reviewer's numbers (PR #379, round 4): summaries of 60K and 40K characters, 80K of turns around them,
+    so half of the whole (90K) is less than what the summaries alone weigh once the turns are gone."""
+    big = [
+        LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\n" + "s" * size)
+        for size in (60_000, 40_000)
+    ]
+    return [big[0], *_turns(20, 1_000, "first"), big[1], *_turns(20, 1_000, "second"), _last_question()]
+
+
+def _last_question() -> LLMMessage:
+    return LLMMessage(role=MessageRole.USER, content="last question")
+
+
+def test_the_halving_cut_drops_half_of_the_turns_when_the_summaries_alone_weigh_half_the_history():
+    from pincer.core.compaction import choose_halving_cut
+
+    messages = _big_summaries_joined()
+    turns = _turn_chars(messages)
+    assert turns > 80_000  # precondition: 80K of turns beside 100K of summaries
+
+    cut = choose_halving_cut(messages)
+
+    kept = _turn_chars(messages[cut:])
+    assert turns * 0.4 < kept < turns * 0.6, f"{kept} of {turns} characters of turns kept"
+
+
+def test_the_halving_cut_of_a_history_without_summaries_still_halves_it():
+    from pincer.core.compaction import choose_halving_cut
+
+    messages = [*_turns(20, 1_000, "only"), _last_question()]
+    total = _turn_chars(messages)
+
+    kept = _turn_chars(messages[choose_halving_cut(messages) :])
+
+    assert total * 0.45 < kept < total * 0.55
+
+
 def test_a_cut_that_stops_before_a_summary_keeps_only_the_ones_it_passed():
     from pincer.core.compaction import kept_summaries
 
