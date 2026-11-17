@@ -172,6 +172,8 @@ class LLMMessage:
     # worked out: a stored message does not change, and the history is sized after every request. Not saved,
     # not compared; assumes `raw` is not edited once the message is in a history.
     raw_chars: int | None = field(default=None, init=False, repr=False, compare=False)
+    # The same for the compaction item of a compacted window, which an earlier window of a history does not send.
+    compaction_chars: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal dict for session storage (JSON-serializable)."""

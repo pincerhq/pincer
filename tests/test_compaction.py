@@ -1019,3 +1019,44 @@ def test_the_hard_cut_counts_the_retained_messages_of_an_earlier_window_as_saved
 
     # W1's 50,000 retained characters go with the cut, and two turn messages (1,000 each) more are enough
     assert choose_hard_cut(messages, last, sent - 51_500) == 3
+
+
+def test_the_size_of_an_earlier_windows_encrypted_item_is_worked_out_once(monkeypatch: pytest.MonkeyPatch):
+    """The earlier-window count measures the compaction item, and `_sizes` runs after every request: like
+    `raw_chars` it is kept on the message (PR #379 review, round 5). Counted as the measurements of a compaction
+    item through `_text_len`, the one place that measures a stored block."""
+    from pincer.core import compaction
+
+    measured = 0
+    real = compaction._text_len
+
+    def counting(value):
+        nonlocal measured
+        if isinstance(value, dict) and value.get("type") == "compaction":
+            measured += 1
+        return real(value)
+
+    monkeypatch.setattr(compaction, "_text_len", counting)
+    first, second = _window(2_000, 60_000), _window(1_000, 40_000)
+    messages = [first, *_pair(100), second, *_pair(100)]
+
+    once = compaction._sizes(messages, _RESPONSES)
+    first_time = measured
+    for _ in range(10):
+        assert compaction._sizes(messages, _RESPONSES) == once
+
+    assert first_time >= 2  # precondition: both windows were measured by the first call
+    assert measured == first_time  # the next ten measured nothing
+    assert once[0] == 2_000 + len(first.content)  # and the cached length is the right one
+
+
+def test_the_cached_size_of_a_windows_encrypted_item_is_not_part_of_what_a_message_is():
+    from pincer.core.compaction import _sizes
+
+    window = _window(10, 100)
+    _sizes([window, *_pair(10), _window(10, 100)], _RESPONSES)
+
+    assert window.compaction_chars == 100
+    assert "compaction_chars" not in window.to_dict()
+    assert "compaction_chars" not in repr(window)
+    assert window == _window(10, 100)  # not compared

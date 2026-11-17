@@ -116,6 +116,14 @@ def _raw_chars(message: LLMMessage) -> int:
     return message.raw_chars
 
 
+def _compaction_chars(message: LLMMessage) -> int:
+    """The characters of the compaction items in a message's stored output (kept after the first time, like
+    `_raw_chars`): what an earlier window of a history does not send."""
+    if message.compaction_chars is None:
+        message.compaction_chars = sum(_text_len(item) for item in message.raw if item.get("type") == "compaction")
+    return message.compaction_chars
+
+
 def _chars(message: LLMMessage, wire: str | None = None, *, earlier_window: bool = False) -> int:
     """The characters a request to `wire` carries for `message`: its text, tool calls, photos and what the
     provider's own output adds to them, all of which go out again on every request.
@@ -130,8 +138,8 @@ def _chars(message: LLMMessage, wire: str | None = None, *, earlier_window: bool
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
     raw = _raw_chars(message) if message.raw and (wire is None or message.wire == wire) else 0
     if earlier_window and raw:
-        encrypted = sum(_text_len(item) for item in message.raw if item.get("type") == "compaction")
-        text = len(message.content) + raw - encrypted  # the notice stands in the place of the encrypted item
+        # the notice stands in the place of the encrypted item
+        text = len(message.content) + raw - _compaction_chars(message)
     elif message.role == MessageRole.SYSTEM:
         text = max(len(message.content), raw)
     else:
