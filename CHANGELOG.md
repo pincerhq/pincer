@@ -95,7 +95,8 @@ from the variable name.
   once: the API answers 400 `compaction_block_misplaced` to messages in front of it. A block that is
   not first (two histories joined by an identity rename each bring their own summary) is sent as its
   summary text, so a session already joined that way works again. On a Responses endpoint only the
-  last compacted window of a history goes back as items, an earlier one as its notice.
+  last compacted window of a history sends its encrypted item; an earlier one still sends the user
+  messages it kept, with its notice where the encrypted item was.
 - When an endpoint rejects a request as too long for the model (Anthropic "prompt is too long",
   OpenAI and Azure `context_length_exceeded`, a request over the size limit), the turn drops about
   the oldest half of the history (whole turns, the summary kept) and retries, up to four times.

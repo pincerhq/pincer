@@ -809,12 +809,9 @@ async def test_streamed_and_voice_turns_compact_what_their_last_request_sent(
     assert session.messages[0].raw == _WINDOW
 
 
-async def test_only_the_last_window_of_a_joined_history_is_sent_as_items_the_earlier_ones_as_the_notice(
-    openai_settings, session_manager, cost_tracker, registry
-):
-    """Two histories joined by an identity rename each bring a window. The docs name "the most recent compaction
-    item" as the one that carries the context and say nothing of several in one input, so one goes as items and
-    the other as its notice (the same shape as the one block of the Anthropic wire)."""
+async def _joined_history(session_manager) -> list[dict[str, Any]]:
+    """Two histories joined by an identity rename: [W1, turns 1, W2, turns 2], each window holding a user message
+    and an encrypted item. Returns the second window."""
     second = [user_item("Which coffee?", "msg_u2"), compaction_item("cmp_2", "ENC-CMP-2")]
     session = await session_manager.get_or_create("user1", "test")
     await session_manager.add_messages(
@@ -828,6 +825,17 @@ async def test_only_the_last_window_of_a_joined_history_is_sent_as_items_the_ear
             LLMMessage(role=MessageRole.ASSISTANT, content="second side answer"),
         ],
     )
+    return second
+
+
+async def test_an_earlier_window_goes_as_its_messages_with_the_notice_where_its_encrypted_item_was(
+    openai_settings, session_manager, cost_tracker, registry
+):
+    """The docs name "the most recent compaction item" as the one that carries the context and say nothing of
+    several in one input (docs only, no live call was made), so only the last window sends its encrypted item.
+    An earlier one still sends the user messages the endpoint kept, which are readable: dropping them would
+    lose that conversation for good. The notice stands where its encrypted item was."""
+    second = await _joined_history(session_manager)
     llm = ScriptedOpenAI(openai_settings, [[message_item("Reply", "msg_r")]])
 
     await _agent(openai_settings, llm, session_manager, cost_tracker, registry).handle_message(
@@ -835,16 +843,35 @@ async def test_only_the_last_window_of_a_joined_history_is_sent_as_items_the_ear
     )
 
     items = llm.requests[0]["input"]
-    sent = json.dumps(items)
-    assert "ENC-CMP-2" in sent  # the last window goes as it was returned
-    assert "ENC-CMP-1" not in sent  # the earlier one does not
-    assert items[0] == {"role": "system", "content": _NOTICE}
-    assert items[1:4] == [
+    assert "ENC-CMP-2" in json.dumps(items)  # the last window goes as it was returned
+    assert "ENC-CMP-1" not in json.dumps(items)  # the earlier one's encrypted item does not
+    assert items[:6] == [
+        _WINDOW[0],  # what the first window kept
+        {"role": "system", "content": _NOTICE},  # in the place of its encrypted item
         {"role": "user", "content": "first side question"},
         {"role": "assistant", "content": "first side answer"},
-        second[0],
+        *second,
     ]
-    assert second[1] in items
+
+
+async def test_the_compaction_of_a_joined_history_summarizes_the_messages_an_earlier_window_kept(
+    openai_settings, session_manager, cost_tracker, registry
+):
+    """`/responses/compact` is sent the same conversion: the first conversation's kept messages reach it, so
+    they are summarized instead of replaced by the notice."""
+    await _joined_history(session_manager)
+    replies = [([message_item("Reply", "msg_r")], _OVER_THE_LIMIT), Compaction(_WINDOW)]
+    llm = ScriptedOpenAI(openai_settings, replies)
+    agent = _agent(openai_settings, llm, session_manager, cost_tracker, registry)
+
+    await agent.handle_message("user1", "test", "next", memory=False)
+    await agent.wait_compactions()
+
+    assert llm.paths == ["/v1/responses", "/v1/responses/compact"]  # precondition: the compaction ran
+    body = llm.requests[1]["input"]
+    assert _WINDOW[0] in body
+    assert "ENC-CMP-1" not in json.dumps(body)
+    assert "ENC-CMP-2" in json.dumps(body)
 
 
 async def test_a_single_window_still_goes_as_items(openai_settings, session_manager, cost_tracker, registry):

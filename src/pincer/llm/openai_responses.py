@@ -40,29 +40,55 @@ def convert_tools_to_responses(tools: list[dict[str, Any]]) -> list[dict[str, An
     ]
 
 
+def is_window(msg: LLMMessage) -> bool:
+    """True for a compacted window: a SYSTEM message holding what `/responses/compact` returned, which has
+    an encrypted compaction item (a Claude compaction block has none)."""
+    return msg.role == MessageRole.SYSTEM and any(
+        item.get("type") == "compaction" and "encrypted_content" in item for item in msg.raw
+    )
+
+
+def last_window_index(messages: list[LLMMessage], wire: str) -> int:
+    """The index of the last window of `messages` that goes back as items to `wire` (-1 when there is none):
+    the only one that sends its encrypted item. The converter and the size estimate (`core.compaction`) both
+    ask here, so what is counted is what is sent."""
+    return max(
+        (index for index, msg in enumerate(messages) if is_window(msg) and replayable_raw(msg, wire) is not None),
+        default=-1,
+    )
+
+
+def window_items(msg: LLMMessage, wire: str, *, last: bool) -> list[dict[str, Any]] | None:
+    """The items a window goes back as to `wire`, None when it does not go as items (another wire).
+
+    The last window goes as the API returned it. An earlier one (a history joined from two by an identity
+    rename has two) keeps the user messages the endpoint retained, which are readable, and the notice takes
+    the place of its encrypted item: the docs call the most recent compaction item the one that carries the
+    context and say nothing of several in one input, so only one is sent."""
+    items = replayable_raw(msg, wire)
+    if items is None or last:
+        return items
+    return [_notice_item(msg) if item.get("type") == "compaction" else item for item in items]
+
+
+def _notice_item(window: LLMMessage) -> dict[str, Any]:
+    return {"role": window.role.value, "content": window.content}
+
+
 def convert_messages_to_responses(messages: list[LLMMessage], wire: str) -> list[dict[str, Any]]:
     """Unified messages as Responses `input` items.
 
     An assistant message goes back as the provider's own output items (reasoning included) while it was
     produced by this provider and model (see `llm.replay`); any other is rebuilt from its text and tool
     calls. A compacted window (a SYSTEM message holding what `/responses/compact` returned) goes back the
-    same way, and as `WINDOW_NOTICE` text on any other wire. Only the last window of a history goes back as
-    items, any earlier one (a history joined from two by an identity rename has two) as the notice: the docs
-    call the most recent compaction item the one that carries the context and say nothing of several in one
-    input.
+    same way, and as `WINDOW_NOTICE` text on any other wire; see `window_items` for the earlier windows of
+    a joined history.
     """
     items: list[dict[str, Any]] = []
-    last_window = max(
-        (
-            index
-            for index, msg in enumerate(messages)
-            if msg.role == MessageRole.SYSTEM and replayable_raw(msg, wire) is not None
-        ),
-        default=-1,
-    )
+    last_window = last_window_index(messages, wire)
     for index, msg in enumerate(messages):
-        if index == last_window:
-            items.extend(replayable_raw(msg, wire) or [])  # the window goes back as the API returned it
+        if is_window(msg) and (window := window_items(msg, wire, last=index == last_window)) is not None:
+            items.extend(window)
         elif msg.role == MessageRole.TOOL_RESULT:
             items.append({"type": "function_call_output", "call_id": msg.tool_call_id or "", "output": msg.content})
         elif msg.role == MessageRole.ASSISTANT:
