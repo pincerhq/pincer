@@ -11,7 +11,7 @@ from anthropic_sse import ScriptedAnthropic, text
 from pincer.core.agent import Agent
 from pincer.core.compaction import CompactionOutcome, Compactor, LastRequest, SentRequest, ServerCompaction
 from pincer.core.session import SessionManager
-from pincer.llm.base import ImageContent, LLMMessage, LLMResponse, MessageRole
+from pincer.llm.base import ImageContent, LLMMessage, LLMResponse, MessageRole, ToolCall
 from pincer.tools.registry import ToolRegistry
 
 
@@ -693,3 +693,26 @@ async def test_the_emergency_cut_keeps_both_summaries_of_a_joined_history(
         ]
     )
     assert [m["role"] for m in stored][:3] == ["system", "system", "user"]
+
+
+# ── half of what the cut can drop: not the current turn, which it never reaches (round 5) ──
+
+
+def test_the_halving_cut_does_not_count_the_current_turn_as_something_it_can_drop():
+    """Ten small earlier turns (~10K characters) and a current turn whose tool result is 150K characters: only the
+    earlier turns can go, so half of them is the target, not half of the 160K (80K, which drops them all)."""
+    from pincer.core.compaction import choose_halving_cut
+
+    earlier = _turns(10, 500, "earlier")
+    call = ToolCall(id="t1", name="search", arguments={})
+    current = [
+        LLMMessage(role=MessageRole.USER, content="now"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[call]),
+        LLMMessage(role=MessageRole.TOOL_RESULT, content="r" * 150_000, tool_call_id="t1"),
+    ]
+    messages = [*earlier, *current]
+
+    cut = choose_halving_cut(messages)
+
+    kept_turns = (len(earlier) - cut) // 2
+    assert 4 <= kept_turns <= 6, f"{kept_turns} of 10 earlier turns kept"

@@ -210,7 +210,7 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     wire = last.wire
     sizes = _sizes(messages, wire)
     estimate = per_char * (last.overhead_chars + sum(sizes)) + _SUMMARY_MAX_TOKENS
-    floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
+    floor = _floor(messages)
     cut = 0
     while estimate > target_tokens and cut < floor:
         estimate -= per_char * sizes[cut]
@@ -242,10 +242,16 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
     return _hard_cut(messages, last.tokens_per_char, last.overhead_chars, target_tokens, last.wire)
 
 
+def _floor(messages: list[LLMMessage]) -> int:
+    """The index of the last user message: a cut never reaches it, so it and what follows (the current turn)
+    stay."""
+    return max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
+
+
 def _hard_cut(messages: list[LLMMessage], per_char: float, overhead_chars: int, target: int, wire: str | None) -> int:
     sizes = _sizes(messages, wire)
     estimate = per_char * (overhead_chars + sum(sizes))
-    floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
+    floor = _floor(messages)
     cut = 0
     while estimate > target and cut < floor:
         if messages[cut].role != MessageRole.SYSTEM:
@@ -260,12 +266,14 @@ def choose_halving_cut(messages: list[LLMMessage], wire: str | None = None) -> i
     """How many of the oldest messages to drop so about half of the characters that can be dropped are gone,
     on the rules of `choose_hard_cut`. For a request the endpoint refused as too long: no request succeeded,
     so there is no measured rate and no known window, and half is the step that is retried until it fits.
-    A summary is never dropped, so half is taken of the turns: half of a total that includes big summaries
-    could be less than they weigh alone, and the cut would drop every turn.
+    A summary is never dropped, and neither is the last user message or what follows it (the current turn,
+    which may hold a huge tool result): half is taken of the earlier turns only. Half of a total that includes
+    them could be less than they weigh alone, and the cut would drop every turn.
     `wire` is the one the refused request went to (None when it is not known): what is stored from another
     wire is not sent there, so it is not half of anything."""
     sizes = _sizes(messages, wire)
-    droppable = sum(size for m, size in zip(messages, sizes, strict=True) if m.role != MessageRole.SYSTEM)
+    floor = _floor(messages)
+    droppable = sum(size for m, size in zip(messages[:floor], sizes, strict=False) if m.role != MessageRole.SYSTEM)
     return _hard_cut(messages, 1.0, 0, sum(sizes) - droppable // 2, wire)
 
 
