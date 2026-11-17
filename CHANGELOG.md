@@ -115,6 +115,8 @@ from the variable name.
   instead of being re-encoded at lower quality without its EXIF.
   The sessions kept in memory are also limited by the photos they hold (256 MiB of base64 at most):
   past it the least recently used session is saved and dropped, and loaded again on its next message.
+  Only sessions that hold photos are dropped, and none when the session being loaded or one in a turn
+  holds more than the budget by itself: dropping the others could not bring the total under it.
 - `PINCER_MAX_SESSION_MESSAGES` has no effect any more: when it is still set, Pincer logs a
   warning at startup and `pincer doctor` reports it. Remove it from `.env`.
 

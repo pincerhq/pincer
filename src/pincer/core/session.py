@@ -25,7 +25,7 @@ from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import ImageSet, SessionService, StoredImage, register_cache
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -386,8 +386,9 @@ class SessionManager:
         `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
 
         Over the photo budget only, the sessions dropped are the oldest ones that hold photos: a session
-        with none frees nothing, and once what holds the photos is `keep` or a session in a turn, nothing is
-        dropped at all.
+        with none frees nothing. Nothing is dropped at all when `keep` and the sessions in a turn, which stay,
+        hold more than the budget by themselves: dropping every other session could not bring the total under
+        it, and those users would only reload their photos.
         """
         # Known race: a turn still holding a session evicted after its save
         # keeps writing that object while the next request loads a second
@@ -398,21 +399,31 @@ class SessionManager:
         sizes = {key: cached._photo_bytes for key, cached in self._cache.items()}
         photos = sum(sizes.values())
         attempts = _EVICTION_SPARE_ATTEMPTS + max(len(self._cache) - self._max_cached, 0)
+        candidates: Iterator[tuple[str, Session]] = iter(())
         if photos > self._max_cached_photo_bytes:
-            attempts += sum(1 for size in sizes.values() if size)
+            stays = sum(size for key, size in sizes.items() if key == keep or key in self._turn_locks)
+            if stays <= self._max_cached_photo_bytes:  # dropping the others can bring it under
+                # The sessions that hold photos and can go, oldest first, found in one walk of the cache
+                evictable = [
+                    (key, cached)
+                    for key, cached in self._cache.items()
+                    if sizes[key] and key != keep and key not in self._turn_locks
+                ]
+                attempts += len(evictable)
+                candidates = iter(evictable)
         while attempts > 0:
             if len(self._cache) > self._max_cached:
                 key, session = next(iter(self._cache.items()))
                 if key == keep:
                     return  # everything older was tried
             elif photos > self._max_cached_photo_bytes:
-                # Only the photos are over: drop the oldest session that holds some. One that holds none frees
-                # nothing, and when what is left is the session being used or one in a turn, there is no one to drop
+                # Only the photos are over: drop the next session of those that hold some. One that was
+                # dropped, replaced or put in a turn since the walk is passed over
                 found = next(
                     (
                         (key, cached)
-                        for key, cached in self._cache.items()
-                        if sizes.get(key) and key != keep and key not in self._turn_locks
+                        for key, cached in candidates
+                        if self._cache.get(key) is cached and key not in self._turn_locks
                     ),
                     None,
                 )

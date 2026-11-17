@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from collections import OrderedDict
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -630,3 +631,82 @@ async def test_the_photo_total_follows_a_clear_and_a_cut(photo_budget: SessionMa
     await photo_budget.get_or_create("d", "web")
 
     assert list(photo_budget._cache) == ["web:a", "web:b", "web:c", "web:d"]  # nothing went
+
+
+# ── eviction stops when it cannot help, and walks the cache once (PR #379 review, round 4) ──
+
+
+async def test_other_photo_sessions_stay_when_the_session_being_loaded_is_over_the_budget_by_itself(
+    photo_budget: SessionManager,
+):
+    await _with_photos(photo_budget, "big", 3)  # 12,000 characters: over the 9,000 on its own
+    await photo_budget.evict("web:big")
+    for user in ("a", "b"):
+        await _with_photos(photo_budget, user, 1)  # 4,000 each: 8,000 together, under the budget
+    assert list(photo_budget._cache) == ["web:a", "web:b"]  # precondition: nothing was evicted so far
+
+    await photo_budget.get_or_create("big", "web")  # their eviction could not bring the total under 9,000
+
+    assert list(photo_budget._cache) == ["web:a", "web:b", "web:big"]
+
+
+async def test_other_photo_sessions_stay_when_a_session_in_a_turn_is_over_the_budget_by_itself(
+    photo_budget: SessionManager,
+):
+    for user in ("a", "b"):
+        await _with_photos(photo_budget, user, 1)
+    big = await photo_budget.get_or_create("big", "web")
+    for n in range(3):  # photos arrive in its turn: 12,000 characters
+        photo = ImageContent.from_bytes(f"big{n}".encode() * (_PHOTO_BYTES // 2), "image/jpeg")
+        await photo_budget.add_message(big, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+
+    async with photo_budget._locked("web:big"):
+        await photo_budget.get_or_create("d", "web")
+
+    assert sorted(photo_budget._cache) == ["web:a", "web:b", "web:big", "web:d"]
+
+
+async def test_the_sessions_dropped_for_photos_are_found_in_one_walk_of_the_cache(tmp_path: Path):
+    """With many sessions that hold no photo at the front of the cache, every step of an eviction that looked for
+    the next photo session from the front walked all of them again. The cache is iterated through a counting
+    subclass (its own entry points, so the bound does not depend on which of them the code calls)."""
+
+    class Counting(OrderedDict[str, Any]):
+        steps = 0
+
+        def _count(self, entries):
+            for entry in entries:
+                type(self).steps += 1
+                yield entry
+
+        def __iter__(self):
+            return self._count(super().__iter__())
+
+        def items(self):  # type: ignore[override]
+            return self._count(super().items())
+
+        def keys(self):  # type: ignore[override]
+            return self._count(super().keys())
+
+        def values(self):  # type: ignore[override]
+            return self._count(super().values())
+
+    sm = SessionManager(tmp_path / "test.db", max_cached=1_000, max_cached_photo_bytes=10**9)
+    await sm.initialize()
+    try:
+        for n in range(300):
+            await _plain(sm, f"plain{n}")  # the oldest: no photo
+        for n in range(40):
+            await _with_photos(sm, f"q{n:02d}", 1)  # 8,000 characters each, 320,000 in all
+        assert len(sm._cache) == 340  # precondition: every one is still cached (the budget was out of reach)
+        sm._max_cached_photo_bytes = 9_000  # the budget drops under what is cached (the one private poke)
+        sm._cache = Counting(sm._cache)  # type: ignore[assignment]
+        Counting.steps = 0
+
+        await sm.get_or_create("new", "web")
+
+        photo_sessions = [key for key in sm._cache if key.startswith("web:q")]
+        assert photo_sessions == ["web:q39"]  # must-reach control: the photos were brought down to the budget (9,000)
+        assert Counting.steps < 4 * 340  # a walk or two of the 340, not one per dropped session (12,000+ before)
+    finally:
+        await sm.close()
