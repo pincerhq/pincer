@@ -41,7 +41,7 @@ from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 from pincer.llm.base import STOP_REASON_COMPACTION, LLMMessage, MessageRole
 from pincer.llm.capabilities import endpoint_capabilities
 from pincer.llm.openai_common import OpenAICompatibleProvider
-from pincer.llm.openai_responses import WINDOW_NOTICE
+from pincer.llm.openai_responses import WINDOW_NOTICE, is_window, last_window_index
 from pincer.llm.replay import wire_tag
 
 if TYPE_CHECKING:
@@ -116,19 +116,38 @@ def _raw_chars(message: LLMMessage) -> int:
     return message.raw_chars
 
 
-def _chars(message: LLMMessage, wire: str | None = None) -> int:
+def _chars(message: LLMMessage, wire: str | None = None, *, earlier_window: bool = False) -> int:
     """The characters a request to `wire` carries for `message`: its text, tool calls, photos and what the
     provider's own output adds to them, all of which go out again on every request.
 
     The stored provider output goes out only to the wire that made it (see `llm.replay`); to any other, a
     message is its text. None means the wire is not known (no request to look at): the output counts.
     A SYSTEM message (a summary, a compaction block, or a compacted window) is the larger of its text and
-    its output: a window's text is a short notice while its items are what is sent.
+    its output: a window's text is a short notice while its items are what is sent. `earlier_window` says
+    the message is a window that is not the last of its history: it sends the user messages it kept and the
+    notice, not its encrypted item (see `openai_responses.window_items`).
     """
     calls = json.dumps([tc.to_dict() for tc in message.tool_calls]) if message.tool_calls else ""
     raw = _raw_chars(message) if message.raw and (wire is None or message.wire == wire) else 0
-    text = max(len(message.content), raw) if message.role == MessageRole.SYSTEM else len(message.content) + raw
+    if earlier_window and raw:
+        encrypted = sum(_text_len(item) for item in message.raw if item.get("type") == "compaction")
+        text = len(message.content) + raw - encrypted  # the notice stands in the place of the encrypted item
+    elif message.role == MessageRole.SYSTEM:
+        text = max(len(message.content), raw)
+    else:
+        text = len(message.content) + raw
     return len(message.context) + text + len(calls) + PHOTO_CHARS * len(message.images)
+
+
+def _sizes(messages: list[LLMMessage], wire: str | None) -> list[int]:
+    """`_chars` of each of `messages` for a request to `wire`. On a Responses wire only the last window
+    sends its encrypted item, so an earlier one counts what it sends instead (`last_window_index`, the
+    converter's own rule)."""
+    last = last_window_index(messages, wire) if wire is not None else -1
+    return [
+        _chars(m, wire, earlier_window=wire is not None and index != last and is_window(m))
+        for index, m in enumerate(messages)
+    ]
 
 
 @dataclass(frozen=True)
@@ -175,7 +194,7 @@ class LastRequest:
         too (issue #358).
         """
         wire = wire_tag(request.provider, request.model) if request else None
-        sent_chars = overhead_chars + sum(_chars(m, wire) for m in sent)
+        sent_chars = overhead_chars + sum(_sizes(sent, wire))
         return cls(prompt_tokens, prompt_tokens / max(1, sent_chars), overhead_chars, tuple(sent), request)
 
 
@@ -189,11 +208,12 @@ def choose_cut(messages: list[LLMMessage], last: LastRequest, target_tokens: int
     """
     per_char = last.tokens_per_char
     wire = last.wire
-    estimate = per_char * (last.overhead_chars + sum(_chars(m, wire) for m in messages)) + _SUMMARY_MAX_TOKENS
+    sizes = _sizes(messages, wire)
+    estimate = per_char * (last.overhead_chars + sum(sizes)) + _SUMMARY_MAX_TOKENS
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
     cut = 0
     while estimate > target_tokens and cut < floor:
-        estimate -= per_char * _chars(messages[cut], wire)
+        estimate -= per_char * sizes[cut]
         cut += 1
     while cut < floor and messages[cut].role == MessageRole.TOOL_RESULT:
         cut += 1
@@ -223,12 +243,13 @@ def choose_hard_cut(messages: list[LLMMessage], last: LastRequest, target_tokens
 
 
 def _hard_cut(messages: list[LLMMessage], per_char: float, overhead_chars: int, target: int, wire: str | None) -> int:
-    estimate = per_char * (overhead_chars + sum(_chars(m, wire) for m in messages))
+    sizes = _sizes(messages, wire)
+    estimate = per_char * (overhead_chars + sum(sizes))
     floor = max((i for i, m in enumerate(messages) if m.role == MessageRole.USER), default=0)
     cut = 0
     while estimate > target and cut < floor:
         if messages[cut].role != MessageRole.SYSTEM:
-            estimate -= per_char * _chars(messages[cut], wire)
+            estimate -= per_char * sizes[cut]
         cut += 1
     while cut < floor and messages[cut].role != MessageRole.USER:
         cut += 1
@@ -241,7 +262,7 @@ def choose_halving_cut(messages: list[LLMMessage], wire: str | None = None) -> i
     there is no measured rate and no known window, and half is the step that is retried until it fits.
     `wire` is the one the refused request went to (None when it is not known): what is stored from another
     wire is not sent there, so it is not half of anything."""
-    total = sum(_chars(m, wire) for m in messages)
+    total = sum(_sizes(messages, wire))
     return _hard_cut(messages, 1.0, 0, total // 2, wire)
 
 

@@ -892,3 +892,91 @@ def test_the_cached_size_is_not_part_of_a_message_its_saved_form_or_its_equality
     assert measured.to_dict() == fresh.to_dict()
     assert "raw_chars" not in repr(measured)
     assert LLMMessage.from_dict(measured.to_dict()) == fresh
+
+
+# ── a Responses history joined from two holds two windows; only the last sends its encrypted item (round 4) ──
+
+_RESPONSES = "openai:gpt-6"
+
+
+def _window(kept: int, encrypted: int) -> LLMMessage:
+    """What `/responses/compact` returned: a user message it kept and the encrypted item."""
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    raw = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "w" * kept}]},
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * encrypted},
+    ]
+    return LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=raw, wire=_RESPONSES)
+
+
+def _pair(size: int) -> list[LLMMessage]:
+    return [
+        LLMMessage(role=MessageRole.USER, content="u" * size),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * size),
+    ]
+
+
+def _joined_history() -> list[LLMMessage]:
+    """[W1 (2,000 kept + 60,000 encrypted), 2 turns, W2 (1,000 + 40,000), 3 turns, the last question]."""
+    last = LLMMessage(role=MessageRole.USER, content="last")
+    return [_window(2_000, 60_000), *_pair(1_000), *_pair(1_000), _window(1_000, 40_000), *_pair(1_000) * 3, last]
+
+
+def _characters_sent(messages: list[LLMMessage]) -> int:
+    """The characters of text the real Responses request for `messages` carries."""
+    from pincer.core.compaction import _text_len
+    from pincer.llm.openai_responses import convert_messages_to_responses
+
+    return sum(_text_len(item) for item in convert_messages_to_responses(messages, _RESPONSES))
+
+
+def test_an_earlier_window_counts_the_messages_it_sends_not_its_encrypted_item():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    messages = [_window(2_000, 60_000), *_pair(100), _window(1_000, 40_000), *_pair(100)]
+    # W1 sends its 2,000 kept characters and the notice, W2 all 41,000, the four turn messages 100 each
+    sent = 2_000 + len(WINDOW_NOTICE) + 41_000 + 400
+
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    assert last.tokens_per_char == 1.0  # not the prompt spread over W1's 60,000 encrypted characters
+
+
+def test_what_is_counted_for_a_joined_history_is_what_its_request_carries():
+    messages = _joined_history()
+
+    last = LastRequest.measure(_characters_sent(messages), messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    assert last.tokens_per_char == 1.0
+
+
+def test_the_compaction_cut_of_a_joined_history_saves_what_the_first_window_really_sends():
+    from pincer.core.compaction import choose_cut
+
+    messages = _joined_history()
+    sent = _characters_sent(messages)
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    # W1 saves 2,000 + the notice, each turn message 1,000: the target is met after W1 and two more messages
+    assert choose_cut(messages, last, sent + 2_048 - 4_000) == 3
+
+
+def test_the_hard_cut_of_a_joined_history_saves_what_a_turn_really_sends():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = _joined_history()
+    sent = _characters_sent(messages)
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    # W1 saves nothing (a summary stays), the first two turn messages 1,000 each: the target is met at the 3rd
+    assert choose_hard_cut(messages, last, sent - 1_500) == 3
+
+
+def test_a_single_window_counts_in_full():
+    messages = [_window(2_000, 60_000), *_pair(100)]
+
+    last = LastRequest.measure(_characters_sent(messages), messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    assert _characters_sent(messages) > 62_000
+    assert last.tokens_per_char == 1.0
