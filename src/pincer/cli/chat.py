@@ -47,7 +47,7 @@ async def _chat_loop() -> None:
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.registry import ToolRegistry
 
-    session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
+    session_mgr = SessionManager(settings.db_path)
     await session_mgr.initialize()
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd, load_price_table())
     await cost_tracker.initialize()

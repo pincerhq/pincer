@@ -254,6 +254,7 @@ async def test_openai_voice_turn_never_runs_a_tool_call_with_cut_off_arguments(
         openai_api_key="sk-oai-test",  # type: ignore[arg-type]
         telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
         openai_model="gpt-4o-mini",
+        responses_api_providers=[],  # this test is about Chat Completions
     )
     with patch("pincer.llm.openai_common.AsyncOpenAI") as mock_cls:
         mock_cls.return_value = MagicMock()

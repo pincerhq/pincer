@@ -180,7 +180,8 @@ _OPENAI_GPT5_RULES: tuple[tuple[int, _OpenAIReasoningRule], ...] = (
 # only at none: gpt-6-sol / gpt-6-luna pages ("Chat Completions supports function calling
 # only with reasoning_effort set to none") and a live probe on Azure OpenAI (lead,
 # 2026-11-09: gpt-6.1-terra with one function tool, no effort or "low" -> 400, "none" -> 200).
-# So astra and gpt-6.1-sol can't take tools on Chat Completions at all (Responses API, #358).
+# So astra and gpt-6.1-sol can't take tools on Chat Completions at all; the Responses API takes
+# any effort with tools, and resolves through `ReasoningWire.OPENAI_RESPONSES` without these limits.
 _GPT6_RE = re.compile(r"(?P<name>gpt-6(?:\.\d+)?-[a-z]+)(?:-\d{4}-\d{2}-\d{2})?$")
 _OPENAI_GPT6_RULE = _OpenAIReasoningRule(_EFFORT_ALL, disabled="none", thinks_by_default=True, tools_need_off=True)
 _OPENAI_GPT6_NO_OFF_RULE = _OPENAI_GPT6_RULE._replace(disabled=None)
@@ -300,8 +301,17 @@ def _bare_openai_name(model: str) -> str:
 
 
 class ReasoningWire(StrEnum):
+    """The request format a reasoning setting is resolved for. Chosen per endpoint by
+    `llm.capabilities.reasoning_wire`, which is the only place that decides it."""
+
     ANTHROPIC = "anthropic"
-    OPENAI = "openai"
+    OPENAI = "openai"  # Chat Completions
+    OPENAI_RESPONSES = "openai-responses"
+
+    @property
+    def openai(self) -> bool:
+        """Either OpenAI form: one `reasoning_effort` knob, the same level table."""
+        return self is not ReasoningWire.ANTHROPIC
 
 
 class DropReason(StrEnum):
@@ -341,10 +351,12 @@ def resolve_reasoning(
     recognised, is dropped and listed in `dropped` with the reason; logging it
     is the caller's job. Empty settings resolve to nothing, except on a request
     `with_tools` to a model whose Chat Completions takes tools only with reasoning
-    off (gpt-6): that sends the off level, since sending nothing is a 400.
+    off (gpt-6): that sends the off level, since sending nothing is a 400. The Responses
+    wire has no such limit: nothing set sends nothing.
     """
-    if wire is ReasoningWire.OPENAI:
-        return _resolve_openai(model, effort, thinking, with_tools=with_tools)
+    if wire.openai:
+        # Only Chat Completions takes gpt-6's tools at the off level alone; Responses takes any effort
+        return _resolve_openai(model, effort, thinking, with_tools=with_tools and wire is ReasoningWire.OPENAI)
     if not (effort or thinking):
         return ReasoningParams()
     version = _claude_version(model)
@@ -415,7 +427,7 @@ def model_thinks(wire: ReasoningWire, model: str, params: ReasoningParams) -> bo
     """Whether `model` does extended thinking on a request carrying `params`
     (from `resolve_reasoning`): what the request turns on or off, else the
     model's default. None when the model isn't recognised."""
-    if wire is ReasoningWire.OPENAI:
+    if wire.openai:
         rule = _openai_reasoning_rule(model)
         if rule is None:
             return None
@@ -429,6 +441,22 @@ def model_thinks(wire: ReasoningWire, model: str, params: ReasoningParams) -> bo
     if sent is None:
         return claude_rule.thinks_by_default
     return sent not in _CLAUDE_THINKING_OFF_TYPES
+
+
+def thinking_is_bound(model: str, params: ReasoningParams) -> bool:
+    """Whether a Claude request carrying `params` sends thinking that Anthropic binds to the
+    conversation (`thinking.block_binding`, issue #358): the model is one that thinks by default
+    and takes adaptive thinking (the 5.x generation), and the request thinks, whether it asks
+    for it or sends no thinking setting to a model that thinks unless told otherwise.
+
+    Restrictive side: an earlier model that takes `adaptive` (Opus/Sonnet 4.6) or a model that
+    isn't recognised is not listed, since the setting could be rejected there.
+    """
+    version = _claude_version(model)
+    rule = _claude_reasoning_rule(version) if version else None
+    if rule is None or not (rule.adaptive and rule.thinks_by_default):
+        return False
+    return model_thinks(ReasoningWire.ANTHROPIC, model, params) is True
 
 
 def _resolve_openai(

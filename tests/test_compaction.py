@@ -18,7 +18,7 @@ from pydantic import SecretStr
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.compaction import Compactor, LastRequest, choose_cut
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ThinkingBlock, ToolCall
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
 from pincer.llm.openai_common import OpenAICompatibleProvider
 from pincer.tools.registry import ToolRegistry
 
@@ -128,7 +128,14 @@ class _ScriptedOpenAI:
         self._replies = list(replies)
         self.requests: list[dict[str, Any]] = []
         self.provider = OpenAICompatibleProvider(
-            settings.model_copy(update={"openai_model": "gpt-4o", "openai_api_key": SecretStr("sk-test")}), "openai"
+            settings.model_copy(
+                update={
+                    "openai_model": "gpt-4o",
+                    "openai_api_key": SecretStr("sk-test"),
+                    "responses_api_providers": [],  # this test is about Chat Completions
+                }
+            ),
+            "openai",
         )
         self.provider._client = AsyncOpenAI(
             api_key="sk-test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
@@ -327,22 +334,27 @@ async def test_a_later_turn_over_the_limit_retries_the_compaction(settings, sess
     assert session.messages[1].content == _earlier(6)
 
 
-async def test_the_message_backstop_cuts_51_messages_to_the_newest_30(tmp_path):
+async def test_a_long_session_is_never_cut_by_message_count(tmp_path):
     from pincer.core.session import SessionManager
 
-    manager = SessionManager(tmp_path / "test.db", max_messages=50)
+    manager = SessionManager(tmp_path / "test.db")
     await manager.initialize()
     try:
         session = await manager.get_or_create("user1", "test")
-        for index in range(50):
+        for index in range(200):  # four times the old cap of 50: no cut at any length
             role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
             await manager.add_message(session, LLMMessage(role=role, content=f"message {index}"))
-        assert len(session.messages) == 50  # at the cap: no cut
-        await manager.add_message(session, LLMMessage(role=MessageRole.USER, content="message 50"))
+        assert len(session.messages) == 200
     finally:
         await manager.close()
 
-    assert [m.content for m in session.messages] == [f"message {i}" for i in range(21, 51)]
+    reloaded = SessionManager(tmp_path / "test.db")
+    await reloaded.initialize()
+    try:
+        stored = await reloaded.get_or_create("user1", "test")
+    finally:
+        await reloaded.close()
+    assert [m.content for m in stored.messages] == [f"message {i}" for i in range(200)]
 
 
 class _GatedSummary:
@@ -600,14 +612,13 @@ def test_the_api_lifespan_cancels_the_agents_compactions(monkeypatch, tmp_path):
     agent.cancel_compactions.assert_awaited_once()
 
 
-async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_history(
-    settings, cost_tracker, tmp_path
-):
-    """The reviewer's case (PR #366): the turn's request sent 51 messages, then end_turn trimmed
-    52 to 30. The tokens-per-character rate must come from the 51 sent, not the 30 left."""
+async def test_the_rate_is_measured_on_what_the_request_sent(settings, cost_tracker, tmp_path):
+    """The reviewer's case (PR #366) was a trim between the request and the compaction. Nothing trims a
+    turn's history any more; the tokens-per-character rate still comes from the 51 messages the
+    request sent, and the cut is chosen on the 52 the session holds after the reply."""
     from pincer.core.session import SessionManager
 
-    sessions = SessionManager(tmp_path / "cap50.db", max_messages=50)
+    sessions = SessionManager(tmp_path / "long.db")
     await sessions.initialize()
     try:
         session = await sessions.get_or_create("user1", "test")
@@ -628,20 +639,424 @@ async def test_the_rate_is_measured_on_what_the_request_sent_not_on_the_trimmed_
     finally:
         await sessions.close()
 
-    assert len(session.messages) == 24  # the summary + 23 of the 30 the trim left: 7 summarized
+    assert len(session.messages) == 24  # the summary + the newest 23 of the 52: 29 summarized
     assert session.messages[0].content == f"[Previous conversation summary]\n{_SUMMARY}"
     assert session.messages[1].content.startswith("message 29 ")
 
 
 def test_the_rate_counts_the_thinking_a_request_replayed():
-    """Within a turn, a tool-loop request resends the turn's thinking: its tokens are in the
-    prompt, so its characters must be in the calibration (end_turn strips them afterwards)."""
-    thought = ThinkingBlock("thinking", thinking="t" * 3_000, signature="sig")
+    """A request resends the thinking the history keeps: its tokens are in the prompt, so its
+    characters must be in the calibration."""
+    thought = {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"}
     sent = [
         LLMMessage(role=MessageRole.USER, content="u" * 1_000),
-        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, thinking_blocks=[thought]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, raw=[thought], wire="anthropic:x"),
     ]
 
     last = LastRequest.measure(5_000, sent, overhead_chars=0)
 
-    assert last.tokens_per_char == 1.0  # 5,000 tokens over 1,000 + 1,000 + 3,000 characters
+    assert last.tokens_per_char == 5_000 / 5_003  # 1,000 + 1,000 + 3,000 characters and the 3-character signature
+
+
+# ── what a request carries, beyond text: the size estimate behind every cut (PR #379 review) ─────────
+
+
+def _rate(prompt_tokens: int, *messages: LLMMessage) -> float:
+    return LastRequest.measure(prompt_tokens, list(messages), overhead_chars=0).tokens_per_char
+
+
+def test_a_photo_counts_as_the_characters_of_its_tokens():
+    from pincer.core.compaction import PHOTO_CHARS
+    from pincer.llm.base import ImageContent
+
+    photo = LLMMessage(
+        role=MessageRole.USER, content="u" * 1_000, images=[ImageContent.from_bytes(b"jpeg bytes", "image/jpeg")]
+    )
+
+    assert PHOTO_CHARS == 16_000  # an estimate (a photo at the 2,576 px cap is about 4,600 tokens)
+    assert _rate(17_000, photo) == 1.0  # 1,000 characters of text + one photo
+
+
+def test_a_compacted_openai_window_counts_its_encrypted_item_and_the_messages_it_keeps():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    window = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "w" * 2_000}]},
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000},
+    ]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    assert _rate(42_000, message) == 1.0  # not the notice's few characters
+
+
+def test_a_compaction_block_counts_its_content_and_signature():
+    block = {"type": "compaction", "content": "S" * 5_000, "signature": "G" * 3_000}
+    message = LLMMessage(role=MessageRole.SYSTEM, content="[summary]\n" + "S" * 5_000, raw=[block], wire="anthropic:x")
+
+    assert _rate(8_000, message) == 1.0
+
+
+def test_encrypted_reasoning_counts_but_the_text_and_calls_of_the_raw_output_do_not_count_twice():
+    answer = [{"type": "output_text", "text": "a" * 1_000}]
+    raw = [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "R" * 5_000},
+        {"type": "message", "role": "assistant", "content": answer},
+        {"type": "function_call", "call_id": "c1", "name": "search", "arguments": "{}"},
+    ]
+    call = ToolCall(id="c1", name="search", arguments={})
+    message = LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, tool_calls=[call], raw=raw, wire="openai:x")
+    calls = len(json.dumps([call.to_dict()]))
+
+    assert _rate(1_000 + calls + 5_000, message) == 1.0
+
+
+def test_an_anthropic_assistant_message_counts_its_thinking_once_beside_its_text_and_tool_calls():
+    call = ToolCall(id="toolu_1", name="search", arguments={"q": "x"})
+    raw = [
+        {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"},
+        {"type": "redacted_thinking", "data": "d" * 500},
+        {"type": "text", "text": "a" * 1_000},
+        {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {"q": "x"}},
+    ]
+    message = LLMMessage(
+        role=MessageRole.ASSISTANT, content="a" * 1_000, tool_calls=[call], raw=raw, wire="anthropic:x"
+    )
+    calls = len(json.dumps([call.to_dict()]))
+
+    assert _rate(1_000 + calls + 3_003 + 500, message) == 1.0
+
+
+def test_the_cut_of_a_photo_turn_saves_what_the_photo_cost():
+    """The first turn holds the photo that made the prompt big: dropping that one turn is enough."""
+    from pincer.core.compaction import choose_hard_cut
+    from pincer.llm.base import ImageContent
+
+    photo = ImageContent.from_bytes(b"jpeg bytes", "image/jpeg")
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100, images=[photo]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(16_600, messages, overhead_chars=0)
+
+    assert choose_hard_cut(messages, last, target_tokens=1_000) == 2  # the photo turn only
+
+
+def test_a_photo_inside_a_stored_window_counts_as_a_photo_not_as_its_data_url():
+    """A Responses window keeps the user items it was made from, photos included: the base64 of a photo
+    is not text, and counts what a photo costs (PR #379 review, round 2)."""
+    from pincer.core.compaction import PHOTO_CHARS
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    data_url = "data:image/jpeg;base64," + "D" * 4_000_000
+    window = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "w" * 2_000},
+                {"type": "input_image", "image_url": data_url, "detail": "auto"},
+            ],
+        },
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000},
+    ]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    assert _rate(42_000 + PHOTO_CHARS, message) == 1.0
+
+
+def test_an_anthropic_image_block_inside_stored_raw_counts_as_a_photo_too():
+    from pincer.core.compaction import PHOTO_CHARS
+
+    block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "D" * 900_000}}
+    message = LLMMessage(role=MessageRole.SYSTEM, content="[summary]", raw=[block, {"type": "x", "v": "v" * 100}])
+
+    assert _rate(PHOTO_CHARS + 100, message) == 1.0
+
+
+def _sent_to(provider: str, model: str):
+    from pincer.core.compaction import SentRequest
+
+    return SentRequest(provider, model, None, None)
+
+
+def test_the_raw_output_of_another_wire_is_not_counted_because_it_is_not_sent():
+    """A message is replayed with its thinking only on the wire that made it (`llm.replay`): on another one
+    only its text goes out, and the rate must not divide the prompt over characters that were not in it."""
+    thought = {"type": "thinking", "thinking": "t" * 5_000, "signature": "sig"}
+    sent = [LLMMessage(role=MessageRole.ASSISTANT, content="a" * 1_000, raw=[thought], wire="anthropic:x")]
+
+    same = LastRequest.measure(6_003, sent, 0, request=_sent_to("anthropic", "x"))
+    other = LastRequest.measure(1_000, sent, 0, request=_sent_to("anthropic", "y"))
+
+    assert same.tokens_per_char == 1.0
+    assert other.tokens_per_char == 1.0  # the text only
+
+
+def test_a_window_of_another_wire_counts_as_its_notice():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    window = [{"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * 40_000}]
+    message = LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=window, wire="openai:gpt-6")
+
+    foreign = LastRequest.measure(len(WINDOW_NOTICE), [message], 0, request=_sent_to("anthropic", "claude"))
+    own = LastRequest.measure(40_000, [message], 0, request=_sent_to("openai", "gpt-6"))
+
+    assert foreign.tokens_per_char == 1.0
+    assert own.tokens_per_char == 1.0
+
+
+def test_the_hard_cut_does_not_credit_the_thinking_a_request_to_another_wire_never_carried():
+    from pincer.core.compaction import choose_hard_cut
+
+    thought = {"type": "thinking", "thinking": "t" * 50_000, "signature": ""}
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100, raw=[thought], wire="other:x"),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(800, messages, 0, request=_sent_to("anthropic", "a"))
+
+    assert last.tokens_per_char == 1.0  # 800 characters of text were sent
+    # 800 -> under 500 takes two turns (200 each); the old thinking was never in the prompt, so it saves nothing
+    assert choose_hard_cut(messages, last, target_tokens=500) == 4
+
+
+def test_the_summary_cut_does_not_credit_the_thinking_a_request_to_another_wire_never_carried():
+    from pincer.core.compaction import _SUMMARY_MAX_TOKENS, choose_cut
+
+    thought = {"type": "thinking", "thinking": "t" * 50_000, "signature": ""}
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100, raw=[thought], wire="other:x"),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+        LLMMessage(role=MessageRole.USER, content="u" * 100),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * 100),
+    ]
+    last = LastRequest.measure(800, messages, 0, request=_sent_to("anthropic", "a"))
+
+    # 800 characters + the room for the summary, down to 450 + that room: four messages of 100
+    assert choose_cut(messages, last, target_tokens=_SUMMARY_MAX_TOKENS + 450) == 4
+
+
+def test_the_size_of_a_stored_output_is_worked_out_once_per_message_not_after_every_request():
+    """`LastRequest.measure` sizes the whole history after each request of a tool loop; a stored message never
+    changes, so the walk over its blocks is not repeated (PR #379 review, round 2)."""
+    from pincer.core import compaction
+
+    thought = {"type": "thinking", "thinking": "t" * 3_000, "signature": "sig"}
+    history = [
+        LLMMessage(role=MessageRole.ASSISTANT, content="a", raw=[thought], wire="anthropic:x") for _ in range(50)
+    ] + [LLMMessage(role=MessageRole.USER, content="no raw")]
+    walks = 0
+    real = compaction._text_len
+
+    def counting(value):
+        nonlocal walks
+        walks += 1
+        return real(value)
+
+    compaction._text_len = counting
+    try:
+        first = [compaction._chars(m) for m in history]
+        walks_first = walks
+        second = [compaction._chars(m) for m in history]
+    finally:
+        compaction._text_len = real
+
+    assert first == second == [3_004] * 50 + [len("no raw")]
+    assert walks_first > 0  # precondition: the first pass did walk the blocks
+    assert walks == walks_first  # the second one did not
+
+
+def test_the_cached_size_is_not_part_of_a_message_its_saved_form_or_its_equality():
+    from pincer.core.compaction import _chars
+
+    raw = [{"type": "thinking", "thinking": "t" * 100, "signature": "s"}]
+    measured = LLMMessage(role=MessageRole.ASSISTANT, content="a", raw=raw, wire="anthropic:x")
+    fresh = LLMMessage(role=MessageRole.ASSISTANT, content="a", raw=raw, wire="anthropic:x")
+    _chars(measured)
+
+    assert measured == fresh
+    assert measured.to_dict() == fresh.to_dict()
+    assert "raw_chars" not in repr(measured)
+    assert LLMMessage.from_dict(measured.to_dict()) == fresh
+
+
+# ── a Responses history joined from two holds two windows; only the last sends its encrypted item (round 4) ──
+
+_RESPONSES = "openai:gpt-6"
+
+
+def _window(kept: int, encrypted: int) -> LLMMessage:
+    """What `/responses/compact` returned: a user message it kept and the encrypted item."""
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    raw = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "w" * kept}]},
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "E" * encrypted},
+    ]
+    return LLMMessage(role=MessageRole.SYSTEM, content=WINDOW_NOTICE, raw=raw, wire=_RESPONSES)
+
+
+def _pair(size: int) -> list[LLMMessage]:
+    return [
+        LLMMessage(role=MessageRole.USER, content="u" * size),
+        LLMMessage(role=MessageRole.ASSISTANT, content="a" * size),
+    ]
+
+
+def _joined_history() -> list[LLMMessage]:
+    """[W1 (2,000 kept + 60,000 encrypted), 2 turns, W2 (1,000 + 40,000), 3 turns, the last question]."""
+    last = LLMMessage(role=MessageRole.USER, content="last")
+    return [_window(2_000, 60_000), *_pair(1_000), *_pair(1_000), _window(1_000, 40_000), *_pair(1_000) * 3, last]
+
+
+def _characters_sent(messages: list[LLMMessage]) -> int:
+    """The characters of text the real Responses request for `messages` carries."""
+    from pincer.core.compaction import _text_len
+    from pincer.llm.openai_responses import convert_messages_to_responses
+
+    return sum(_text_len(item) for item in convert_messages_to_responses(messages, _RESPONSES))
+
+
+def test_an_earlier_window_counts_the_messages_it_sends_not_its_encrypted_item():
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    messages = [_window(2_000, 60_000), *_pair(100), _window(1_000, 40_000), *_pair(100)]
+    # W1 sends its 2,000 kept characters and the notice, W2 all 41,000, the four turn messages 100 each
+    sent = 2_000 + len(WINDOW_NOTICE) + 41_000 + 400
+
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    assert last.tokens_per_char == 1.0  # not the prompt spread over W1's 60,000 encrypted characters
+
+
+def test_what_is_counted_for_a_joined_history_is_what_its_request_carries():
+    messages = _joined_history()
+
+    last = LastRequest.measure(_characters_sent(messages), messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    assert last.tokens_per_char == 1.0
+
+
+def test_the_compaction_cut_of_a_joined_history_saves_what_the_first_window_really_sends():
+    from pincer.core.compaction import choose_cut
+
+    messages = _joined_history()
+    sent = _characters_sent(messages)
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    # W1 saves 2,000 + the notice, each turn message 1,000: the target is met after W1 and two more messages
+    assert choose_cut(messages, last, sent + 2_048 - 4_000) == 3
+
+
+def test_the_hard_cut_of_a_joined_history_saves_what_a_turn_really_sends():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = _joined_history()
+    sent = _characters_sent(messages)
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    # W1 saves its 2,000 retained characters (it stays as its notice), the first two turn messages 1,000 each: the
+    # target is met at the 3rd message
+    assert choose_hard_cut(messages, last, sent - 3_500) == 3
+
+
+def test_a_single_window_counts_in_full():
+    messages = [_window(2_000, 60_000), *_pair(100)]
+
+    last = LastRequest.measure(_characters_sent(messages), messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    assert _characters_sent(messages) > 62_000
+    assert last.tokens_per_char == 1.0
+
+
+# ── a cut drops an earlier window's retained messages, keeping its notice (round 5) ──
+
+
+def _two_windows_with_turns() -> list[LLMMessage]:
+    """[W1 (50,000 kept), 2 pairs, W2 (1,000 kept), 2 pairs, the last question]; every turn message is 1,000."""
+    last = LLMMessage(role=MessageRole.USER, content="last")
+    return [_window(50_000, 10), *_pair(1_000), *_pair(1_000), _window(1_000, 10), *_pair(1_000), *_pair(1_000), last]
+
+
+def test_a_cut_keeps_an_earlier_window_as_its_notice_and_the_last_one_whole():
+    from pincer.core.compaction import kept_summaries
+    from pincer.llm.openai_responses import WINDOW_NOTICE
+
+    messages = _two_windows_with_turns()
+    first, second = messages[0], messages[5]
+
+    both = kept_summaries(messages[:7], messages[7:])  # the cut passes both windows
+
+    assert [m.content for m in both] == [WINDOW_NOTICE, WINDOW_NOTICE]
+    assert both[0].raw == [] and both[0].wire == ""  # the first one's retained messages went with the cut
+    assert both[1] is second  # the last window of the history stays whole
+    only_first = kept_summaries(messages[:3], messages[3:])  # a later window is still in the history
+    assert [m.raw for m in only_first] == [[]]
+    alone = kept_summaries([first, *_pair(10)])  # nothing after it: it is the last
+    assert alone == [first] and alone[0] is first
+
+
+def test_the_hard_cut_counts_the_retained_messages_of_an_earlier_window_as_saved_by_the_cut():
+    from pincer.core.compaction import choose_hard_cut
+
+    messages = _two_windows_with_turns()
+    sent = _characters_sent(messages)
+    last = LastRequest.measure(sent, messages, 0, request=_sent_to("openai", "gpt-6"))
+
+    # W1's 50,000 retained characters go with the cut, and two turn messages (1,000 each) more are enough
+    assert choose_hard_cut(messages, last, sent - 51_500) == 3
+
+
+def test_the_size_of_an_earlier_windows_encrypted_item_is_worked_out_once(monkeypatch: pytest.MonkeyPatch):
+    """The earlier-window count measures the compaction item, and `_sizes` runs after every request: like
+    `raw_chars` it is kept on the message (PR #379 review, round 5). Counted as the measurements of a compaction
+    item through `_text_len`, the one place that measures a stored block."""
+    from pincer.core import compaction
+
+    measured = 0
+    real = compaction._text_len
+
+    def counting(value):
+        nonlocal measured
+        if isinstance(value, dict) and value.get("type") == "compaction":
+            measured += 1
+        return real(value)
+
+    monkeypatch.setattr(compaction, "_text_len", counting)
+    first, second = _window(2_000, 60_000), _window(1_000, 40_000)
+    messages = [first, *_pair(100), second, *_pair(100)]
+
+    once = compaction._sizes(messages, _RESPONSES)
+    first_time = measured
+    for _ in range(10):
+        assert compaction._sizes(messages, _RESPONSES) == once
+
+    assert first_time >= 2  # precondition: both windows were measured by the first call
+    assert measured == first_time  # the next ten measured nothing
+    assert once[0] == 2_000 + len(first.content)  # and the cached length is the right one
+
+
+def test_the_cached_size_of_a_windows_encrypted_item_is_not_part_of_what_a_message_is():
+    from pincer.core.compaction import _sizes
+
+    window = _window(10, 100)
+    _sizes([window, *_pair(10), _window(10, 100)], _RESPONSES)
+
+    assert window.compaction_chars == 100
+    assert "compaction_chars" not in window.to_dict()
+    assert "compaction_chars" not in repr(window)
+    assert window == _window(10, 100)  # not compared

@@ -235,8 +235,10 @@ async def _stream_turn_kwargs(model: str, effort: str | None) -> dict:
     """The request kwargs stream_turn sends (the request itself is cut short)."""
     from unittest.mock import AsyncMock
 
-    # Global effort/thinking pinned empty: the developer's .env must not leak in
-    provider = OpenAICompatibleProvider(_azure_default(reasoning_effort="", thinking=""), "azure")
+    # Global effort/thinking pinned empty: the developer's .env must not leak in. On Chat Completions:
+    # these tests are about its request kwargs
+    chat = _azure_default(reasoning_effort="", thinking="", responses_api_providers=[])
+    provider = OpenAICompatibleProvider(chat, "azure")
     create = AsyncMock(side_effect=_Sent)
     provider._client.chat.completions.create = create  # type: ignore[method-assign]
     with pytest.raises(_Sent):

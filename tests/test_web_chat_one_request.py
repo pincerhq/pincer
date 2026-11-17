@@ -169,7 +169,8 @@ async def test_the_next_step_of_a_turn_sends_the_turns_thinking_back(  # type: i
     assert tool_call_message["role"] == "assistant"
     assert tool_call_message["content"][0] == {"type": "thinking", "thinking": "Tea first.", "signature": "SIG-1"}
     session = await session_manager.get_or_create("user1", "web")
-    assert all(not m.thinking_blocks for m in session.messages)  # the turn's end drops it
+    kept = [block["type"] for m in session.messages if m.tool_calls for block in m.raw[:1]]
+    assert kept == ["thinking"]  # the turn's end keeps it (D2)
 
 
 async def test_a_web_chat_step_rate_limited_before_its_first_event_is_retried_by_the_provider(  # type: ignore[no-untyped-def]

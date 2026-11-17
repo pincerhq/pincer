@@ -1652,11 +1652,14 @@ def _orphaned_call(call_id: str = "late") -> LLMMessage:
     ids=["partially-orphaned", "orphaned-with-text"],
 )
 @pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+@pytest.mark.parametrize("mid_history", [False, True], ids=["tail-closed-by-append", "mid-history-stripped"])
 async def test_orphaned_tool_calls_never_reach_the_llm(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, content, tool_calls, streaming
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, content, tool_calls, streaming, mid_history
 ):
     """Sanitizing that rewrites a message keeps the history's length, which
-    used to hide the repair — the orphaned calls were sent and OpenAI 400'd."""
+    used to hide the repair — the orphaned calls were sent and OpenAI 400'd.
+    A turn's unanswered tail is closed by appended error results (issue #358); one in the
+    middle of the history is still stripped."""
     session = await session_manager.get_or_create("user1", "test")
     session.messages = [
         LLMMessage(role=MessageRole.USER, content="hi"),
@@ -1664,6 +1667,11 @@ async def test_orphaned_tool_calls_never_reach_the_llm(
     ]
     if any(tc.id == "ok" for tc in tool_calls):
         session.messages.append(LLMMessage(role=MessageRole.TOOL_RESULT, content="Hello!", tool_call_id="ok"))
+    if mid_history:
+        session.messages += [
+            LLMMessage(role=MessageRole.USER, content="next"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="fine"),
+        ]
 
     sent: list[list[LLMMessage]] = []
     mock_llm.complete.side_effect = _recording_complete(sent, _DONE)
@@ -1673,16 +1681,32 @@ async def test_orphaned_tool_calls_never_reach_the_llm(
     assert len(sent) == 1
     assert _unpaired_call_ids(sent[0]) == set()
     assert _unpaired_call_ids(session.messages) == set()
+    answered = {m.tool_call_id for m in sent[0] if m.role == MessageRole.TOOL_RESULT}
+    # a tail keeps its calls (each answered); a mid-history orphan loses them
+    assert ("orphan" in answered) is (not mid_history)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mid_history", "expected"),
+    [
+        (True, ["hi", "next", "ok", "again"]),  # the orphan in the middle is stripped
+        (False, ["hi", "", "(interrupted: the tool did not finish)", "again"]),  # the tail is closed by append
+    ],
+    ids=["mid-history-stripped", "tail-closed-by-append"],
+)
 async def test_repaired_history_is_persisted(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry, tmp_path
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, tmp_path, mid_history, expected
 ):
     """The repair is saved, not just applied to the cached session: the
     turn fails before anything else would write the session out."""
     session = await session_manager.get_or_create("user1", "test")
     session.messages = [LLMMessage(role=MessageRole.USER, content="hi"), _orphaned_call()]
+    if mid_history:
+        session.messages += [
+            LLMMessage(role=MessageRole.USER, content="next"),
+            LLMMessage(role=MessageRole.ASSISTANT, content="ok"),
+        ]
     mock_llm.complete.side_effect = LLMError("openai API error: 500 server error")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
 
@@ -1694,7 +1718,7 @@ async def test_repaired_history_is_persisted(
     await store.initialize()
     try:
         stored = await store.get_or_create("user1", "test")
-        assert [m.content for m in stored.messages] == ["hi", "again"]
+        assert [m.content for m in stored.messages] == expected
         assert _unpaired_call_ids(stored.messages) == set()
     finally:
         await store.close()

@@ -2,12 +2,14 @@
 Session management, stored through `pincer.services.sessions`.
 
 A session = one conversation thread for one user on one channel.
-Stores message history, supports trimming, and provides context for the agent.
+Stores message history and provides context for the agent. A session is never cut by message
+count: it is compacted by prompt tokens (`pincer.core.compaction`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -16,14 +18,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from pincer.llm.base import LLMMessage, MessageRole, strip_thinking
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.repositories.sessions import rekeyed_session_id
 from pincer.services.onboarding import OnboardingService
-from pincer.services.sessions import SessionService, register_cache
+from pincer.services.sessions import ImageSet, SessionService, StoredImage, register_cache
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -33,12 +35,12 @@ logger = logging.getLogger(__name__)
 # Sessions held in memory at once; past it the least recently used is
 # persisted and dropped, and reloads from the database on its next turn.
 _DEFAULT_MAX_CACHED_SESSIONS = 1024
+# The photos the cached sessions hold at once, in base64 characters (about 192 MB of image bytes): every cached
+# session keeps its photos in memory, up to 5 MB each, so a count cap alone does not bound what the cache costs
+_DEFAULT_MAX_CACHED_PHOTO_BYTES = 256 * 1024 * 1024
 # Eviction tries this many sessions beyond the overflow per request, so a few
 # that cannot be saved are stepped over without one request retrying them all.
 _EVICTION_SPARE_ATTEMPTS = 2
-# Past the message cap a session is cut to this share of it (50 -> 30) in one go, so its
-# history stays the same between cuts (owner ruling Q20: the backstop to token compaction).
-_TRIM_KEEP_NUMERATOR, _TRIM_KEEP_DENOMINATOR = 3, 5
 
 
 def _session_key(user_id: str, channel: str) -> str:
@@ -87,9 +89,13 @@ class Session:
     # Set once an eviction's save has failed and been warned about, so a
     # session that keeps failing is not logged with a traceback every request.
     _eviction_failed: bool = field(default=False, init=False, repr=False, compare=False)
-    # Set while an agent turn runs on the session: its history must not change
-    # under the turn's thinking blocks, so add_message does not trim until the turn ends.
-    _turn_open: bool = field(default=False, init=False, repr=False, compare=False)
+    # The hashes of the photos the image store holds for this session, as last saved or loaded;
+    # `_persist` brings the store to the photos the messages hold now.
+    _synced_images: frozenset[str] = field(default=frozenset(), init=False, repr=False, compare=False)
+    # `photo_bytes()` as of the last save or load, for the cache's photo budget: summing it over every message of
+    # every cached session on every cache miss would be the cost of the cache; stale only between an edit in memory
+    # and the save that follows it
+    _photo_bytes: int = field(default=0, init=False, repr=False, compare=False)
     # What the latest LLM request of the session's turn sent, for compaction; never saved
     last_request: LastRequest | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -113,15 +119,27 @@ class Session:
         """Flag the session memory-free; saved with its next message."""
         self.metadata[MEMORY_FREE_KEY] = "true"
 
+    def photo_bytes(self) -> int:
+        """What the session's photos take in memory, in base64 characters; a photo shown by several
+        messages is one."""
+        held = {image.sha256 or id(image): len(image.data) for m in self.messages for image in m.images}
+        return sum(held.values())
+
 
 class SessionManager:
     """Async SQLite-backed session store."""
 
-    def __init__(self, db_path: Path, max_messages: int = 50, max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS,
+        max_cached_photo_bytes: int = _DEFAULT_MAX_CACHED_PHOTO_BYTES,
+    ) -> None:
         self._db_path = db_path
-        self._max_messages = max_messages
-        self._keep_messages = max_messages * _TRIM_KEEP_NUMERATOR // _TRIM_KEEP_DENOMINATOR
         self._max_cached = max_cached
+        self._max_cached_photo_bytes = max_cached_photo_bytes
+        # Counts the cache hits (each moves a session to the recent end): see `_evict_overflow`
+        self._touches = 0
         self._service: SessionService | None = None
         self._onboarding: OnboardingService | None = None
         self._cache: OrderedDict[str, Session] = OrderedDict()
@@ -133,17 +151,10 @@ class SessionManager:
         self, user_id: str, channel: str, session_key: str | None = None, pincer_user_id: str = ""
     ) -> AsyncIterator[Session]:
         """Run one agent turn on the session: serialize turns, pin the session while they are
-        active or queued, and yield it. The turn opens on entry and ends on exit (see
-        `begin_turn` / `end_turn`), so an entry point cannot forget either."""
+        active or queued, and yield it. Every message of the turn is saved as it is added."""
         key = _resolve_session_key(user_id, channel, pincer_user_id, session_key)
         async with self._locked(key):
-            session = await self.get_or_create(user_id, channel, pincer_user_id, session_key)
-            self.begin_turn(session)
-            try:
-                yield session
-            finally:
-                # However the turn ended: drop its thinking and images, trim, save
-                await self.end_turn(session)
+            yield await self.get_or_create(user_id, channel, pincer_user_id, session_key)
 
     @asynccontextmanager
     async def _locked(self, key: str) -> AsyncIterator[None]:
@@ -160,20 +171,44 @@ class SessionManager:
             else:
                 self._turn_locks[key] = (current_lock, users - 1)
 
-    async def compact(self, session: Session, prefix: list[LLMMessage], replacement: LLMMessage) -> bool:
+    async def compact(
+        self,
+        session: Session,
+        prefix: list[LLMMessage],
+        replacement: LLMMessage,
+        kept_ok: Callable[[list[LLMMessage]], bool] | None = None,
+    ) -> bool:
         """Replace the session's oldest messages `prefix` by `replacement`, between turns.
 
         Applies only while `prefix` is still the start of the cached session's history (the
-        same message objects), so a turn, repair, clear or trim since it was chosen wins.
-        True if the history changed.
+        same message objects), so a turn, repair, clear or cut since it was chosen wins; and
+        only if `kept_ok` accepts the messages that would follow the replacement, judged under
+        the turn lock, when no turn can add to them. True if the history changed.
         """
+        return await self._replace_prefix(session, prefix, [replacement], kept_ok)
+
+    async def cut(self, session: Session, prefix: list[LLMMessage], keep: list[LLMMessage] | None = None) -> bool:
+        """Drop the session's oldest messages `prefix` (the emergency cut), between turns, on the
+        same terms as `compact`, except `keep`: the messages of the prefix that stay at the head (its
+        summaries). The photos only the dropped messages showed are deleted with them."""
+        return await self._replace_prefix(session, prefix, keep or [], None)
+
+    async def _replace_prefix(
+        self,
+        session: Session,
+        prefix: list[LLMMessage],
+        replacement: list[LLMMessage],
+        kept_ok: Callable[[list[LLMMessage]], bool] | None,
+    ) -> bool:
         async with self._locked(session.session_id):
             if self._cache.get(session.session_id) is not session:
                 return False
             head = session.messages[: len(prefix)]
             if len(head) != len(prefix) or any(a is not b for a, b in zip(head, prefix, strict=True)):
                 return False
-            session.messages = [replacement, *session.messages[len(prefix) :]]
+            if kept_ok is not None and not kept_ok(session.messages[len(prefix) :]):
+                return False
+            session.messages = [*replacement, *session.messages[len(prefix) :]]
             session.updated_at = time.time()
             await self._persist(session)
             return True
@@ -234,12 +269,23 @@ class SessionManager:
 
         if key in self._cache:
             self._cache.move_to_end(key)
+            self._touches += 1
             return self._cache[key]
 
         row = await self._store.load(key, user_id=user_id, channel=channel, legacy_fallback=not session_key)
 
         if row:
-            messages = [LLMMessage.from_dict(m) for m in json.loads(row["messages"])]
+            photos = {
+                photo.sha256: ImageContent(
+                    data=base64.b64encode(photo.data).decode(), media_type=photo.media_type, sha256=photo.sha256
+                )
+                for photo in row["images"]
+            }
+            stored = json.loads(row["messages"])
+            missing = {ref["sha256"] for m in stored for ref in m.get("images", [])} - photos.keys()
+            if missing:
+                logger.warning("Session %s refers to %d photo(s) its image store lacks; left out", key, len(missing))
+            messages = [LLMMessage.from_dict(m, photos) for m in stored]
             session = Session(
                 session_id=key,
                 user_id=user_id,
@@ -259,16 +305,26 @@ class SessionManager:
             )
 
         session._saved_hash = hash(_serialized(session))
+        session._photo_bytes = session.photo_bytes()
+        if row and row["session_id"] == key:  # a session left under the old key stores its photos anew
+            session._synced_images = frozenset(photo.sha256 for photo in row["images"])
         self._cache[key] = session
         await self._evict_overflow(keep=key)
         return session
 
     async def add_message(self, session: Session, message: LLMMessage) -> None:
-        """Add a message to session and auto-trim if needed (at the turn's end while a turn is open)."""
+        """Add a message to the session and save it."""
         session.messages.append(message)
         session.updated_at = time.time()
-        if not session._turn_open:
-            self._trim(session)
+        await self._persist(session)
+
+    async def add_messages(self, session: Session, messages: list[LLMMessage]) -> None:
+        """Add several messages to the session and save them in one write (every save writes the whole
+        session, so one call is cheaper than a call per message)."""
+        if not messages:
+            return
+        session.messages.extend(messages)
+        session.updated_at = time.time()
         await self._persist(session)
 
     async def append_note(self, session_key: str, user_id: str, channel: str, text: str) -> None:
@@ -281,49 +337,6 @@ class SessionManager:
         async with self.turn(user_id, channel, session_key=session_key) as session:
             await self.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=text))
 
-    def begin_turn(self, session: Session) -> None:
-        """An agent turn starts: until `end_turn`, adding messages never trims the session."""
-        session._turn_open = True
-
-    async def end_turn(self, session: Session) -> None:
-        """An agent turn ended (however it ended): drop what lives only within a turn
-        (thinking blocks, images), then trim to the cap and save if trimming cut anything.
-
-        A failed save is logged, not raised, so it never hides the turn's own error;
-        the trimmed session stays cached and the next save writes it.
-        """
-        strip_thinking(session.messages)
-        for message in session.messages:
-            if message.images:
-                message.images = []
-        session._turn_open = False
-        if not self._trim(session):
-            return
-        try:
-            await self._persist(session)
-        except Exception:
-            logger.warning("Could not save session %s after trimming it at the end of a turn", session.session_id)
-
-    def _trim(self, session: Session) -> bool:
-        """Past the cap, cut to the newest 3/5 of it, keeping tool pairs whole. True if anything was cut."""
-        if len(session.messages) <= self._max_messages:
-            return False
-        before = len(session.messages)
-        system_msgs = [m for m in session.messages if m.role == MessageRole.SYSTEM]
-        other_msgs = [m for m in session.messages if m.role != MessageRole.SYSTEM]
-        # Never past the end: old sessions may hold more summaries than the share kept
-        start = min(len(other_msgs), len(other_msgs) - (self._keep_messages - len(system_msgs)))
-        # Never start on a tool_result — it would be orphaned without its tool_use
-        while start < len(other_msgs) and other_msgs[start].role == MessageRole.TOOL_RESULT:
-            start += 1
-        # Never leave an orphaned tool_use right before the trim boundary
-        if start > 0 and other_msgs[start - 1].role == MessageRole.ASSISTANT and other_msgs[start - 1].tool_calls:
-            start -= 1
-        trimmed = other_msgs[start:]
-        session.messages = system_msgs + trimmed
-        logger.info("Session %s trimmed from %d to %d messages", session.session_id, before, len(session.messages))
-        return True
-
     async def save(self, session: Session) -> None:
         """Write the session out after its messages were changed in place."""
         await self._persist(session)
@@ -332,7 +345,7 @@ class SessionManager:
         """Clear all messages from a session."""
         session.messages.clear()
         session.updated_at = time.time()
-        await self._persist(session)
+        await self._persist(session, force_images=True)
 
     def forget_identity(self, url: str | None, old_user_id: str, new_user_id: str) -> None:
         """Drop, unsaved, the cached sessions of both ids of a rename on `url`'s database.
@@ -364,26 +377,76 @@ class SessionManager:
             del self._cache[key]
 
     async def _evict_overflow(self, keep: str) -> None:
-        """Persist and drop least recently used sessions past the cap.
+        """Persist and drop least recently used sessions past the cap, or while their photos pass the
+        byte budget (`max_cached_photo_bytes`; the session `keep` stays even if its own photos pass it).
 
         Runs inside the request for `keep`, which is never evicted here. A
         session whose save fails is logged and kept, moved to the recent end
         so the next one in line is tried; the request goes on, and the cache
         stays over the cap until later evictions succeed. A session hit or
         replaced while its save was awaited is kept too. At most the overflow
-        plus `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
+        (and the sessions that hold photos, when they are over budget) plus
+        `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
+
+        Over the photo budget only, the sessions dropped are the oldest ones that hold photos: a session
+        with none frees nothing. Nothing is dropped at all when `keep` and the sessions in a turn, which stay,
+        hold more than the budget by themselves: dropping every other session could not bring the total under
+        it, and those users would only reload their photos.
         """
         # Known race: a turn still holding a session evicted after its save
         # keeps writing that object while the next request loads a second
         # copy, and the last write wins. It takes more than `max_cached`
         # other keys within one turn, so only a client minting new
         # conversation ids gets near it.
-        attempts = len(self._cache) - self._max_cached + _EVICTION_SPARE_ATTEMPTS
-        while len(self._cache) > self._max_cached and attempts > 0:
+        # Summed once per request (a cache hit never gets here), then reduced by each session dropped
+        sizes = {key: cached._photo_bytes for key, cached in self._cache.items()}
+        photos = sum(sizes.values())
+        attempts = _EVICTION_SPARE_ATTEMPTS + max(len(self._cache) - self._max_cached, 0)
+        # Dropping the others can bring the photos under the budget only if what stays does not pass it alone
+        can_help = photos > self._max_cached_photo_bytes and (
+            sum(size for key, size in sizes.items() if key == keep or key in self._turn_locks)
+            <= self._max_cached_photo_bytes
+        )
+
+        def photo_sessions() -> list[tuple[str, Session]]:
+            """The sessions that hold photos and can go, oldest first, found in one walk of the cache."""
+            if not can_help:
+                return []
+            return [
+                (key, cached)
+                for key, cached in self._cache.items()
+                if sizes.get(key) and key != keep and key not in self._turn_locks
+            ]
+
+        walked = photo_sessions()
+        attempts += len(walked)
+        candidates, touched = iter(walked), self._touches
+        while attempts > 0:
+            if len(self._cache) > self._max_cached:
+                key, session = next(iter(self._cache.items()))
+                if key == keep:
+                    return  # everything older was tried
+            elif photos > self._max_cached_photo_bytes:
+                # Only the photos are over: drop the next session of those that hold some. One that was
+                # dropped, replaced or put in a turn since the walk is passed over; a session used since it
+                # (while a save was awaited) has moved in the cache, so the walk is made again (the live order)
+                if touched != self._touches:
+                    candidates, touched = iter(photo_sessions()), self._touches
+                found = next(
+                    (
+                        (key, cached)
+                        for key, cached in candidates
+                        if self._cache.get(key) is cached and key not in self._turn_locks
+                    ),
+                    None,
+                )
+                if found is None:
+                    return
+                key, session = found
+                self._cache.move_to_end(key, last=False)  # the next in line, for the checks below
+            else:
+                return
             attempts -= 1
-            key, session = next(iter(self._cache.items()))
-            if key == keep:
-                return  # everything older was tried
             if key in self._turn_locks:
                 self._cache.move_to_end(key)
                 continue
@@ -406,14 +469,22 @@ class SessionManager:
                 and not _changed(session)
             ):
                 del self._cache[key]
+                photos -= sizes.pop(key, 0)
 
-    async def _persist(self, session: Session, *, only_if_changed: bool = False) -> None:
+    async def _persist(self, session: Session, *, only_if_changed: bool = False, force_images: bool = False) -> None:
         """Write the session out (with ``only_if_changed``, only when its
-        messages or metadata differ from what was last saved or loaded)."""
+        messages or metadata differ from what was last saved or loaded).
+
+        Its photos follow its messages: new ones are stored, and the ones no message holds any
+        more are deleted, whichever code removed those messages. ``force_images`` also deletes
+        what an earlier session of this process left behind (a clear).
+        """
         state = _serialized(session)
         if only_if_changed and hash(state) == session._saved_hash:
             return
         messages, metadata = state
+        session._photo_bytes = session.photo_bytes()
+        images = _image_set(session, force=force_images)
         await self._store.save(
             session_id=session.session_id,
             user_id=session.user_id,
@@ -422,13 +493,34 @@ class SessionManager:
             metadata=metadata,
             created_at=session.created_at,
             updated_at=session.updated_at,
+            images=images,
         )
         session._saved_hash = hash(state)
+        if images is not None:
+            session._synced_images = images.keep
 
 
 def _serialized(session: Session) -> tuple[str, str]:
     """The session's messages and metadata as they are stored."""
     return json.dumps([m.to_dict() for m in session.messages]), json.dumps(session.metadata)
+
+
+def _image_set(session: Session, *, force: bool) -> ImageSet | None:
+    """The photos the session's messages hold, if they differ from what its image store holds."""
+    held: dict[str, ImageContent] = {}
+    for message in session.messages:
+        for image in message.images:
+            if image.sha256:
+                held.setdefault(image.sha256, image)
+    keep = frozenset(held)
+    if keep == session._synced_images and not force:
+        return None
+    add = tuple(
+        StoredImage(sha, image.media_type, base64.b64decode(image.data))
+        for sha, image in held.items()
+        if sha not in session._synced_images
+    )
+    return ImageSet(keep, add)
 
 
 def _belongs_to(key: str, user_id: str) -> bool:

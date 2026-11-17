@@ -34,7 +34,6 @@ def _patch_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost_usd: float
     mock_settings.default_provider.value = "anthropic"
     mock_settings.db_path = tmp_path / "test.db"
     mock_settings.daily_budget_usd = 100.0
-    mock_settings.max_session_messages = 20
     mock_settings.agent_name = "TestAgent"
     mock_settings.log_level.value = "WARNING"
 

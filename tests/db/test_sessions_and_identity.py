@@ -17,7 +17,7 @@ from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
-from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession
+from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
@@ -35,6 +35,7 @@ _TABLES = [
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
+    SessionImage.__table__,
     Onboarding.__table__,
 ]
 
@@ -223,7 +224,7 @@ async def _say(url: str, user_id: str, channel: str, text: str) -> None:
     """Store a message the way the main message path does."""
     # Attached to `url` directly rather than through `initialize()`, which
     # only takes a SQLite path, so this runs on either dialect.
-    manager = SessionManager(Path(), max_messages=20)
+    manager = SessionManager(Path())
     manager._service = SessionService(url)
     session = await manager.get_or_create(user_id, channel)
     await manager.add_message(session, LLMMessage(role=MessageRole.USER, content=text))
@@ -265,7 +266,7 @@ async def test_a_merge_is_not_undone_by_a_cached_session(url):
     service = IdentityService(url)
     await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
     await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
-    manager = SessionManager(Path(), max_messages=20)
+    manager = SessionManager(Path())
     manager._service = SessionService(url)
     source, target = f"web:usr_hash:{_CONVERSATION}", f"web:alice:{_CONVERSATION}"
     for user_id, key, text in [("usr_hash", source, "anonymous half"), ("alice", target, "signed-in half")]:

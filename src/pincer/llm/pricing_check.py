@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING
 
 from pincer.config.llm import NO_SETTING, call_effort, effective_effort, effective_thinking
 from pincer.config.pricing import PricingError, load_price_table, paste_block
+from pincer.llm.capabilities import reasoning_wire
 from pincer.llm.model_params import ReasoningWire, openai_tools_need_off, openai_tools_unusable, resolve_reasoning
 from pincer.llm.router import (
     has_credentials,
     is_free_provider,
-    is_openai_wire,
     known_provider_names,
     plan_voice_turn,
     provider_default_model,
@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 GPT6_TOOLS_EXPLANATION = (
     "Why: Pincer talks to OpenAI models through Chat Completions, which lets gpt-6 models use tools only "
     "with reasoning off. The summary model uses no tools, so PINCER_SUMMARY_REASONING_EFFORT still applies to it.\n"
-    "When it changes: reasoning with tools comes with the Responses API (#358)."
+    "To use reasoning with tools: add the endpoint's name to PINCER_RESPONSES_API_PROVIDERS if it serves "
+    "/v1/responses (openai, azure and azure-openai already use it)."
 )
 # gpt-6 models that take tools with reasoning off, suggested for a model that can't (model pages, 2026-11-09)
 _GPT6_TOOL_MODELS = "gpt-6.1-terra, gpt-6-sol, gpt-6-luna or a gpt-5 model"
@@ -108,13 +109,15 @@ class EffortConflict:
 
 
 def effort_conflicts(settings: Settings) -> list[EffortConflict]:
-    """Every gpt-6 chat or voice use whose requests carry tools at a reasoning effort other
-    than none. Judged on what would be sent (an effort replaced by thinking=disabled is
-    fine), on every provider with credentials, free ones included: the 400 comes from the
-    model, not the bill. The summary model sends no tools and is never a conflict."""
+    """Every gpt-6 chat or voice use on Chat Completions whose requests carry tools at a reasoning effort
+    other than none (an endpoint on the Responses API has no such limit). Judged on what would be sent
+    (an effort replaced by thinking=disabled is fine), on every provider with credentials, free ones
+    included: the 400 comes from the model, not the bill. The summary model sends no tools and is never
+    a conflict."""
     conflicts: list[EffortConflict] = []
     for use in _model_uses(settings):
-        if use.role == "summary" or not is_openai_wire(settings, use.provider):
+        # Only Chat Completions has the limit: the Responses API takes any effort with tools
+        if use.role == "summary" or reasoning_wire(settings, use.provider) is not ReasoningWire.OPENAI:
             continue
         if not openai_tools_need_off(use.model):
             continue

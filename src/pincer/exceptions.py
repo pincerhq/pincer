@@ -13,10 +13,14 @@ class LLMError(PincerError):
     """Error communicating with an LLM provider.
 
     ``retryable``: the failure is transient (a rate limit, an overload, a server error), so the
-    same request may succeed when asked again; a 4xx or a connection failure is not."""
+    same request may succeed when asked again; a 4xx or a connection failure is not.
 
-    def __init__(self, message: str = "", *, retryable: bool = False) -> None:
+    ``wire``: the ``"<provider name>:<model>"`` the failed request went to, when the provider that raised
+    it knows (see ``llm.replay``); "" otherwise."""
+
+    def __init__(self, message: str = "", *, retryable: bool = False, wire: str = "") -> None:
         self.retryable = retryable
+        self.wire = wire
         super().__init__(message)
 
 

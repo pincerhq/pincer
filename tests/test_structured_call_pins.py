@@ -78,7 +78,9 @@ async def test_a_structured_call_on_a_model_that_cannot_disable_thinking_still_g
     body = await structured_request("claude-opus-5-5")  # thinks always: `disabled` is dropped, low still applies
 
     assert body["output_config"] == {"effort": "low"}
-    assert "thinking" not in body
+    # `disabled` is not sent; what goes out is the adaptive thinking the model has anyway, now with its
+    # binding controls (issue #358)
+    assert body["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 
 
 async def test_summaries_keep_their_own_settings_and_chat_keeps_the_global_ones(settings):

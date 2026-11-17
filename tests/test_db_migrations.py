@@ -2220,3 +2220,71 @@ def test_0029_adds_the_cache_token_columns_and_leaves_old_rows_at_zero(migration
         assert {c["name"] for c in sa.inspect(engine_).get_columns("pincer_cost_logs")} >= _CACHE_COLUMNS
     finally:
         engine_.dispose()
+
+
+# ── 0030: session images ───────────────────────────────────────────────
+
+
+def _version(engine_: sa.Engine) -> str:
+    with engine_.connect() as conn:
+        return str(conn.execute(sa.text(f"SELECT version_num FROM {VERSION_TABLE}")).scalar_one())
+
+
+def test_0030_session_images_hang_off_their_session_and_the_downgrade_drops_them(migration_url, tmp_path):
+    """#358: one photo per session and hash, gone with its session (Postgres cascades; SQLite
+    is told by the code). The upgrade and downgrade must really run, not just exit 0: the table
+    and the version are read back after each."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0029")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        assert "pincer_session_images" not in sa.inspect(engine_).get_table_names()
+        assert _version(engine_) == "0029"
+
+        command.upgrade(cfg, "0030")
+        inspector = sa.inspect(engine_)
+        assert _version(engine_) == "0030"
+        assert "pincer_session_images" in inspector.get_table_names()
+        assert {c["name"]: c["nullable"] for c in inspector.get_columns("pincer_session_images")} == {
+            "session_id": False,
+            "sha256": False,
+            "media_type": False,
+            "data": False,
+            "created_at": False,
+        }
+        assert inspector.get_pk_constraint("pincer_session_images")["constrained_columns"] == ["session_id", "sha256"]
+        (fk,) = inspector.get_foreign_keys("pincer_session_images")
+        assert (fk["referred_table"], fk["referred_columns"], fk["constrained_columns"]) == (
+            "pincer_sessions",
+            ["session_id"],
+            ["session_id"],
+        )
+        assert (fk["options"].get("ondelete"), fk["options"].get("onupdate")) == ("CASCADE", "CASCADE")
+
+        with engine_.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+                    "VALUES ('web:alice', 'alice', 'web', 1.0, 1.0)"
+                )
+            )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+                    "VALUES ('web:alice', :sha, 'image/jpeg', :data, 1.0)"
+                ),
+                {"sha": "a" * 64, "data": b"\xff\xd8 photo bytes"},
+            )
+
+        command.downgrade(cfg, "0029")
+        assert "pincer_session_images" not in sa.inspect(engine_).get_table_names()
+        assert "pincer_sessions" in sa.inspect(engine_).get_table_names()
+        assert _version(engine_) == "0029"
+
+        command.upgrade(cfg, "0030")
+        assert "pincer_session_images" in sa.inspect(engine_).get_table_names()
+        assert _version(engine_) == "0030"
+        with engine_.connect() as conn:
+            assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 0
+    finally:
+        engine_.dispose()

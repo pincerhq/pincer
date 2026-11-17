@@ -11,7 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from pincer.config import Settings
-from pincer.llm.pricing_check import pricing_problems
+from pincer.llm.pricing_check import check_pricing, pricing_problems
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -342,7 +342,8 @@ def test_a_multiplier_for_a_configured_provider_passes(tmp_path: Path) -> None:
 _GPT6_FOOTER = (
     "Why: Pincer talks to OpenAI models through Chat Completions, which lets gpt-6 models use tools only "
     "with reasoning off. The summary model uses no tools, so PINCER_SUMMARY_REASONING_EFFORT still applies to it.\n"
-    "When it changes: reasoning with tools comes with the Responses API (#358)."
+    "To use reasoning with tools: add the endpoint's name to PINCER_RESPONSES_API_PROVIDERS if it serves "
+    "/v1/responses (openai, azure and azure-openai already use it)."
 )
 _THEN = "Pincer then turns reasoning off for this model's tool requests."
 
@@ -360,6 +361,7 @@ def _gpt6(model: str = "gpt-6.1-terra", **overrides: object) -> Settings:
         "voice_reasoning_effort": "",
         "voice_thinking": "",
         "summary_reasoning_effort": "",
+        "responses_api_providers": [],  # Chat Completions: the rules below; the Responses twins pass the default
     }
     base.update(overrides)
     return _settings(**base)
@@ -587,3 +589,40 @@ def test_the_price_check_does_not_load_the_working_directorys_env_file(
 def test_a_sampling_model_is_not_checked_without_an_anthropic_key(tmp_path: Path) -> None:
     settings = _settings(anthropic_api_key="", openai_api_key="sk-test", default_provider="openai", openai_model="m")
     assert pricing_problems(settings, _with_sampling(_priced(tmp_path, "claude-a", "m"))) is None
+
+
+# ── gpt-6 on the Responses API (slice 8): nothing to refuse ──────────────────
+
+_RESPONSES = {"responses_api_providers": ["openai", "azure", "azure-openai"]}
+
+
+@pytest.mark.parametrize("effort", ["", "low", "high", "max"])
+@pytest.mark.parametrize("model", ["gpt-6.1-terra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra"])
+def test_a_listed_endpoint_starts_with_any_gpt_6_chat_effort(tmp_path: Path, model: str, effort: str) -> None:
+    assert pricing_problems(_gpt6(model, reasoning_effort=effort, **_RESPONSES), _gpt6_priced(tmp_path)) is None
+
+
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6-astra"])
+def test_a_listed_endpoint_starts_with_a_model_that_has_no_off_level_for_voice(tmp_path: Path, model: str) -> None:
+    voice = _gpt6("gpt-5-mini", voice_enabled=True, voice_turn_model=model, voice_reasoning_effort="high", **_RESPONSES)
+
+    assert pricing_problems(voice, _gpt6_priced(tmp_path)) is None
+
+
+def test_only_the_endpoint_still_on_chat_completions_is_refused(tmp_path: Path) -> None:
+    """Chat on `openai` (Responses) is fine; voice on `gw`, which is not listed, still has the old limit."""
+    mixed = _gpt6(
+        "gpt-6.1-terra",
+        reasoning_effort="high",
+        openai_compatible_provider="gw",
+        openai_compatible_base_url="http://localhost:9999/v1",
+        openai_compatible_api_key="gw-key",
+        openai_compatible_model="gpt-5-mini",
+        voice_enabled=True,
+        voice_turn_model="gw:gpt-6-sol",
+        **_RESPONSES,
+    )
+    report = check_pricing(mixed, _gpt6_priced(tmp_path))
+
+    assert [(c.use.role, c.use.provider) for c in report.conflicts] == [("voice", "gw")]
+    assert "#358" not in report.message()

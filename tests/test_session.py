@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+import asyncio
+from collections import OrderedDict
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from pincer.core.session import ONBOARDING_PROMPT_SENT_KEY, SessionManager, conversation_key
-from pincer.llm.base import ImageContent, LLMMessage, MessageRole, ThinkingBlock
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 from pincer.services.sessions import SessionService
 
 if TYPE_CHECKING:
@@ -360,8 +360,10 @@ def test_a_call_report_after_the_reply_serializes_for_the_next_turn():
         LLMMessage(role=MessageRole.USER, content="did they answer?"),
     ]
 
-    anthropic_self = SimpleNamespace(_validate_api_messages=AnthropicCompatibleProvider._validate_api_messages)
-    anthropic = AnthropicCompatibleProvider._convert_messages(anthropic_self, history)  # type: ignore[arg-type]
+    anthropic_self = SimpleNamespace(
+        _validate_api_messages=AnthropicCompatibleProvider._validate_api_messages, _provider_name="anthropic"
+    )
+    anthropic = AnthropicCompatibleProvider._convert_messages(anthropic_self, history, "claude-x")  # type: ignore[arg-type]
     assert [m["role"] for m in anthropic] == ["user", "assistant", "user"]
     assert "No answer." in anthropic[1]["content"]
     assert "It's ringing." in anthropic[1]["content"]
@@ -370,44 +372,11 @@ def test_a_call_report_after_the_reply_serializes_for_the_next_turn():
     assert [m["role"] for m in openai] == ["user", "assistant", "assistant", "user"]
 
 
-async def test_end_of_turn_save_failure_is_logged_not_raised(session_manager, caplog):
-    """The trimmed session stays cached; what lives only within a turn is gone even when the save fails."""
-    session = await session_manager.get_or_create("user1", "test")
-    session_manager.begin_turn(session)
-    thinking = [ThinkingBlock("thinking", thinking="SECRET-THOUGHT", signature="SIG")]
-    for index in range(25):  # past the fixture's cap of 20: nothing is trimmed within the turn
-        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
-        await session_manager.add_message(
-            session,
-            LLMMessage(
-                role=role,
-                content=f"message {index}",
-                images=[ImageContent(data="aW1n", media_type="image/png")] if index == 24 else [],
-                thinking_blocks=list(thinking) if role is MessageRole.ASSISTANT else [],
-            ),
-        )
-    assert len(session.messages) == 25  # precondition: no trimming within the turn
-
-    async def failing_save(**kwargs: object) -> None:
-        raise OSError("disk full")
-
-    with patch.object(session_manager._store, "save", side_effect=failing_save), caplog.at_level(logging.WARNING):
-        await session_manager.end_turn(session)
-
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert session._turn_open is False
-    assert all(not m.thinking_blocks and not m.images for m in session.messages)
-    warnings = [r for r in caplog.records if r.name == "pincer.core.session" and r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert session.session_id in warnings[0].getMessage()
-    assert "SECRET-THOUGHT" not in warnings[0].getMessage()
+_THOUGHT = [{"type": "thinking", "thinking": "SECRET-THOUGHT", "signature": "SIG"}]
 
 
-_THOUGHT = [ThinkingBlock("thinking", thinking="SECRET-THOUGHT", signature="SIG")]
-
-
-async def _fill_past_the_cap(session_manager: SessionManager, session) -> None:
-    """25 messages, past the fixture's cap of 20; the last carries an image, assistant ones a thought."""
+async def _fill(session_manager: SessionManager, session) -> None:
+    """25 messages, past the old cap of 20 of the fixture; the last carries an image, assistant ones a thought."""
     for index in range(25):
         role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
         await session_manager.add_message(
@@ -416,42 +385,45 @@ async def _fill_past_the_cap(session_manager: SessionManager, session) -> None:
                 role=role,
                 content=f"message {index}",
                 images=[ImageContent(data="aW1n", media_type="image/png")] if index == 24 else [],
-                thinking_blocks=list(_THOUGHT) if role is MessageRole.ASSISTANT else [],
+                raw=list(_THOUGHT) if role is MessageRole.ASSISTANT else [],
             ),
         )
 
 
-async def test_a_turn_keeps_its_history_whole_and_ends_by_dropping_thinking_and_trimming(session_manager):
+def _assert_whole(session) -> None:
+    assert [m.content for m in session.messages] == [f"message {i}" for i in range(25)]  # nothing is cut
+    assert [len(m.images) for m in session.messages] == [0] * 24 + [1]  # the photo stays
+    assert all(m.raw == _THOUGHT for m in session.messages if m.role is MessageRole.ASSISTANT)  # so does thinking
+
+
+async def test_a_turn_keeps_its_whole_history_thinking_and_photos(session_manager):
     async with session_manager.turn("user1", "test") as session:
-        await _fill_past_the_cap(session_manager, session)
-        assert len(session.messages) == 25  # nothing is trimmed while the turn runs
-        assert any(m.thinking_blocks for m in session.messages)
+        await _fill(session_manager, session)
+        _assert_whole(session)
 
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert all(not m.thinking_blocks and not m.images for m in session.messages)
+    _assert_whole(session)  # and when the turn ends
 
 
-async def test_a_turn_that_fails_still_ends(session_manager):
+async def test_a_failed_turn_keeps_its_messages_and_releases_the_session(session_manager):
     with pytest.raises(RuntimeError, match="boom"):
         async with session_manager.turn("user1", "test") as session:
-            await _fill_past_the_cap(session_manager, session)
+            await _fill(session_manager, session)
             raise RuntimeError("boom")
 
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert all(not m.thinking_blocks and not m.images for m in session.messages)
-    assert session._turn_open is False
+    _assert_whole(session)
+    async with asyncio.timeout(5):  # the turn lock is free again
+        async with session_manager.turn("user1", "test") as again:
+            assert again is session
 
 
-async def test_a_cancelled_turn_still_ends(session_manager):
-    import asyncio
-
+async def test_a_cancelled_turn_keeps_its_messages_and_releases_the_session(session_manager):
     inside = asyncio.Event()
     holder: list = []
 
     async def run() -> None:
         async with session_manager.turn("user1", "test") as session:
             holder.append(session)
-            await _fill_past_the_cap(session_manager, session)
+            await _fill(session_manager, session)
             inside.set()
             await asyncio.sleep(60)
 
@@ -462,11 +434,309 @@ async def test_a_cancelled_turn_still_ends(session_manager):
         await task
 
     session = holder[0]
-    assert len(session.messages) == 12  # past the cap of 20: cut to 3/5 of it
-    assert all(not m.thinking_blocks and not m.images for m in session.messages)
+    _assert_whole(session)
+    async with asyncio.timeout(5):
+        async with session_manager.turn("user1", "test") as again:
+            assert again is session
 
 
 async def test_a_turn_yields_the_cached_session(session_manager):
     async with session_manager.turn("user1", "test") as session:
         assert await session_manager.get_or_create("user1", "test") is session
         assert session.session_id in session_manager._turn_locks
+
+
+# ── the cache is bounded by the photos it holds, not only by how many sessions (PR #379 review, round 2) ──
+
+_PHOTO_BYTES = 3_000  # 4,000 base64 characters
+
+
+async def _with_photo(sm: SessionManager, user: str) -> None:
+    """A session of `user` whose one message shows a photo of its own."""
+    session = await sm.get_or_create(user, "web")
+    photo = ImageContent.from_bytes(user.encode() * (_PHOTO_BYTES // len(user)), "image/jpeg")
+    await sm.add_message(session, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+
+
+@pytest.fixture
+async def photo_budget(tmp_path: Path):
+    """A manager that caches many sessions but holds the photos of about two of them."""
+    sm = SessionManager(tmp_path / "test.db", max_cached=100, max_cached_photo_bytes=9_000)
+    await sm.initialize()
+    yield sm
+    await sm.close()
+
+
+async def test_the_cache_drops_the_least_recently_used_session_when_its_photos_pass_the_budget(
+    photo_budget: SessionManager,
+):
+    for user in ("a", "b", "c"):
+        await _with_photo(photo_budget, user)  # 3 x 4,000 characters: over the 9,000
+    assert len(photo_budget._cache) == 3  # precondition: only the count cap (100) applies so far
+
+    await photo_budget.get_or_create("d", "web")
+
+    assert list(photo_budget._cache) == ["web:b", "web:c", "web:d"]
+
+
+async def test_an_evicted_session_reloads_with_its_photo(photo_budget: SessionManager):
+    for user in ("a", "b", "c"):
+        await _with_photo(photo_budget, user)
+    await photo_budget.get_or_create("d", "web")
+    assert "web:a" not in photo_budget._cache
+
+    again = await photo_budget.get_or_create("a", "web")
+
+    assert [len(m.images) for m in again.messages] == [1]
+    assert again.messages[0].images[0].data  # the bytes are back
+
+
+async def test_a_session_in_a_turn_is_not_evicted_for_its_photos(photo_budget: SessionManager):
+    for user in ("a", "b", "c"):
+        await _with_photo(photo_budget, user)
+
+    async with photo_budget._locked("web:a"):  # a turn on a: it is the least recently used, and pinned
+        await photo_budget.get_or_create("d", "web")
+
+        assert sorted(photo_budget._cache) == ["web:a", "web:c", "web:d"]  # b went instead
+
+
+async def test_the_session_being_loaded_stays_even_when_its_own_photos_pass_the_budget(tmp_path: Path):
+    sm = SessionManager(tmp_path / "test.db", max_cached=100, max_cached_photo_bytes=1_000)
+    await sm.initialize()
+    try:
+        await _with_photo(sm, "a")
+        await sm.evict("web:a")
+
+        again = await sm.get_or_create("a", "web")
+
+        assert sm._cache["web:a"] is again
+        assert len(again.messages[0].images) == 1
+    finally:
+        await sm.close()
+
+
+async def test_a_photo_two_messages_show_counts_once(photo_budget: SessionManager):
+    session = await photo_budget.get_or_create("a", "web")
+    photo = ImageContent.from_bytes(b"x" * _PHOTO_BYTES, "image/jpeg")
+    for _ in range(3):
+        await photo_budget.add_message(session, LLMMessage(role=MessageRole.USER, content="again", images=[photo]))
+
+    assert session.photo_bytes() == len(photo.data)
+
+
+# ── eviction for photos frees photos, and stops when only the session being used holds them (round 3) ──
+
+
+async def _plain(sm: SessionManager, user: str) -> None:
+    """A session of `user` with one message and no photo (so it has something to save when evicted)."""
+    session = await sm.get_or_create(user, "web")
+    await sm.add_message(session, LLMMessage(role=MessageRole.USER, content="hello"))
+
+
+async def _with_photos(sm: SessionManager, user: str, count: int) -> None:
+    session = await sm.get_or_create(user, "web")
+    for n in range(count):
+        photo = ImageContent.from_bytes(f"{user}{n}".encode() * (_PHOTO_BYTES // 2), "image/jpeg")
+        await sm.add_message(session, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+
+
+def _count_saves(sm: SessionManager) -> list[str]:
+    saved: list[str] = []
+    real = sm._store.save
+
+    async def spy(**kwargs):
+        saved.append(kwargs["session_id"])
+        return await real(**kwargs)
+
+    sm._store.save = spy  # type: ignore[method-assign]
+    return saved
+
+
+async def test_the_session_being_loaded_holding_all_the_photos_does_not_empty_the_cache(photo_budget: SessionManager):
+    await _with_photos(photo_budget, "big", 3)  # 3 x 4,000 characters: over the 9,000 on its own
+    await photo_budget.evict("web:big")
+    for user in ("p1", "p2", "p3", "p4", "p5"):
+        await _plain(photo_budget, user)
+    saved = _count_saves(photo_budget)
+
+    big = await photo_budget.get_or_create("big", "web")  # a miss: loaded with its photos, over the budget
+
+    assert list(photo_budget._cache) == ["web:p1", "web:p2", "web:p3", "web:p4", "web:p5", "web:big"]
+    assert photo_budget._cache["web:big"] is big
+    assert saved == []  # nobody was saved or dropped for photos they do not hold
+
+
+async def test_a_session_in_a_turn_holding_all_the_photos_does_not_empty_the_cache(photo_budget: SessionManager):
+    big = await photo_budget.get_or_create("big", "web")  # the oldest
+    for user in ("p1", "p2", "p3"):
+        await _plain(photo_budget, user)
+    for n in range(3):  # photos arrive in its turn: 12,000 characters, over the 9,000
+        photo = ImageContent.from_bytes(f"big{n}".encode() * (_PHOTO_BYTES // 2), "image/jpeg")
+        await photo_budget.add_message(big, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+    saved = _count_saves(photo_budget)
+
+    async with photo_budget._locked("web:big"):  # in a turn: it cannot go
+        await photo_budget.get_or_create("d", "web")
+
+    assert sorted(photo_budget._cache) == ["web:big", "web:d", "web:p1", "web:p2", "web:p3"]
+    assert saved == []
+
+
+async def test_eviction_for_photos_takes_the_oldest_session_that_holds_some_and_leaves_the_others(
+    photo_budget: SessionManager,
+):
+    await _plain(photo_budget, "p")  # the oldest, no photo
+    for user in ("a", "b", "c"):
+        await _with_photos(photo_budget, user, 1)  # 12,000 characters in all, over the 9,000
+
+    await photo_budget.get_or_create("d", "web")
+
+    assert list(photo_budget._cache) == ["web:p", "web:b", "web:c", "web:d"]
+
+
+async def test_a_cache_miss_does_not_walk_the_messages_of_the_cached_sessions(
+    photo_budget: SessionManager, monkeypatch: pytest.MonkeyPatch
+):
+    """The photo total is kept from what each session's last save counted, not summed over every message of every
+    cached session on every miss (PR #379 review, round 3)."""
+    from pincer.core.session import Session
+
+    for n in range(20):
+        await _plain(photo_budget, f"u{n}")
+    walks = 0
+    real = Session.photo_bytes
+
+    def counting(self: Session) -> int:
+        nonlocal walks
+        walks += 1
+        return real(self)
+
+    monkeypatch.setattr(Session, "photo_bytes", counting)
+
+    await photo_budget.get_or_create("new", "web")
+
+    assert walks <= 1  # the session just loaded, not the 20 cached
+
+
+async def test_the_photo_total_follows_a_clear_and_a_cut(photo_budget: SessionManager):
+    sessions = {}
+    for user in ("a", "b", "c"):
+        await _with_photos(photo_budget, user, 1)  # 12,000 characters in all, over the 9,000
+        sessions[user] = photo_budget._cache[f"web:{user}"]
+    # a clear and a cut free two photos: 4,000 left, within the budget
+    await photo_budget.clear(sessions["a"])
+    await photo_budget.cut(sessions["b"], list(sessions["b"].messages))
+
+    await photo_budget.get_or_create("d", "web")
+
+    assert list(photo_budget._cache) == ["web:a", "web:b", "web:c", "web:d"]  # nothing went
+
+
+# ── eviction stops when it cannot help, and walks the cache once (PR #379 review, round 4) ──
+
+
+async def test_other_photo_sessions_stay_when_the_session_being_loaded_is_over_the_budget_by_itself(
+    photo_budget: SessionManager,
+):
+    await _with_photos(photo_budget, "big", 3)  # 12,000 characters: over the 9,000 on its own
+    await photo_budget.evict("web:big")
+    for user in ("a", "b"):
+        await _with_photos(photo_budget, user, 1)  # 4,000 each: 8,000 together, under the budget
+    assert list(photo_budget._cache) == ["web:a", "web:b"]  # precondition: nothing was evicted so far
+
+    await photo_budget.get_or_create("big", "web")  # their eviction could not bring the total under 9,000
+
+    assert list(photo_budget._cache) == ["web:a", "web:b", "web:big"]
+
+
+async def test_other_photo_sessions_stay_when_a_session_in_a_turn_is_over_the_budget_by_itself(
+    photo_budget: SessionManager,
+):
+    for user in ("a", "b"):
+        await _with_photos(photo_budget, user, 1)
+    big = await photo_budget.get_or_create("big", "web")
+    for n in range(3):  # photos arrive in its turn: 12,000 characters
+        photo = ImageContent.from_bytes(f"big{n}".encode() * (_PHOTO_BYTES // 2), "image/jpeg")
+        await photo_budget.add_message(big, LLMMessage(role=MessageRole.USER, content="look", images=[photo]))
+
+    async with photo_budget._locked("web:big"):
+        await photo_budget.get_or_create("d", "web")
+
+    assert sorted(photo_budget._cache) == ["web:a", "web:b", "web:big", "web:d"]
+
+
+async def test_the_sessions_dropped_for_photos_are_found_in_one_walk_of_the_cache(tmp_path: Path):
+    """With many sessions that hold no photo at the front of the cache, every step of an eviction that looked for
+    the next photo session from the front walked all of them again. The cache is iterated through a counting
+    subclass (its own entry points, so the bound does not depend on which of them the code calls)."""
+
+    class Counting(OrderedDict[str, Any]):
+        steps = 0
+
+        def _count(self, entries):
+            for entry in entries:
+                type(self).steps += 1
+                yield entry
+
+        def __iter__(self):
+            return self._count(super().__iter__())
+
+        def items(self):  # type: ignore[override]
+            return self._count(super().items())
+
+        def keys(self):  # type: ignore[override]
+            return self._count(super().keys())
+
+        def values(self):  # type: ignore[override]
+            return self._count(super().values())
+
+    sm = SessionManager(tmp_path / "test.db", max_cached=1_000, max_cached_photo_bytes=10**9)
+    await sm.initialize()
+    try:
+        for n in range(300):
+            await _plain(sm, f"plain{n}")  # the oldest: no photo
+        for n in range(40):
+            await _with_photos(sm, f"q{n:02d}", 1)  # 8,000 characters each, 320,000 in all
+        assert len(sm._cache) == 340  # precondition: every one is still cached (the budget was out of reach)
+        sm._max_cached_photo_bytes = 9_000  # the budget drops under what is cached (the one private poke)
+        sm._cache = Counting(sm._cache)  # type: ignore[assignment]
+        Counting.steps = 0
+
+        await sm.get_or_create("new", "web")
+
+        photo_sessions = [key for key in sm._cache if key.startswith("web:q")]
+        assert photo_sessions == ["web:q39"]  # must-reach control: the photos were brought down to the budget (9,000)
+        assert Counting.steps < 4 * 340  # a walk or two of the 340, not one per dropped session (12,000+ before)
+    finally:
+        await sm.close()
+
+
+async def test_a_session_used_while_an_eviction_saves_another_is_not_dropped_ahead_of_older_ones(tmp_path: Path):
+    """The sessions to drop are found in one walk, before the first save is awaited. One that is used meanwhile has
+    moved to the recent end of the cache, and goes after the older ones, as the live order says."""
+    sm = SessionManager(tmp_path / "test.db", max_cached=100, max_cached_photo_bytes=10**9)
+    await sm.initialize()
+    try:
+        for user in ("a", "b", "c", "e"):
+            await _with_photos(sm, user, 1)  # 4,000 characters each
+        sm._max_cached_photo_bytes = 9_000  # now two of the four must go (the one private poke)
+        oldest = sm._cache["web:a"]
+        oldest.messages.append(LLMMessage(role=MessageRole.USER, content="unsaved"))  # a has something to save
+        real = sm._store.save
+        used: list[str] = []
+
+        async def save_and_use_b(**kwargs):
+            if not used:
+                used.append("web:b")
+                await sm.get_or_create("b", "web")  # b is hit while a is being saved
+            return await real(**kwargs)
+
+        sm._store.save = save_and_use_b  # type: ignore[method-assign]
+
+        await sm.get_or_create("d", "web")
+
+        assert used == ["web:b"]  # precondition: the hit happened inside the eviction
+        assert list(sm._cache) == ["web:e", "web:d", "web:b"]  # a and c went; b, the one used meanwhile, stayed
+    finally:
+        await sm.close()

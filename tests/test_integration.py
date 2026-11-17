@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 
 from pincer.core.agent import Agent, AgentResponse, StreamChunk, StreamEventType
+from pincer.core.compaction import CompactionOutcome
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.memory.store import MemoryStore
 
@@ -120,7 +121,7 @@ class _NoCosts:
         return False
 
 
-async def _compact(llm, memory_store, session_manager, user_id: str, **compactor_kwargs) -> bool:
+async def _compact(llm, memory_store, session_manager, user_id: str, **compactor_kwargs) -> CompactionOutcome:
     """Eight short messages, compacted as if the last request's prompt was 100K tokens."""
     from pincer.core.compaction import Compactor, LastRequest
 
@@ -156,7 +157,7 @@ async def test_a_compaction_summary_is_a_searchable_memory(
         output_tokens=30,
     )
 
-    assert await _compact(mock_llm, memory_store, session_manager, "user1") is True
+    assert await _compact(mock_llm, memory_store, session_manager, "user1") is CompactionOutcome.COMPACTED
     assert mock_llm.complete.call_count == 1
 
     results = await memory_store.search_text("Summary", user_id="user1")
@@ -191,7 +192,8 @@ async def _summary_request(settings, memory_store, session_manager, **compactor_
     import anthropic_sse as sse
 
     async with sse.ScriptedAnthropic(settings, [([sse.text("Summary.")], "end_turn")]) as llm:
-        assert await _compact(llm.provider, memory_store, session_manager, "user-s", **compactor_kwargs) is True
+        outcome = await _compact(llm.provider, memory_store, session_manager, "user-s", **compactor_kwargs)
+        assert outcome is CompactionOutcome.COMPACTED
     assert len(llm.requests) == 1
     return llm.requests[0]
 
@@ -204,7 +206,7 @@ async def test_summary_sends_its_own_effort_and_thinking(memory_store: MemorySto
 
     assert body["model"] == "claude-haiku-5-5"
     assert body["output_config"] == {"effort": "low"}
-    assert body["thinking"] == {"type": "adaptive"}
+    assert body["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 
 
 @pytest.mark.asyncio
@@ -214,7 +216,7 @@ async def test_summary_without_its_own_values_sends_the_global_ones(memory_store
     body = await _summary_request(settings, memory_store, session_manager)
 
     assert body["output_config"] == {"effort": "medium"}
-    assert body["thinking"] == {"type": "adaptive"}
+    assert body["thinking"] == {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 
 
 @pytest.mark.asyncio

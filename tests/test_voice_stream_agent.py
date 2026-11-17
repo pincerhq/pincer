@@ -829,6 +829,10 @@ def _reasoning_settings(settings, **values):
     )
 
 
+# Adaptive thinking on Haiku 5.5 through the 'anthropic' endpoint carries the binding controls (issue #358)
+_DROP_BLOCK = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+
+
 class TestVoiceReasoningOverrides:
     async def _voice_request(self, settings, session_manager, cost_tracker, tool_registry) -> dict:
         async with sse.ScriptedAnthropic(settings, [([sse.text("Hi there.")], "end_turn")]) as llm:
@@ -865,7 +869,8 @@ class TestVoiceReasoningOverrides:
 
         assert body["model"] == "claude-haiku-5-5"
         assert "output_config" not in body
-        assert "thinking" not in body
+        # no setting: the adaptive thinking Haiku 5.5 has anyway, with its binding controls (issue #358)
+        assert body["thinking"] == _DROP_BLOCK
 
     async def test_provider_prefixed_voice_model_gets_the_voice_values(
         self, settings, session_manager, cost_tracker, tool_registry
@@ -924,10 +929,7 @@ class TestVoiceReasoningOverrides:
         voice, regeneration = llm.requests
         assert (voice["output_config"], voice["thinking"]) == ({"effort": "low"}, {"type": "disabled"})
         assert regeneration["messages"][0]["content"][-1] == {"type": "text", "text": "Hi"}  # the call's own session
-        assert (regeneration["output_config"], regeneration["thinking"]) == (
-            {"effort": "high"},
-            {"type": "adaptive"},
-        )
+        assert (regeneration["output_config"], regeneration["thinking"]) == ({"effort": "high"}, _DROP_BLOCK)
 
     async def test_chat_turns_ignore_the_voice_settings(self, settings, session_manager, cost_tracker, tool_registry):
         settings = _reasoning_settings(
@@ -943,4 +945,4 @@ class TestVoiceReasoningOverrides:
 
         assert len(llm.requests) == 1
         assert llm.requests[0]["output_config"] == {"effort": "high"}
-        assert llm.requests[0]["thinking"] == {"type": "adaptive"}
+        assert llm.requests[0]["thinking"] == _DROP_BLOCK
