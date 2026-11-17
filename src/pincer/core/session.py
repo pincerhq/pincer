@@ -25,7 +25,7 @@ from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import ImageSet, SessionService, StoredImage, register_cache
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -138,6 +138,8 @@ class SessionManager:
         self._db_path = db_path
         self._max_cached = max_cached
         self._max_cached_photo_bytes = max_cached_photo_bytes
+        # Counts the cache hits (each moves a session to the recent end): see `_evict_overflow`
+        self._touches = 0
         self._service: SessionService | None = None
         self._onboarding: OnboardingService | None = None
         self._cache: OrderedDict[str, Session] = OrderedDict()
@@ -267,6 +269,7 @@ class SessionManager:
 
         if key in self._cache:
             self._cache.move_to_end(key)
+            self._touches += 1
             return self._cache[key]
 
         row = await self._store.load(key, user_id=user_id, channel=channel, legacy_fallback=not session_key)
@@ -399,18 +402,25 @@ class SessionManager:
         sizes = {key: cached._photo_bytes for key, cached in self._cache.items()}
         photos = sum(sizes.values())
         attempts = _EVICTION_SPARE_ATTEMPTS + max(len(self._cache) - self._max_cached, 0)
-        candidates: Iterator[tuple[str, Session]] = iter(())
-        if photos > self._max_cached_photo_bytes:
-            stays = sum(size for key, size in sizes.items() if key == keep or key in self._turn_locks)
-            if stays <= self._max_cached_photo_bytes:  # dropping the others can bring it under
-                # The sessions that hold photos and can go, oldest first, found in one walk of the cache
-                evictable = [
-                    (key, cached)
-                    for key, cached in self._cache.items()
-                    if sizes[key] and key != keep and key not in self._turn_locks
-                ]
-                attempts += len(evictable)
-                candidates = iter(evictable)
+        # Dropping the others can bring the photos under the budget only if what stays does not pass it alone
+        can_help = photos > self._max_cached_photo_bytes and (
+            sum(size for key, size in sizes.items() if key == keep or key in self._turn_locks)
+            <= self._max_cached_photo_bytes
+        )
+
+        def photo_sessions() -> list[tuple[str, Session]]:
+            """The sessions that hold photos and can go, oldest first, found in one walk of the cache."""
+            if not can_help:
+                return []
+            return [
+                (key, cached)
+                for key, cached in self._cache.items()
+                if sizes.get(key) and key != keep and key not in self._turn_locks
+            ]
+
+        walked = photo_sessions()
+        attempts += len(walked)
+        candidates, touched = iter(walked), self._touches
         while attempts > 0:
             if len(self._cache) > self._max_cached:
                 key, session = next(iter(self._cache.items()))
@@ -418,7 +428,10 @@ class SessionManager:
                     return  # everything older was tried
             elif photos > self._max_cached_photo_bytes:
                 # Only the photos are over: drop the next session of those that hold some. One that was
-                # dropped, replaced or put in a turn since the walk is passed over
+                # dropped, replaced or put in a turn since the walk is passed over; a session used since it
+                # (while a save was awaited) has moved in the cache, so the walk is made again (the live order)
+                if touched != self._touches:
+                    candidates, touched = iter(photo_sessions()), self._touches
                 found = next(
                     (
                         (key, cached)

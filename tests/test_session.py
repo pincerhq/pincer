@@ -710,3 +710,33 @@ async def test_the_sessions_dropped_for_photos_are_found_in_one_walk_of_the_cach
         assert Counting.steps < 4 * 340  # a walk or two of the 340, not one per dropped session (12,000+ before)
     finally:
         await sm.close()
+
+
+async def test_a_session_used_while_an_eviction_saves_another_is_not_dropped_ahead_of_older_ones(tmp_path: Path):
+    """The sessions to drop are found in one walk, before the first save is awaited. One that is used meanwhile has
+    moved to the recent end of the cache, and goes after the older ones, as the live order says."""
+    sm = SessionManager(tmp_path / "test.db", max_cached=100, max_cached_photo_bytes=10**9)
+    await sm.initialize()
+    try:
+        for user in ("a", "b", "c", "e"):
+            await _with_photos(sm, user, 1)  # 4,000 characters each
+        sm._max_cached_photo_bytes = 9_000  # now two of the four must go (the one private poke)
+        oldest = sm._cache["web:a"]
+        oldest.messages.append(LLMMessage(role=MessageRole.USER, content="unsaved"))  # a has something to save
+        real = sm._store.save
+        used: list[str] = []
+
+        async def save_and_use_b(**kwargs):
+            if not used:
+                used.append("web:b")
+                await sm.get_or_create("b", "web")  # b is hit while a is being saved
+            return await real(**kwargs)
+
+        sm._store.save = save_and_use_b  # type: ignore[method-assign]
+
+        await sm.get_or_create("d", "web")
+
+        assert used == ["web:b"]  # precondition: the hit happened inside the eviction
+        assert list(sm._cache) == ["web:e", "web:d", "web:b"]  # a and c went; b, the one used meanwhile, stayed
+    finally:
+        await sm.close()
