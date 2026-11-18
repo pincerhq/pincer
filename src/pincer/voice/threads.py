@@ -133,7 +133,7 @@ class Thread:
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> Thread:
         return cls(
-            thread_id=str(row["thread_id"]),
+            thread_id=str(row["id"]),
             subject=str(row["subject"] or ""),
             status=str(row["status"] or STATUS_OPEN),
             origin=str(row["origin"] or ORIGIN_USER_TASK),
@@ -553,7 +553,7 @@ class ThreadManager:
         store = await self._store()
         await store.create(
             {
-                "thread_id": thread.thread_id,
+                "id": thread.thread_id,
                 "subject": thread.subject,
                 "status": thread.status,
                 "origin": thread.origin,

@@ -28,7 +28,7 @@ class ThreadRepository(BaseRepository[CallThread, str]):
         """An id that could never exist changes nothing, quietly — as `BaseRepository.get`."""
         if not is_id(thread_id):
             return 0
-        stmt = update(CallThread).where(col(CallThread.thread_id) == thread_id).values(**values)
+        stmt = update(CallThread).where(col(CallThread.id) == thread_id).values(**values)
         return int((await self.session.exec(stmt)).rowcount)
 
     async def for_number(
@@ -52,9 +52,7 @@ class ThreadRepository(BaseRepository[CallThread, str]):
         return (await self.session.exec(stmt)).all()
 
     async def stale_ids(self, status: str, older_than: str) -> Sequence[str]:
-        stmt = select(CallThread.thread_id).where(
-            col(CallThread.status) != status, col(CallThread.updated_at) < older_than
-        )
+        stmt = select(CallThread.id).where(col(CallThread.status) != status, col(CallThread.updated_at) < older_than)
         return (await self.session.exec(stmt)).all()
 
     async def search(

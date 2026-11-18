@@ -69,11 +69,11 @@ async def test_a_driven_call_produces_call_turn_and_event_rows(telemetry):
     # The channel's own turn counter and the telemetry rows must agree.
     assert call["turn_count"] == result.turns
 
-    turns = await queries.get_turns(telemetry, call["call_id"])
+    turns = await queries.get_turns(telemetry, call["id"])
     assert len(turns) == result.turns
     assert all(turn["engine"] == "fake" for turn in turns)
 
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     names = {event["name"] for event in events}
     assert {"call.registered", "call.answered", "turn.start", "turn.end", "call.ended"} <= names
 
@@ -98,7 +98,7 @@ async def test_turns_report_an_estimated_latency_source_without_speech_end(telem
         telemetry,
     )
     call = await queries.get_call(telemetry, call_sid)
-    turns = await queries.get_turns(telemetry, call["call_id"])
+    turns = await queries.get_turns(telemetry, call["id"])
     assert turns
     assert all(turn["response_latency_source"] == "transcript_arrival" for turn in turns)
 
@@ -119,7 +119,7 @@ async def test_an_abrupt_hangup_still_leaves_a_diagnosable_call(telemetry):
         "callee_unavailable",
         "unknown",
     )
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     assert any(event["name"] == "call.ended" for event in events)
 
 
@@ -129,7 +129,7 @@ async def test_a_brain_error_marks_the_turn_failed_without_killing_the_call(tele
         telemetry,
     )
     call = await queries.get_call(telemetry, call_sid)
-    turns = await queries.get_turns(telemetry, call["call_id"])
+    turns = await queries.get_turns(telemetry, call["id"])
     failed = [turn for turn in turns if turn["error"]]
     assert failed, "a scripted agent failure must appear on its turn"
     assert failed[0]["complete"] is False
@@ -243,16 +243,16 @@ async def test_every_parallel_tool_call_is_traced(telemetry, settings, session_m
     await get_recorder().flush()
 
     call = await queries.get_call(telemetry, "CA_tools")
-    spans = await queries.get_spans(telemetry, call["call_id"])
+    spans = await queries.get_spans(telemetry, call["id"])
     tool_spans = [s for s in spans if s["name"] == str(SpanName.TOOL)]
     assert {s["attributes"]["tool"] for s in tool_spans} == {"calendar_today", "contact_lookup"}
 
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     starts = [e for e in events if e["name"] == "tool.start"]
     assert len(starts) == 2
     assert {e["attributes"]["tool"] for e in starts} == {"calendar_today", "contact_lookup"}
 
-    rows = await queries.get_turns(telemetry, call["call_id"])
+    rows = await queries.get_turns(telemetry, call["id"])
     assert rows[0]["tool_calls"] == 2
     # Two LLM iterations, each its own span.
     assert len([s for s in spans if s["name"] == str(SpanName.LLM)]) == 2

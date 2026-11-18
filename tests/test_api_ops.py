@@ -45,8 +45,8 @@ async def _seed(db_path, rows: list[tuple[str, str, float]]) -> None:
                 (sid, started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
             await db.execute(
-                "INSERT INTO pincer_call_costs (call_sid, total_usd, twilio_usd, llm_usd, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pincer_call_costs (id, call_sid, total_usd, twilio_usd, llm_usd, recorded_at) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?)",
                 (sid, cost, cost * 0.7, cost * 0.3, datetime.now(UTC).isoformat()),
             )
         await db.commit()

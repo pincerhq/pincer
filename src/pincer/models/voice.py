@@ -1,7 +1,7 @@
 """Phone calls: the call log, transcripts, actions, contacts, the dialling gate, messages, threads and analytics."""
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
@@ -94,8 +94,10 @@ class PhoneContact(SQLModel, table=True):
 
 class DoNotCallNumber(SQLModel, table=True):
     __tablename__ = "pincer_do_not_call_numbers"
+    __table_args__ = (UniqueConstraint("phone_number", name="uq_do_not_call_numbers_phone_number"),)
 
-    phone_number: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    phone_number: str = Field(sa_column=Column(Text(), nullable=False))
     reason: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     source: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     call_sid: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -138,7 +140,7 @@ class CallThread(SQLModel, table=True):
     __tablename__ = "pincer_call_threads"
     __table_args__ = (Index("idx_threads_number_status", "primary_number", "status"),)
 
-    thread_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     subject: str = Field(sa_column=Column(Text(), nullable=False))
     status: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'open'")))
     origin: str = Field(sa_column=Column(Text(), nullable=False))
@@ -155,10 +157,14 @@ class CallThread(SQLModel, table=True):
 
 class CallThreadMember(SQLModel, table=True):
     __tablename__ = "pincer_call_thread_members"
-    __table_args__ = (Index("idx_thread_members_thread", "thread_id"),)
+    __table_args__ = (
+        UniqueConstraint("call_sid", name="uq_call_thread_members_call_sid"),
+        Index("idx_thread_members_thread", "thread_id"),
+    )
 
-    call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
-    thread_id: str = Field(sa_column=Column(Uuid7(), ForeignKey("pincer_call_threads.thread_id"), nullable=False))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    call_sid: str = Field(sa_column=Column(Text(), nullable=False))
+    thread_id: str = Field(sa_column=Column(Uuid7(), ForeignKey("pincer_call_threads.id"), nullable=False))
     attach_kind: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("''"))
     )
@@ -171,11 +177,15 @@ class CallThreadMember(SQLModel, table=True):
 
 class CallAnalytics(SQLModel, table=True):
     __tablename__ = "pincer_call_analytics"
-    __table_args__ = (Index("idx_call_analytics_sentiment", "sentiment"),)
+    __table_args__ = (
+        UniqueConstraint("call_sid", name="uq_call_analytics_call_sid"),
+        Index("idx_call_analytics_sentiment", "sentiment"),
+    )
 
     # No foreign key to voice_calls: the retention purge deletes an expired
     # call and keeps its analytics (migration 0014).
-    call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    call_sid: str = Field(sa_column=Column(Text(), nullable=False))
     agent_speech_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     caller_speech_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     silence_ms: int | None = Field(default=None, sa_column=Column(Integer()))
@@ -200,11 +210,13 @@ class CallOrigin(SQLModel, table=True):
 
     __tablename__ = "pincer_call_origins"
     __table_args__ = (
+        UniqueConstraint("call_sid", name="uq_call_origins_call_sid"),
         Index("idx_call_origins_session", "pincer_user_id", "session_key"),
         Index("idx_call_origins_reported", "reported_at"),
     )
 
-    call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    call_sid: str = Field(sa_column=Column(Text(), nullable=False))
     # The delivery id on the channel (a Telegram chat id); `pincer_user_id` is the identity.
     user_id: str = Field(sa_column=Column(Text(), nullable=False))
     pincer_user_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))

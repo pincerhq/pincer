@@ -168,7 +168,7 @@ def test_call_detail_exposes_turns_events_and_spans(seeded):
 
 def test_a_call_can_be_reached_by_internal_id_too(seeded):
     client = _client(seeded)
-    internal = client.get("/api/telephony/calls/CA_alpha").json()["call"]["call_id"]
+    internal = client.get("/api/telephony/calls/CA_alpha").json()["call"]["id"]
     assert client.get(f"/api/telephony/calls/{internal}").status_code == 200
 
 
@@ -311,7 +311,7 @@ def test_csv_export_covers_the_whole_filter_not_just_the_page(seeded):
     assert int(response.headers["X-Export-Rows"]) == 2
 
     lines = response.text.strip().splitlines()
-    assert lines[0].startswith("call_id,provider_call_id,trace_id")
+    assert lines[0].startswith("id,provider_call_id,trace_id")
     assert len(lines) == 3  # header + both calls, despite the page-size hint
     assert "CA_alpha" in response.text and "CA_beta" in response.text
 
@@ -481,7 +481,7 @@ def test_a_call_archive_holds_the_timeline_as_csv(seeded):
         "metrics.json",
     }
     events = archive.read("events.csv").decode()
-    assert events.splitlines()[0] == "ts_utc,seq,name,event_id,turn_id,span_id"
+    assert events.splitlines()[0] == "ts_utc,seq,name,reference_event_id,turn_id,span_id"
     assert "call.answered" in events
     assert "CA_alpha" in archive.read("README.txt").decode()
 

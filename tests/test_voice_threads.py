@@ -131,6 +131,11 @@ async def test_thread_create_on_task_call(manager, tmp_path):
     assert row["thread_id"] == thread.thread_id
     assert row["thread_attach_kind"] == KIND_ORIGIN
 
+    # The stored row is the thread under that id, not one minted beside it.
+    async with aiosqlite.connect(manager.db_path) as db:
+        stored = await (await db.execute("SELECT id FROM pincer_call_threads")).fetchall()
+    assert [row[0] for row in stored] == [thread.thread_id]
+
 
 async def test_thread_subject_is_required_and_capped(manager):
     with pytest.raises(ThreadError):
@@ -241,9 +246,7 @@ async def test_autoclose_only_touches_inactive_threads(manager):
     fresh = await manager.create("New matter")
     long_ago = (datetime.now(UTC) - timedelta(days=90)).isoformat()
     async with aiosqlite.connect(manager.db_path) as db:
-        await db.execute(
-            "UPDATE pincer_call_threads SET updated_at = ? WHERE thread_id = ?", (long_ago, stale.thread_id)
-        )
+        await db.execute("UPDATE pincer_call_threads SET updated_at = ? WHERE id = ?", (long_ago, stale.thread_id))
         await db.commit()
 
     assert await manager.autoclose(30) == [stale.thread_id]
@@ -293,7 +296,7 @@ async def test_inbound_match_respects_status_and_window(manager):
     old = await manager.create("Old matter", primary_number="+4930333")
     async with aiosqlite.connect(manager.db_path) as db:
         await db.execute(
-            "UPDATE pincer_call_threads SET updated_at = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET updated_at = ? WHERE id = ?",
             ((datetime.now(UTC) - timedelta(days=30)).isoformat(), old.thread_id),
         )
         await db.commit()

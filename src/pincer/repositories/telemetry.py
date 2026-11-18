@@ -70,8 +70,11 @@ _STATUS_ASSIGNMENT = (
 #: update rather than duplicate.
 _SPAN_UPDATES = ("end_utc", "end_mono_ns", "duration_ms", "status", "attributes")
 
+#: The columns a record's `to_row()` fills, in its order. The row's own `id`
+#: is not among them: raw SQL never fires the model's default, so
+#: `TelemetryService.write_records` mints it, and a conflict keeps the stored one.
 EVENT_COLUMNS = (
-    "event_id",
+    "reference_event_id",
     "call_id",
     "provider_call_id",
     "trace_id",
@@ -85,7 +88,7 @@ EVENT_COLUMNS = (
 )
 
 SPAN_COLUMNS = (
-    "span_id",
+    "reference_span_id",
     "call_id",
     "trace_id",
     "parent_span_id",
@@ -147,13 +150,13 @@ class TelemetryStatements:
 
     def events(self) -> Executable:
         """Append to the timeline. A repeated event id is ignored, not an error."""
-        return self._statement("pincer_telephony_events", EVENT_COLUMNS, "event_id", None)
+        return self._statement("pincer_telephony_events", ("id", *EVENT_COLUMNS), "reference_event_id", None)
 
     def spans(self) -> Executable:
         return self._statement(
             "pincer_telephony_spans",
-            SPAN_COLUMNS,
-            "span_id",
+            ("id", *SPAN_COLUMNS),
+            "reference_span_id",
             ", ".join(f"{column}=excluded.{column}" for column in _SPAN_UPDATES),
         )
 
@@ -163,11 +166,11 @@ class TelemetryStatements:
         Counters accumulate; a terminal status absorbs (see `LIVE_STATUSES`);
         everything else takes the incoming value.
         """
-        columns = ("call_id", *known)
+        columns = ("id", *known)
         return self._statement(
             "pincer_telephony_calls",
             columns,
-            "call_id",
+            "id",
             ", ".join(_call_assignment(column) for column in known),
         )
 
@@ -177,11 +180,11 @@ class TelemetryStatements:
         Upsert rather than insert: a turn cancelled by barge-in is written once
         when it is cancelled, and a late completion must not duplicate the row.
         """
-        columns = ("turn_id", *known)
+        columns = ("id", *known)
         return self._statement(
             "pincer_telephony_turns",
             columns,
-            "turn_id",
+            "id",
             ", ".join(f"{column}=excluded.{column}" for column in known),
         )
 
@@ -201,5 +204,5 @@ class TelemetryCallRepository(BaseRepository[TelephonyCall, str]):
         than a precompiled `text()`: precompiling is for the audio loop's
         latency, and a one-off CLI backfill never runs there.
         """
-        stmt = update(TelephonyCall).where(col(TelephonyCall.call_id) == call_id).values(**values)
+        stmt = update(TelephonyCall).where(col(TelephonyCall.id) == call_id).values(**values)
         return int((await self.session.exec(stmt)).rowcount)

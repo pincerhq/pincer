@@ -783,7 +783,7 @@ async def threads_api(client, tmp_path):
     await manager.attach("CA_gone", thread.thread_id, th.KIND_FOLLOWUP)  # no voice_calls row = purged
     async with aiosqlite.connect(str(tmp_path / "pincer.db")) as db:
         await db.execute(
-            "UPDATE pincer_call_threads SET rolling_summary = ?, open_commitments = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET rolling_summary = ?, open_commitments = ? WHERE id = ?",
             (
                 "Dienstag angerufen.\nStand: wartet auf Rückruf.",
                 '[{"who":"callee","what":"ruft am Freitag zurück","due":null,'
@@ -950,7 +950,7 @@ async def test_expired_commitment_filter(threads_api):
     expired_id = client.post("/api/voice/threads", json={"subject": "Überfällig"}).json()["thread_id"]
     async with aiosqlite.connect(str(threads_api.manager.db_path)) as db:
         await db.execute(
-            "UPDATE pincer_call_threads SET open_commitments = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET open_commitments = ? WHERE id = ?",
             (
                 '[{"who":"callee","what":"schickt die Unterlagen","due":"2026-01-01T10:00:00+00:00",'
                 '"status":"expired","source_call_sid":"CA002"}]',

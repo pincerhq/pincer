@@ -497,7 +497,7 @@ async def test_voice_cut_off_mid_sentence_ends_the_turn_with_what_was_said(
     assert len(warnings) == 1
     assert "220 of 220" in warnings[0].getMessage()
     call = await queries.get_call(telemetry, "CA_midsentence")
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     cut = [e for e in events if e["name"] == "llm.output_truncated"]
     assert len(cut) == 1
     assert cut[0]["attributes"]["max_tokens"] == 220
@@ -514,7 +514,7 @@ async def test_voice_silent_retry_is_recorded_in_telemetry(
 
     call = await queries.get_call(telemetry, "CA_retry")
     assert call["retry_count"] == 1
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     retries = [e for e in events if e["attributes"].get("code") == "llm_retry"]
     assert len(retries) == 1
     assert retries[0]["attributes"]["attempt"] == 2

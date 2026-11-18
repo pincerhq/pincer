@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 
 from pincer.db import ensure_schema_current
+from pincer.db.ids import new_id
 from pincer.voice.telemetry import hooks, queries, runtime
 from pincer.voice.telemetry.recorder import get_recorder
 from pincer.voice.telemetry.schema import EventName, SpanName, SpanStatus
@@ -86,7 +87,7 @@ async def test_successful_inbound_call_is_fully_recorded(telemetry):
     assert call["from_number_masked"].startswith("+49")
     assert "15112345678" not in call["from_number_masked"]
 
-    turns = await queries.get_turns(telemetry, call["call_id"])
+    turns = await queries.get_turns(telemetry, call["id"])
     assert len(turns) == 1
     row = turns[0]
     assert row["response_latency_ms"] == pytest.approx(720.0, abs=1.0)
@@ -143,7 +144,7 @@ async def test_a_slow_stt_finalisation_is_visible_as_its_own_stage(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    row = (await queries.get_turns(telemetry, call["call_id"]))[0]
+    row = (await queries.get_turns(telemetry, call["id"]))[0]
     assert row["endpointing_ms"] == pytest.approx(900.0, abs=1.0)
     assert row["stt_final_ms"] == pytest.approx(900.0, abs=1.0)
     assert row["stt_first_partial_ms"] == pytest.approx(300.0, abs=1.0)
@@ -165,7 +166,7 @@ async def test_relay_turn_is_labelled_as_starting_from_transcript_arrival(teleme
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    row = (await queries.get_turns(telemetry, call["call_id"]))[0]
+    row = (await queries.get_turns(telemetry, call["id"]))[0]
     assert row["response_latency_source"] == "transcript_arrival"
 
 
@@ -185,7 +186,7 @@ async def test_multi_turn_conversation_records_each_turn(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    turns = await queries.get_turns(telemetry, call["call_id"])
+    turns = await queries.get_turns(telemetry, call["id"])
     assert [t["turn_no"] for t in turns] == [1, 2, 3]
     assert [round(t["response_latency_ms"]) for t in turns] == [300, 400, 500]
     assert call["turn_count"] == 3
@@ -218,7 +219,7 @@ async def test_a_slow_stage_is_named_as_the_bottleneck(telemetry, stage, span_na
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    row = (await queries.get_turns(telemetry, call["call_id"]))[0]
+    row = (await queries.get_turns(telemetry, call["id"]))[0]
     assert row["bottleneck_stage"] == str(span_name)
     assert row["bottleneck_ms"] == pytest.approx(2000.0, abs=1.0)
     assert row["response_latency_ms"] == pytest.approx(2100.0, abs=1.0)
@@ -244,11 +245,11 @@ async def test_parallel_tool_calls_are_separate_spans(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    spans = await queries.get_spans(telemetry, call["call_id"])
+    spans = await queries.get_spans(telemetry, call["id"])
     tools = [s for s in spans if s["name"] == str(SpanName.TOOL)]
     assert {s["attributes"]["tool"] for s in tools} == {"calendar", "crm"}
 
-    row = (await queries.get_turns(telemetry, call["call_id"]))[0]
+    row = (await queries.get_turns(telemetry, call["id"]))[0]
     assert row["tool_calls"] == 2
     # Overlapping tools must not be summed into more than the window.
     segments = row["critical_path"]["segments"]
@@ -268,10 +269,10 @@ async def test_a_tool_retry_is_its_own_attempt_span(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    spans = await queries.get_spans(telemetry, call["call_id"])
+    spans = await queries.get_spans(telemetry, call["id"])
     attempts = sorted(s["attempt"] for s in spans if s["name"] == str(SpanName.TOOL))
     assert attempts == [1, 2]
-    row = (await queries.get_turns(telemetry, call["call_id"]))[0]
+    row = (await queries.get_turns(telemetry, call["id"]))[0]
     assert row["tool_retries"] == 1
 
 
@@ -291,7 +292,7 @@ async def test_a_barge_in_turn_is_cancelled_not_counted_as_slow(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    turns = await queries.get_turns(telemetry, call["call_id"])
+    turns = await queries.get_turns(telemetry, call["id"])
     cancelled = [t for t in turns if t["cancelled"]]
     assert len(cancelled) == 1
     assert cancelled[0]["interrupted"] is True
@@ -325,7 +326,7 @@ async def test_a_call_that_never_connected_still_has_a_diagnosable_row(telemetry
     assert call["failure_category"] == "callee_unavailable"
     assert call["termination_reason"] == "timeout_ringing"
 
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     assert [e["name"] for e in events if e["name"] == "call.provider_status"]
 
 
@@ -342,11 +343,11 @@ async def test_an_abrupt_hangup_keeps_the_partial_turn(telemetry):
 
     call = await queries.get_call(telemetry, "CA_in")
     assert call["failure_category"] == "technical"
-    row = (await queries.get_turns(telemetry, call["call_id"]))[0]
+    row = (await queries.get_turns(telemetry, call["id"]))[0]
     assert row["response_latency_ms"] is None
     assert row["complete"] is False
     assert row["error"] == "caller_hangup"
-    spans = await queries.get_spans(telemetry, call["call_id"])
+    spans = await queries.get_spans(telemetry, call["id"])
     assert any(s["name"] == str(SpanName.LLM) for s in spans)
 
 
@@ -377,7 +378,7 @@ async def test_open_spans_are_closed_when_the_call_dies_under_them(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    spans = await queries.get_spans(telemetry, call["call_id"])
+    spans = await queries.get_spans(telemetry, call["id"])
     media = [s for s in spans if s["name"] == str(SpanName.MEDIA)]
     assert media and media[0]["status"] == "cancelled"
 
@@ -393,7 +394,7 @@ async def test_duplicate_provider_callbacks_collapse_to_one_event(telemetry):
     await _settle()
 
     call = await queries.get_call(telemetry, "CA_in")
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     statuses = [e for e in events if e["name"] == "call.provider_status"]
     assert len(statuses) == 1
 
@@ -412,12 +413,13 @@ async def test_out_of_order_events_are_ordered_at_read_time(telemetry):
     async with get_engine(get_database_url(Path(str(telemetry)))).connect() as db:
         await db.execute(
             sa.text(
-                "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
-                "VALUES (:event_id, :call_id, :name, :ts_utc, :mono_ns, :seq)"
+                "INSERT INTO pincer_telephony_events (id, reference_event_id, call_id, name, ts_utc, mono_ns, seq) "
+                "VALUES (:id, :reference_event_id, :call_id, :name, :ts_utc, :mono_ns, :seq)"
             ),
             {
-                "event_id": "late-1",
-                "call_id": call["call_id"],
+                "id": new_id(),
+                "reference_event_id": "late-1",
+                "call_id": call["id"],
                 "name": "call.provider_status",
                 "ts_utc": "1990-01-01T00:00:00+00:00",
                 "mono_ns": 0,
@@ -426,8 +428,8 @@ async def test_out_of_order_events_are_ordered_at_read_time(telemetry):
         )
         await db.commit()
 
-    events = await queries.get_events(telemetry, call["call_id"])
-    assert events[0]["event_id"] == "late-1"
+    events = await queries.get_events(telemetry, call["id"])
+    assert events[0]["reference_event_id"] == "late-1"
     timestamps = [e["ts_utc"] for e in events]
     assert timestamps == sorted(timestamps)
 
@@ -452,9 +454,9 @@ async def test_an_unsampled_call_keeps_its_lifecycle_but_not_its_turns(telemetry
     assert call["failure_code"] == "llm_error"
     assert call["coverage"] == "lifecycle_only"
     assert call["turn_count"] == 1  # counted, even though the detail was dropped
-    assert await queries.get_turns(telemetry, call["call_id"]) == []
+    assert await queries.get_turns(telemetry, call["id"]) == []
 
-    events = await queries.get_events(telemetry, call["call_id"])
+    events = await queries.get_events(telemetry, call["id"])
     names = {e["name"] for e in events}
     assert "call.ended" in names
     assert "turn.start" not in names
@@ -530,7 +532,7 @@ async def test_a_mid_call_reconnect_never_rewrites_the_establishment(telemetry):
     assert call is not None
     assert call["media_establish_ms"] == 0.0
 
-    opens = [e for e in await queries.get_events(telemetry, call["call_id"]) if e["name"] == "call.media_stream_open"]
+    opens = [e for e in await queries.get_events(telemetry, call["id"]) if e["name"] == "call.media_stream_open"]
     assert len(opens) == 2
     assert opens[1]["ts_utc"] >= opens[0]["ts_utc"]
 
@@ -669,7 +671,7 @@ async def test_a_timed_out_dial_with_unknown_outcome_is_not_a_rejection(telemetr
     assert call["termination_reason"] == "dial_unknown"
     assert call["failure_code"] == "twilio_api"
     assert call["failure_category"] == "technical"
-    names = [e["name"] for e in await queries.get_events(telemetry, call["call_id"])]
+    names = [e["name"] for e in await queries.get_events(telemetry, call["id"])]
     assert "call.dial_unknown" in names
     assert "call.dial_rejected" not in names
     assert runtime.tracer_for("pending-ddd") is None

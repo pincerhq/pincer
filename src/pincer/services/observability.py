@@ -41,7 +41,7 @@ class CallCostsService(DatabaseService):
 
     async def get(self, call_sid: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
-            row = await CallCostRepository(session).get(call_sid)
+            row = await CallCostRepository(session).get_by(call_sid=call_sid)
         return None if row is None else {name: getattr(row, name) for name in CallCost.model_fields}
 
     async def recorded_since(self, since: str, end: str | None = None) -> list[dict[str, Any]]:

@@ -306,7 +306,7 @@ async def alert_state(request: Request) -> list[dict[str, Any]]:
 #: only masked numbers are here, and no content column exists to add.
 EXPORT_COLUMNS: dict[str, tuple[str, ...]] = {
     "calls": (
-        "call_id",
+        "id",
         "provider_call_id",
         "trace_id",
         "direction",
@@ -344,7 +344,7 @@ EXPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "coverage",
     ),
     "turns": (
-        "turn_id",
+        "id",
         "call_id",
         "provider_call_id",
         "turn_no",
@@ -383,9 +383,9 @@ EXPORT_COLUMNS: dict[str, tuple[str, ...]] = {
     # Per-call datasets. `attributes` is deliberately absent from both: a JSON
     # blob in a CSV cell helps nobody, and the JSON members of the same archive
     # carry it in full.
-    "events": ("ts_utc", "seq", "name", "event_id", "turn_id", "span_id"),
+    "events": ("ts_utc", "seq", "name", "reference_event_id", "turn_id", "span_id"),
     "spans": (
-        "span_id",
+        "reference_span_id",
         "parent_span_id",
         "turn_id",
         "name",
@@ -786,7 +786,7 @@ async def call_detail(request: Request, call_ref: str) -> CallDetailOut:
     known limitation rather than a broken one.
     """
     call = await _resolve_call(request, call_ref)
-    turns = await queries.get_turns(_db_path(), call["call_id"])
+    turns = await queries.get_turns(_db_path(), call["id"])
     engine = str(call.get("engine") or "")
     available = [m for m in METRICS.values() if m.available(engine)]
     unavailable = [m for m in METRICS.values() if not m.available(engine)]
@@ -833,7 +833,7 @@ async def export_call(
     import json as json_lib
 
     call = await _resolve_call(request, call_ref)
-    call_id = str(call["call_id"])
+    call_id = str(call["id"])
     db = _db_path()
     turns = await queries.get_turns(db, call_id)
     events = await queries.get_events(db, call_id, limit=CALL_EXPORT_LIMIT)
@@ -912,7 +912,7 @@ async def call_events(
     minutes late still lands where it belongs.
     """
     call = await _resolve_call(request, call_ref)
-    return await queries.get_events(_db_path(), call["call_id"], limit=limit)
+    return await queries.get_events(_db_path(), call["id"], limit=limit)
 
 
 @router.get("/calls/{call_ref}/spans")
@@ -923,10 +923,10 @@ async def call_spans(
 ) -> list[dict[str, Any]]:
     """Waterfall spans. They overlap — that is the pipeline, not a bug."""
     call = await _resolve_call(request, call_ref)
-    return await queries.get_spans(_db_path(), call["call_id"], limit=limit)
+    return await queries.get_spans(_db_path(), call["id"], limit=limit)
 
 
 @router.get("/calls/{call_ref}/turns")
 async def call_turns(request: Request, call_ref: str) -> list[dict[str, Any]]:
     call = await _resolve_call(request, call_ref)
-    return await queries.get_turns(_db_path(), call["call_id"])
+    return await queries.get_turns(_db_path(), call["id"])

@@ -30,7 +30,7 @@ export function CallHeader({ call, gaps }: { call: TelephonyCall; gaps: string[]
     <div className="space-y-3">
       <div className="grid gap-3 rounded-xl border border-[var(--color-border)] bg-white/[0.02] p-4 sm:grid-cols-3 lg:grid-cols-5">
         <Field label="Provider call id" title={call.provider_call_id} value={<span className="font-mono">{call.provider_call_id}</span>} />
-        <Field label="Internal call id" title={call.call_id} value={<span className="font-mono">{call.call_id}</span>} />
+        <Field label="Internal call id" title={call.id} value={<span className="font-mono">{call.id}</span>} />
         <Field label="Trace id" title={call.trace_id} value={<span className="font-mono">{call.trace_id}</span>} />
         <Field label="Direction" value={call.direction} />
         <Field label="Status" value={`${call.status}${call.outcome ? ` (${call.outcome})` : ""}`} />

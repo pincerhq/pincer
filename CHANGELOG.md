@@ -54,6 +54,24 @@ Always on, without setting anything:
   `pincer_habit_checkins`, `pincer_pomodoro_sessions` and
   `pincer_discord_threads`. Nothing read or wrote them. The downgrade recreates
   them empty.
+- **`0032` gives the seven tables keyed by an outside identifier a UUIDv7
+  `id` primary key**: `pincer_call_costs`, `pincer_call_analytics`,
+  `pincer_call_origins`, `pincer_call_thread_members` (CallSid),
+  `pincer_do_not_call_numbers` (phone number), `pincer_telephony_events`
+  (event key) and `pincer_telephony_spans` (span id). The old key stays,
+  as a UNIQUE constraint. Each row's id carries its own creation time. API
+  responses that list these rows gain an `id` field. The downgrade is lossless.
+  Key columns are renamed so a table's own key is `id`:
+  `pincer_telephony_turns.turn_id`, `pincer_telephony_calls.call_id` and
+  `pincer_call_threads.thread_id` become `id`, and the outside keys
+  `pincer_telephony_events.event_id` and `pincer_telephony_spans.span_id`
+  become `reference_event_id` and `reference_span_id`. Columns pointing at
+  them (`call_id`, `turn_id`, `span_id`, `thread_id` on other tables) keep
+  their names. **The telephony API, its CSV/JSON exports and the `pincer
+  telephony` JSON output use the new names:** a call's `call_id` is now `id`,
+  a turn's `turn_id` is `id`, an event's `event_id` is `reference_event_id`
+  and a span's `span_id` is `reference_span_id`. The call-thread API is
+  unchanged.
 
 #### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.3.0)
 

@@ -968,7 +968,7 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         ]
         # The thread keeps its subject and loses its old hand-made id: 0018
         # converts it, so the value is a v7 uuid rather than `th_1`.
-        ((thread_id, subject),) = con.execute("SELECT thread_id, subject FROM pincer_call_threads").fetchall()
+        ((thread_id, subject),) = con.execute("SELECT id, subject FROM pincer_call_threads").fetchall()
         assert subject == "Angebot"
         assert uuid.UUID(thread_id).version == 7
         # The member still points at its thread — both sides rewritten from one map.
@@ -1290,7 +1290,9 @@ def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(mig
     with _connect(migration_url) as conn:
         before = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
 
-    command.upgrade(cfg, "head")
+    # Up to the revision before 0032, which starts giving tables new keys and
+    # columns on purpose; everything 0019-0031 did is accounted for below.
+    command.upgrade(cfg, "0031")
 
     with _connect(migration_url) as conn:
         # 0019 has since prefixed every table; look each one up under its new
@@ -2330,3 +2332,161 @@ def test_0031_drops_the_dormant_tables_and_the_downgrade_recreates_them_empty(mi
         assert not (_DORMANT & set(sa.inspect(engine_).get_table_names()))
     finally:
         engine_.dispose()
+
+
+# ── 0032: UUIDv7 ids for the natural-key tables ────────────────────────
+
+_THREAD_0032 = "01890000-0000-7000-8000-000000000001"
+_CALL_0032 = "01890000-0000-7000-8000-000000000002"
+
+_SEED_0032 = (
+    "INSERT INTO pincer_call_threads (thread_id, subject, origin, created_at, updated_at) "
+    f"VALUES ('{_THREAD_0032}', 's', 'inbound', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+    # Inserted newest first, so key order and time order disagree.
+    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA1', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA2', '2026-02-01T00:00:00')",
+    "INSERT INTO pincer_call_analytics (call_sid, method, created_at) VALUES ('CA1', 'vad', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_origins (call_sid, user_id, created_at) VALUES ('CA1', 'chat-1', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_thread_members (call_sid, thread_id, attached_at) "
+    f"VALUES ('CA1', '{_THREAD_0032}', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_do_not_call_numbers (phone_number, added_at) VALUES ('+491', '2026-03-01T00:00:00')",
+    # Same timestamp: the monotonic clock and then `seq` decide.
+    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+    f"VALUES ('e-a', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 5, 1)",
+    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+    f"VALUES ('e-b', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 2, 1)",
+    "INSERT INTO pincer_telephony_spans (span_id, call_id, name, start_utc) "
+    f"VALUES ('s1', '{_CALL_0032}', 'llm', '2026-03-01T00:00:00')",
+)
+
+
+def _0032_tables() -> tuple[tuple[str, str, str, str, tuple[str, ...]], ...]:
+    path = Path(__file__).parents[1] / "src/pincer/db/migrations/versions/0032_uuid7_natural_key_tables.py"
+    spec = importlib.util.spec_from_file_location("rev_0032", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.TABLES
+
+
+#: (table, old name) of the UUIDv7 keys 0032 renames `id`.
+_RENAMED_0032 = (
+    ("pincer_telephony_turns", "turn_id"),
+    ("pincer_telephony_calls", "call_id"),
+    ("pincer_call_threads", "thread_id"),
+)
+
+#: (table, old name, new name) of the outside keys 0032 renames.
+_REFERENCES_0032 = (
+    ("pincer_telephony_events", "event_id", "reference_event_id"),
+    ("pincer_telephony_spans", "span_id", "reference_span_id"),
+)
+
+
+def _member_fk(inspector: sa.Inspector) -> tuple[str, list[str]]:
+    """What a thread member's foreign key points at."""
+    (fk,) = [
+        fk
+        for fk in inspector.get_foreign_keys("pincer_call_thread_members")
+        if fk["constrained_columns"] == ["thread_id"]
+    ]
+    return fk["referred_table"], fk["referred_columns"]
+
+
+_TURN = "01890000-0000-7000-8000-0000000000e1"
+_TURN_CALL = "01890000-0000-7000-8000-0000000000e2"
+
+
+def test_0032_gives_each_natural_key_table_a_dated_id_and_keeps_the_old_key_unique(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0031")
+    with _connect(migration_url) as conn:
+        for insert in _SEED_0032:
+            conn.execute(sa.text(insert))
+        conn.execute(sa.text(f"INSERT INTO pincer_telephony_calls (call_id) VALUES ('{_TURN_CALL}')"))
+        conn.execute(
+            sa.text(
+                f"INSERT INTO pincer_telephony_turns (turn_id, call_id, created_at) "
+                f"VALUES ('{_TURN}', '{_TURN_CALL}', '2026-01-01T00:00:00')"
+            )
+        )
+        before = {table: _shape(sa.inspect(conn), table) for table, *_ in _0032_tables()}
+
+    command.upgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        for table, key, *_ in _0032_tables():
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+            assert [key] in [u["column_names"] for u in inspector.get_unique_constraints(table)], table
+            columns = {c["name"]: c["nullable"] for c in inspector.get_columns(table)}
+            assert (columns["id"], columns[key]) == (False, False), table
+            assert conn.execute(sa.text(f"SELECT COUNT(*) FROM {table} WHERE id IS NULL")).scalar_one() == 0  # noqa: S608
+
+        def ids(table: str, key: str) -> list[str]:
+            rows = conn.execute(sa.text(f"SELECT {key}, id FROM {table} ORDER BY id")).all()  # noqa: S608
+            return [str(row[0]) for row in rows]
+
+        # The UUIDv7 keys since 0018 are renamed `id`, not re-minted.
+        for table, old in _RENAMED_0032:
+            names = {c["name"] for c in inspector.get_columns(table)}
+            assert "id" in names and old not in names, table
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+        assert str(conn.execute(sa.text("SELECT id FROM pincer_telephony_turns")).scalar_one()) == _TURN
+        assert str(conn.execute(sa.text("SELECT id FROM pincer_call_threads")).scalar_one()) == _THREAD_0032
+        assert _member_fk(inspector) == ("pincer_call_threads", ["id"])
+        # The outside keys say they are one, and their constraints say so too.
+        for table, old, new in _REFERENCES_0032:
+            assert old not in {c["name"] for c in inspector.get_columns(table)}, table
+            assert {u["name"] for u in inspector.get_unique_constraints(table)} == {f"uq_{table[7:]}_{new}"}, table
+
+        # Ordered by the row's own time, not its key.
+        assert ids("pincer_call_costs", "call_sid") == ["CA2", "CA1"]
+        assert ids("pincer_telephony_events", "reference_event_id") == ["e-b", "e-a"]
+
+        with pytest.raises(sa.exc.IntegrityError), conn.begin_nested():
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_call_costs (id, call_sid, recorded_at) "
+                    "VALUES ('01890000-0000-7000-8000-0000000000ff', 'CA1', '2026-04-01T00:00:00')"
+                )
+            )
+
+    command.downgrade(cfg, "0031")
+    with _connect(migration_url) as conn:
+        after = {table: _shape(sa.inspect(conn), table) for table, *_ in _0032_tables()}
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_call_costs")).scalar_one() == 2
+        inspector = sa.inspect(conn)
+        for table, old in _RENAMED_0032:
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == [old], table
+        assert _member_fk(inspector) == ("pincer_call_threads", ["thread_id"])
+    if migration_url.startswith("sqlite"):
+        # SQLite let these TEXT primary keys hold NULL; the restored key says
+        # NOT NULL (`unswap_primary_key`). Everything else is as it was.
+        old_names = {new: old for _table, old, new in _REFERENCES_0032}
+        for table, key, *_ in _0032_tables():
+            old = old_names.get(key, key)
+            before[table]["columns"] = [(n, False if n == old else null) for n, null in before[table]["columns"]]
+    assert after == before
+
+    command.upgrade(cfg, "0032")
+
+
+def test_0032_drops_rows_whose_sqlite_text_key_is_null(migration_url, tmp_path):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("only SQLite let a TEXT primary key hold NULL")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0031")
+    with _connect(migration_url) as conn:
+        for phone in ("NULL", "NULL", "'+15550001'"):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_do_not_call_numbers (phone_number, added_at) "  # noqa: S608
+                    f"VALUES ({phone}, '2026-01-01T00:00:00')"
+                )
+            )
+
+    command.upgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        rows = conn.execute(sa.text("SELECT phone_number, id FROM pincer_do_not_call_numbers")).all()
+    assert [row[0] for row in rows] == ["+15550001"]
+    assert rows[0][1] is not None

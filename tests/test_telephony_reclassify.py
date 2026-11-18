@@ -115,7 +115,7 @@ async def _seed(url: str) -> None:
         await telemetry.write_records(
             [
                 {
-                    "event_id": f"{sid}-{i}",
+                    "reference_event_id": f"{sid}-{i}",
                     "call_id": call_id,
                     "provider_call_id": sid,
                     "trace_id": "",

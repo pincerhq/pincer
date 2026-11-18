@@ -51,7 +51,7 @@ _EQUALITY_FILTERS = (
 )
 
 #: Call columns the search box matches, case-insensitively, anywhere in the value.
-_SEARCHED = ("call_id", "provider_call_id", "trace_id", "from_number_masked", "to_number_masked")
+_SEARCHED = ("id", "provider_call_id", "trace_id", "from_number_masked", "to_number_masked")
 
 #: Call columns the call table may be sorted by.
 SORTABLE = frozenset(
@@ -95,7 +95,7 @@ class CallFilters:
         needle = self.search.strip()
         if needle:
             pattern = f"%{_escape_like(needle)}%"
-            # `call_id` is a uuid on Postgres, which has no `uuid LIKE text`;
+            # `id` is a uuid on Postgres, which has no `uuid LIKE text`;
             # the cast costs no index, since a leading wildcard could use none.
             conditions.append(or_(*(cast(CALLS.c[column], String).ilike(pattern, escape="\\") for column in _SEARCHED)))
         return conditions
@@ -127,7 +127,7 @@ def _escape_like(value: str) -> str:
 
 def _joined(*columns: Any) -> Select[Any]:
     """Turns, each with the named columns of its call."""
-    return select(TURNS, *columns).select_from(TURNS.join(CALLS, CALLS.c.call_id == TURNS.c.call_id))
+    return select(TURNS, *columns).select_from(TURNS.join(CALLS, CALLS.c.id == TURNS.c.call_id))
 
 
 class TelemetryReads:
@@ -175,7 +175,7 @@ class TelemetryReads:
         """
         match = CALLS.c.provider_call_id == ref
         if is_id(ref):
-            match = or_(CALLS.c.call_id == ref, match)
+            match = or_(CALLS.c.id == ref, match)
         rows = await self._rows(select(CALLS).where(match, *where).limit(1))
         return rows[0] if rows else None
 
@@ -235,7 +235,7 @@ class TelemetryReads:
         """How often each named event occurred on the calls `where` selects."""
         stmt = (
             select(EVENTS.c.name, func.count().label("n"))
-            .select_from(EVENTS.join(CALLS, CALLS.c.call_id == EVENTS.c.call_id))
+            .select_from(EVENTS.join(CALLS, CALLS.c.id == EVENTS.c.call_id))
             .where(*where, EVENTS.c.name.in_(list(names)))
             .group_by(EVENTS.c.name)
         )
@@ -249,7 +249,7 @@ class TelemetryReads:
         """The named events since `since`, with their call's provider id."""
         stmt = (
             select(EVENTS.c.attributes, EVENTS.c.name, CALLS.c.provider_call_id)
-            .select_from(EVENTS.join(CALLS, CALLS.c.call_id == EVENTS.c.call_id))
+            .select_from(EVENTS.join(CALLS, CALLS.c.id == EVENTS.c.call_id))
             .where(EVENTS.c.ts_utc >= since, EVENTS.c.name.in_(list(names)))
         )
         return await self._rows(stmt)
@@ -265,7 +265,8 @@ class TelemetryReads:
                 VOICE_CALLS.c.call_sid,
                 VOICE_CALLS.c.started_at,
                 VOICE_CALLS.c.failure_code,
-                CALLS.c.call_id,
+                # The other rows reclassification reads name the call `call_id`.
+                CALLS.c.id.label("call_id"),
                 CALLS.c.turn_count,
             )
             .select_from(VOICE_CALLS.outerjoin(CALLS, CALLS.c.provider_call_id == VOICE_CALLS.c.call_sid))

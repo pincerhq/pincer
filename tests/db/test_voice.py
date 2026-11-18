@@ -82,9 +82,7 @@ async def test_the_thread_columns_are_re_derived_from_the_membership(url):
     calls = CallsService(url)
     async with session_scope(url) as session:
         session.add(
-            CallThread(
-                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-            )
+            CallThread(id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
         )
         await session.flush()
         await ThreadMemberRepository(session).attach(
@@ -109,9 +107,7 @@ async def test_a_call_attached_before_its_row_exists_is_backfilled_on_save(url):
     threads = ThreadsService(url)
     async with session_scope(url) as session:
         session.add(
-            CallThread(
-                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-            )
+            CallThread(id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
         )
     await threads.attach(
         {
@@ -143,9 +139,7 @@ async def test_a_backfill_leaves_the_facts_it_was_not_given(url):
     backfill must not blank the ones it was not given."""
     async with session_scope(url) as session:
         session.add(
-            CallThread(
-                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-            )
+            CallThread(id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
         )
         await session.flush()
         members = ThreadMemberRepository(session)
@@ -171,9 +165,7 @@ async def test_a_re_attach_fills_in_the_call_facts_but_never_blanks_them(url):
     async with session_scope(url) as session:
         for label in ("th_1", "th_2"):
             session.add(
-                CallThread(
-                    thread_id=seeded_id(label), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-                )
+                CallThread(id=seeded_id(label), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
             )
 
     async def attach(thread: str, started_at: str | None, direction: str) -> CallThreadMember:
@@ -238,7 +230,7 @@ async def test_merging_a_thread_leaves_the_target_s_own_calls_alone(url):
     for label in ("th_src", "th_dst"):
         await threads.create(
             {
-                "thread_id": seeded_id(label),
+                "id": seeded_id(label),
                 "subject": label,
                 "origin": "user_task",
                 "created_at": EARLIER,

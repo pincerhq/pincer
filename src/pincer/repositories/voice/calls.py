@@ -131,7 +131,7 @@ class CallRepository(BaseRepository[VoiceCall, str]):
             where.append(col(VoiceCall.thread_id) == thread_id)
         stmt = (
             select(VoiceCall, CallThread.subject)
-            .outerjoin(CallThread, col(CallThread.thread_id) == col(VoiceCall.thread_id))
+            .outerjoin(CallThread, col(CallThread.id) == col(VoiceCall.thread_id))
             .where(*where)
             .order_by(col(VoiceCall.started_at).desc())
             .limit(limit)
@@ -142,7 +142,7 @@ class CallRepository(BaseRepository[VoiceCall, str]):
     async def with_thread(self, call_sid: str) -> tuple[VoiceCall, str | None] | None:
         stmt = (
             select(VoiceCall, CallThread.subject)
-            .outerjoin(CallThread, col(CallThread.thread_id) == col(VoiceCall.thread_id))
+            .outerjoin(CallThread, col(CallThread.id) == col(VoiceCall.thread_id))
             .where(col(VoiceCall.call_sid) == call_sid)
         )
         return (await self.session.exec(stmt)).first()

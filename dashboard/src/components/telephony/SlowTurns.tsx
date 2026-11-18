@@ -19,10 +19,10 @@ export function SlowTurns({ turns }: { turns: TelephonyTurn[] }) {
   return (
     <ul className="space-y-2.5">
       {turns.map((turn) => (
-        <li key={turn.turn_id} className="rounded-lg border border-[var(--color-border)] px-3 py-2.5">
+        <li key={turn.id} className="rounded-lg border border-[var(--color-border)] px-3 py-2.5">
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <Link
-              to={`${ROUTES.TELEPHONY_CALL.replace(":callRef", turn.provider_call_id || turn.call_id)}?turn=${turn.turn_id}`}
+              to={`${ROUTES.TELEPHONY_CALL.replace(":callRef", turn.provider_call_id || turn.call_id)}?turn=${turn.id}`}
               className="font-mono text-[var(--color-accent)] hover:underline"
             >
               {turn.provider_call_id || shortId(turn.call_id)}

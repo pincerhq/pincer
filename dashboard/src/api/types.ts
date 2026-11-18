@@ -542,7 +542,7 @@ export interface RateValue {
 }
 
 export interface TelephonyCall {
-  call_id: string
+  id: string
   provider_call_id: string
   trace_id: string
   direction: string
@@ -602,7 +602,7 @@ export interface CriticalPath {
 }
 
 export interface TelephonyTurn {
-  turn_id: string
+  id: string
   call_id: string
   turn_no: number
   trigger: string
@@ -641,7 +641,7 @@ export interface TelephonyTurn {
 }
 
 export interface TelephonyEvent {
-  event_id: string
+  reference_event_id: string
   call_id: string
   provider_call_id: string
   trace_id: string
@@ -654,7 +654,7 @@ export interface TelephonyEvent {
 }
 
 export interface TelephonySpan {
-  span_id: string
+  reference_span_id: string
   parent_span_id: string
   call_id: string
   trace_id: string

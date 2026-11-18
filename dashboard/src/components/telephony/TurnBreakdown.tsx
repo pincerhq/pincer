@@ -55,17 +55,17 @@ export function TurnBreakdown({
   return (
     <div className="space-y-2">
       {turns.map((turn) => {
-        const open = selectedTurnId === turn.turn_id
+        const open = selectedTurnId === turn.id
         return (
           <div
-            key={turn.turn_id}
+            key={turn.id}
             className={cn(
               "rounded-lg border border-[var(--color-border)]",
               open && "border-[var(--color-accent)]/40 bg-white/[0.02]",
             )}
           >
             <button
-              onClick={() => onSelect(open ? "" : turn.turn_id)}
+              onClick={() => onSelect(open ? "" : turn.id)}
               className="flex w-full flex-wrap items-center gap-2 px-3 py-2 text-left text-xs"
             >
               <span className="font-medium">Turn {turn.turn_no}</span>
