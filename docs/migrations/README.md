@@ -66,8 +66,6 @@ they have no model and are written by hand:
 
 - the FTS5 table `pincer_memories_fts`, its shadow tables and its triggers (SQLite only)
 - `idx_phone_contacts_name` (`COLLATE NOCASE` on SQLite, `lower(name)` on Postgres)
-- the dormant tables from `0001` (`pincer_registry_skills`, `pincer_expenses`,
-  `pincer_habits`, `pincer_habit_checkins`, `pincer_pomodoro_sessions`, `pincer_discord_threads`)
 
 It also ignores two differences that SQLite reports on its own and that are
 not worth rebuilding a table for: primary keys that reflect as nullable, and

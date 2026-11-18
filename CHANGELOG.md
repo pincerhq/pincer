@@ -44,6 +44,17 @@ Always on, without setting anything:
 
 ### Changed
 
+#### UUIDv7 ids for every table (migrations 0031–0034)
+
+**Upgrading**
+
+- **Back up first** (`scripts/backup-db.sh`).
+- **`0031` drops the six dormant tables** that `0001` kept from never-applied
+  SQL files: `pincer_registry_skills`, `pincer_expenses`, `pincer_habits`,
+  `pincer_habit_checkins`, `pincer_pomodoro_sessions` and
+  `pincer_discord_threads`. Nothing read or wrote them. The downgrade recreates
+  them empty.
+
 #### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.3.0)
 
 Telemetry moves to pincer-telemetry 0.3.0, which adds PostHog next to Uptrace.

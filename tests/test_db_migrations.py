@@ -42,12 +42,6 @@ EXPECTED_TABLES = {
     "pincer_briefing_configs",
     "pincer_cost_logs",
     "pincer_image_cost_logs",
-    "pincer_registry_skills",
-    "pincer_expenses",
-    "pincer_habits",
-    "pincer_habit_checkins",
-    "pincer_pomodoro_sessions",
-    "pincer_discord_threads",
     "pincer_voice_calls",
     "pincer_call_transcripts",
     "pincer_call_actions",
@@ -2286,5 +2280,53 @@ def test_0030_session_images_hang_off_their_session_and_the_downgrade_drops_them
         assert _version(engine_) == "0030"
         with engine_.connect() as conn:
             assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 0
+    finally:
+        engine_.dispose()
+
+
+# ── 0031: dormant tables ───────────────────────────────────────────────
+
+_DORMANT = {
+    "pincer_registry_skills",
+    "pincer_expenses",
+    "pincer_habits",
+    "pincer_habit_checkins",
+    "pincer_pomodoro_sessions",
+    "pincer_discord_threads",
+}
+
+
+def test_0031_drops_the_dormant_tables_and_the_downgrade_recreates_them_empty(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0030")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        assert set(sa.inspect(engine_).get_table_names()) >= _DORMANT
+        with engine_.begin() as conn:
+            conn.execute(sa.text("INSERT INTO pincer_habits (pincer_user_id, habit_name) VALUES ('alice', 'run')"))
+
+        command.upgrade(cfg, "0031")
+        assert not (_DORMANT & set(sa.inspect(engine_).get_table_names()))
+        assert _version(engine_) == "0031"
+
+        command.downgrade(cfg, "0030")
+        inspector = sa.inspect(engine_)
+        assert set(inspector.get_table_names()) >= _DORMANT
+        assert _version(engine_) == "0030"
+        assert {fk["referred_table"] for fk in inspector.get_foreign_keys("pincer_expenses")} == {
+            "pincer_identity_profiles"
+        }
+        with engine_.connect() as conn:
+            # An expression index: SQLite's reflection skips it, so read the catalog.
+            index_names = (
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+                if engine_.dialect.name == "sqlite"
+                else "SELECT indexname FROM pg_indexes"
+            )
+            assert "idx_habit_checkins_daily" in set(conn.execute(sa.text(index_names)).scalars())
+            assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_habits")).scalar_one() == 0
+
+        command.upgrade(cfg, "0031")
+        assert not (_DORMANT & set(sa.inspect(engine_).get_table_names()))
     finally:
         engine_.dispose()
