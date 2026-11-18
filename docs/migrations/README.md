@@ -38,7 +38,7 @@ The SQLModel tables in [`src/pincer/models/`](../../src/pincer/models/) are
 the source of truth for the schema, and Alembic's `target_metadata` points at
 them. `0001`–`0013` predate the models and stay hand-written SQL, as do the
 Postgres-only type widenings (`0013`, `0016`), the FTS revisions, and the
-UUIDv7 key conversions (`0017`, `0018`, `0032`, `0033`), which move data rather than DDL.
+UUIDv7 key conversions (`0017`, `0018`, `0032`–`0034`), which move data rather than DDL.
 `tests/test_schema_drift.py` checks that the models and those revisions
 describe the same schema, on SQLite and (in CI) on Postgres.
 
@@ -106,8 +106,9 @@ is branched on), the derived `{channel}:{user}` session key, phone numbers, W3C 
 collapses a provider's retried callbacks into one row.
 
 A table keyed by one of those still gets an `id` of its own as its primary
-key (`0032`); the outside identifier stays as a named `UniqueConstraint`,
-which is all `upsert(..., index_elements=[...])` needs. Look such a row up
+key (`0032`–`0034`; `migration_helpers.swap_primary_key` does the swap); the
+outside identifier stays as a named `UniqueConstraint`, which is all
+`upsert(..., index_elements=[...])` needs. Look such a row up
 with `BaseRepository.get_by(call_sid=...)`: `get()` takes the `id`, and
 answers None for anything else. Raw-SQL writers (the telemetry statements)
 must pass the `id` themselves, since only the ORM and Core fire the column

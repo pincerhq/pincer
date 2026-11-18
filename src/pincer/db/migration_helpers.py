@@ -241,7 +241,9 @@ def swap_primary_key(
     if postgres:
         old_pk = sa.inspect(bind).get_pk_constraint(table)["name"]
         op.execute(f"ALTER TABLE {table} ALTER COLUMN id TYPE uuid USING id::uuid")
-        op.execute(f"ALTER TABLE {table} ALTER COLUMN id SET NOT NULL")
+        for column in ("id", *key):
+            # The old key may be a column added just before, still nullable.
+            op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL")
         op.execute(f'ALTER TABLE {table} DROP CONSTRAINT "{old_pk}"')
         op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {pk_name(table)} PRIMARY KEY (id)")
         op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {unique} UNIQUE ({', '.join(key)})")

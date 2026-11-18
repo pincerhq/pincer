@@ -2081,8 +2081,9 @@ def test_0022_auth_sessions_belong_to_credentials_and_round_trip(migration_url, 
 
 
 def test_0023_onboarding_is_keyed_by_user_and_channel_and_round_trips(migration_url, tmp_path):
+    """At 0033: 0034 gives the table an `id` and keeps (user, channel) unique (see `test_0034_*`)."""
     cfg = _config(migration_url, tmp_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0033")
     engine_ = sa.create_engine(migration_url)
     try:
         inspector = sa.inspect(engine_)
@@ -2617,3 +2618,81 @@ def test_0033_keys_identities_by_id_and_points_every_user_reference_at_it(migrat
     assert after == before
 
     command.upgrade(cfg, "0033")
+
+
+# ── 0034: session ids ──────────────────────────────────────────────────
+
+_SEED_0034 = (
+    "INSERT INTO pincer_identity_profiles (id, pincer_user_id) "
+    "VALUES ('01890000-0000-7000-8000-0000000000d1', 'alice')",
+    # Newest first, so key order and time order disagree.
+    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+    "VALUES ('unified:alice', 'alice', 'telegram', 20.0, 20.0)",
+    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+    "VALUES ('web:guest', 'guest', 'web', 10.0, 10.0)",
+    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+    "VALUES ('unified:alice', 'aa', 'image/jpeg', X'FF', 21.0)",
+    # Onboarding has no creation time: asked, or else closed.
+    "INSERT INTO pincer_onboarding (user_id, channel, asked_at) VALUES ('alice', 'telegram', 5.0)",
+    "INSERT INTO pincer_onboarding (user_id, channel, completed_at) VALUES ('guest', 'web', 1.0)",
+)
+
+#: A photo of a session that is gone: SQLite never enforced the foreign key.
+_ORPHAN_0034 = (
+    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+    "VALUES ('gone:x', 'bb', 'image/jpeg', X'FF', 1.0)"
+)
+
+
+def test_0034_gives_sessions_photos_and_onboarding_an_id(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0033")
+    sqlite = migration_url.startswith("sqlite")
+    seed = [*_SEED_0034, *((_ORPHAN_0034,) if sqlite else ())]
+    if not sqlite:
+        seed = [insert.replace("X'FF'", "'\\xff'::bytea") for insert in seed]
+    with _connect(migration_url) as conn:
+        for insert in seed:
+            conn.execute(sa.text(insert))
+        before = {
+            table: _shape(sa.inspect(conn), table)
+            for table in ("pincer_sessions", "pincer_session_images", "pincer_onboarding")
+        }
+
+    command.upgrade(cfg, "0034")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        for table in ("pincer_sessions", "pincer_session_images", "pincer_onboarding"):
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+        (fk,) = inspector.get_foreign_keys("pincer_session_images")
+        assert (fk["constrained_columns"], fk["referred_columns"]) == (["session_ref"], ["id"])
+
+        def ordered(sql: str) -> list[str]:
+            return [str(row[0]) for row in conn.execute(sa.text(sql)).all()]
+
+        assert ordered("SELECT session_id FROM pincer_sessions ORDER BY id") == ["web:guest", "unified:alice"]
+        assert ordered("SELECT user_id FROM pincer_onboarding ORDER BY id") == ["guest", "alice"]
+        photos = conn.execute(
+            sa.text(
+                "SELECT s.session_id, i.sha256 FROM pincer_session_images i "
+                "JOIN pincer_sessions s ON s.id = i.session_ref"
+            )
+        ).all()
+        assert [tuple(row) for row in photos] == [("unified:alice", "aa")]  # the orphan is gone
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 1
+        profiles = dict(conn.execute(sa.text("SELECT user_id, CAST(profile_id AS TEXT) FROM pincer_sessions")).all())
+        assert profiles == {"alice": "01890000-0000-7000-8000-0000000000d1", "guest": None}
+
+    command.downgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        after = {table: _shape(sa.inspect(conn), table) for table in before}
+        photos = conn.execute(sa.text("SELECT session_id, sha256 FROM pincer_session_images")).all()
+        assert [tuple(row) for row in photos] == [("unified:alice", "aa")]
+    if sqlite:
+        # The restored keys say NOT NULL, as `unswap_primary_key` documents.
+        before["pincer_sessions"]["columns"] = [
+            (n, False if n == "session_id" else null) for n, null in before["pincer_sessions"]["columns"]
+        ]
+    assert after == before
+
+    command.upgrade(cfg, "0034")

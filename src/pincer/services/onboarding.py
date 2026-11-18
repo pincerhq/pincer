@@ -61,7 +61,7 @@ class OnboardingService(DatabaseService):
 
     async def get(self, user_id: str, channel: str) -> OnboardingRecord | None:
         async with session_scope(self._url) as session:
-            row = await OnboardingRepository(session).get((user_id, channel))
+            row = await OnboardingRepository(session).get_by(user_id=user_id, channel=channel)
             if row is None:
                 return None
             if row.completed_at is not None:

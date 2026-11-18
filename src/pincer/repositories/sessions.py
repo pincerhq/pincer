@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, json_text_field, upsert
+from pincer.models.identity import profile_id_of
 from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage
 from pincer.repositories.base import BaseRepository
 
@@ -134,25 +135,24 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             stmt = stmt.where(col(ChatSession.created_at) < created_before)
         return (await self.session.exec(stmt)).first() is not None
 
-    async def save(self, values: dict[str, Any]) -> None:
-        """Insert the session, or update the parts that change.
+    async def save(self, values: dict[str, Any]) -> str:
+        """Insert the session, or update the parts that change. Returns its `id`.
 
         `created_at` deliberately keeps its stored value: only the messages,
         the metadata and `updated_at` move.
         """
-        await self.session.exec(
-            upsert(
-                dialect_of(self.session),
-                ChatSession,
-                values,
-                index_elements=["session_id"],
-                set_=lambda excluded: {
-                    "messages": excluded.messages,
-                    "metadata": excluded.metadata,
-                    "updated_at": excluded.updated_at,
-                },
-            )
-        )
+        stmt = upsert(
+            dialect_of(self.session),
+            ChatSession,
+            values,
+            index_elements=["session_id"],
+            set_=lambda excluded: {
+                "messages": excluded.messages,
+                "metadata": excluded.metadata,
+                "updated_at": excluded.updated_at,
+            },
+        ).returning(col(ChatSession.id))
+        return str((await self.session.exec(stmt)).scalar_one())
 
     async def move_user(self, old_user_id: str, new_user_id: str) -> int:
         """Move the old id's sessions to the new id: re-key them, then reassign `user_id`.
@@ -171,7 +171,11 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         Returns the number of rows changed or removed.
         """
         changed = await self._rekey_sessions(old_user_id, new_user_id)
-        reassign = update(ChatSession).where(col(ChatSession.user_id) == old_user_id).values(user_id=new_user_id)
+        reassign = (
+            update(ChatSession)
+            .where(col(ChatSession.user_id) == old_user_id)
+            .values(user_id=new_user_id, profile_id=profile_id_of(new_user_id))
+        )
         return changed + int((await self.session.exec(reassign)).rowcount)
 
     async def _rekey_sessions(self, old_user_id: str, new_user_id: str) -> int:
@@ -232,26 +236,31 @@ class SessionRepository(BaseRepository[ChatSession, str]):
                 await images.merge(old_key, new_key)
                 changed += await self.delete_where(col(ChatSession.session_id) == old_key)
                 continue
+            # The photos point at the row's `id`, which a new key does not change.
             rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
             changed += int((await self.session.exec(rekey)).rowcount)
-            # After the session's own row: Postgres has already moved the photos (ON UPDATE
-            # CASCADE) and this finds none; SQLite, with foreign keys off, needs it
-            await images.rekey(old_key, new_key)
         return changed
 
     async def ids(self) -> Sequence[str]:
         return (await self.session.exec(select(ChatSession.session_id))).all()
 
 
-class SessionImageRepository(BaseRepository[SessionImage, tuple[str, str]]):
+def _session_ref(session_id: str) -> Any:
+    """The `id` of the session with this key, as a scalar subquery."""
+    return select(ChatSession.id).where(col(ChatSession.session_id) == session_id).scalar_subquery()
+
+
+class SessionImageRepository(BaseRepository[SessionImage, str]):
     model = SessionImage
 
-    async def for_session(self, session_id: str) -> Sequence[SessionImage]:
-        return await self.list(col(SessionImage.session_id) == session_id, order_by=[col(SessionImage.created_at)])
+    async def for_session(self, session_ref: str) -> Sequence[SessionImage]:
+        """The photos of the session whose `id` is `session_ref`, oldest first."""
+        return await self.list(col(SessionImage.session_ref) == session_ref, order_by=[col(SessionImage.created_at)])
 
-    async def sync(self, session_id: str, keep: Collection[str], add: Sequence[SessionImage]) -> None:
-        """Make the session's photos exactly `keep`: store the ones in `add` that are not there yet
-        (never overwriting a stored one), then delete every other row of the session."""
+    async def sync(self, session_ref: str, keep: Collection[str], add: Sequence[SessionImage]) -> None:
+        """Make the photos of the session whose `id` is `session_ref` exactly `keep`: store the ones
+        in `add` that are not there yet (never overwriting a stored one), then delete every other
+        row of the session. The session row has to exist already."""
         if add:
             await self.session.exec(
                 upsert(
@@ -259,7 +268,7 @@ class SessionImageRepository(BaseRepository[SessionImage, tuple[str, str]]):
                     SessionImage,
                     [
                         {
-                            "session_id": image.session_id,
+                            "session_ref": session_ref,
                             "sha256": image.sha256,
                             "media_type": image.media_type,
                             "data": image.data,
@@ -267,30 +276,21 @@ class SessionImageRepository(BaseRepository[SessionImage, tuple[str, str]]):
                         }
                         for image in add
                     ],
-                    index_elements=["session_id", "sha256"],
+                    index_elements=["session_ref", "sha256"],
                 )
             )
-        if keep:
-            await self.delete_where(col(SessionImage.session_id) == session_id, col(SessionImage.sha256).notin_(keep))
-        else:
-            await self.delete_for_session(session_id)
-
-    async def delete_for_session(self, session_id: str) -> int:
-        return await self.delete_where(col(SessionImage.session_id) == session_id)
+        stale = [col(SessionImage.sha256).notin_(keep)] if keep else []
+        await self.delete_where(col(SessionImage.session_ref) == session_ref, *stale)
 
     async def merge(self, old_session_id: str, new_session_id: str) -> int:
         """Move the photos of `old_session_id` that `new_session_id` does not hold to it, for two sessions
         joined into one; a photo both hold (same hash, so same bytes) is stored once. Whatever is left under
-        the old key is deleted, so the old session row can go. Returns the photos moved."""
-        held = select(SessionImage.sha256).where(col(SessionImage.session_id) == new_session_id)
+        the old session is deleted, so the old session row can go. Returns the photos moved."""
+        target = _session_ref(new_session_id)
+        held = select(SessionImage.sha256).where(col(SessionImage.session_ref) == target)
         move = update(SessionImage).where(
-            col(SessionImage.session_id) == old_session_id, col(SessionImage.sha256).notin_(held)
+            col(SessionImage.session_ref) == _session_ref(old_session_id), col(SessionImage.sha256).notin_(held)
         )
-        moved = int((await self.session.exec(move.values(session_id=new_session_id))).rowcount)
-        await self.delete_for_session(old_session_id)
+        moved = int((await self.session.exec(move.values(session_ref=target))).rowcount)
+        await self.delete_where(col(SessionImage.session_ref) == _session_ref(old_session_id))
         return moved
-
-    async def rekey(self, old_session_id: str, new_session_id: str) -> int:
-        """Move the photos of `old_session_id` to its new key, once the session row has moved."""
-        stmt = update(SessionImage).where(col(SessionImage.session_id) == old_session_id)
-        return int((await self.session.exec(stmt.values(session_id=new_session_id))).rowcount)

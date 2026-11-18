@@ -46,6 +46,11 @@ Always on, without setting anything:
 
 #### UUIDv7 ids for every table (migrations 0031–0034)
 
+Every table's primary key is now a UUIDv7 `id`, minted by the writer and
+carrying the row's creation time. Keys that come from elsewhere — Twilio
+CallSids, phone numbers, span ids, session keys, an identity's
+`pincer_user_id` — stay, as UNIQUE columns.
+
 **Upgrading**
 
 - **Back up first** (`scripts/backup-db.sh`).
@@ -96,6 +101,11 @@ Always on, without setting anything:
   before this release is kept as well, and its phone is recorded on the
   contact's next message. A message addressed by the phone finds the LID's
   identity without linking the phone next to it.
+- **`0034` gives sessions, their photos and onboarding rows a UUIDv7 `id`.**
+  Session keys (`unified:alice`, `web:alice:<conversation>`) are unchanged and
+  stay unique. Photos point at the session's `id`, so re-keying a session no
+  longer touches them; photos of a session that is gone are dropped. Sessions
+  and onboarding rows gain a `profile_id` too. The downgrade is lossless.
 
 #### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.3.0)
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlmodel import col
+from sqlmodel import col, select
 
 from pincer.core.session import Session, SessionManager
 from pincer.db.engine import get_engine
@@ -69,10 +69,16 @@ async def say(manager: SessionManager, session: Session, text: str, *photos: Ima
 async def photo_rows(url: str) -> dict[str, set[str]]:
     """session id -> the hashes of the photos stored for it."""
     async with session_scope(url) as session:
-        rows = await SessionImageRepository(session).list()
+        rows = (
+            await session.exec(
+                select(ChatSession.session_id, SessionImage.sha256).join(
+                    ChatSession, col(ChatSession.id) == col(SessionImage.session_ref)
+                )
+            )
+        ).all()
     found: dict[str, set[str]] = {}
-    for row in rows:
-        found.setdefault(row.session_id, set()).add(row.sha256)
+    for session_id, sha256 in rows:
+        found.setdefault(session_id, set()).add(sha256)
     return found
 
 
@@ -295,7 +301,9 @@ async def test_a_merge_collision_joins_the_photos_and_the_raw_output_of_both_ses
     joined = json.loads(row["messages"])
     assert [m for m in joined if m["role"] == "assistant"] == [reply_of(user) for user in order]  # raw and wire intact
     async with session_scope(url) as session:
-        moved = (await SessionImageRepository(session).get(("whatsapp:alice", photo(1).sha256))).data
+        alice = await SessionRepository(session).get_by(session_id="whatsapp:alice")
+        photos = await SessionImageRepository(session).for_session(alice.id)
+        moved = next(image.data for image in photos if image.sha256 == photo(1).sha256)
     assert moved == base64.b64decode(photo(1).data)  # the bytes came over, not just the hash
 
 
@@ -345,19 +353,22 @@ async def test_a_merge_is_not_undone_by_a_cached_session_with_photos(url):
 # ── the foreign key ──────────────────────────────────────────────────
 
 
-async def test_the_photo_table_hangs_off_its_session_with_both_foreign_key_actions_cascading(url):
+async def test_the_photo_table_hangs_off_its_session_s_id_and_goes_with_it(url):
+    """By the session's `id`, not its key: a re-keyed session keeps its photos untouched."""
     async with get_engine(url).connect() as conn:
         foreign_keys = await conn.run_sync(lambda c: sa.inspect(c).get_foreign_keys("pincer_session_images"))
         primary_key = await conn.run_sync(lambda c: sa.inspect(c).get_pk_constraint("pincer_session_images"))
+        uniques = await conn.run_sync(lambda c: sa.inspect(c).get_unique_constraints("pincer_session_images"))
         columns = await conn.run_sync(lambda c: sa.inspect(c).get_columns("pincer_session_images"))
     assert [
         (fk["constrained_columns"], fk["referred_table"], fk["referred_columns"], fk["options"].get("ondelete"))
         for fk in foreign_keys
-    ] == [(["session_id"], "pincer_sessions", ["session_id"], "CASCADE")]
-    assert [fk["options"].get("onupdate") for fk in foreign_keys] == ["CASCADE"]
-    assert primary_key["constrained_columns"] == ["session_id", "sha256"]
+    ] == [(["session_ref"], "pincer_sessions", ["id"], "CASCADE")]
+    assert primary_key["constrained_columns"] == ["id"]
+    assert [u["column_names"] for u in uniques] == [["session_ref", "sha256"]]
     assert {c["name"]: c["nullable"] for c in columns} == {
-        "session_id": False,
+        "id": False,
+        "session_ref": False,
         "sha256": False,
         "media_type": False,
         "data": False,

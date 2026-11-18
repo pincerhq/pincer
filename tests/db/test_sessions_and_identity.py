@@ -839,6 +839,24 @@ async def test_a_merge_keeps_the_targets_briefing_config_even_with_no_profile_id
     assert (await _owners(url))["pincer_briefing_configs"] == [("alice", None)]
 
 
+async def test_a_merged_identity_s_sessions_and_onboarding_point_at_the_target(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="1")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _store_session(url, "telegram:usr_hash", user_id="usr_hash")
+    async with session_scope(url) as session:
+        session.add(Onboarding(user_id="usr_hash", channel="telegram", asked_at=1.0))
+
+    await service.rename_identity("usr_hash", "alice")
+
+    async with session_scope(url) as session:
+        alice = (await IdentityProfileRepository(session).named("alice")).id
+        sessions = (await session.exec(select(ChatSession.session_id, ChatSession.profile_id))).all()
+        onboarding = (await session.exec(select(Onboarding.user_id, Onboarding.profile_id))).all()
+    assert [(key, str(profile)) for key, profile in sessions] == [("telegram:alice", alice)]
+    assert [(user, str(profile)) for user, profile in onboarding] == [("alice", alice)]
+
+
 async def _open_session(url: str, pincer_user_id: str) -> str:
     async with session_scope(url) as session:
         profile = await IdentityProfileRepository(session).named(pincer_user_id)

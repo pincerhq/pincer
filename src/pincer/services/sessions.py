@@ -77,13 +77,13 @@ class SessionService(DatabaseService):
         """
         async with session_scope(self._url) as session:
             repo = SessionRepository(session)
-            row = await repo.get(session_id)
+            row = await repo.get_by(session_id=session_id)
             if row is None and legacy_fallback:
                 row = await repo.newest_for(user_id, channel, exclude_prefix=f"{session_id}:")
             if row is None:
                 return None
-            # By the row's own key: a session left under the pre-unified key keeps its photos there
-            photos = await SessionImageRepository(session).for_session(row.session_id)
+            # By the row's own id: a session left under the pre-unified key keeps its photos there
+            photos = await SessionImageRepository(session).for_session(row.id)
             return _as_dict(row) | {"images": [StoredImage(i.sha256, i.media_type, i.data) for i in photos]}
 
     async def has_any(self, user_id: str, channel: str, *, created_before: float | None = None) -> bool:
@@ -107,7 +107,7 @@ class SessionService(DatabaseService):
         """Write the session row and, with `images`, bring its photos to that set, in one
         transaction. The row goes first: a photo's foreign key needs it on Postgres."""
         async with session_scope(self._url) as session:
-            await SessionRepository(session).save(
+            session_ref = await SessionRepository(session).save(
                 {
                     "session_id": session_id,
                     "user_id": user_id,
@@ -120,9 +120,9 @@ class SessionService(DatabaseService):
             )
             if images is not None:
                 await SessionImageRepository(session).sync(
-                    session_id,
+                    session_ref,
                     images.keep,
-                    [_as_row(session_id, image, created_at=time.time()) for image in images.add],
+                    [_as_row(image, created_at=time.time()) for image in images.add],
                 )
 
 
@@ -138,9 +138,9 @@ def _as_dict(row: Any) -> dict[str, Any]:
     }
 
 
-def _as_row(session_id: str, image: StoredImage, *, created_at: float) -> SessionImage:
+def _as_row(image: StoredImage, *, created_at: float) -> SessionImage:
+    """A photo to store; `SessionImageRepository.sync` sets whose it is."""
     return SessionImage(
-        session_id=session_id,
         sha256=image.sha256,
         media_type=image.media_type,
         data=image.data,
