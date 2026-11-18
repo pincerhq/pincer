@@ -38,7 +38,7 @@ The SQLModel tables in [`src/pincer/models/`](../../src/pincer/models/) are
 the source of truth for the schema, and Alembic's `target_metadata` points at
 them. `0001`–`0013` predate the models and stay hand-written SQL, as do the
 Postgres-only type widenings (`0013`, `0016`), the FTS revisions, and the
-UUIDv7 key conversions (`0017`, `0018`, `0032`), which move data rather than DDL.
+UUIDv7 key conversions (`0017`, `0018`, `0032`, `0033`), which move data rather than DDL.
 `tests/test_schema_drift.py` checks that the models and those revisions
 describe the same schema, on SQLite and (in CI) on Postgres.
 
@@ -99,9 +99,9 @@ Two properties this buys, both relied on and both tested:
 
 Identifiers that come from somewhere else are **not** UUIDs and must not be
 converted: Twilio CallSids (including `call_transcripts.call_id` and
-`call_actions.call_id`, which hold one despite the name), `pincer_user_id` (a
-deterministic hash whose `usr_` prefix is branched on), the derived
-`{channel}:{user}` session key, phone numbers, W3C `trace_id` / `span_id` /
+`call_actions.call_id`, which hold one despite the name), `pincer_user_id` (an
+identity's name: a configured one, or a deterministic hash whose `usr_` prefix
+is branched on), the derived `{channel}:{user}` session key, phone numbers, W3C `trace_id` / `span_id` /
 `parent_span_id`, and `telephony_events.event_id`, which is a SHA-1 that
 collapses a provider's retried callbacks into one row.
 
@@ -112,6 +112,15 @@ with `BaseRepository.get_by(call_sid=...)`: `get()` takes the `id`, and
 answers None for anything else. Raw-SQL writers (the telemetry statements)
 must pass the `id` themselves, since only the ORM and Core fire the column
 default.
+
+An identity is the same: `pincer_identity_profiles.id` is its key, and
+`pincer_user_id` its unique name (`0033`). The identity tables point at the
+`id` (`profile_id`); the tables that name a user in text — schedules,
+memories, calls, audit logs and every other model with a
+`models.identity.profile_ref` column — keep the text, which may name a sender
+with no profile, and carry a nullable `profile_id` beside it. An insert fills
+it with a subquery on the text; raw SQL that inserts into these tables must
+set it itself.
 
 `Uuid7` refuses to bind a value that is not a uuid, on SQLite as well as
 Postgres — a lenient SQLite branch would let a bad id through locally and fail

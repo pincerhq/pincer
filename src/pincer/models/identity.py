@@ -1,18 +1,32 @@
 """Cross-channel identity: one profile per Pincer user, the channel ids linked
 to it, its phone numbers, and the credentials it signs in to the API with."""
 
+from collections.abc import Callable
+from typing import Any
+
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text
-from sqlmodel import Field, SQLModel
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text, UniqueConstraint, event, select
+from sqlalchemy.orm import Mapper
+from sqlmodel import Field, Relationship, SQLModel, col
 
 from pincer.db.ids import new_id
 from pincer.db.types import IsoText, Real, Uuid7
 
 
 class IdentityProfile(SQLModel, table=True):
-    __tablename__ = "pincer_identity_profiles"
+    """One Pincer user.
 
-    pincer_user_id: str = Field(sa_column=Column(Text(), primary_key=True))
+    `id` is the row's own key, and what every other table points at.
+    `pincer_user_id` is the name the user is known by — a configured name or
+    a `usr_` id — on the CLI, in the TOML, in a JWT's `sub` and in the API;
+    renaming an identity changes only that column.
+    """
+
+    __tablename__ = "pincer_identity_profiles"
+    __table_args__ = (UniqueConstraint("pincer_user_id", name="uq_identity_profiles_pincer_user_id"),)
+
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    pincer_user_id: str = Field(sa_column=Column(Text(), nullable=False))
     preferred_channel: str | None = Field(default=None, sa_column=Column(Text()))
     display_name: str | None = Field(default=None, sa_column=Column(Text()))
     active_channel: str | None = Field(default=None, sa_column=Column(Text()))
@@ -30,15 +44,24 @@ class IdentityProfile(SQLModel, table=True):
     source: str = Field(default="config", sa_column=Column(Text(), nullable=False, server_default="config"))
 
 
-class ChannelIdentity(SQLModel, table=True):
-    __tablename__ = "pincer_channel_identities"
-    __table_args__ = (Index("idx_ci_pincer", "pincer_user_id"),)
+class IdentityChannel(SQLModel, table=True):
+    """A channel id (a Telegram chat, a WhatsApp number) linked to an identity."""
 
-    channel: str = Field(sa_column=Column(Text(), primary_key=True))
-    channel_user_id: str = Field(sa_column=Column(Text(), primary_key=True))
-    pincer_user_id: str = Field(
-        sa_column=Column(Text(), ForeignKey("pincer_identity_profiles.pincer_user_id"), nullable=False)
+    __tablename__ = "pincer_identity_channels"
+    __table_args__ = (
+        UniqueConstraint("channel", "channel_user_id", name="uq_identity_channels_channel_channel_user_id"),
+        Index("idx_ci_pincer", "profile_id"),
+        Index("idx_identity_channels_alt", "channel", "alt_id"),
     )
+
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    channel: str = Field(sa_column=Column(Text(), nullable=False))
+    channel_user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str = Field(sa_column=Column(Uuid7(), ForeignKey("pincer_identity_profiles.id"), nullable=False))
+    #: The channel's other id for the same account: the phone number behind a
+    #: WhatsApp LID. Lets a LID link stand for the configured phone when the
+    #: channel cannot be asked, so it is never swapped back to the phone.
+    alt_id: str | None = Field(default=None, sa_column=Column(Text(), nullable=True))
     created_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
     )
@@ -59,14 +82,14 @@ class IdentityCredential(SQLModel, table=True):
     """
 
     __tablename__ = "pincer_identity_credentials"
-    __table_args__ = (Index("idx_identity_credentials_api_key", "api_key_hash", unique=True),)
+    __table_args__ = (
+        UniqueConstraint("profile_id", name="uq_identity_credentials_profile_id"),
+        Index("idx_identity_credentials_api_key", "api_key_hash", unique=True),
+    )
 
-    pincer_user_id: str = Field(
-        sa_column=Column(
-            Text(),
-            ForeignKey("pincer_identity_profiles.pincer_user_id", ondelete="CASCADE"),
-            primary_key=True,
-        )
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    profile_id: str = Field(
+        sa_column=Column(Uuid7(), ForeignKey("pincer_identity_profiles.id", ondelete="CASCADE"), nullable=False)
     )
     password_hash: str | None = Field(default=None, sa_column=Column(Text()))
     password_updated_at: str | None = Field(default=None, sa_column=Column(IsoText()))
@@ -78,6 +101,13 @@ class IdentityCredential(SQLModel, table=True):
     created_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
     )
+
+    # Loaded with the row, so `pincer_user_id` reads after the session is gone.
+    profile: IdentityProfile = Relationship(sa_relationship_kwargs={"lazy": "joined", "viewonly": True})
+
+    @property
+    def pincer_user_id(self) -> str:
+        return self.profile.pincer_user_id
 
 
 class IdentityPhone(SQLModel, table=True):
@@ -91,15 +121,15 @@ class IdentityPhone(SQLModel, table=True):
     """
 
     __tablename__ = "pincer_identity_phones"
-    __table_args__ = (Index("idx_identity_phones_user", "pincer_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("phone", name="uq_identity_phones_phone"),
+        Index("idx_identity_phones_user", "profile_id"),
+    )
 
-    phone: str = Field(sa_column=Column(Text(), primary_key=True))  # +E.164
-    pincer_user_id: str = Field(
-        sa_column=Column(
-            Text(),
-            ForeignKey("pincer_identity_profiles.pincer_user_id", ondelete="CASCADE"),
-            nullable=False,
-        )
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    phone: str = Field(sa_column=Column(Text(), nullable=False))  # +E.164
+    profile_id: str = Field(
+        sa_column=Column(Uuid7(), ForeignKey("pincer_identity_profiles.id", ondelete="CASCADE"), nullable=False)
     )
     confirmed: bool = Field(default=False, sa_column=Column(Boolean(), nullable=False, server_default=sa.text("FALSE")))
     confirmed_at: str | None = Field(default=None, sa_column=Column(IsoText()))
@@ -126,14 +156,13 @@ class AuthSession(SQLModel, table=True):
     """
 
     __tablename__ = "pincer_auth_sessions"
-    __table_args__ = (Index("idx_auth_sessions_user", "pincer_user_id"),)
+    __table_args__ = (Index("idx_auth_sessions_user", "profile_id"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
-    pincer_user_id: str = Field(
+    # Through the credentials row: deleting it (a revoke) signs every session out.
+    profile_id: str = Field(
         sa_column=Column(
-            Text(),
-            ForeignKey("pincer_identity_credentials.pincer_user_id", ondelete="CASCADE"),
-            nullable=False,
+            Uuid7(), ForeignKey("pincer_identity_credentials.profile_id", ondelete="CASCADE"), nullable=False
         )
     )
     refresh_jti: str = Field(sa_column=Column(Text(), nullable=False))
@@ -143,3 +172,76 @@ class AuthSession(SQLModel, table=True):
     created_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
     )
+
+    profile: IdentityProfile = Relationship(
+        sa_relationship_kwargs={
+            "lazy": "joined",
+            "viewonly": True,
+            "primaryjoin": "foreign(AuthSession.profile_id) == IdentityProfile.id",
+        }
+    )
+
+    @property
+    def pincer_user_id(self) -> str:
+        return self.profile.pincer_user_id
+
+
+def profile_id_of(pincer_user_id: Any) -> Any:
+    """The profile's `id` as a scalar subquery: NULL for a name with no profile.
+
+    `pincer_user_id` is a name or a column (`excluded.pincer_user_id`, for an
+    upsert that sets the text and has to keep `profile_id` in step with it).
+    """
+    return (
+        select(col(IdentityProfile.id)).where(col(IdentityProfile.pincer_user_id) == pincer_user_id).scalar_subquery()
+    )
+
+
+#: `Column.info` key of a column whose insert value is derived from the row's
+#: other values: a callable given a getter for them, returning the value (or
+#: None for NULL). `pincer.db.dialect.upsert` and the ORM flush both apply it.
+DERIVE = "derive"
+
+
+#: `Column.info` key naming the text column of a `profile_ref` whose rows
+#: `pincer.repositories.identity.follow_profile` moves on a rename or merge.
+FOLLOWS = "follows_profile"
+
+
+def profile_ref(text_column: str, *, follows: bool = True) -> Any:
+    """`profile_id` for a table that names its user in `text_column`: nullable,
+    indexed, set NULL when the profile goes.
+
+    An insert fills it from the text: the profile of that name, or NULL for a
+    sender with no profile (a `telegram:1` stand-in, a web visitor, `system`).
+    As a subquery inside the INSERT, not a lookup before it.
+
+    `follows=False` for a table whose own repository moves its rows on a
+    rename, because they need more than the name changed.
+    """
+
+    def derive(get: Callable[[str], Any]) -> Any:
+        name = get(text_column)
+        return None if name is None else profile_id_of(name)
+
+    return Field(
+        default=None,
+        sa_column=Column(
+            "profile_id",
+            Uuid7(),
+            ForeignKey("pincer_identity_profiles.id", ondelete="SET NULL"),
+            index=True,
+            info={DERIVE: derive, **({FOLLOWS: text_column} if follows else {})},
+        ),
+    )
+
+
+@event.listens_for(Mapper, "before_insert")
+def _derive_on_flush(mapper: Mapper[Any], _connection: Any, target: Any) -> None:
+    """Fill the derived columns `add()`ed rows leave unset."""
+    for column in mapper.local_table.columns:
+        derive = column.info.get(DERIVE)
+        if derive is not None and getattr(target, column.key, None) is None:
+            value = derive(lambda name: getattr(target, name, None))
+            if value is not None:
+                setattr(target, column.key, value)

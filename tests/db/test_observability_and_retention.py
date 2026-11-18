@@ -7,6 +7,7 @@ from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
+from pincer.models.identity import IdentityProfile
 from pincer.models.observability import AppointmentOutcome, CallCost, CanaryRun
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
 from pincer.models.voice import (
@@ -25,6 +26,7 @@ from pincer.services.retention import RetentionService
 _TABLES = [
     model.__table__
     for model in (
+        IdentityProfile,
         AppointmentOutcome,
         CallCost,
         CanaryRun,

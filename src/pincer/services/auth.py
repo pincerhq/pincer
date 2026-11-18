@@ -22,6 +22,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends
+from sqlalchemy.exc import IntegrityError
 from starlette.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves the dependency's annotation
 
 from pincer.db.engine import get_database_url
@@ -177,27 +178,35 @@ class AuthService(DatabaseService):
             expires_in=self._access_ttl,
         )
 
-    async def _start_session(self, pincer_user_id: str, token_version: int) -> TokenPair:
-        """Open a server-side session and mint its first token pair."""
+    async def _start_session(self, credential: IdentityCredential, token_version: int) -> TokenPair:
+        """Open a server-side session under these credentials and mint its first token pair.
+
+        Credentials that moved or went since they were read (a rename or a
+        revoke in between) sign nobody in: `InvalidCredentialsError`.
+        """
+        pincer_user_id = credential.pincer_user_id
         session_id, refresh_jti, now = new_id(), creds.new_token_id(), time.time()
-        async with session_scope(self._url) as session:
-            sessions = AuthSessionRepository(session)
-            await sessions.delete_expired(pincer_user_id, now=now)
-            await sessions.add(
-                AuthSession(
-                    id=session_id,
-                    pincer_user_id=pincer_user_id,
-                    refresh_jti=refresh_jti,
-                    expires_at=now + self._refresh_ttl,
-                ),
-                refresh=False,
-            )
+        try:
+            async with session_scope(self._url) as session:
+                sessions = AuthSessionRepository(session)
+                await sessions.delete_expired(pincer_user_id, now=now)
+                await sessions.add(
+                    AuthSession(
+                        id=session_id,
+                        profile_id=credential.profile_id,
+                        refresh_jti=refresh_jti,
+                        expires_at=now + self._refresh_ttl,
+                    ),
+                    refresh=False,
+                )
+        except IntegrityError as exc:
+            raise InvalidCredentialsError from exc
         return self._pair(pincer_user_id, token_version, session_id, refresh_jti)
 
     @staticmethod
     async def _is_active(session: Any, pincer_user_id: str) -> bool:
         """False for a deactivated identity (or one with no profile left)."""
-        profile = await IdentityProfileRepository(session).get(pincer_user_id)
+        profile = await IdentityProfileRepository(session).named(pincer_user_id)
         return profile is not None and bool(profile.active)
 
     async def _ensure_active(self, session: Any, pincer_user_id: str, error: type[AuthError]) -> None:
@@ -210,14 +219,14 @@ class AuthService(DatabaseService):
 
     async def _credential(self, pincer_user_id: str) -> IdentityCredential | None:
         async with session_scope(self._url) as session:
-            return await IdentityCredentialRepository(session).get(pincer_user_id)
+            return await IdentityCredentialRepository(session).for_user(pincer_user_id)
 
     @staticmethod
     async def _resolve(session: Any, identifier: str) -> str | None:
         """The identity `identifier` names: an exact identity id first, else
         an email. An email several identities share names nobody."""
         profiles = IdentityProfileRepository(session)
-        profile = await profiles.get(identifier)
+        profile = await profiles.named(identifier)
         if profile is None and "@" in identifier:
             matches = await profiles.find_by_email_ci(identifier)
             profile = matches[0] if len(matches) == 1 else None
@@ -241,7 +250,7 @@ class AuthService(DatabaseService):
             resolved = await self._resolve(session, identifier)
             if resolved is None:
                 return None
-            return await IdentityCredentialRepository(session).get(resolved)
+            return await IdentityCredentialRepository(session).for_user(resolved)
 
     async def login(self, identifier: str, password: str) -> TokenPair:
         """Exchange a name or email and a password for a token pair.
@@ -269,7 +278,7 @@ class AuthService(DatabaseService):
             upgraded = await creds.hash_password(password)
             async with session_scope(self._url) as session:
                 await IdentityCredentialRepository(session).replace_password_hash(row.pincer_user_id, upgraded)
-        return await self._start_session(row.pincer_user_id, row.token_version)
+        return await self._start_session(row, row.token_version)
 
     async def _current(self, claims: creds.TokenClaims) -> IdentityCredential:
         """The credentials a token was issued under, if it is still current."""
@@ -360,7 +369,7 @@ class AuthService(DatabaseService):
             return AuthIdentity(row.pincer_user_id, "api_key")
         claims = self._decode(value, "access")
         async with session_scope(self._url) as session:
-            credential = await IdentityCredentialRepository(session).get(claims.sub)
+            credential = await IdentityCredentialRepository(session).for_user(claims.sub)
             if credential is None or credential.token_version != claims.ver:
                 raise TokenStaleError
             await self._ensure_active(session, credential.pincer_user_id, InvalidTokenError)
@@ -386,7 +395,7 @@ class AuthService(DatabaseService):
         """
         creds.validate_password(password)
         async with session_scope(self._url) as session:
-            if await IdentityProfileRepository(session).get(pincer_user_id) is None:
+            if await IdentityProfileRepository(session).named(pincer_user_id) is None:
                 raise UnknownIdentityError(pincer_user_id)
         password_hash = await creds.hash_password(password)
         async with session_scope(self._url) as session:
@@ -413,7 +422,9 @@ class AuthService(DatabaseService):
             raise InvalidCredentialsError
         await self.set_password(pincer_user_id, new_password)
         fresh = await self._credential(pincer_user_id)
-        return await self._start_session(pincer_user_id, fresh.token_version if fresh else row.token_version + 1)
+        if fresh is None:
+            raise InvalidCredentialsError
+        return await self._start_session(fresh, fresh.token_version)
 
     # ── API keys ─────────────────────────────────────────────────────
 
@@ -429,10 +440,10 @@ class AuthService(DatabaseService):
         prefix, last4 = creds.api_key_display_parts(api_key)
         now = _now()
         async with session_scope(self._url) as session:
-            if await IdentityProfileRepository(session).get(pincer_user_id) is None:
+            if await IdentityProfileRepository(session).named(pincer_user_id) is None:
                 raise UnknownIdentityError(pincer_user_id)
             credentials = IdentityCredentialRepository(session)
-            existing = await credentials.get(pincer_user_id)
+            existing = await credentials.for_user(pincer_user_id)
             if existing is not None and existing.api_key_hash and not force:
                 raise ApiKeyExistsError(pincer_user_id)
             await credentials.set_api_key(

@@ -16,6 +16,7 @@ from pincer.cli.telephony import _parse_since, _retention_note, telephony_app
 from pincer.db import ensure_schema_current
 from pincer.db.engine import get_database_url, get_engine
 from pincer.models.audit import AuditLog
+from pincer.models.identity import IdentityProfile
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
 from pincer.models.voice import VoiceCall
 from pincer.services.audit import AuditService
@@ -69,6 +70,7 @@ def test_human_verdict_and_completed_status_derive_nothing():
 # ── plan / apply through the store, on both dialects ─────────────────
 
 _TABLES = [
+    IdentityProfile.__table__,
     VoiceCall.__table__,
     TelephonyCall.__table__,
     TelephonyEvent.__table__,

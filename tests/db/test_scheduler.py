@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from pincer.db.engine import get_engine
+from pincer.models.identity import IdentityProfile
 from pincer.models.scheduler import BriefingConfig, EventTrigger, Schedule
 from pincer.services.scheduler import (
     DEFAULT_BRIEFING_CONFIG,
@@ -15,7 +16,7 @@ from pincer.services.scheduler import (
     ScheduleService,
 )
 
-_TABLES = [Schedule.__table__, EventTrigger.__table__, BriefingConfig.__table__]
+_TABLES = [IdentityProfile.__table__, Schedule.__table__, EventTrigger.__table__, BriefingConfig.__table__]
 
 
 @pytest.fixture

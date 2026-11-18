@@ -94,10 +94,10 @@ async def test_seeded_phone_is_confirmed_and_resolves(tmp_path):
     assert profile["phones"] == [{"phone": "+491512345678", "confirmed": True}]
     # Seeding again keeps the first confirmation time
     async with session_scope(store._url) as session:
-        first = (await IdentityPhoneRepository(session).get("+491512345678")).confirmed_at
+        first = (await IdentityPhoneRepository(session).get_by(phone="+491512345678")).confirmed_at
     await resolver.seed_from_config()
     async with session_scope(store._url) as session:
-        row = await IdentityPhoneRepository(session).get("+491512345678")
+        row = await IdentityPhoneRepository(session).get_by(phone="+491512345678")
     assert row.confirmed_at == first and row.source == "config"
 
 
@@ -194,7 +194,7 @@ async def test_rename_carries_phones_and_prune_drops_orphans(tmp_path):
     removed, orphaned = await store.prune(set())
     assert (removed, orphaned) == (1, 1)
     async with session_scope(store._url) as session:
-        assert await IdentityPhoneRepository(session).get("+491512345678") is None
+        assert await IdentityPhoneRepository(session).get_by(phone="+491512345678") is None
 
 
 OTHER_TOML = """

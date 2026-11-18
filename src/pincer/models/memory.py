@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
 from pincer.db.types import Real, Uuid7
+from pincer.models.identity import profile_ref
 
 
 class Conversation(SQLModel, table=True):
@@ -14,6 +15,7 @@ class Conversation(SQLModel, table=True):
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str | None = profile_ref("user_id")
     channel: str = Field(sa_column=Column(Text(), nullable=False))
     messages_json: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'[]'"))
@@ -28,6 +30,7 @@ class Memory(SQLModel, table=True):
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str | None = profile_ref("user_id")
     content: str = Field(sa_column=Column(Text(), nullable=False))
     category: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'general'"))
@@ -43,6 +46,7 @@ class Entity(SQLModel, table=True):
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str | None = profile_ref("user_id")
     name: str = Field(sa_column=Column(Text(), nullable=False))
     type: str = Field(sa_column=Column(Text(), nullable=False))
     attributes_json: str | None = Field(

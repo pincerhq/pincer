@@ -14,10 +14,11 @@ import pytest
 from support import label_of, seeded_id
 
 from pincer.db.engine import get_engine
+from pincer.models.identity import IdentityProfile
 from pincer.models.memory import Conversation, Entity, Memory
 from pincer.services.memory import MemoryService
 
-_TABLES = [Memory.__table__, Entity.__table__, Conversation.__table__]
+_TABLES = [IdentityProfile.__table__, Memory.__table__, Entity.__table__, Conversation.__table__]
 
 
 @pytest.fixture

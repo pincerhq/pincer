@@ -37,10 +37,10 @@ if config.config_file_name is not None:
 # and those revisions in step.
 target_metadata = metadata
 
-#: Tables that only Pincer creates, under their name before `0019` and after:
-#: `channel_identities` exists from `0001` on and is never renamed until
-#: `0019` prefixes it. Both names are specific to Pincer.
-_PINCER_MARKER_TABLES = frozenset({"channel_identities", "pincer_channel_identities"})
+#: Tables that only Pincer creates, under every name they have had:
+#: `channel_identities` exists from `0001` on, `0019` prefixes it, and `0033`
+#: renames it `pincer_identity_channels`. All three are specific to Pincer.
+_PINCER_MARKER_TABLES = frozenset({"channel_identities", "pincer_channel_identities", "pincer_identity_channels"})
 
 
 def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:

@@ -19,22 +19,24 @@ from pincer.core.session import Session, SessionManager
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.llm.base import ImageContent, LLMMessage, MessageRole
-from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
+from pincer.models.identity import AuthSession, IdentityChannel, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession, SessionImage
+from pincer.repositories.identity import profile_owned
 from pincer.repositories.sessions import SessionImageRepository, SessionRepository
 from pincer.services.identity import IdentityService
 from pincer.services.sessions import ImageSet, SessionService, StoredImage
 
 _TABLES = [
     IdentityProfile.__table__,
-    ChannelIdentity.__table__,
+    IdentityChannel.__table__,
     IdentityCredential.__table__,
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
     SessionImage.__table__,
     Onboarding.__table__,
+    *(table for table, _column in profile_owned()),
 ]
 
 

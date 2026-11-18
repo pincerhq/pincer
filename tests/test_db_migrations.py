@@ -32,7 +32,7 @@ EXPECTED_TABLES = {
     "pincer_entities",
     "pincer_sessions",
     "pincer_identity_profiles",
-    "pincer_channel_identities",
+    "pincer_identity_channels",
     "pincer_identity_credentials",
     "pincer_auth_sessions",
     "pincer_onboarding",
@@ -165,7 +165,8 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
         links = {
             (channel, channel_user_id)
             for channel, channel_user_id in con.execute(
-                "SELECT channel, channel_user_id FROM pincer_channel_identities WHERE pincer_user_id = 'usr_abc'"
+                "SELECT c.channel, c.channel_user_id FROM pincer_identity_channels c "
+                "JOIN pincer_identity_profiles p ON p.id = c.profile_id WHERE p.pincer_user_id = 'usr_abc'"
             ).fetchall()
         }
         assert links == {("telegram", "555111"), ("whatsapp", "491234567890")}
@@ -2001,9 +2002,11 @@ def test_0020_deletes_webhook_retry_schedules_and_keeps_the_rest(migration_url, 
 
 def test_0021_identity_credentials_constraints(migration_url, tmp_path):
     """Issue #228: one credentials row per identity, an API key hash names at
-    most one of them, and an identity with only a password has none."""
+    most one of them, and an identity with only a password has none.
+
+    At 0032: 0033 re-keys credentials by the profile's id (see `test_0033_*`)."""
     cfg = _config(migration_url, tmp_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0032")
     insert = sa.text(
         "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash, api_key_hash) "
         "VALUES (:uid, :password_hash, :api_key_hash)"
@@ -2490,3 +2493,127 @@ def test_0032_drops_rows_whose_sqlite_text_key_is_null(migration_url, tmp_path):
         rows = conn.execute(sa.text("SELECT phone_number, id FROM pincer_do_not_call_numbers")).all()
     assert [row[0] for row in rows] == ["+15550001"]
     assert rows[0][1] is not None
+
+
+# ── 0033: identity profile ids ─────────────────────────────────────────
+
+_S1 = "01890000-0000-7000-8000-0000000000a1"
+_S2 = "01890000-0000-7000-8000-0000000000a2"
+_SESSION_0033 = "01890000-0000-7000-8000-0000000000b1"
+
+_SEED_0033 = (
+    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('alice', '2026-01-02T00:00:00')",
+    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('bob', '2026-01-01T00:00:00')",
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
+    "VALUES ('telegram', '1', 'alice')",
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '2', 'bob')",
+    "INSERT INTO pincer_identity_phones (phone, pincer_user_id, source) VALUES ('+491', 'alice', 'config')",
+    "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash) VALUES ('alice', 'h')",
+    "INSERT INTO pincer_auth_sessions (id, pincer_user_id, refresh_jti, expires_at) "
+    f"VALUES ('{_SESSION_0033}', 'alice', 'j', 1.0)",
+    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
+    f"VALUES ('{_S1}', 'alice', 'a', '* * * * *', '{{}}')",
+    # `system` names no profile: its schedule keeps the text and no profile_id.
+    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
+    f"VALUES ('{_S2}', 'system', 'b', '* * * * *', '{{}}')",
+    "INSERT INTO pincer_memories (id, user_id, content, created_at) "
+    "VALUES ('01890000-0000-7000-8000-0000000000c1', 'alice', 'likes tea', 0)",
+)
+
+#: A link to a profile that is gone: SQLite never enforced the foreign key.
+_ORPHAN_0033 = (
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '9', 'ghost')"
+)
+
+
+def test_0033_keys_identities_by_id_and_points_every_user_reference_at_it(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0032")
+    sqlite = migration_url.startswith("sqlite")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0033, *((_ORPHAN_0033,) if sqlite else ())):
+            conn.execute(sa.text(insert))
+        before = {
+            table: _shape(sa.inspect(conn), table)
+            for table in ("pincer_identity_profiles", "pincer_channel_identities", "pincer_schedules")
+        }
+
+    command.upgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        tables = set(inspector.get_table_names())
+        assert "pincer_identity_channels" in tables
+        assert "pincer_channel_identities" not in tables
+        assert inspector.get_pk_constraint("pincer_identity_profiles")["constrained_columns"] == ["id"]
+        for table in ("pincer_identity_channels", "pincer_identity_phones", "pincer_identity_credentials"):
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+        for table in (
+            "pincer_identity_channels",
+            "pincer_identity_phones",
+            "pincer_identity_credentials",
+            "pincer_auth_sessions",
+        ):
+            columns = {c["name"]: c["nullable"] for c in inspector.get_columns(table)}
+            assert "pincer_user_id" not in columns, table
+            assert columns["profile_id"] is False, table
+
+        ids = dict(conn.execute(sa.text("SELECT pincer_user_id, id FROM pincer_identity_profiles")).all())
+        # Dated by `created_at`: bob was made first.
+        assert str(ids["bob"]) < str(ids["alice"])
+
+        def owner(sql: str) -> list[str]:
+            return [str(row[0]) for row in conn.execute(sa.text(sql)).all()]
+
+        assert owner(
+            "SELECT p.pincer_user_id FROM pincer_identity_channels c "
+            "JOIN pincer_identity_profiles p ON p.id = c.profile_id ORDER BY c.channel_user_id"
+        ) == ["alice", "bob"]  # the orphan is gone
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_identity_channels")).scalar_one() == 2
+        # Which phone a LID link stands for is not known yet: the next message records it.
+        assert {c["name"]: c["nullable"] for c in inspector.get_columns("pincer_identity_channels")}["alt_id"]
+        assert "idx_identity_channels_alt" in {i["name"] for i in inspector.get_indexes("pincer_identity_channels")}
+        assert (
+            conn.execute(sa.text("SELECT COUNT(*) FROM pincer_identity_channels WHERE alt_id IS NOT NULL")).scalar_one()
+            == 0
+        )
+        assert owner("SELECT CAST(profile_id AS TEXT) FROM pincer_identity_phones") == [str(ids["alice"])]
+        assert owner("SELECT CAST(profile_id AS TEXT) FROM pincer_auth_sessions") == [str(ids["alice"])]
+        schedules = {
+            str(row[0]): (row[1], None if row[2] is None else str(row[2]))
+            for row in conn.execute(sa.text("SELECT id, pincer_user_id, profile_id FROM pincer_schedules")).all()
+        }
+        assert schedules == {_S1: ("alice", str(ids["alice"])), _S2: ("system", None)}
+        assert owner("SELECT CAST(profile_id AS TEXT) FROM pincer_memories") == [str(ids["alice"])]
+        if sqlite:
+            # The rebuild kept the full-text index in step with the table.
+            assert (
+                conn.execute(
+                    sa.text("SELECT COUNT(*) FROM pincer_memories_fts WHERE pincer_memories_fts MATCH 'tea'")
+                ).scalar_one()
+                == 1
+            )
+
+    command.downgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        assert "pincer_channel_identities" in set(inspector.get_table_names())
+        after = {table: _shape(inspector, table) for table in before}
+        links = conn.execute(
+            sa.text("SELECT channel_user_id, pincer_user_id FROM pincer_channel_identities ORDER BY channel_user_id")
+        ).all()
+        assert [tuple(row) for row in links] == [("1", "alice"), ("2", "bob")]
+        assert conn.execute(sa.text("SELECT pincer_user_id FROM pincer_identity_credentials")).scalar_one() == "alice"
+        assert conn.execute(sa.text("SELECT pincer_user_id FROM pincer_auth_sessions")).scalar_one() == "alice"
+        assert "profile_id" not in {c["name"] for c in inspector.get_columns("pincer_schedules")}
+    if sqlite:
+        # The restored keys say NOT NULL, as `unswap_primary_key` documents.
+        before["pincer_identity_profiles"]["columns"] = [
+            (n, False if n == "pincer_user_id" else null) for n, null in before["pincer_identity_profiles"]["columns"]
+        ]
+        before["pincer_channel_identities"]["columns"] = [
+            (n, False if n in ("channel", "channel_user_id") else null)
+            for n, null in before["pincer_channel_identities"]["columns"]
+        ]
+    assert after == before
+
+    command.upgrade(cfg, "0033")

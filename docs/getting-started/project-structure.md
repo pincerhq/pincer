@@ -46,7 +46,7 @@
 
 ### Cross-Channel Identity (`core/identity.py`)
 - Unified `pincer_user_id` across all channels — tell the agent something on WhatsApp, ask about it on Telegram, it remembers
-- Two-table normalized schema: `identity_profiles` (one row per user) + `channel_identities` (many-to-many channel links)
+- Normalized schema: `pincer_identity_profiles` (one row per user, keyed by a UUIDv7 `id`; `pincer_user_id` is its unique name) + `pincer_identity_channels` (many-to-many channel links), `pincer_identity_phones` and `pincer_identity_credentials`, all pointing at the profile's `id`
 - Config-driven identity seeding at startup from the `[identity]` section of `pincer.toml`, applied as `PINCER_IDENTITY_MANAGEMENT` says (`update` by default, `sync`, or `clionly`); N channels per identity
 - Identities can also be created, linked, edited, deactivated and reactivated with `pincer identity …` in every mode; a deactivated identity is a guest everywhere at once
 - Named canonical IDs (the `[identity.<key>]` key) make memory tags human-readable and portable across DB rebuilds

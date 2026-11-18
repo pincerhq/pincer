@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
 from pincer.db.types import IsoText, Uuid7
+from pincer.models.identity import profile_ref
 
 
 class Schedule(SQLModel, table=True):
@@ -21,6 +22,7 @@ class Schedule(SQLModel, table=True):
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     pincer_user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str | None = profile_ref("pincer_user_id")
     name: str = Field(sa_column=Column(Text(), nullable=False))
     cron_expr: str = Field(sa_column=Column(Text(), nullable=False))
     action: str = Field(sa_column=Column(Text(), nullable=False))
@@ -49,6 +51,7 @@ class EventTrigger(SQLModel, table=True):
     trigger_type: str = Field(sa_column=Column(Text(), nullable=False))
     trigger_key: str = Field(sa_column=Column(Text(), nullable=False))
     pincer_user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str | None = profile_ref("pincer_user_id")
     processed_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
     )
@@ -60,6 +63,7 @@ class BriefingConfig(SQLModel, table=True):
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     pincer_user_id: str = Field(sa_column=Column(Text(), unique=True, nullable=False))
+    profile_id: str | None = profile_ref("pincer_user_id")
     sections: str | None = Field(
         default=None,
         sa_column=Column(Text(), nullable=False, server_default=sa.text('\'["weather","calendar","email","news"]\'')),

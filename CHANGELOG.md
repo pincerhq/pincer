@@ -72,6 +72,30 @@ Always on, without setting anything:
   a turn's `turn_id` is `id`, an event's `event_id` is `reference_event_id`
   and a span's `span_id` is `reference_span_id`. The call-thread API is
   unchanged.
+- **`0033` keys identities by a UUIDv7.** `pincer_identity_profiles` gets an
+  `id` primary key, and `pincer_user_id` stays as its unique name: the CLI,
+  the `[identity]` TOML, the API and tokens keep using it. The channel links,
+  phones, credentials and signed-in sessions point at the profile's `id`
+  instead of repeating the name. `pincer_channel_identities` is renamed
+  `pincer_identity_channels`; update any query of your own. Links, phones and
+  credentials whose profile is gone are dropped (SQLite never enforced that
+  foreign key). The downgrade is lossless.
+- **Merging an identity now takes everything with it.** Schedules, event
+  triggers, briefing configs, calls, call origins, outbound call logs,
+  memories, entities, conversations and audit log rows carry a `profile_id`
+  next to their user name, and when the `[identity]` config folds a `usr_`
+  identity into a named one, they move to it. Before, they stayed behind under the old name.
+  The rows of senders with no profile (a guest's `telegram:123`, `system`)
+  have no `profile_id`.
+- **A WhatsApp LID link is never swapped back to the phone number.** Until
+  now a restart with WhatsApp disabled, unpaired, or not yet knowing a
+  contact's LID replaced their LID link with the phone from the `[identity]`
+  config. `pincer_identity_channels` gains an `alt_id` (the phone behind a
+  LID), recorded when seeding resolves a phone or a message reveals the LID;
+  with it the configured phone resolves to the stored LID. A LID linked
+  before this release is kept as well, and its phone is recorded on the
+  contact's next message. A message addressed by the phone finds the LID's
+  identity without linking the phone next to it.
 
 #### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.3.0)
 

@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
 from pincer.db.types import IsoText, Real, Uuid7
+from pincer.models.identity import profile_ref
 
 
 class VoiceCall(SQLModel, table=True):
@@ -24,6 +25,7 @@ class VoiceCall(SQLModel, table=True):
     from_number: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     to_number: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     pincer_user_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    profile_id: str | None = profile_ref("pincer_user_id")
     recording_enabled: bool | None = Field(default=None, sa_column=Column(Boolean(), server_default=sa.text("FALSE")))
     consent_given: bool | None = Field(default=None, sa_column=Column(Boolean(), server_default=sa.text("FALSE")))
     started_at: str = Field(sa_column=Column(IsoText(), nullable=False))
@@ -114,6 +116,7 @@ class OutboundCallLog(SQLModel, table=True):
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     phone_number: str = Field(sa_column=Column(Text(), nullable=False))
     user_id: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("''")))
+    profile_id: str | None = profile_ref("user_id")
     channel: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     call_sid: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     placed_at: str = Field(sa_column=Column(IsoText(), nullable=False))
@@ -220,6 +223,7 @@ class CallOrigin(SQLModel, table=True):
     # The delivery id on the channel (a Telegram chat id); `pincer_user_id` is the identity.
     user_id: str = Field(sa_column=Column(Text(), nullable=False))
     pincer_user_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    profile_id: str | None = profile_ref("pincer_user_id")
     channel: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     # The chat session that asked for the call ("" for calls with no chat).
     session_key: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))

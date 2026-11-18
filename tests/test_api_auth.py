@@ -123,7 +123,7 @@ def test_an_oversized_password_is_refused_without_being_echoed(authed_app: Authe
 def test_login_upgrades_a_hash_made_with_weaker_parameters(authed_app: AuthedApp, monkeypatch) -> None:
     async def stored_hash() -> tuple[str, int]:
         async with session_scope(authed_app.db_url) as session:
-            row = await IdentityCredentialRepository(session).get("alice")
+            row = await IdentityCredentialRepository(session).for_user("alice")
             return row.password_hash, row.token_version
 
     old_hash, old_version = authed_app.run(stored_hash)
@@ -336,7 +336,7 @@ def test_api_key_is_generated_once_and_replaced_only_by_force(authed_app: Authed
 
         # Only the hash is stored.
         async with session_scope(authed_app.db_url) as session:
-            row = await IdentityCredentialRepository(session).get("alice")
+            row = await IdentityCredentialRepository(session).for_user("alice")
         assert replacement not in repr(row)
         assert row.api_key_hash == credentials.hash_api_key(replacement)
 
@@ -440,7 +440,7 @@ def test_a_listen_in_ticket_dies_with_the_session_that_asked_for_it(authed_app: 
     # A ticket that names no session at all opens nothing either.
     async def sessionless() -> None:
         async with session_scope(authed_app.db_url) as session:
-            ver = (await IdentityCredentialRepository(session).get("alice")).token_version
+            ver = (await IdentityCredentialRepository(session).for_user("alice")).token_version
         bare = credentials.encode_token("j" * 48, sub="alice", typ="ws", ver=ver, ttl_seconds=60, call="CA1")
         with pytest.raises(TokenStaleError):
             await auth.authenticate_ws_ticket(bare, "CA1")
@@ -617,7 +617,7 @@ def test_a_token_without_a_session_is_not_accepted(authed_app: AuthedApp) -> Non
 
     async def version() -> int:
         async with session_scope(authed_app.db_url) as session:
-            return (await IdentityCredentialRepository(session).get("alice")).token_version
+            return (await IdentityCredentialRepository(session).for_user("alice")).token_version
 
     ver = authed_app.run(version)
     for sid in (None, "0198c1b2-0000-7000-8000-000000000000", "not-a-uuid"):
@@ -765,7 +765,7 @@ def test_deactivating_ends_the_sessions_and_keeps_the_credentials(authed_app: Au
     async def check() -> None:
         assert await authed_app.identities.set_active("alice", False)
         async with session_scope(authed_app.db_url) as db:
-            credential = await IdentityCredentialRepository(db).get("alice")
+            credential = await IdentityCredentialRepository(db).for_user("alice")
         assert credential is not None and credential.password_hash and credential.api_key_hash
 
         assert await authed_app.identities.set_active("alice", True)

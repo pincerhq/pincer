@@ -9,6 +9,7 @@ from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
+from pincer.models.identity import IdentityProfile
 from pincer.models.voice import (
     CallAction,
     CallAnalytics,
@@ -21,6 +22,7 @@ from pincer.models.voice import (
     PhoneContact,
     VoiceCall,
 )
+from pincer.repositories.identity import IdentityProfileRepository
 from pincer.repositories.voice import ThreadMemberRepository
 from pincer.services.voice import (
     AnalyticsService,
@@ -34,6 +36,7 @@ from pincer.services.voice import (
 _TABLES = [
     model.__table__
     for model in (
+        IdentityProfile,
         VoiceCall,
         CallTranscript,
         CallAction,
@@ -75,6 +78,22 @@ async def test_saving_a_call_twice_updates_it_in_place(url):
     # A column this caller did not pass keeps its value — the INSERT OR REPLACE
     # this replaces would have blanked it.
     assert stored["language"] == "de"
+
+
+async def test_a_call_that_learns_whose_it_is_points_at_that_profile(url):
+    """The row is often made before the caller is known; the save that names
+    them must fill `profile_id`, which the column default does on insert only."""
+    async with session_scope(url) as session:
+        session.add(IdentityProfile(pincer_user_id="alice"))
+    calls = CallsService(url)
+    await calls.save_call({"call_sid": "CA1", "direction": "inbound", "started_at": EARLIER})
+    assert (await calls.get("CA1"))["profile_id"] is None
+
+    await calls.save_call({"call_sid": "CA1", "direction": "inbound", "started_at": EARLIER, "pincer_user_id": "alice"})
+
+    async with session_scope(url) as session:
+        alice = await IdentityProfileRepository(session).named("alice")
+    assert str((await calls.get("CA1"))["profile_id"]) == alice.id
 
 
 async def test_the_thread_columns_are_re_derived_from_the_membership(url):
