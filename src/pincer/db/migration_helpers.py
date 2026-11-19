@@ -27,6 +27,9 @@ logger = logging.getLogger("pincer.db.migrations")
 #: How many keys of the rows `drop_rows` deletes its warning lists.
 LOGGED_KEYS = 20
 
+#: Rows per `INSERT` into `fill_ids`' map, so a large table is not sent as one batch.
+FILL_BATCH = 5000
+
 
 def hold_transaction(bind: sa.Connection) -> None:
     """Make the rest of a revision one transaction on SQLite, DDL included.
@@ -209,10 +212,6 @@ def mint_ids(
 
     sequence = Uuid7Sequence()
     return [(old, sequence.next(earliest if ms is None else ms)) for old, ms, _tie in sorted(stamped, key=order)]
-
-
-#: Rows per `INSERT` into `fill_ids`' map, so a large table is not sent as one batch.
-FILL_BATCH = 5000
 
 
 def fill_ids(bind: sa.Connection, table: str, key: Sequence[str], pairs: Sequence[tuple[tuple[Any, ...], str]]) -> None:

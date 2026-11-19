@@ -54,6 +54,106 @@ _ADDED_AFTER_0018 = {
     "cost_logs": {"cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"},  # 0029
 }
 
+_DORMANT = {
+    "pincer_registry_skills",
+    "pincer_expenses",
+    "pincer_habits",
+    "pincer_habit_checkins",
+    "pincer_pomodoro_sessions",
+    "pincer_discord_threads",
+}
+
+_THREAD_0032 = "01890000-0000-7000-8000-000000000001"
+_CALL_0032 = "01890000-0000-7000-8000-000000000002"
+
+_SEED_0032 = (
+    "INSERT INTO pincer_call_threads (thread_id, subject, origin, created_at, updated_at) "
+    f"VALUES ('{_THREAD_0032}', 's', 'inbound', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+    # Inserted newest first, so key order and time order disagree.
+    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA1', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA2', '2026-02-01T00:00:00')",
+    "INSERT INTO pincer_call_analytics (call_sid, method, created_at) VALUES ('CA1', 'vad', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_origins (call_sid, user_id, created_at) VALUES ('CA1', 'chat-1', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_thread_members (call_sid, thread_id, attached_at) "
+    f"VALUES ('CA1', '{_THREAD_0032}', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_do_not_call_numbers (phone_number, added_at) VALUES ('+491', '2026-03-01T00:00:00')",
+    # Same timestamp: the monotonic clock and then `seq` decide.
+    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+    f"VALUES ('e-a', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 5, 1)",
+    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+    f"VALUES ('e-b', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 2, 1)",
+    "INSERT INTO pincer_telephony_spans (span_id, call_id, name, start_utc) "
+    f"VALUES ('s1', '{_CALL_0032}', 'llm', '2026-03-01T00:00:00')",
+)
+
+#: (table, old name) of the UUIDv7 keys 0032 renames `id`.
+_RENAMED_0032 = (
+    ("pincer_telephony_turns", "turn_id"),
+    ("pincer_telephony_calls", "call_id"),
+    ("pincer_call_threads", "thread_id"),
+)
+
+#: (table, old name, new name) of the outside keys 0032 renames.
+_REFERENCES_0032 = (
+    ("pincer_telephony_events", "event_id", "reference_event_id"),
+    ("pincer_telephony_spans", "span_id", "reference_span_id"),
+)
+
+_TURN = "01890000-0000-7000-8000-0000000000e1"
+_TURN_CALL = "01890000-0000-7000-8000-0000000000e2"
+
+_S1 = "01890000-0000-7000-8000-0000000000a1"
+_S2 = "01890000-0000-7000-8000-0000000000a2"
+_SESSION_0033 = "01890000-0000-7000-8000-0000000000b1"
+
+_SEED_0033 = (
+    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('alice', '2026-01-02T00:00:00')",
+    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('bob', '2026-01-01T00:00:00')",
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
+    "VALUES ('telegram', '1', 'alice')",
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '2', 'bob')",
+    "INSERT INTO pincer_identity_phones (phone, pincer_user_id, source) VALUES ('+491', 'alice', 'config')",
+    "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash) VALUES ('alice', 'h')",
+    "INSERT INTO pincer_auth_sessions (id, pincer_user_id, refresh_jti, expires_at) "
+    f"VALUES ('{_SESSION_0033}', 'alice', 'j', 1.0)",
+    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
+    f"VALUES ('{_S1}', 'alice', 'a', '* * * * *', '{{}}')",
+    # `system` names no profile: its schedule keeps the text and no profile_id.
+    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
+    f"VALUES ('{_S2}', 'system', 'b', '* * * * *', '{{}}')",
+    "INSERT INTO pincer_memories (id, user_id, content, created_at) "
+    "VALUES ('01890000-0000-7000-8000-0000000000c1', 'alice', 'likes tea', 0)",
+)
+
+#: A link to a profile that is gone: SQLite never enforced the foreign key.
+_ORPHAN_0033 = (
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '9', 'ghost')"
+)
+
+_SEED_0034 = (
+    "INSERT INTO pincer_identity_profiles (id, pincer_user_id) "
+    "VALUES ('01890000-0000-7000-8000-0000000000d1', 'alice')",
+    # Newest first, so key order and time order disagree.
+    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+    "VALUES ('unified:alice', 'alice', 'telegram', 20.0, 20.0)",
+    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+    "VALUES ('web:guest', 'guest', 'web', 10.0, 10.0)",
+    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+    "VALUES ('unified:alice', 'aa', 'image/jpeg', X'FF', 21.0)",
+    # Onboarding has no creation time: asked, or else closed.
+    "INSERT INTO pincer_onboarding (user_id, channel, asked_at) VALUES ('alice', 'telegram', 5.0)",
+    "INSERT INTO pincer_onboarding (user_id, channel, completed_at) VALUES ('guest', 'web', 1.0)",
+)
+
+#: A photo of a session that is gone: SQLite never enforced the foreign key.
+_ORPHAN_0034 = (
+    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+    "VALUES ('gone:x', 'bb', 'image/jpeg', X'FF', 1.0)"
+)
+
+#: The id of a row deleted behind the migration's back.
+_GONE = "01890000-0000-7000-8000-0000000000e0"
+
 
 def _tables(db_path: Path) -> set[str]:
     con = sqlite3.connect(str(db_path))
@@ -2292,15 +2392,6 @@ def test_0030_session_images_hang_off_their_session_and_the_downgrade_drops_them
 
 # ── 0031: dormant tables ───────────────────────────────────────────────
 
-_DORMANT = {
-    "pincer_registry_skills",
-    "pincer_expenses",
-    "pincer_habits",
-    "pincer_habit_checkins",
-    "pincer_pomodoro_sessions",
-    "pincer_discord_threads",
-}
-
 
 def test_0031_drops_the_dormant_tables_and_the_downgrade_recreates_them_empty(migration_url, tmp_path):
     cfg = _config(migration_url, tmp_path)
@@ -2340,29 +2431,6 @@ def test_0031_drops_the_dormant_tables_and_the_downgrade_recreates_them_empty(mi
 
 # ── 0032: UUIDv7 ids for the natural-key tables ────────────────────────
 
-_THREAD_0032 = "01890000-0000-7000-8000-000000000001"
-_CALL_0032 = "01890000-0000-7000-8000-000000000002"
-
-_SEED_0032 = (
-    "INSERT INTO pincer_call_threads (thread_id, subject, origin, created_at, updated_at) "
-    f"VALUES ('{_THREAD_0032}', 's', 'inbound', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-    # Inserted newest first, so key order and time order disagree.
-    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA1', '2026-03-01T00:00:00')",
-    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA2', '2026-02-01T00:00:00')",
-    "INSERT INTO pincer_call_analytics (call_sid, method, created_at) VALUES ('CA1', 'vad', '2026-03-01T00:00:00')",
-    "INSERT INTO pincer_call_origins (call_sid, user_id, created_at) VALUES ('CA1', 'chat-1', '2026-03-01T00:00:00')",
-    "INSERT INTO pincer_call_thread_members (call_sid, thread_id, attached_at) "
-    f"VALUES ('CA1', '{_THREAD_0032}', '2026-03-01T00:00:00')",
-    "INSERT INTO pincer_do_not_call_numbers (phone_number, added_at) VALUES ('+491', '2026-03-01T00:00:00')",
-    # Same timestamp: the monotonic clock and then `seq` decide.
-    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
-    f"VALUES ('e-a', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 5, 1)",
-    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
-    f"VALUES ('e-b', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 2, 1)",
-    "INSERT INTO pincer_telephony_spans (span_id, call_id, name, start_utc) "
-    f"VALUES ('s1', '{_CALL_0032}', 'llm', '2026-03-01T00:00:00')",
-)
-
 
 def _0032_tables() -> tuple[tuple[str, str, str, str, tuple[str, ...]], ...]:
     path = Path(__file__).parents[1] / "src/pincer/db/migrations/versions/0032_uuid7_natural_key_tables.py"
@@ -2373,20 +2441,6 @@ def _0032_tables() -> tuple[tuple[str, str, str, str, tuple[str, ...]], ...]:
     return module.TABLES
 
 
-#: (table, old name) of the UUIDv7 keys 0032 renames `id`.
-_RENAMED_0032 = (
-    ("pincer_telephony_turns", "turn_id"),
-    ("pincer_telephony_calls", "call_id"),
-    ("pincer_call_threads", "thread_id"),
-)
-
-#: (table, old name, new name) of the outside keys 0032 renames.
-_REFERENCES_0032 = (
-    ("pincer_telephony_events", "event_id", "reference_event_id"),
-    ("pincer_telephony_spans", "span_id", "reference_span_id"),
-)
-
-
 def _member_fk(inspector: sa.Inspector) -> tuple[str, list[str]]:
     """What a thread member's foreign key points at."""
     (fk,) = [
@@ -2395,10 +2449,6 @@ def _member_fk(inspector: sa.Inspector) -> tuple[str, list[str]]:
         if fk["constrained_columns"] == ["thread_id"]
     ]
     return fk["referred_table"], fk["referred_columns"]
-
-
-_TURN = "01890000-0000-7000-8000-0000000000e1"
-_TURN_CALL = "01890000-0000-7000-8000-0000000000e2"
 
 
 def test_0032_gives_each_natural_key_table_a_dated_id_and_keeps_the_old_key_unique(migration_url, tmp_path):
@@ -2498,34 +2548,6 @@ def test_0032_drops_rows_whose_sqlite_text_key_is_null(migration_url, tmp_path):
 
 # ── 0033: identity profile ids ─────────────────────────────────────────
 
-_S1 = "01890000-0000-7000-8000-0000000000a1"
-_S2 = "01890000-0000-7000-8000-0000000000a2"
-_SESSION_0033 = "01890000-0000-7000-8000-0000000000b1"
-
-_SEED_0033 = (
-    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('alice', '2026-01-02T00:00:00')",
-    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('bob', '2026-01-01T00:00:00')",
-    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
-    "VALUES ('telegram', '1', 'alice')",
-    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '2', 'bob')",
-    "INSERT INTO pincer_identity_phones (phone, pincer_user_id, source) VALUES ('+491', 'alice', 'config')",
-    "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash) VALUES ('alice', 'h')",
-    "INSERT INTO pincer_auth_sessions (id, pincer_user_id, refresh_jti, expires_at) "
-    f"VALUES ('{_SESSION_0033}', 'alice', 'j', 1.0)",
-    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
-    f"VALUES ('{_S1}', 'alice', 'a', '* * * * *', '{{}}')",
-    # `system` names no profile: its schedule keeps the text and no profile_id.
-    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
-    f"VALUES ('{_S2}', 'system', 'b', '* * * * *', '{{}}')",
-    "INSERT INTO pincer_memories (id, user_id, content, created_at) "
-    "VALUES ('01890000-0000-7000-8000-0000000000c1', 'alice', 'likes tea', 0)",
-)
-
-#: A link to a profile that is gone: SQLite never enforced the foreign key.
-_ORPHAN_0033 = (
-    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '9', 'ghost')"
-)
-
 
 def test_0033_keys_identities_by_id_and_points_every_user_reference_at_it(migration_url, tmp_path):
     cfg = _config(migration_url, tmp_path)
@@ -2622,27 +2644,6 @@ def test_0033_keys_identities_by_id_and_points_every_user_reference_at_it(migrat
 
 # ── 0034: session ids ──────────────────────────────────────────────────
 
-_SEED_0034 = (
-    "INSERT INTO pincer_identity_profiles (id, pincer_user_id) "
-    "VALUES ('01890000-0000-7000-8000-0000000000d1', 'alice')",
-    # Newest first, so key order and time order disagree.
-    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
-    "VALUES ('unified:alice', 'alice', 'telegram', 20.0, 20.0)",
-    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
-    "VALUES ('web:guest', 'guest', 'web', 10.0, 10.0)",
-    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
-    "VALUES ('unified:alice', 'aa', 'image/jpeg', X'FF', 21.0)",
-    # Onboarding has no creation time: asked, or else closed.
-    "INSERT INTO pincer_onboarding (user_id, channel, asked_at) VALUES ('alice', 'telegram', 5.0)",
-    "INSERT INTO pincer_onboarding (user_id, channel, completed_at) VALUES ('guest', 'web', 1.0)",
-)
-
-#: A photo of a session that is gone: SQLite never enforced the foreign key.
-_ORPHAN_0034 = (
-    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
-    "VALUES ('gone:x', 'bb', 'image/jpeg', X'FF', 1.0)"
-)
-
 
 def test_0034_gives_sessions_photos_and_onboarding_an_id(migration_url, tmp_path):
     cfg = _config(migration_url, tmp_path)
@@ -2699,9 +2700,6 @@ def test_0034_gives_sessions_photos_and_onboarding_an_id(migration_url, tmp_path
 
 
 # ── 0031–0034: retryable on SQLite, and no silent drops ────────────────
-
-#: The id of a row deleted behind the migration's back.
-_GONE = "01890000-0000-7000-8000-0000000000e0"
 
 
 def test_a_failed_sqlite_downgrade_rolls_back_whole_and_can_be_retried(migration_url, tmp_path, monkeypatch):
