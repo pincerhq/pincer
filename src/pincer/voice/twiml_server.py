@@ -1386,7 +1386,11 @@ async def relay_webhook(request: Request) -> Response:
             to=str(body.get("to", body.get("To", ""))),
             verified=_was_verified(request),
         )
-    # Before any handler: turns read it (session.py).
+    # Mark the call as relay-webhook-driven (RELAY_WEBHOOK_KEY) before any
+    # handler runs: the receptionist's turns check this flag (session.py
+    # `_transfer_refused`) and refuse a human transfer on it, since without a
+    # media socket a redirect Twilio did not apply could never be detected.
+    # A setup's state must be resolved first, above, or there is nothing to mark.
     _mark_relay_webhook(call_sid)
 
     if event_type == "prompt":
