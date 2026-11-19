@@ -151,12 +151,18 @@ play in full has one of three states, and its `delivery_reason` says why:
 
 | `state` | meaning | `delivery_reason` |
 |---|---|---|
-| `undelivered` | a **failure**: `send_speech` returned False | `no_websocket`, `send_error` (CR socket send raised), `unknown_call`, `no_tts`, `tts_failed` (retry failed, spoken fallback taken), `empty`, `no_audio` (TTS produced nothing), `unknown` |
-| `cancelled` | a **deliberate cut** before any of it played | `barge_in` (the caller talked over it), `call_ended` (hangup or shutdown), `tts_retry` (Media Streams: queued behind an utterance whose TTS failed, and dropped when its retry cleared the buffer) |
+| `undelivered` | a **failure**: `send_speech` returned False | `no_websocket` (the media socket never attached), `send_error` (CR socket send raised), `no_tts`, `tts_failed` (retry failed, spoken fallback taken), `empty`, `no_audio` (TTS produced nothing), `unknown` |
+| `cancelled` | a **deliberate cut** before any of it played | `barge_in` (the caller talked over it), `call_ended` (hangup or shutdown, including a send attempted after the call's media socket had closed), `tts_retry` (Media Streams: queued behind an utterance whose TTS failed, and dropped when its retry cleared the buffer) |
 | `interrupted` | played in part, then cut | `barge_in`, `call_ended`, `tts_retry` |
 
 Only `undelivered` counts toward `no_audio`: a call whose lines were all
-`cancelled` is a caller who kept interrupting, not a silent agent. The failure
+`cancelled` is a caller who kept interrupting, not a silent agent. A hang-up
+doesn't count either: whether the call was already gone is decided from the
+call's state (its media socket had closed, or the call had ended), not from the
+failure reason, and such a send is logged `cancelled`/`call_ended` whatever the
+send itself raised (e.g. the callee hung up during the greeting). So
+`no_websocket` always means the socket never attached, which is the silent
+agent and counts. The failure
 itself is in the logs next to the line (`CR websocket send failed`,
 `TTS retry failed`, `send_speech with no … websocket`). The dashboard shows `⚠`
 only for `undelivered`; the other two get a muted "not played" marker.

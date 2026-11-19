@@ -21,6 +21,7 @@ from starlette.websockets import WebSocketState
 
 from pincer.utils.csv_list import split_csv
 from pincer.voice.call_locks import one_call_update_at_a_time
+from pincer.voice.engine import MEDIA_CLOSED_KEY
 from pincer.voice.twiml_builder import CALL_SID_PLACEHOLDER
 from pincer.voice.webhook_auth import (
     WS_MONITOR_PATH,
@@ -1131,6 +1132,7 @@ async def relay_ws(websocket: WebSocket) -> None:
                     await websocket.close(code=1008, reason="Already connected")
                     return
                 state.metadata["websocket"] = websocket
+                state.metadata.pop(MEDIA_CLOSED_KEY, None)
                 from pincer.voice.telemetry import hooks as telemetry
 
                 telemetry.media_open(call_sid, engine="conversation_relay")
@@ -1167,6 +1169,9 @@ async def relay_ws(websocket: WebSocket) -> None:
         logger.exception("ConversationRelay WS error: %s", call_sid)
     finally:
         if state is not None and state.metadata.get("websocket") is websocket:
+            # Before the pop: a send that finds no socket from here on is
+            # teardown (call_ended), not a socket that never attached.
+            state.metadata[MEDIA_CLOSED_KEY] = True
             state.metadata.pop("websocket", None)
             from pincer.voice.telemetry import hooks as telemetry
 
@@ -1454,6 +1459,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         await websocket.close(code=1008, reason="Already connected")
         return
     state.metadata["websocket"] = websocket
+    state.metadata.pop(MEDIA_CLOSED_KEY, None)
     from pincer.voice.telemetry import hooks as telemetry
 
     telemetry.media_open(call_sid, engine="media_streams")
@@ -1524,6 +1530,9 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         # cut off (or read as "media gone" for) the caller still streaming, as
         # the relay handler already guards.
         if state is not None and state.metadata.get("websocket") is websocket:
+            # First: a send failing while the stream closes is teardown
+            # (call_ended), not a silent agent.
+            state.metadata[MEDIA_CLOSED_KEY] = True
             if _engine and hasattr(_engine, "close_media_stream"):
                 await _engine.close_media_stream(call_sid)
             state.metadata.pop("websocket", None)

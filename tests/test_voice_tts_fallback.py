@@ -318,6 +318,38 @@ class TestSpokenFallback:
         assert ended == ["CA_tts"]
         assert state.metadata[SPEECH_FAILURE_KEY] == "tts_failed"  # #301: the failure says why
 
+    async def test_tts_failure_after_the_socket_closed_is_teardown(self, monkeypatch):
+        """#402: the callee hung up while the utterance was synthesising. The
+        failure is `call_ended` (the media had closed), not `tts_failed`."""
+        from pincer.voice.engine import MEDIA_CLOSED_KEY
+
+        captured: dict = {}
+        _install_fake_twilio(monkeypatch, captured)
+        engine = MediaStreamEngine(_settings())
+        engine._tts_provider = FlakyTTS(fail_times=99)
+        state, _ws = await _start_call(engine)
+        state.metadata[MEDIA_CLOSED_KEY] = True  # the stream's read loop saw the hangup
+
+        assert await engine.send_speech("CA_tts", "Hello caller.") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "call_ended"
+
+    async def test_no_socket_is_no_websocket_until_one_closed(self, monkeypatch):
+        """#402: no socket at all is `no_websocket` (never attached, the silent
+        agent); no socket after the call's socket closed is `call_ended`."""
+        from pincer.voice.engine import MEDIA_CLOSED_KEY
+
+        engine = MediaStreamEngine(_settings())
+        engine._tts_provider = FlakyTTS(fail_times=0)
+        state, _ws = await _start_call(engine)
+        state.metadata.pop("websocket")
+
+        assert await engine.send_speech("CA_tts", "Hello caller.") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "no_websocket"
+
+        state.metadata[MEDIA_CLOSED_KEY] = True
+        assert await engine.send_speech("CA_tts", "Hello caller.") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "call_ended"
+
     async def test_german_call_gets_german_apology(self, monkeypatch):
         captured: dict = {}
         _install_fake_twilio(monkeypatch, captured)

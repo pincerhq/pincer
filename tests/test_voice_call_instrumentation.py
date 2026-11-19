@@ -116,6 +116,58 @@ def test_caller_talking_into_dead_air_is_still_no_audio(settings):
     assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NO_AUDIO
 
 
+def test_a_hangup_during_the_greeting_is_not_no_audio(settings):
+    """The callee hangs up mid-greeting: the greeting is cut by the hangup, and
+    the next send, made after the media closed, is logged as cut by it too
+    (whatever the send raised). That is teardown, not a silent agent."""
+    channel = _channel(settings)
+    transcript = TranscriptLogger("CA_hangup")
+    transcript.log_utterance(Speaker.AGENT, "Guten Tag, hier ist", state="cancelled", delivery_reason="call_ended")
+    transcript.log_utterance(Speaker.AGENT, "Wie kann ich helfen?", state="cancelled", delivery_reason="call_ended")
+    assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NONE
+
+
+def test_a_socket_that_never_attached_is_still_no_audio(settings):
+    """The call is answered but its media socket never attaches: every line
+    fails `no_websocket` and the call completes. That is the silent agent."""
+    channel = _channel(settings)
+    transcript = TranscriptLogger("CA_no_socket")
+    transcript.log_utterance(Speaker.AGENT, "Guten Tag", state="undelivered", delivery_reason="no_websocket")
+    transcript.log_utterance(Speaker.CALLER, "Hallo?")
+    transcript.log_utterance(Speaker.AGENT, "Wie kann ich helfen?", state="undelivered", delivery_reason="no_websocket")
+    assert channel._classify_call_failure(None, transcript, completed=True) is FailureCode.NO_AUDIO
+
+
+def _channel_with_call(settings, failure: str | None):
+    """A channel whose engine knows one call, `CA_live`, whose last send
+    failed with `failure`; `None` means the engine has dropped the call."""
+    from pincer.voice.engine import SPEECH_FAILURE_KEY
+
+    channel = _channel(settings)
+    engine = MagicMock()
+    state = CallState(call_sid="CA_live", direction=CallDirection.OUTBOUND, caller_number="+1")
+    state.metadata[SPEECH_FAILURE_KEY] = failure or ""
+    engine.get_call_state.return_value = state if failure is not None else None
+    channel.set_engine(engine)
+    return channel
+
+
+def test_a_send_after_the_media_closed_is_cut_by_the_hangup(settings):
+    channel = _channel_with_call(settings, "call_ended")
+    assert channel._spoken_state("CA_live", False, None) == ("cancelled", "call_ended")
+
+
+def test_a_send_for_a_call_already_gone_is_cut_by_the_hangup(settings):
+    channel = _channel_with_call(settings, None)
+    assert channel._spoken_state("CA_live", False, None) == ("cancelled", "call_ended")
+
+
+@pytest.mark.parametrize("failure", ["no_websocket", "send_error", "tts_failed"])
+def test_a_send_that_failed_on_a_live_call_is_undelivered(settings, failure):
+    channel = _channel_with_call(settings, failure)
+    assert channel._spoken_state("CA_live", False, None) == ("undelivered", failure)
+
+
 def test_partially_delivered_call_is_not_no_audio(settings):
     """One undelivered turn in an otherwise audible call is not a silent call."""
     channel = _channel(settings)

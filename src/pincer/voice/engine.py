@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 from pincer.voice.audio import MULAW_BYTES_PER_SECOND
-from pincer.voice.transcript import CANCELLED, INTERRUPTED
+from pincer.voice.transcript import CALL_ENDED_REASON, CANCELLED, INTERRUPTED
 from pincer.voice.twilio_rest import TwilioRest, outcome_unknown
 
 if TYPE_CHECKING:
@@ -94,9 +94,15 @@ CLAIMED_SID_KEY = "claimed_sid"
 #: Metadata key for why the call's latest `send_speech` returned False, read by
 #: the channel right after it returns: `no_websocket`, `send_error`, `no_tts`,
 #: `tts_failed`, `empty` or `no_audio` are failures; `barge_in` (Media Streams,
-#: cut before its first audio) is a deliberate cancellation. "" after a send
-#: that delivered. A call the engine does not know has no state to carry it.
+#: cut before its first audio) is a deliberate cancellation; `call_ended`
+#: (CALL_ENDED_REASON) is teardown: the call's media socket had already closed,
+#: so nothing could play. `no_websocket` is only a socket that never attached.
+#: "" after a send that delivered. A call the engine does not know has no state
+#: to carry it.
 SPEECH_FAILURE_KEY = "last_speech_failure"
+#: Metadata key set when the call's own media WebSocket closes (twiml_server).
+#: Tells a socket that closed (hang-up) from one that never attached.
+MEDIA_CLOSED_KEY = "media_closed"
 #: Metadata key (Media Streams): the call's playout id counter. Each
 #: `send_speech` takes the next id, `s<n>`, which is also the name of the
 #: Twilio `mark` sent after the utterance's last audio.
@@ -1300,6 +1306,30 @@ def _socket_open(ws: Any) -> bool:
     return getattr(getattr(ws, "client_state", None), "name", "") == "CONNECTED"
 
 
+def _media_gone(state: CallState, ws: Any) -> bool:
+    """Had the call's media already closed when a send to `ws` failed?
+
+    Decided from the call, not the failure: the receive loop has marked the
+    socket closed, the call's socket was replaced, or the socket itself says
+    it is disconnected. A send can raise on a socket the caller just hung up
+    before that loop has run its cleanup, hence the socket's own state.
+    """
+    if state.metadata.get(MEDIA_CLOSED_KEY):
+        return True
+    if ws is None:
+        return False
+    if state.metadata.get("websocket") is not ws:
+        return True
+    return any(
+        getattr(getattr(ws, attr, None), "name", "") == "DISCONNECTED" for attr in ("client_state", "application_state")
+    )
+
+
+def _no_websocket_reason(state: CallState) -> str:
+    """Why a send found no socket: the call's socket closed, or never attached."""
+    return CALL_ENDED_REASON if state.metadata.get(MEDIA_CLOSED_KEY) else "no_websocket"
+
+
 def dial_key(dial_id: str, dial_call_sid: str) -> str:
     """What identifies a dial and its result in `DIALS_KEY`: our own dial token
     (from the action URL) when there is one, else Twilio's DialCallSid, which is
@@ -1426,10 +1456,10 @@ class ConversationRelayEngine(VoiceEngine):
                 if accumulator is not None:
                     accumulator.agent_text(text, state.language)
             except Exception:
-                state.metadata[SPEECH_FAILURE_KEY] = "send_error"
+                state.metadata[SPEECH_FAILURE_KEY] = CALL_ENDED_REASON if _media_gone(state, ws) else "send_error"
                 logger.exception("CR websocket send failed [%s] — agent output DROPPED", call_sid)
         else:
-            state.metadata[SPEECH_FAILURE_KEY] = "no_websocket"
+            state.metadata[SPEECH_FAILURE_KEY] = _no_websocket_reason(state)
             logger.warning("send_speech with no CR websocket [%s] — agent output DROPPED", call_sid)
         logger.info("CR speech output [%s] delivered=%s: %s", call_sid, delivered, text[:80])
         return delivered
@@ -1994,7 +2024,8 @@ class MediaStreamEngine(VoiceEngine):
                 return await self._stream_tts(call_sid, state, segments, progress)
             except Exception:
                 logger.exception("TTS retry failed [%s] — spoken fallback + hangup", call_sid)
-                state.metadata[SPEECH_FAILURE_KEY] = "tts_failed"
+                gone = _media_gone(state, state.metadata.get("websocket"))
+                state.metadata[SPEECH_FAILURE_KEY] = CALL_ENDED_REASON if gone else "tts_failed"
                 await self.fallback_and_end(call_sid)
                 return False
 
@@ -2023,7 +2054,7 @@ class MediaStreamEngine(VoiceEngine):
 
         ws = state.metadata.get("websocket")
         if not ws:
-            state.metadata[SPEECH_FAILURE_KEY] = "no_websocket"
+            state.metadata[SPEECH_FAILURE_KEY] = _no_websocket_reason(state)
             logger.warning("send_speech with no MS websocket [%s] — agent output DROPPED", call_sid)
             return False
         stream_sid = state.metadata.get("stream_sid", "")
@@ -2213,7 +2244,7 @@ class MediaStreamEngine(VoiceEngine):
         state.metadata["playout_until_ns"] = 0
 
         # Our own cut (shutdown) is not the caller's barge-in.
-        await self._clear_twilio_buffer(state, reason="barge_in" if by_caller else "call_ended")
+        await self._clear_twilio_buffer(state, reason="barge_in" if by_caller else CALL_ENDED_REASON)
         if interrupted:
             # Twilio does not acknowledge a `clear`, so this is when WE stopped
             # sending — audio already in its playout buffer may still be heard.

@@ -47,6 +47,10 @@ UNDELIVERED = "undelivered"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
 NOT_PLAYED_STATES = frozenset({UNDELIVERED, CANCELLED})
+# Delivery reason for a line the hang-up (or shutdown) stopped: cut in flight,
+# or sent after the call's media had already closed. Logged CANCELLED: the
+# call was gone, the agent did not fail to speak.
+CALL_ENDED_REASON = "call_ended"
 
 
 class Speaker:
@@ -151,6 +155,27 @@ class TranscriptLogger:
         if self._entries and self._entries[-1].speaker == Speaker.AGENT:
             self._entries[-1].ends_utterance = True
 
+    def current_reply(self, *, skip_trailing_caller: bool = False) -> list[TranscriptEntry]:
+        """The agent lines after the latest caller line, oldest first.
+
+        With `skip_trailing_caller`, the caller lines at the end of the
+        transcript are dropped first, so this is the reply the caller's latest
+        turn (however many lines it took) answers.
+        """
+        entries = self._entries
+        end = len(entries)
+        if skip_trailing_caller:
+            while end and entries[end - 1].speaker == Speaker.CALLER:
+                end -= 1
+        reply: list[TranscriptEntry] = []
+        for entry in reversed(entries[:end]):
+            if entry.speaker == Speaker.CALLER:
+                break
+            if entry.speaker == Speaker.AGENT:
+                reply.append(entry)
+        reply.reverse()
+        return reply
+
     def mark_interrupted(self, heard: str) -> int:
         """Re-mark the agent lines of the current reply the caller did not hear.
 
@@ -171,13 +196,7 @@ class TranscriptLogger:
         def _norm(value: str) -> str:
             return " ".join(value.split()).casefold()
 
-        reply: list[TranscriptEntry] = []
-        for entry in reversed(self._entries):
-            if entry.speaker == Speaker.CALLER:
-                break
-            if entry.speaker == Speaker.AGENT:
-                reply.append(entry)
-        reply.reverse()
+        reply = self.current_reply()
         utterances: list[list[TranscriptEntry]] = []
         for index, entry in enumerate(reply):
             if index == 0 or reply[index - 1].ends_utterance:

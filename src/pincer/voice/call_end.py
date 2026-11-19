@@ -13,7 +13,12 @@ window cancels the hangup.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING
+
+from pincer.voice.transcript import NOT_PLAYED_STATES
+
+if TYPE_CHECKING:
+    from pincer.voice.transcript import TranscriptLogger
 
 END_CALL_TOKEN = "[END_CALL]"
 _END_TOKEN_RE = re.compile(r"\[\s*END[_ ]?CALL\s*\]", re.IGNORECASE)
@@ -103,38 +108,22 @@ def is_farewell(text: str, language: str) -> bool:
     return bool(core.search(t)) and bool(only.match(t))
 
 
-# agent lines the caller never heard (voice/transcript.py NOT_PLAYED_STATES)
-_NOT_PLAYED = frozenset({"undelivered", "cancelled"})
-
-
-def last_agent_said_farewell(transcript: Any, language: str) -> bool:
+def last_agent_said_farewell(transcript: TranscriptLogger, language: str) -> bool:
     """Did the agent's reply to the latest caller turn contain a goodbye the
     caller heard?
 
-    Lines that never played (failed or cancelled) are skipped: a goodbye the
-    caller did not hear is not one the agent has said. The search stops at
-    the previous caller line, so a goodbye from earlier in the call — before
-    the caller asked something else — does not count.
+    The caller's turn is every caller line at the end of the transcript (a
+    goodbye can arrive as "Danke." then "Tschüss."). Lines that never played
+    (failed or cancelled) are skipped: a goodbye the caller did not hear is
+    not one the agent has said. Only the reply before that turn counts, so a
+    goodbye from earlier in the call — before the caller asked something
+    else — does not.
     """
-    entries = list(getattr(transcript, "entries", None) or [])
-    if entries and _is_caller(entries[-1]):
-        entries.pop()  # the caller's own goodbye, already logged
-    for entry in reversed(entries):
-        if _is_caller(entry):
-            return False
-        if not _speaker(entry).endswith("agent") or str(getattr(entry, "state", "") or "") in _NOT_PLAYED:
+    for entry in reversed(transcript.current_reply(skip_trailing_caller=True)):
+        if entry.state in NOT_PLAYED_STATES:
             continue
-        return contains_farewell(str(getattr(entry, "text", "") or ""), language)
+        return contains_farewell(entry.text, language)
     return False
-
-
-def _speaker(entry: Any) -> str:
-    speaker = getattr(entry, "speaker", "")
-    return str(getattr(speaker, "value", speaker)).lower()
-
-
-def _is_caller(entry: Any) -> bool:
-    return _speaker(entry).endswith("caller")
 
 
 def estimate_speech_seconds(text: str) -> float:

@@ -1003,6 +1003,38 @@ class TestConversationRelayProtocol:
         # Unknown call
         assert await engine.send_speech("CA_nope", "hello") is False
 
+    async def test_send_speech_after_the_socket_closed_is_teardown(self):
+        """#402: a send that fails because the call's media had closed is
+        `call_ended`, decided from the call's state, not from what the send
+        raised. A socket that never attached stays `no_websocket`, and a send
+        raising on a live socket stays `send_error`."""
+        from starlette.websockets import WebSocketState
+
+        from pincer.voice.engine import MEDIA_CLOSED_KEY, SPEECH_FAILURE_KEY, CallDirection, ConversationRelayEngine
+
+        engine = ConversationRelayEngine(MagicMock())
+        state = await engine.on_call_start("CA_cr4", "+1", CallDirection.OUTBOUND)
+
+        # The socket raises while still connected: a real send failure.
+        ws = AsyncMock()
+        ws.client_state = WebSocketState.CONNECTED
+        ws.send_text.side_effect = RuntimeError("send failed")
+        state.metadata["websocket"] = ws
+        assert await engine.send_speech("CA_cr4", "hello") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "send_error"
+
+        # The callee hung up: the socket is disconnected before the read
+        # loop's cleanup has run.
+        ws.client_state = WebSocketState.DISCONNECTED
+        assert await engine.send_speech("CA_cr4", "hello") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "call_ended"
+
+        # The read loop's cleanup has run: marked closed, socket dropped.
+        state.metadata[MEDIA_CLOSED_KEY] = True
+        state.metadata.pop("websocket")
+        assert await engine.send_speech("CA_cr4", "hello") is False
+        assert state.metadata[SPEECH_FAILURE_KEY] == "call_ended"
+
 
 class TestUndeliveredTranscript:
     """F4: the transcript distinguishes 'text generated' from 'audio heard'."""
