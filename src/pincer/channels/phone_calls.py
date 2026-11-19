@@ -206,10 +206,19 @@ class VoiceChannel(BaseChannel):
         ``applied_late``: a redirect given up as not applied went live after all."""
         if outcome == "applied_late":
             # The redirect went live after all: back to the untimed phase, or
-            # the message-taking timeout would hang up a bridged call.
+            # the phase timeouts would hang up a bridged call. Forced: the
+            # conversation may have moved on (CONFIRM, VERIFY, EXECUTE) to a
+            # phase the transition table has no TRANSFERRING exit from.
             sm = self._state_machines.get(call_sid)
-            if sm is not None and sm.phase == CallPhase.TAKE_MESSAGE:
-                sm.transition(CallPhase.TRANSFERRING, "transfer_applied_late")
+            if sm is not None and not sm.is_terminal and sm.phase != CallPhase.TRANSFERRING:
+                sm.force_phase(CallPhase.TRANSFERRING, "transfer_applied_late")
+            # Nothing may end or talk into the bridged call: a farewell hangup
+            # already scheduled would hang up on the caller, and a turn still
+            # in flight speaks into a closed relay and moves a phase it no
+            # longer owns. Cancelled, not awaited: the engine holds the call's
+            # lock while it reports this.
+            self._cancel_hangup(call_sid)
+            self._cancel_active_turn(call_sid, reason="transfer_applied_late")
             return
         session = self._reception_sessions.get(call_sid)
         if session is None:
@@ -971,8 +980,16 @@ class VoiceChannel(BaseChannel):
         except asyncio.CancelledError:
             return
         self._hangup_tasks.pop(call_sid, None)
-        if self._engine is None or self._engine.get_call_state(call_sid) is None:
+        if self._engine is None:
+            return
+        state = self._engine.get_call_state(call_sid)
+        if state is None:
             return  # already gone (other side hung up first)
+        if state.metadata.get("transferring"):
+            # The caller is in a <Dial> (a transfer that went live late): the
+            # bridge, not the farewell, ends this call.
+            logger.info("Hangup skipped [%s]: the call is being transferred", call_sid)
+            return
         if not sm.is_terminal:
             sm.force_terminal(CallPhase.COMPLETED, reason=reason)
         with contextlib.suppress(Exception):

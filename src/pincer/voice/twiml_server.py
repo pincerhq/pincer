@@ -988,15 +988,19 @@ async def voice_status(request: Request) -> PlainTextResponse:
         elif status == "completed" and _engine:
             state = _engine.get_call_state(call_sid)
             if state:
-                # Twilio has already ended the call: finalize without a REST
-                # hangup, which could only fail.
-                # A plain hang-up reaches us twice (this and the media close):
-                # no reason, so the trace says the same whichever wins. During
-                # a transfer the media is already gone and this is the signal.
-                # `transferring`, not the `transfer` record: the record outlives
-                # a failed transfer that handed the call back to the AI.
-                reason = "provider_completed" if state.metadata.get("transferring") else ""
-                await _engine.finish_remote_ended(call_sid, reason=reason)
+                # The caller hung up before any <Dial> and the settle is waiting
+                # out its grace for a dial result: none came before this, the
+                # call's final status, so the abandonment stands.
+                if not await _engine.finish_abandoned_transfer(call_sid):
+                    # Twilio has already ended the call: finalize without a REST
+                    # hangup, which could only fail.
+                    # A plain hang-up reaches us twice (this and the media close):
+                    # no reason, so the trace says the same whichever wins. During
+                    # a transfer the media is already gone and this is the signal.
+                    # `transferring`, not the `transfer` record: the record outlives
+                    # a failed transfer that handed the call back to the AI.
+                    reason = "provider_completed" if state.metadata.get("transferring") else ""
+                    await _engine.finish_remote_ended(call_sid, reason=reason)
             elif _already_torn_down(call_sid):
                 # Race: end_call (AMD hangup, caller hangup, shutdown) popped the
                 # state and handed the final message to its post-call pipeline,
@@ -1370,6 +1374,23 @@ async def relay_webhook(request: Request) -> Response:
 
     call_sid = str(body.get("CallSid", body.get("callSid", "")))
     event_type = str(body.get("type", ""))
+    if event_type == "setup" and call_sid and not _engine.get_call_state(call_sid):
+        # Same resolver as the relay socket, so the briefing rules cannot
+        # differ between the two transports. Before the mark below, which
+        # needs the registered state.
+        await _resolve_setup_state(
+            call_sid,
+            str(body.get("from", body.get("From", ""))),
+            str(body.get("direction", "")),
+            client=client_ip(request),
+            to=str(body.get("to", body.get("To", ""))),
+            verified=_was_verified(request),
+        )
+    # Mark the call as relay-webhook-driven (RELAY_WEBHOOK_KEY) before any
+    # handler runs: the receptionist's turns check this flag (session.py
+    # `_transfer_refused`) and refuse a human transfer on it, since without a
+    # media socket a redirect Twilio did not apply could never be detected.
+    # A setup's state must be resolved first, above, or there is nothing to mark.
     _mark_relay_webhook(call_sid)
 
     if event_type == "prompt":
@@ -1378,20 +1399,7 @@ async def relay_webhook(request: Request) -> Response:
             await _engine.on_speech_input(call_sid, text)
 
     elif event_type == "setup":
-        caller = str(body.get("from", body.get("From", "")))
-        if call_sid and not _engine.get_call_state(call_sid):
-            # Same resolver as the relay socket, so the briefing rules cannot
-            # differ between the two transports.
-            await _resolve_setup_state(
-                call_sid,
-                caller,
-                str(body.get("direction", "")),
-                client=client_ip(request),
-                to=str(body.get("to", body.get("To", ""))),
-                verified=_was_verified(request),
-            )
         if call_sid:
-            _mark_relay_webhook(call_sid)  # registered just now
             _note_reconnected(_engine.get_call_state(call_sid))
             await _engine.mark_call_answered(call_sid)
 

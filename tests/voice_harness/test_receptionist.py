@@ -1701,17 +1701,19 @@ async def test_caller_hangup_during_the_not_applied_apology_finalizes_the_call(m
     await h.channel.wait_for_turn(CALL)  # a real engine hands the turn to a task
     await _settled(h)
     await asyncio.wait_for(closes[0], timeout=5)
-    assert h.engine.get_call_state(CALL) is None  # ended by the close itself, before any re-check
+    await _settled(h)  # the grace for a dial result on its way, not a re-check
+    assert h.engine.get_call_state(CALL) is None
     assert h.engine.fetches == 1
     assert session.end_reason != "caller_hangup_during_transfer"
     assert metrics == ["failed"]
 
 
-def _fast_transfer_checks(monkeypatch, settle_s=0.0, backoff_s=0.0, grace_s=0.0):
+def _fast_transfer_checks(monkeypatch, settle_s=0.0, backoff_s=0.0, grace_s=0.0, recheck_s=0.0):
     """Settle and re-check timed-out transfer redirects with short delays."""
     from pincer.voice import engine as engine_module
 
     monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", settle_s)
+    monkeypatch.setattr(engine_module, "LAGGING_STATUS_RECHECK_S", recheck_s)
     monkeypatch.setattr(engine_module, "TRANSFER_CONFIRM_BACKOFF_S", (backoff_s,) * 3)
     monkeypatch.setattr(engine_module, "TERMINAL_STATUS_GRACE_S", grace_s)
 
@@ -1778,7 +1780,8 @@ async def test_late_apply_after_not_applied_keeps_the_caller(monkeypatch):
 async def test_watchdog_leaves_a_late_applied_bridge_alone_in_any_phase(monkeypatch):
     """The receptionist may have moved past message-taking before a redirect it
     gave up on goes live late. Whatever timed phase the session is in, the
-    phase watchdog must not hang up a call the engine says is transferring."""
+    call goes to the untimed TRANSFERRING phase, and the phase watchdog does
+    not hang up a call the engine says is transferring."""
     _fast_transfer_checks(monkeypatch)
     h = await _start(settings=_transfer_settings())
     h.state.metadata["websocket"] = _open_socket()
@@ -1793,8 +1796,9 @@ async def test_watchdog_leaves_a_late_applied_bridge_alone_in_any_phase(monkeypa
     h.state.metadata.pop("websocket")  # Twilio applies the redirect after all
     await h.engine.on_media_closed(CALL)
     assert h.state.metadata.get("transferring") is True
+    assert h.sm.phase == CallPhase.TRANSFERRING  # moved out of the timed phase
     h.sm._state.phase_entered_at -= 100_000
-    assert h.sm.check_timeout() is True  # the phase alone would time out
+    assert h.sm.check_timeout() is False
     await h.channel._enforce_phase_timeouts()
     assert h.engine.get_call_state(CALL) is h.state
     assert h.engine.ended == []
@@ -1805,7 +1809,8 @@ async def test_normal_hangup_during_message_taking_in_the_window_is_a_plain_end(
     """Not applied, so a message is being taken; 20 s later the caller hangs up
     while giving their name, inside the possibly-live window. Twilio says the
     call is over: a plain end, reported as such, not a hang-up during a
-    transfer, and with no wait for a re-check."""
+    transfer, and with no wait for a re-check (only the grace for a dial
+    result on its way)."""
     _fast_transfer_checks(monkeypatch, backoff_s=0.05)
     metrics = _transfer_metrics(monkeypatch)
     h = await _start(settings=_transfer_settings())
@@ -1818,6 +1823,7 @@ async def test_normal_hangup_during_message_taking_in_the_window_is_a_plain_end(
     _twilio_reports(h, "completed")
     h.state.metadata.pop("websocket")  # the caller hangs up
     await h.engine.on_media_closed(CALL)
+    await _settled(h)
     assert h.engine.get_call_state(CALL) is None
     assert h.engine.status_fetches == [CALL]
     assert session.end_reason != "caller_hangup_during_transfer"
@@ -1838,6 +1844,7 @@ async def test_unexplained_close_with_twilio_unreachable_ends_as_a_hangup_once_t
     await h.say(HUMAN_PLEASE)
     await _settled(h)
     _twilio_reports(h, RuntimeError("timeout"), RuntimeError("timeout"), "completed")
+    finalized = _finalized_states(h)
     h.state.metadata.pop("websocket")
     await h.engine.on_media_closed(CALL)
     assert h.engine.get_call_state(CALL) is h.state  # held, not finalized blind
@@ -1846,6 +1853,8 @@ async def test_unexplained_close_with_twilio_unreachable_ends_as_a_hangup_once_t
     assert h.engine.status_fetches == [CALL, CALL, CALL]
     assert session.end_reason != "caller_hangup_during_transfer"
     assert metrics == ["failed"]
+    # close_unexplained: not the neutral transfer_outcome_unknown
+    assert [s.metadata.get("remote_end_reason", "") for s in finalized] == [""]
 
 
 async def test_failing_status_checks_are_retried_until_twilio_answers(monkeypatch):
@@ -1904,7 +1913,9 @@ async def _bridged_result_during_the_grace(h: Harness, given: asyncio.Event):
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_bridged_result_queued_behind_a_terminal_recheck_wins(monkeypatch):
     """A re-check sees the call completed while the bridged dial result is on
-    its way: the result decides (a completed transfer), not the re-check."""
+    its way. The result is posted during the grace, after the re-check has
+    released the call's lock: it decides (a completed transfer), not the
+    re-check."""
     _fast_transfer_checks(monkeypatch, grace_s=0.3)
     abandoned = []
     monkeypatch.setattr(sess.ReceptionSession, "on_transfer_abandoned", lambda self: abandoned.append(1))
@@ -1980,6 +1991,295 @@ async def test_hangup_just_before_the_settle_with_lagging_status_is_not_a_transf
     assert h.engine.get_call_state(CALL) is None
     assert session.end_reason != "caller_hangup_during_transfer"
     assert started == []
+
+
+def _settled_outcomes(h: Harness) -> list[str]:
+    """Every outcome the engine reports to the channel's transfer-settled callback from here on."""
+    seen: list[str] = []
+    original = h.engine._on_transfer_settled_callback
+
+    async def recording(call_sid, outcome):
+        seen.append(outcome)
+        await original(call_sid, outcome)
+
+    h.engine.set_on_transfer_settled(recording)
+    return seen
+
+
+async def _not_applied(monkeypatch, *, grace_s=0.0, recheck_s=0.0) -> Harness:
+    """A call whose timed-out transfer redirect was settled as not applied:
+    the receptionist is taking a message, and the dial may still go live."""
+    _fast_transfer_checks(monkeypatch, grace_s=grace_s, recheck_s=recheck_s)
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    assert "transferring" not in h.state.metadata  # not applied: the apology was spoken
+    return h
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_hangup_in_the_window_with_a_lagging_in_progress_is_a_plain_end(monkeypatch):
+    """The caller hangs up during message-taking, inside the possibly-live
+    window, and Twilio's status still says in-progress for a moment. Asked
+    again, Twilio says completed: a plain hang-up, never a late apply."""
+    h = await _not_applied(monkeypatch)
+    sm, session = h.sm, h.session
+    outcomes = _settled_outcomes(h)
+    finalized = _finalized_states(h)
+    before = len(sm.state.transitions)
+    _twilio_reports(h, "in-progress", "completed")
+    h.state.metadata.pop("websocket")  # the caller hangs up
+    await h.engine.on_media_closed(CALL)
+    await _settled(h)
+    assert h.engine.get_call_state(CALL) is None
+    assert h.engine.status_fetches == [CALL, CALL]
+    assert "applied_late" not in outcomes
+    assert CallPhase.TRANSFERRING not in [t.to_phase for t in sm.state.transitions[before:]]
+    assert session.end_reason != "caller_hangup_during_transfer"
+    assert [s.metadata.get("remote_end_reason", "") for s in finalized] == [""]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+@pytest.mark.parametrize("phase", [CallPhase.CONFIRM, CallPhase.VERIFY, CallPhase.EXECUTE])
+async def test_late_apply_from_a_phase_without_a_transferring_edge_completes(monkeypatch, phase):
+    """The conversation has reached a phase the transition table has no
+    TRANSFERRING exit from when the redirect goes live late. The phase is
+    forced to TRANSFERRING, so the bridged result ends the call as a
+    completed one, not as a hang-up during an action."""
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    h = await _not_applied(monkeypatch)
+    sm = h.sm
+    sm._state.phase = phase  # set directly: the property is the phase, not how it got there
+    _twilio_reports(h, "in-progress")
+    h.state.metadata.pop("websocket")  # Twilio applies the redirect after all
+    await h.engine.on_media_closed(CALL)
+    assert sm.phase == CallPhase.TRANSFERRING
+    await _settled(h)  # the re-checks see Twilio's in-progress throughout
+    data = {
+        "CallSid": CALL,
+        "DialCallStatus": "completed",
+        "DialCallSid": "CAdial",
+        "DialCallDuration": "42",
+        "CallStatus": "completed",
+    }
+    async with _async_client(h) as client:
+        await client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data)
+    assert h.engine.get_call_state(CALL) is None
+    assert sm.phase == CallPhase.COMPLETED
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_late_apply_cancels_a_farewell_hangup_already_scheduled(monkeypatch):
+    """The caller said goodbye and the hangup is scheduled when the redirect
+    goes live late: the bridged caller must not be hung up on."""
+    h = await _not_applied(monkeypatch)
+    h.channel._settings.voice_hangup_grace_s = 0.05
+    h.channel._schedule_hangup(CALL, h.sm, "", "caller_farewell")
+    hangup = h.channel._hangup_tasks[CALL]
+    _twilio_reports(h, "in-progress")
+    h.state.metadata.pop("websocket")  # Twilio applies the redirect after all
+    await h.engine.on_media_closed(CALL)
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(hangup, timeout=5)
+    assert hangup.cancelled() or hangup.done()
+    assert CALL not in h.channel._hangup_tasks
+    assert h.engine.ended == []
+    assert h.sm.phase == CallPhase.TRANSFERRING
+
+
+async def test_farewell_hangup_leaves_a_call_being_transferred_alone():
+    """However the hangup was not cancelled, it never ends a call the engine
+    says is in a <Dial>."""
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["transferring"] = True
+    await h.channel._hangup_after(CALL, h.sm, 0, "caller_farewell")
+    assert h.engine.ended == []
+    assert h.engine.get_call_state(CALL) is h.state
+    assert not h.sm.is_terminal
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_late_apply_cancels_the_turn_in_flight(monkeypatch):
+    """A turn still running when the redirect goes live late would speak into
+    the closed relay and move a phase it no longer owns: it is cancelled."""
+    h = await _not_applied(monkeypatch)
+    turn = asyncio.create_task(asyncio.sleep(10))
+    h.channel._active_turns[CALL] = turn
+    _twilio_reports(h, "in-progress")
+    h.state.metadata.pop("websocket")
+    await h.engine.on_media_closed(CALL)
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(turn, timeout=5)
+    assert turn.cancelled()
+    assert CALL not in h.channel._active_turns
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_close_late_in_the_window_is_still_decided_after_the_recheck(monkeypatch):
+    """The media closes just before the possibly-live window ends, and the
+    window expires during the lagging-status wait. The close happened inside
+    it: Twilio still says in-progress, so it is a late apply, not dropped."""
+    h = await _not_applied(monkeypatch, recheck_s=0.05)
+    record = h.state.metadata["transfer"]
+    outcomes = _settled_outcomes(h)
+    answers = ["in-progress", "in-progress"]
+
+    async def fetch(call_sid):
+        h.engine.status_fetches.append(call_sid)
+        record["possibly_live_until"] = 0  # the window ends during the wait
+        return answers.pop(0) if answers else "in-progress"
+
+    h.engine.fetch_call_status = fetch
+    h.state.metadata.pop("websocket")
+    await h.engine.on_media_closed(CALL)
+    assert outcomes == ["applied_late"]
+    assert h.state.metadata.get("transferring") is True
+    assert h.sm.phase == CallPhase.TRANSFERRING
+    await _settled(h)
+    assert h.engine.get_call_state(CALL) is h.state
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_dial_result_during_the_lagging_status_wait_decides(monkeypatch):
+    """The lagging-status wait does not hold the call's lock: a bridged result
+    arriving during it decides at once, and the re-check then does nothing."""
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    h = await _not_applied(monkeypatch, recheck_s=0.3)
+    session = h.session
+    outcomes = _settled_outcomes(h)
+    finalized = _finalized_states(h)
+    given = _twilio_reports_then_signals(h, "in-progress")
+    h.state.metadata.pop("websocket")
+    close = asyncio.create_task(h.engine.on_media_closed(CALL))
+    await asyncio.wait_for(given.wait(), timeout=5)
+    data = {
+        "CallSid": CALL,
+        "DialCallStatus": "completed",
+        "DialCallSid": "CAdial",
+        "DialCallDuration": "42",
+        "CallStatus": "completed",
+    }
+    async with _async_client(h) as client:
+        response = await asyncio.wait_for(
+            client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data),
+            timeout=0.25,  # inside the wait: not queued behind it
+        )
+    assert response.status_code == 200
+    await asyncio.wait_for(close, timeout=5)
+    assert session.transfer_completed is True
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["transferred"]
+    assert outcomes == []
+    assert h.engine.status_fetches == [CALL]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_final_status_during_the_settles_hangup_grace_records_the_abandonment(monkeypatch):
+    """The settle sees the call completed (the caller hung up before any
+    <Dial>) and waits out the grace for a dial result. Twilio's final
+    /status completed comes first: the abandonment stands and is recorded
+    once, and the grace finds nothing left to do."""
+    _fast_transfer_checks(monkeypatch, grace_s=0.3)
+    metrics = _transfer_metrics(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.redirect_hook = lambda call_sid: h.state.metadata.pop("websocket", None)
+    h.engine.transfer_raises = TimeoutError()
+    given = _twilio_reports_then_signals(h, "completed")
+    session = h.session
+    finalized = _finalized_states(h)
+    await h.say(HUMAN_PLEASE)
+    settle = h.engine.pending_transfer_settle(CALL)
+    await asyncio.wait_for(given.wait(), timeout=5)
+    async with _async_client(h) as client:
+        response = await client.post("/api/apps/twilio/status", data={"CallSid": CALL, "CallStatus": "completed"})
+    assert response.status_code == 200
+    with contextlib.suppress(asyncio.CancelledError):  # the call's end drops the grace
+        await asyncio.wait_for(settle, timeout=5)
+    assert metrics == ["caller_hangup"]
+    assert session.end_reason == "caller_hangup_during_transfer"
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["caller_hangup_during_transfer"]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_dial_result_after_a_terminal_close_in_the_window_records_the_abandonment(monkeypatch):
+    """The media closes inside the possibly-live window and Twilio says the
+    call is over, but the dial did go out: its result (the caller hung up
+    while the target rang) arrives within the grace and decides."""
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    h = await _not_applied(monkeypatch, grace_s=0.3)
+    metrics = _transfer_metrics(monkeypatch)
+    session = h.session
+    finalized = _finalized_states(h)
+    _twilio_reports(h, "completed")
+    h.state.metadata.pop("websocket")
+    await h.engine.on_media_closed(CALL)
+    assert h.engine.get_call_state(CALL) is h.state  # waiting out the grace
+    grace = h.engine.pending_transfer_settle(CALL)
+    data = {"CallSid": CALL, "DialCallStatus": "no-answer", "DialCallSid": "CAdial", "CallStatus": "completed"}
+    async with _async_client(h) as client:
+        await client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data)
+    with contextlib.suppress(asyncio.CancelledError):  # the result ended the call: the grace is dropped
+        await asyncio.wait_for(grace, timeout=5)
+    assert h.engine.get_call_state(CALL) is None
+    assert metrics == ["caller_hangup"]
+    assert session.end_reason == "caller_hangup_during_transfer"
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["caller_hangup_during_transfer"]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_terminal_close_in_the_window_without_a_result_ends_after_the_grace(monkeypatch):
+    h = await _not_applied(monkeypatch, grace_s=0.05)
+    metrics = _transfer_metrics(monkeypatch)
+    session = h.session
+    finalized = _finalized_states(h)
+    _twilio_reports(h, "completed")
+    h.state.metadata.pop("websocket")
+    await h.engine.on_media_closed(CALL)
+    assert h.engine.get_call_state(CALL) is h.state  # waiting out the grace
+    await _settled(h)
+    assert h.engine.get_call_state(CALL) is None
+    assert metrics == []
+    assert session.end_reason != "caller_hangup_during_transfer"
+    assert [s.metadata.get("remote_end_reason", "") for s in finalized] == [""]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_relay_webhook_setup_marks_the_call_it_registers_once(monkeypatch):
+    """A setup over the HTTP relay registers the call, then marks it as an
+    HTTP-relay call (turns read the mark) exactly once."""
+    from pincer.voice import twiml_server
+    from pincer.voice.engine import RELAY_WEBHOOK_KEY, CallDirection
+
+    h = await _start(settings=_transfer_settings())
+    new_call = "CArelaysetup"
+
+    async def registers(call_sid, caller, direction, **_):
+        return await h.engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+
+    marks: list[str] = []
+    original_mark = twiml_server._mark_relay_webhook
+
+    def counting(call_sid):
+        marks.append(call_sid)
+        original_mark(call_sid)
+
+    monkeypatch.setattr(twiml_server, "_resolve_setup_state", registers)
+    monkeypatch.setattr(twiml_server, "_mark_relay_webhook", counting)
+    async with _async_client(h) as client:
+        response = await client.post(
+            "/api/apps/twilio/relay-webhook", json={"type": "setup", "callSid": new_call, "from": CALLER}
+        )
+    assert response.status_code == 200
+    state = h.engine.get_call_state(new_call)
+    assert state is not None
+    assert state.metadata.get(RELAY_WEBHOOK_KEY) is True
+    assert marks == [new_call]
+    await h.engine.finish_remote_ended(new_call)
 
 
 def _transfer_events(monkeypatch) -> list[str]:
