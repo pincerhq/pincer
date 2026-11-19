@@ -39,10 +39,10 @@ from pincer.voice.engine import (
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.transcript import (
+    CALL_ENDED_REASON,
     CANCELLED,
     INTERRUPTED,
     NOT_PLAYED_STATES,
-    TEARDOWN_REASONS,
     UNDELIVERED,
     Speaker,
     TranscriptLogger,
@@ -1839,7 +1839,7 @@ class VoiceChannel(BaseChannel):
                     transcript.mark_interrupted(interrupted[1])
                 else:
                     cause = self._cancel_causes.get(call_sid, "barge_in")
-                    reason = "call_ended" if cause in ("call_ended", "shutdown") else "barge_in"
+                    reason = CALL_ENDED_REASON if cause in (CALL_ENDED_REASON, "shutdown") else "barge_in"
                     state = INTERRUPTED if self._speech_was_heard(call_sid) else CANCELLED
                     transcript.log_utterance(
                         Speaker.AGENT,
@@ -1904,14 +1904,17 @@ class VoiceChannel(BaseChannel):
         Must be called right after it returns: the engine's cut flag and
         failure reason are per call and the next utterance overwrites them.
         A barge-in that stopped the line before its first audio is
-        "cancelled"; any other False return is a failure, "undelivered".
+        "cancelled", and so is a send made after the call was gone (its media
+        closed, or the engine has already dropped the call): the hang-up cut
+        it, as it cuts a send in flight. Any other False return is a failure,
+        "undelivered".
         """
         state = self._engine.get_call_state(call_sid) if self._engine else None
         if not delivered:
             if state is None:
-                return UNDELIVERED, "unknown_call"
+                return CANCELLED, CALL_ENDED_REASON
             reason = str(state.metadata.get(SPEECH_FAILURE_KEY) or "unknown")
-            if reason == "barge_in":
+            if reason in ("barge_in", CALL_ENDED_REASON):
                 return CANCELLED, reason
             return UNDELIVERED, reason
         if state is not None and state.metadata.get("last_speech_cut"):
@@ -2023,7 +2026,7 @@ class VoiceChannel(BaseChannel):
         # Nothing may keep talking into a call that is gone: the streamed turn
         # and any utterances still queued behind it are cancelled, not awaited
         # (teardown can be running inside one of them — never cancel that one).
-        self._cancel_active_turn(call_sid, reason="call_ended")
+        self._cancel_active_turn(call_sid, reason=CALL_ENDED_REASON)
         for task in self._utterance_tasks.pop(call_sid, set()):
             if task is not asyncio.current_task():
                 task.cancel()
@@ -2242,15 +2245,15 @@ class VoiceChannel(BaseChannel):
 
         A caller talking into the dead air cancels lines too, so cancelled
         lines count as unplayed; only an all-cancelled call (every line
-        barged in, nothing failed) is not silent. A send that failed because
-        the call was already gone (TEARDOWN_REASONS) is a hang-up, not a
-        failure to speak.
+        barged in, nothing failed) is not silent. A send made after the
+        call's media closed is logged cancelled (`call_ended`), so a hang-up
+        never counts; a socket that never attached (`no_websocket`) does.
         """
         agent_entries = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.is_final]
         if not agent_entries:
             return False
         return all(e.state in NOT_PLAYED_STATES for e in agent_entries) and any(
-            e.state == UNDELIVERED and e.delivery_reason not in TEARDOWN_REASONS for e in agent_entries
+            e.state == UNDELIVERED for e in agent_entries
         )
 
     async def _record_call_telemetry(

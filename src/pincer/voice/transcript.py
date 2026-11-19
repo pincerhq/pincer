@@ -47,9 +47,10 @@ UNDELIVERED = "undelivered"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
 NOT_PLAYED_STATES = frozenset({UNDELIVERED, CANCELLED})
-# UNDELIVERED reasons that mean the call was already gone (the socket closed
-# or the call was torn down), not that the agent failed to speak.
-TEARDOWN_REASONS = frozenset({"no_websocket", "unknown_call"})
+# Delivery reason for a line the hang-up (or shutdown) stopped: cut in flight,
+# or sent after the call's media had already closed. Logged CANCELLED: the
+# call was gone, the agent did not fail to speak.
+CALL_ENDED_REASON = "call_ended"
 
 
 class Speaker:

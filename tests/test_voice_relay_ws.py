@@ -801,6 +801,23 @@ class TestRelayDelivery:
         await asyncio.wait_for(loop, timeout=2)
         await channel.stop()
 
+    async def test_the_socket_closing_marks_the_call_media_closed(self, relay_call):
+        """#402: the read loop's cleanup marks the call's media closed, so a
+        send after the hangup is teardown, not a socket that never attached."""
+        from pincer.voice.engine import MEDIA_CLOSED_KEY
+
+        engine, channel, _agent, sock, loop, _traces = await relay_call([])
+        await asyncio.sleep(0)  # let the read loop take the setup frame
+        state = engine.get_call_state("CA_cr")
+        assert state is not None
+        assert not state.metadata.get(MEDIA_CLOSED_KEY)
+
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        assert state.metadata[MEDIA_CLOSED_KEY] is True
+        assert "websocket" not in state.metadata
+        await channel.stop()
+
     async def test_a_goodbye_over_a_cut_farewell_ends_the_call_without_a_second_one(self, relay_call, caplog):
         """The issue's call: the caller says goodbye over the agent's farewell.
         The cut farewell is a cancellation, not a failure, and the caller's
