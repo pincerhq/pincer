@@ -13,7 +13,10 @@ missing and tied times. Four tables (`call_costs`, `call_analytics`,
 `call_origins`, `call_thread_members`) overwrite that time on every upsert,
 so their ids date the last write, not the first; nothing orders by them.
 
-The downgrade drops `id` and restores the old primary key; nothing is lost.
+On SQLite a row whose old key is NULL — which SQLite let a TEXT primary key
+hold — is dropped, with a warning: it was never found by its key and cannot
+keep one that is now NOT NULL. The downgrade drops `id` and restores the old
+primary key; it does not bring such rows back.
 
 Columns are renamed so a table's own key is `id` everywhere, and an outside
 identifier says it is one:
@@ -40,6 +43,7 @@ from __future__ import annotations
 from alembic import op
 
 from pincer.db.migration_helpers import (
+    hold_transaction,
     require_foreign_key_aware_rename,
     swap_primary_key,
     unswap_primary_key,
@@ -81,6 +85,7 @@ def unique_name(table: str, key: str) -> str:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    hold_transaction(bind)
     require_foreign_key_aware_rename(bind)
     for table, old, new in REFERENCES:
         _rename_column(table, old, new)
@@ -92,6 +97,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    hold_transaction(bind)
     require_foreign_key_aware_rename(bind)
     for table, old in reversed(RENAMED_KEYS):
         _rename_column(table, "id", old)

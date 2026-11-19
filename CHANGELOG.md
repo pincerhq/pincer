@@ -53,7 +53,9 @@ CallSids, phone numbers, span ids, session keys, an identity's
 
 **Upgrading**
 
-- **Back up first** (`scripts/backup-db.sh`).
+- **Back up first** (`scripts/backup-db.sh`). The downgrades restore the old
+  tables, keys and names, but not rows an upgrade had to drop (listed below);
+  each such drop is logged as a warning with the number of rows and their keys.
 - **`0031` drops the six dormant tables** that `0001` kept from never-applied
   SQL files: `pincer_registry_skills`, `pincer_expenses`, `pincer_habits`,
   `pincer_habit_checkins`, `pincer_pomodoro_sessions` and
@@ -65,7 +67,8 @@ CallSids, phone numbers, span ids, session keys, an identity's
   `pincer_do_not_call_numbers` (phone number), `pincer_telephony_events`
   (event key) and `pincer_telephony_spans` (span id). The old key stays,
   as a UNIQUE constraint. Each row's id carries its own creation time. API
-  responses that list these rows gain an `id` field. The downgrade is lossless.
+  responses that list these rows gain an `id` field. On SQLite, a row whose
+  old key is NULL (never reachable by it) is dropped.
   Key columns are renamed so a table's own key is `id`:
   `pincer_telephony_turns.turn_id`, `pincer_telephony_calls.call_id` and
   `pincer_call_threads.thread_id` become `id`, and the outside keys
@@ -84,14 +87,17 @@ CallSids, phone numbers, span ids, session keys, an identity's
   instead of repeating the name. `pincer_channel_identities` is renamed
   `pincer_identity_channels`; update any query of your own. Links, phones and
   credentials whose profile is gone are dropped (SQLite never enforced that
-  foreign key). The downgrade is lossless.
+  foreign key; the match is exact, so a link to `Alice` for a profile `alice`
+  goes too), as are signed-in sessions with no credentials.
 - **Merging an identity now takes everything with it.** Schedules, event
   triggers, briefing configs, calls, call origins, outbound call logs,
   memories, entities, conversations and audit log rows carry a `profile_id`
   next to their user name, and when the `[identity]` config folds a `usr_`
   identity into a named one, they move to it. Before, they stayed behind under the old name.
   The rows of senders with no profile (a guest's `telegram:123`, `system`)
-  have no `profile_id`.
+  have no `profile_id`. Outbound call logs and blocked-call audit entries now
+  name the Pincer identity, not the channel's own id (a Telegram `12345`), so
+  they follow too; older ones keep the channel id.
 - **A WhatsApp LID link is never swapped back to the phone number.** Until
   now a restart with WhatsApp disabled, unpaired, or not yet knowing a
   contact's LID replaced their LID link with the phone from the `[identity]`
@@ -105,7 +111,7 @@ CallSids, phone numbers, span ids, session keys, an identity's
   Session keys (`unified:alice`, `web:alice:<conversation>`) are unchanged and
   stay unique. Photos point at the session's `id`, so re-keying a session no
   longer touches them; photos of a session that is gone are dropped. Sessions
-  and onboarding rows gain a `profile_id` too. The downgrade is lossless.
+  and onboarding rows gain a `profile_id` too.
 
 #### BREAKING: telemetry DSNs per provider, PostHog support (pincer-telemetry 0.3.0)
 

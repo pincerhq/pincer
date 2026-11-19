@@ -2696,3 +2696,101 @@ def test_0034_gives_sessions_photos_and_onboarding_an_id(migration_url, tmp_path
     assert after == before
 
     command.upgrade(cfg, "0034")
+
+
+# ── 0031–0034: retryable on SQLite, and no silent drops ────────────────
+
+#: The id of a row deleted behind the migration's back.
+_GONE = "01890000-0000-7000-8000-0000000000e0"
+
+
+def test_a_failed_sqlite_downgrade_rolls_back_whole_and_can_be_retried(migration_url, tmp_path, monkeypatch):
+    """The 0034 downgrade starts with a DROP INDEX. Without `hold_transaction`
+    the sqlite3 driver committed it on its own, so a failure further on left
+    the index gone at revision 0034 and the retry died on "no such index"."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres DDL is transactional")
+    import pincer.db.migration_helpers as helpers
+
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0034")
+    unswap = helpers.unswap_primary_key
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("fails part-way")
+
+    monkeypatch.setattr(helpers, "unswap_primary_key", fail)
+    with pytest.raises(RuntimeError, match="part-way"):
+        command.downgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT version_num FROM pincer_alembic_version")).scalar_one() == "0034"
+        index = "SELECT COUNT(*) FROM sqlite_master WHERE name = 'ix_pincer_onboarding_profile_id'"
+        assert conn.execute(sa.text(index)).scalar_one() == 1
+
+    monkeypatch.setattr(helpers, "unswap_primary_key", unswap)
+    command.downgrade(cfg, "0033")
+
+
+def test_0034_downgrade_drops_and_logs_photos_whose_session_is_gone(migration_url, tmp_path, caplog):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres enforces the CASCADE: no such photo can exist")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0034")
+    with _connect(migration_url) as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO pincer_sessions (id, session_id, user_id, channel, created_at, updated_at) "
+                f"VALUES ('{_GONE}', 'unified:alice', 'alice', 'telegram', 1.0, 1.0)"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO pincer_session_images (id, session_ref, sha256, media_type, data, created_at) "
+                f"VALUES ('01890000-0000-7000-8000-0000000000e1', '{_GONE}', 'aa', 'image/jpeg', X'FF', 1.0)"
+            )
+        )
+        conn.execute(sa.text("DELETE FROM pincer_sessions"))  # foreign keys off: the photo stays
+
+    with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+        command.downgrade(cfg, "0033")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 0
+    assert any("pincer_session_images" in line and _GONE in line for line in caplog.messages)
+
+
+def test_0033_downgrade_drops_and_logs_identity_rows_whose_profile_is_gone(migration_url, tmp_path, caplog):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres enforces the foreign keys: no such row can exist")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(f"INSERT INTO pincer_identity_profiles (id, pincer_user_id) VALUES ('{_GONE}', 'alice')"))
+        conn.execute(
+            sa.text(
+                "INSERT INTO pincer_identity_phones (id, phone, profile_id, source) "
+                f"VALUES ('01890000-0000-7000-8000-0000000000e2', '+491', '{_GONE}', 'config')"
+            )
+        )
+        conn.execute(sa.text("DELETE FROM pincer_identity_profiles"))  # foreign keys off: the phone stays
+
+    with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+        command.downgrade(cfg, "0032")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_identity_phones")).scalar_one() == 0
+    assert any("pincer_identity_phones" in line and _GONE in line for line in caplog.messages)
+
+
+def test_0033_upgrade_logs_the_identity_rows_it_drops(migration_url, tmp_path, caplog):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres enforced the foreign key: no orphan link to drop")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(_ORPHAN_0033))
+
+    with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+        command.upgrade(cfg, "0033")
+
+    assert any("pincer_identity_channels" in line and "ghost" in line for line in caplog.messages)

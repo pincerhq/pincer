@@ -511,6 +511,27 @@ async def test_a_dial_cancelled_mid_request_leaves_nothing_pending(voice, dial_o
     assert recorded == [TARGET]
 
 
+async def test_the_call_log_names_the_pincer_identity_not_the_channel_id(voice, dial_outcomes, monkeypatch):
+    """`user_id` in the tool context is the channel's own id (Telegram `12345`),
+    which names no profile: logged, the row would get no `profile_id` and stay
+    behind when the identity is renamed. The per-user limit still counts the
+    channel id."""
+    from pincer.voice import safety_gates
+
+    logged: list[str] = []
+
+    async def _record(settings: Any, number: str, **kwargs: Any) -> None:
+        logged.append(kwargs["user_id"])
+
+    monkeypatch.setattr(safety_gates, "record_outbound_call", _record)
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([]))
+
+    await outbound.make_phone_call(TARGET, TASK, context={"user_id": "12345", "pincer_user_id": "usr_a"})
+
+    assert logged == ["usr_a"]
+    assert sum(outbound._daily_outbound_counts["12345"].values()) == 1
+
+
 @pytest.fixture
 def dialing_notices(monkeypatch):
     """Call SIDs the user was told are ringing."""

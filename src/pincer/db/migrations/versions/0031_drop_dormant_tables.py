@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from alembic import op
 
+from pincer.db.migration_helpers import hold_transaction
+
 revision = "0031"
 down_revision = "0030"
 branch_labels = None
@@ -121,11 +123,13 @@ _HABIT_CHECKINS_DAILY = {
 
 
 def upgrade() -> None:
+    hold_transaction(op.get_bind())
     for table in TABLES:
         op.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def downgrade() -> None:
+    hold_transaction(op.get_bind())
     dialect = op.get_bind().dialect.name
     for template in _CREATE:
         op.execute(

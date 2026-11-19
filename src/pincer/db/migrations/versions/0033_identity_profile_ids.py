@@ -38,7 +38,10 @@ an added column, so the schema would no longer match the models. Rebuilding
 `pincer_memories` drops the triggers that keep `pincer_memories_fts` in step
 with it, so they are re-created and the index rebuilt, as in 0018.
 
-The downgrade restores the text columns from the profiles; it is lossless.
+Rows the upgrade drops — identity rows naming no profile, signed-in sessions
+with no credentials — are logged with their names. The downgrade restores the
+text columns from the profiles, but not those rows; it drops rows whose
+profile went since, which have no name to go back to.
 
 Revision ID: 0033
 Revises: 0032
@@ -54,7 +57,9 @@ import sqlalchemy as sa
 from alembic import op
 
 from pincer.db.migration_helpers import (
+    drop_rows,
     drop_stale_batch_table,
+    hold_transaction,
     pk_name,
     referencing_foreign_keys,
     require_foreign_key_aware_rename,
@@ -168,6 +173,7 @@ def _drop_foreign_keys_onto(bind: sa.Connection, table: str) -> None:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    hold_transaction(bind)
     postgres = bind.dialect.name == "postgresql"
     if not postgres:
         require_foreign_key_aware_rename(bind)
@@ -188,12 +194,14 @@ def upgrade() -> None:
                 f"(SELECT CAST(p.id AS TEXT) FROM {PROFILES} p WHERE p.pincer_user_id = {table}.pincer_user_id)"
             )
         )
-        bind.execute(sa.text(f"DELETE FROM {table} WHERE profile_id IS NULL"))  # noqa: S608
-    bind.execute(
-        sa.text(
-            f"DELETE FROM {AUTH_SESSIONS} WHERE profile_id NOT IN "  # noqa: S608
-            f"(SELECT profile_id FROM {CREDENTIALS})"
-        )
+        # An exact match: a link to `Alice` when the profile is `alice` goes too.
+        drop_rows(bind, table, "profile_id IS NULL", key="pincer_user_id", reason="naming no profile")
+    drop_rows(
+        bind,
+        AUTH_SESSIONS,
+        f"profile_id NOT IN (SELECT profile_id FROM {CREDENTIALS})",
+        key="pincer_user_id",
+        reason="with no credentials",
     )
 
     for table, key, unique in SWAPPED:
@@ -272,6 +280,7 @@ def _memory_triggers_down(bind: sa.Connection) -> Iterator[None]:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    hold_transaction(bind)
     postgres = bind.dialect.name == "postgresql"
 
     op.drop_index(ALT_INDEX, table_name=CHANNELS)
@@ -302,6 +311,9 @@ def downgrade() -> None:
                 f"(SELECT p.pincer_user_id FROM {PROFILES} p WHERE p.id = {table}.profile_id)"
             )
         )
+        # SQLite never enforced the foreign key: a row whose profile is gone
+        # has no name to go back to, and the column turns NOT NULL below.
+        drop_rows(bind, table, "pincer_user_id IS NULL", key="profile_id", reason="whose profile is gone")
 
     # Children before parents: auth sessions hold a foreign key onto the
     # credentials' `profile_id`, and every child one onto the profiles' `id`.

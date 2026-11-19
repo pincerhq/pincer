@@ -18,7 +18,9 @@ Each id carries the row's own creation time: `created_at` for sessions and
 photos, and for onboarding — which has none — when the question was asked or,
 failing that, when the gate closed.
 
-The downgrade restores the old keys; it is lossless.
+The downgrade restores the old keys. Photos dropped for a missing session
+(logged with their keys) do not come back, and photos whose session went
+since are dropped again: they have no key to go back to.
 
 Revision ID: 0034
 Revises: 0033
@@ -31,7 +33,9 @@ import sqlalchemy as sa
 from alembic import op
 
 from pincer.db.migration_helpers import (
+    drop_rows,
     drop_stale_batch_table,
+    hold_transaction,
     pk_name,
     referencing_foreign_keys,
     swap_primary_key,
@@ -69,6 +73,7 @@ def owned_index(table: str) -> str:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    hold_transaction(bind)
     postgres = bind.dialect.name == "postgresql"
 
     if postgres:
@@ -83,7 +88,7 @@ def upgrade() -> None:
             f"(SELECT CAST(s.id AS TEXT) FROM {SESSIONS} s WHERE s.session_id = {IMAGES}.session_id)"
         )
     )
-    bind.execute(sa.text(f"DELETE FROM {IMAGES} WHERE session_ref IS NULL"))  # noqa: S608
+    drop_rows(bind, IMAGES, "session_ref IS NULL", key="session_id", reason="whose session is gone")
     swap_primary_key(bind, IMAGES, ["session_ref", "sha256"], time="created_at", kind="epoch", unique=IMAGES_UNIQUE)
     if postgres:
         op.execute(f"ALTER TABLE {IMAGES} DROP COLUMN session_id")
@@ -128,6 +133,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    hold_transaction(bind)
     postgres = bind.dialect.name == "postgresql"
 
     for table in reversed(OWNED):
@@ -150,6 +156,9 @@ def downgrade() -> None:
             f"(SELECT s.session_id FROM {SESSIONS} s WHERE s.id = {IMAGES}.session_ref)"
         )
     )
+    # SQLite never enforced the CASCADE: a photo whose session is gone has no
+    # key to go back to, and `session_id` turns NOT NULL below.
+    drop_rows(bind, IMAGES, "session_id IS NULL", key="session_ref", reason="whose session is gone")
     if postgres:
         op.execute(f"ALTER TABLE {IMAGES} DROP CONSTRAINT {IMAGES_FK}")
         op.execute(f"ALTER TABLE {IMAGES} DROP CONSTRAINT {IMAGES_UNIQUE}")

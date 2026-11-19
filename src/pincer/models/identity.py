@@ -12,6 +12,15 @@ from sqlmodel import Field, Relationship, SQLModel, col
 from pincer.db.ids import new_id
 from pincer.db.types import IsoText, Real, Uuid7
 
+#: `Column.info` key of a column whose insert value is derived from the row's
+#: other values: a callable given a getter for them, returning the value (or
+#: None for NULL). `pincer.db.dialect.upsert` and the ORM flush both apply it.
+DERIVE = "derive"
+
+#: `Column.info` key naming the text column of a `profile_ref` whose rows
+#: `pincer.repositories.identity.follow_profile` moves on a rename or merge.
+FOLLOWS = "follows_profile"
+
 
 class IdentityProfile(SQLModel, table=True):
     """One Pincer user.
@@ -195,17 +204,6 @@ def profile_id_of(pincer_user_id: Any) -> Any:
     return (
         select(col(IdentityProfile.id)).where(col(IdentityProfile.pincer_user_id) == pincer_user_id).scalar_subquery()
     )
-
-
-#: `Column.info` key of a column whose insert value is derived from the row's
-#: other values: a callable given a getter for them, returning the value (or
-#: None for NULL). `pincer.db.dialect.upsert` and the ORM flush both apply it.
-DERIVE = "derive"
-
-
-#: `Column.info` key naming the text column of a `profile_ref` whose rows
-#: `pincer.repositories.identity.follow_profile` moves on a rename or merge.
-FOLLOWS = "follows_profile"
 
 
 def profile_ref(text_column: str, *, follows: bool = True) -> Any:
