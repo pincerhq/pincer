@@ -50,11 +50,11 @@ export function Waterfall({
         const failed = span.status !== "ok"
         return (
           <button
-            key={span.span_id}
+            key={span.reference_span_id}
             onClick={() => onSelect?.(span)}
             className={cn(
               "flex w-full items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-white/[0.04]",
-              selectedSpanId === span.span_id && "bg-white/[0.07]",
+              selectedSpanId === span.reference_span_id && "bg-white/[0.07]",
             )}
           >
             <span className="w-28 shrink-0 truncate text-[11px]">

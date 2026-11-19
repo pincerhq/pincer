@@ -29,7 +29,7 @@ EARLIER = "2026-09-01T10:00:00+00:00"
 LATER = "2026-09-01T10:05:00+00:00"
 
 _EVENT = {
-    "event_id": "e0",
+    "reference_event_id": "e0",
     "call_id": CALL,
     "provider_call_id": "",
     "trace_id": "",
@@ -43,7 +43,7 @@ _EVENT = {
 }
 
 _SPAN = {
-    "span_id": "s0",
+    "reference_span_id": "s0",
     "call_id": CALL,
     "trace_id": "",
     "parent_span_id": "",
@@ -101,7 +101,7 @@ async def test_counters_accumulate_across_independent_writes(url):
     await service.upsert_call(CALL, {"turn_count": 1})
     await service.upsert_call(CALL, {"turn_count": 1, "error_count": 2})
 
-    row = await _row(url, "pincer_telephony_calls", "call_id", CALL)
+    row = await _row(url, "pincer_telephony_calls", "id", CALL)
     assert row["turn_count"] == 3
     assert row["error_count"] == 3
     assert row["registered_at"] == EARLIER  # written once, not re-stamped
@@ -112,7 +112,7 @@ async def test_everything_else_takes_the_incoming_value(url):
     await service.upsert_call(CALL, {"engine": "media_streams", "language": "de"})
     await service.upsert_call(CALL, {"language": "en"})
 
-    row = await _row(url, "pincer_telephony_calls", "call_id", CALL)
+    row = await _row(url, "pincer_telephony_calls", "id", CALL)
     assert (row["engine"], row["language"]) == ("media_streams", "en")
 
 
@@ -124,7 +124,7 @@ async def test_a_terminal_status_absorbs_later_writes(url):
     await service.upsert_call(CALL, {"status": "completed"})
     await service.upsert_call(CALL, {"status": "active"})  # the late callback
 
-    assert (await _row(url, "pincer_telephony_calls", "call_id", CALL))["status"] == "completed"
+    assert (await _row(url, "pincer_telephony_calls", "id", CALL))["status"] == "completed"
 
 
 async def test_a_row_with_no_status_yet_accepts_one(url):
@@ -132,7 +132,7 @@ async def test_a_row_with_no_status_yet_accepts_one(url):
     service = TelemetryService(url)
     await service.upsert_call(CALL, {"registered_at": EARLIER})
     await service.upsert_call(CALL, {"status": "active"})
-    assert (await _row(url, "pincer_telephony_calls", "call_id", CALL))["status"] == "active"
+    assert (await _row(url, "pincer_telephony_calls", "id", CALL))["status"] == "active"
 
 
 async def test_nothing_known_writes_nothing(url):
@@ -156,14 +156,14 @@ async def test_a_turn_is_written_once_however_often_it_is_reported(url):
         TURN, {"call_id": CALL, "turn_no": 1, "cancelled": 0, "total_ms": 900.0, "created_at": EARLIER}
     )
 
-    row = await _row(url, "pincer_telephony_turns", "turn_id", TURN)
+    row = await _row(url, "pincer_telephony_turns", "id", TURN)
     assert (row["cancelled"], row["total_ms"]) == (0, 900.0)
 
 
 async def test_a_repeated_event_is_ignored_not_duplicated(url):
     service = TelemetryService(url)
     event = {
-        "event_id": "e1",
+        "reference_event_id": "e1",
         "call_id": CALL,
         "provider_call_id": "",
         "trace_id": "",
@@ -176,16 +176,18 @@ async def test_a_repeated_event_is_ignored_not_duplicated(url):
         "attributes": "{}",
     }
     await service.write_records([event], [])
+    first_id = (await _row(url, "pincer_telephony_events", "reference_event_id", "e1"))["id"]
     await service.write_records([{**event, "name": "changed"}], [])
 
-    row = await _row(url, "pincer_telephony_events", "event_id", "e1")
+    row = await _row(url, "pincer_telephony_events", "reference_event_id", "e1")
     assert row["name"] == "call.registered"  # the first write stands
+    assert str(row["id"]) == str(first_id)  # and keeps the id it was given
 
 
 async def test_a_span_rewrite_updates_its_close(url):
     service = TelemetryService(url)
     span = {
-        "span_id": "s1",
+        "reference_span_id": "s1",
         "call_id": CALL,
         "trace_id": "",
         "parent_span_id": "",
@@ -201,17 +203,19 @@ async def test_a_span_rewrite_updates_its_close(url):
         "attributes": "{}",
     }
     await service.write_records([], [span])
+    first_id = (await _row(url, "pincer_telephony_spans", "reference_span_id", "s1"))["id"]
     # The rewrite claims a different start; only the closing facts may move.
     await service.write_records(
         [],
         [{**span, "start_utc": LATER, "start_mono_ns": 99, "end_utc": LATER, "duration_ms": 12.5, "status": "error"}],
     )
 
-    row = await _row(url, "pincer_telephony_spans", "span_id", "s1")
+    row = await _row(url, "pincer_telephony_spans", "reference_span_id", "s1")
     assert (row["duration_ms"], row["status"]) == (12.5, "error")
     # A span that reset its start would misreport its duration and its place
     # on the critical path.
     assert (row["start_utc"], row["start_mono_ns"]) == (EARLIER, 1)
+    assert str(row["id"]) == str(first_id)  # the conflict never re-keys the row
 
 
 async def test_a_real_monotonic_clock_reading_fits(url):
@@ -224,12 +228,12 @@ async def test_a_real_monotonic_clock_reading_fits(url):
     mono = time.monotonic_ns()
     assert mono > 2**31  # the value any host past its first seconds produces
     await service.write_records(
-        [{**_EVENT, "event_id": "e1", "mono_ns": mono}],
-        [{**_SPAN, "span_id": "s1", "start_mono_ns": mono, "end_mono_ns": mono + 1}],
+        [{**_EVENT, "reference_event_id": "e1", "mono_ns": mono}],
+        [{**_SPAN, "reference_span_id": "s1", "start_mono_ns": mono, "end_mono_ns": mono + 1}],
     )
 
-    assert (await _row(url, "pincer_telephony_events", "event_id", "e1"))["mono_ns"] == mono
-    assert (await _row(url, "pincer_telephony_spans", "span_id", "s1"))["end_mono_ns"] == mono + 1
+    assert (await _row(url, "pincer_telephony_events", "reference_event_id", "e1"))["mono_ns"] == mono
+    assert (await _row(url, "pincer_telephony_spans", "reference_span_id", "s1"))["end_mono_ns"] == mono + 1
 
 
 async def test_a_windowed_read_and_its_timestamps_survive_the_round_trip(url):
@@ -241,7 +245,7 @@ async def test_a_windowed_read_and_its_timestamps_survive_the_round_trip(url):
     async with service.reads() as reads:
         assert reads is not None
         rows = await reads.calls(CallFilters(since=EARLIER).where(), limit=10)
-        assert [row["call_id"] for row in rows] == [CALL]
+        assert [row["id"] for row in rows] == [CALL]
         assert rows[0]["registered_at"] == EARLIER
         # A window that starts later excludes it — the comparison is a real
         # timestamp comparison, not a string one that happens to sort.
@@ -253,7 +257,7 @@ async def test_events_and_spans_are_one_batch(url):
     await service.write_records(
         [
             {
-                "event_id": f"e{i}",
+                "reference_event_id": f"e{i}",
                 "call_id": CALL,
                 "provider_call_id": "",
                 "trace_id": "",
@@ -300,10 +304,10 @@ async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkey
     assert aggregate.calls["total"] == 1
 
     table = await queries.search_calls(unused, filters)
-    assert [row["call_id"] for row in table["calls"]] == [CALL]
+    assert [row["id"] for row in table["calls"]] == [CALL]
     assert table["calls"][0]["registered_at"] == now  # an ISO string, not a datetime
 
-    assert [turn["turn_id"] for turn in await queries.slowest_turns(unused, filters)] == [TURN]
+    assert [turn["id"] for turn in await queries.slowest_turns(unused, filters)] == [TURN]
 
 
 async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypatch):
@@ -319,14 +323,14 @@ async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypa
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_provider", "status": "completed"})
-    await service.write_records([{**_EVENT, "event_id": "ev-1", "call_id": CALL, "ts_utc": now}], [])
+    await service.write_records([{**_EVENT, "reference_event_id": "ev-1", "call_id": CALL, "ts_utc": now}], [])
     await service.upsert_turn(TURN, {"call_id": CALL, "turn_no": 1, "created_at": now})
 
     unused = Path("unused.db")
     by_id = await queries.get_call(unused, CALL)
     by_sid = await queries.get_call(unused, "CA_provider")
     assert by_id is not None and by_sid is not None
-    assert by_id["call_id"] == by_sid["call_id"] == CALL
+    assert by_id["id"] == by_sid["id"] == CALL
 
     # An id that names nothing is an empty answer, not an error — and one that
     # could never be an id at all must not reach the uuid column.
@@ -334,14 +338,14 @@ async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypa
     assert await queries.get_call(unused, "not-an-id-at-all") is None
 
     # The per-call timelines compare the same uuid column.
-    assert [event["event_id"] for event in await queries.get_events(unused, CALL)] == ["ev-1"]
-    assert [turn["turn_id"] for turn in await queries.get_turns(unused, CALL)] == [TURN]
+    assert [event["reference_event_id"] for event in await queries.get_events(unused, CALL)] == ["ev-1"]
+    assert [turn["id"] for turn in await queries.get_turns(unused, CALL)] == [TURN]
     assert await queries.get_spans(unused, CALL) == []
     assert await queries.get_events(unused, "not-an-id-at-all") == []
 
 
 async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypatch):
-    """The search box `LIKE`s across `call_id`, and Postgres has no
+    """The search box `LIKE`s across `id`, and Postgres has no
     `uuid LIKE text` — so the column is cast rather than the needle typed."""
     monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
     service = TelemetryService(migrated_url)
@@ -350,10 +354,10 @@ async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypat
 
     unused = Path("unused.db")
     found = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search=CALL[:8]))
-    assert [row["call_id"] for row in found["calls"]] == [CALL]
+    assert [row["id"] for row in found["calls"]] == [CALL]
 
     by_sid = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search="CA_prov"))
-    assert [row["call_id"] for row in by_sid["calls"]] == [CALL]
+    assert [row["id"] for row in by_sid["calls"]] == [CALL]
 
 
 async def test_the_call_search_box_ignores_case_on_both_dialects(migrated_url, monkeypatch):
@@ -367,7 +371,7 @@ async def test_the_call_search_box_ignores_case_on_both_dialects(migrated_url, m
     unused = Path("unused.db")
     for needle in ("ca_prov", "CA_PROVIDER", CALL[:8].upper()):
         found = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search=needle))
-        assert [row["call_id"] for row in found["calls"]] == [CALL], needle
+        assert [row["id"] for row in found["calls"]] == [CALL], needle
 
 
 async def test_a_search_term_is_taken_literally(migrated_url, monkeypatch):
@@ -414,4 +418,4 @@ async def test_a_uuid_shaped_tenant_is_still_a_text_column(migrated_url, monkeyp
     unused = Path("unused.db")
     scope = queries.TenantScope(allowed=(tenant,))
     found = await queries.search_calls(unused, queries.CallFilters.for_hours(24), scope=scope)
-    assert [row["call_id"] for row in found["calls"]] == [CALL]
+    assert [row["id"] for row in found["calls"]] == [CALL]

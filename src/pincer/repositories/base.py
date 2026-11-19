@@ -43,13 +43,19 @@ class BaseRepository[M: SQLModel, PK]:
         found: M | None = await self.session.get(self.model, pk)
         return found
 
+    async def get_by(self, **unique: Any) -> M | None:
+        """The row whose unique columns hold these values, or None.
+
+        For the keys that came from elsewhere — a Twilio SID, a phone number,
+        a session key — now that every table's primary key is its own `id`.
+        """
+        stmt = select(self.model).where(*(getattr(self.model, name) == value for name, value in unique.items()))
+        found: M | None = (await self.session.exec(stmt)).first()
+        return found
+
     @classmethod
     def _has_minted_key(cls) -> bool:
-        """True when this table's key is a single id Pincer mints.
-
-        `channel_identities` has a two-column natural key, and every Twilio
-        SID and phone-number key is plain text; none of those is guarded.
-        """
+        """True when this table's key is a single id Pincer mints."""
         columns = list(cls.model.__table__.primary_key.columns)
         return len(columns) == 1 and isinstance(columns[0].type, Uuid7)
 

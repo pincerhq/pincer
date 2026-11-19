@@ -5,7 +5,7 @@ import type { TelephonyEvent } from "@/api/types"
 
 function ev(name: string, ts: string, seq: number, turn_id = ""): TelephonyEvent {
   return {
-    event_id: `${name}-${seq}`,
+    reference_event_id: `${name}-${seq}`,
     call_id: "CA1",
     provider_call_id: "CA1",
     trace_id: "t",

@@ -9,6 +9,7 @@ from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
+from pincer.models.identity import IdentityProfile
 from pincer.models.voice import (
     CallAction,
     CallAnalytics,
@@ -21,6 +22,7 @@ from pincer.models.voice import (
     PhoneContact,
     VoiceCall,
 )
+from pincer.repositories.identity import IdentityProfileRepository
 from pincer.repositories.voice import ThreadMemberRepository
 from pincer.services.voice import (
     AnalyticsService,
@@ -34,6 +36,7 @@ from pincer.services.voice import (
 _TABLES = [
     model.__table__
     for model in (
+        IdentityProfile,
         VoiceCall,
         CallTranscript,
         CallAction,
@@ -77,14 +80,28 @@ async def test_saving_a_call_twice_updates_it_in_place(url):
     assert stored["language"] == "de"
 
 
+async def test_a_call_that_learns_whose_it_is_points_at_that_profile(url):
+    """The row is often made before the caller is known; the save that names
+    them must fill `profile_id`, which the column default does on insert only."""
+    async with session_scope(url) as session:
+        session.add(IdentityProfile(pincer_user_id="alice"))
+    calls = CallsService(url)
+    await calls.save_call({"call_sid": "CA1", "direction": "inbound", "started_at": EARLIER})
+    assert (await calls.get("CA1"))["profile_id"] is None
+
+    await calls.save_call({"call_sid": "CA1", "direction": "inbound", "started_at": EARLIER, "pincer_user_id": "alice"})
+
+    async with session_scope(url) as session:
+        alice = await IdentityProfileRepository(session).named("alice")
+    assert str((await calls.get("CA1"))["profile_id"]) == alice.id
+
+
 async def test_the_thread_columns_are_re_derived_from_the_membership(url):
     """The member row is the durable record; the call's columns follow it."""
     calls = CallsService(url)
     async with session_scope(url) as session:
         session.add(
-            CallThread(
-                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-            )
+            CallThread(id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
         )
         await session.flush()
         await ThreadMemberRepository(session).attach(
@@ -109,9 +126,7 @@ async def test_a_call_attached_before_its_row_exists_is_backfilled_on_save(url):
     threads = ThreadsService(url)
     async with session_scope(url) as session:
         session.add(
-            CallThread(
-                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-            )
+            CallThread(id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
         )
     await threads.attach(
         {
@@ -143,9 +158,7 @@ async def test_a_backfill_leaves_the_facts_it_was_not_given(url):
     backfill must not blank the ones it was not given."""
     async with session_scope(url) as session:
         session.add(
-            CallThread(
-                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-            )
+            CallThread(id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
         )
         await session.flush()
         members = ThreadMemberRepository(session)
@@ -171,9 +184,7 @@ async def test_a_re_attach_fills_in_the_call_facts_but_never_blanks_them(url):
     async with session_scope(url) as session:
         for label in ("th_1", "th_2"):
             session.add(
-                CallThread(
-                    thread_id=seeded_id(label), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
-                )
+                CallThread(id=seeded_id(label), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
             )
 
     async def attach(thread: str, started_at: str | None, direction: str) -> CallThreadMember:
@@ -238,7 +249,7 @@ async def test_merging_a_thread_leaves_the_target_s_own_calls_alone(url):
     for label in ("th_src", "th_dst"):
         await threads.create(
             {
-                "thread_id": seeded_id(label),
+                "id": seeded_id(label),
                 "subject": label,
                 "origin": "user_task",
                 "created_at": EARLIER,

@@ -1,7 +1,7 @@
 """Telephony telemetry: per-call rows, the event timeline, spans and per-turn latencies."""
 
 import sqlalchemy as sa
-from sqlalchemy import Column, Index, Integer, Text
+from sqlalchemy import Column, Index, Integer, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
@@ -17,7 +17,7 @@ class TelephonyCall(SQLModel, table=True):
         Index("idx_tel_calls_tenant", "tenant_id"),
     )
 
-    call_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     provider_call_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     trace_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     direction: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -63,12 +63,14 @@ class TelephonyCall(SQLModel, table=True):
 class TelephonyEvent(SQLModel, table=True):
     __tablename__ = "pincer_telephony_events"
     __table_args__ = (
+        UniqueConstraint("reference_event_id", name="uq_telephony_events_reference_event_id"),
         Index("idx_tel_events_call", "call_id", "ts_utc", "seq"),
         Index("idx_tel_events_name", "name"),
         Index("idx_tel_events_turn", "turn_id"),
     )
 
-    event_id: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    reference_event_id: str = Field(sa_column=Column(Text(), nullable=False))
     call_id: str = Field(sa_column=Column(Uuid7(), nullable=False))
     provider_call_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     trace_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -84,11 +86,13 @@ class TelephonyEvent(SQLModel, table=True):
 class TelephonySpan(SQLModel, table=True):
     __tablename__ = "pincer_telephony_spans"
     __table_args__ = (
+        UniqueConstraint("reference_span_id", name="uq_telephony_spans_reference_span_id"),
         Index("idx_tel_spans_call", "call_id", "start_utc"),
         Index("idx_tel_spans_turn", "turn_id"),
     )
 
-    span_id: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    reference_span_id: str = Field(sa_column=Column(Text(), nullable=False))
     call_id: str = Field(sa_column=Column(Uuid7(), nullable=False))
     trace_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     parent_span_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -112,7 +116,7 @@ class TelephonyTurn(SQLModel, table=True):
         Index("idx_tel_turns_latency", "response_latency_ms"),
     )
 
-    turn_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     call_id: str = Field(sa_column=Column(Uuid7(), nullable=False))
     turn_no: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     trigger: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))

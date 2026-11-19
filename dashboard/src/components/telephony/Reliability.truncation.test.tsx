@@ -7,7 +7,7 @@ import { OutcomeMix } from "./OutcomeMix"
 /** `n` calls, alternating outcome so both components have rows to draw. */
 function calls(n: number) {
   return Array.from({ length: n }, (_, i) => ({
-    call_id: `CA${i}`,
+    id: `CA${i}`,
     provider_call_id: `CA${i}`,
     failure_category: i % 2 ? "technical" : "none",
     failure_code: i % 2 ? "ws_drop" : "none",

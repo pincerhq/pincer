@@ -7,9 +7,10 @@ all channels.
 
 Schema
 ------
-identity_profiles  — one row per pincer user (preferred channel, display name,
-                     `active`, `source`)
-channel_identities — many-to-many: (channel, channel_user_id) → pincer_user_id
+identity_profiles — one row per pincer user (preferred channel, display name,
+                    `active`, `source`), keyed by a UUIDv7 `id`; the
+                    `pincer_user_id` is its unique name
+identity_channels — many-to-many: (channel, channel_user_id) → profile `id`
 
 Where identities come from
 --------------------------
@@ -61,6 +62,10 @@ RESERVED_IDENTITY_NAMES = frozenset({"me"})
 # Channels whose IDs are phone numbers — leading "+" is stripped for storage
 _PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
 
+# Channels that store an id other than the one the config writes: WhatsApp
+# keeps a contact under their LID once it is known, not under the phone.
+_ALIASED_CHANNELS = {ChannelType.WHATSAPP}
+
 # A resolved config pair: (channel value, channel type, normalized internal id).
 _Pair = tuple[str, ChannelType, str]
 
@@ -87,6 +92,9 @@ class IdentityResolver:
         # Whether the database holds a roster (see `gated`), and when it was last asked.
         self._roster = False
         self._roster_checked: float | None = None
+        # The config id each channel id resolved from, where they differ
+        # (LID → phone), from the last resolution; seeding stores them.
+        self._alts: dict[tuple[str, str], str] = {}
 
     # Bounded wait for mark_seeding_complete() in is_guest(), so a future
     # caller of rebuild_identity_map() that doesn't guarantee it eventually
@@ -185,6 +193,11 @@ class IdentityResolver:
         existing = await self._find_existing(channel, normalized)
         if existing:
             return existing
+        alias = await self._store.owner_by_alt(channel.value, normalized)
+        if alias is not None:
+            # A phone whose link became a LID: that link's identity, or nobody.
+            uid, active = alias
+            return uid if active else None
         return await self._check_config_mapping(channel, normalized)
 
     async def is_guest(self, channel: ChannelType, channel_user_id: str | int) -> bool:
@@ -225,7 +238,7 @@ class IdentityResolver:
         Resolve a channel-specific user ID to a canonical Pincer user ID.
 
         Lookup order:
-        1. Existing mapping in channel_identities
+        1. Existing mapping in identity_channels
         2. Pre-configured cross-channel link from the [identity] TOML
         3. Create new identity
 
@@ -239,6 +252,12 @@ class IdentityResolver:
             return existing
         if await self._store.owner_any(channel.value, normalized) is not None:
             return f"{channel.value}:{normalized}"
+        alias = await self._store.owner_by_alt(channel.value, normalized)
+        if alias is not None:
+            # Addressed by the phone its LID link stands for: that identity,
+            # without linking the phone next to the LID.
+            uid, active = alias
+            return uid if active else f"{channel.value}:{normalized}"
 
         mapped = await self._check_config_mapping(channel, normalized)
         if mapped:
@@ -260,8 +279,12 @@ class IdentityResolver:
             # No profile (e.g. a channel-scoped stand-in id) or a deactivated
             # one: a link would point nowhere, or hand a guest's id to it.
             return
-        if await self._store.owner_any(channel.value, normalized) is None:
-            await self._link_channel(pincer_user_id, channel, normalized)
+        if await self._store.owner_any(channel.value, normalized) is not None:
+            return
+        if await self._store.owner_by_alt(channel.value, normalized) is not None:
+            # The phone of a LID link: linking it would undo the LID.
+            return
+        await self._link_channel(pincer_user_id, channel, normalized)
 
     async def promote_channel_id(
         self,
@@ -276,6 +299,10 @@ class IdentityResolver:
         swapped for it. Returns the owning identity, or None when there is none
         or the swap is refused.
 
+        The placeholder is kept as the LID link's `alt_id`, also when the LID
+        was linked already: startup then resolves the configured phone to the
+        LID without asking WhatsApp, so the swap is never undone.
+
         Owners are looked up with `_find_existing` only: `find()` falls back to
         the config mapping, which would re-create the placeholder row. Never
         creates an identity, and never merges two: a real id that already
@@ -289,14 +316,20 @@ class IdentityResolver:
         real = self._normalize_id(channel, real_id)
         real_owner = await self._find_existing(channel, real)
         linked: list[tuple[str, str]] = []
+        alt: str | None = None
         for placeholder in placeholder_ids:
             normalized = self._normalize_id(channel, placeholder)
             if normalized == real:
                 continue
+            alt = alt or normalized
             owner = await self._find_existing(channel, normalized)
             if owner:
                 linked.append((normalized, owner))
         if not linked:
+            if real_owner and alt:
+                # Already re-keyed (or linked by its LID from the start):
+                # record the phone, so startup keeps the LID for it.
+                await self._store.remember_alt(channel.value, real, alt)
             return real_owner
 
         owners = {owner for _pid, owner in linked}
@@ -315,7 +348,7 @@ class IdentityResolver:
 
         owner = owners.pop()
         old_ids = [pid for pid, _owner in linked]
-        taken_by = await self._store.replace_channel_links(owner, channel.value, real, old_ids)
+        taken_by = await self._store.replace_channel_links(owner, channel.value, real, old_ids, alt_id=alt)
         if taken_by is not None:
             logger.error(
                 "Identity re-key refused: %s:%s was linked to %r while re-keying %r — not merging them",
@@ -371,7 +404,7 @@ class IdentityResolver:
         logger.info("Identity linked: %s ← %s:%s", pincer_user_id, channel.value, normalized_id)
 
     async def _rename_identity(self, old_id: str, new_id: str) -> None:
-        """Rename a pincer_user_id across identity_profiles, channel_identities, and sessions.
+        """Rename a pincer_user_id across identity_profiles, identity_channels, and sessions.
 
         Only called for auto-generated hash IDs (usr_...) to avoid overwriting
         intentionally-named identities.
@@ -437,10 +470,15 @@ class IdentityResolver:
         Returns None when the translation fails or yields an empty ID: the
         pair is then left out rather than stored under a guess, since a wrong
         or shared ID links one person's channel to someone else.
+
+        A channel that is not running, or that does not know the internal ID
+        yet (WhatsApp answers an unseen phone with the phone), falls back to
+        the link stored for the config ID (see `_stored_alias`), so a LID
+        learned once is never traded back for the phone.
         """
         channel = channels.get(ch_type)
         if channel is None:
-            return normalized_id
+            return await self._stored_alias(ch_type, normalized_id)
         try:
             resolved = await channel.resolve_internal_user_id(normalized_id)
         except Exception as e:
@@ -461,7 +499,42 @@ class IdentityResolver:
                 normalized_id,
             )
             return None
-        return self._normalize_id(ch_type, resolved)
+        internal = self._normalize_id(ch_type, resolved)
+        if internal == normalized_id:
+            return await self._stored_alias(ch_type, normalized_id)
+        self._alts[(ch_type.value, internal)] = normalized_id
+        return internal
+
+    async def _stored_alias(self, ch_type: ChannelType, config_id: str) -> str:
+        """The channel ID stored for a config ID it replaced (a LID for a phone), else the config ID."""
+        try:
+            stored = await self._store.linked_as(ch_type.value, config_id)
+        except Exception:
+            # A database without the identity tables has nothing stored.
+            logger.debug("Identity map: stored alias lookup skipped", exc_info=True)
+            return config_id
+        return stored if stored is not None else config_id
+
+    async def _is_legacy_alias(self, name: str, ch_type: ChannelType, config_id: str) -> bool:
+        """True when `config_id` may already have become another ID of the entry's identity.
+
+        A WhatsApp link re-keyed to a LID before `alt_id` was recorded does not
+        say which phone it replaced. When the entry's own identity holds such
+        a link on the channel and not the phone itself, the phone is taken as
+        unresolved: the link is
+        kept (`_unresolved_keep`) and the phone is not linked beside it. The
+        contact's next message records its phone (`promote_channel_id`).
+        """
+        if ch_type not in _ALIASED_CHANNELS:
+            return False
+        try:
+            ids = await self._store.unaltered_ids(name, ch_type.value)
+        except Exception:
+            # A database without the identity tables has no links to keep.
+            logger.debug("Identity map: legacy link lookup skipped", exc_info=True)
+            return False
+        # Still linked by the phone itself: nothing has replaced it yet.
+        return bool(ids) and config_id not in ids
 
     async def _resolve_entry(
         self,
@@ -489,13 +562,23 @@ class IdentityResolver:
                 logger.warning("Unknown channel %r in identity.%s", ch_str, name)
                 continue
             config_id = self._normalize_id(ch_type, cid)
-            norm = config_id
             if channels:
                 internal = await self._resolve_via_channel(ch_type, config_id, channels)
-                if internal is None:
-                    unresolved.append((ch_str, config_id))
-                    continue
-                norm = internal
+            else:
+                internal = await self._stored_alias(ch_type, config_id)
+            if internal == config_id and await self._is_legacy_alias(name, ch_type, config_id):
+                logger.info(
+                    "Identity map: %s:%s may be the phone of a stored %s link of %s — keeping that link",
+                    ch_str,
+                    config_id,
+                    ch_str,
+                    name,
+                )
+                internal = None
+            if internal is None:
+                unresolved.append((ch_str, config_id))
+                continue
+            norm = internal
             source = resolved_from.setdefault((ch_type.value, norm), config_id)
             if source != config_id and norm not in (source, config_id):
                 logger.error(
@@ -612,6 +695,7 @@ class IdentityResolver:
         """Every entry as (name, resolved pairs, unresolved pairs); see `_resolve_entry`."""
         resolved_from: dict[tuple[str, str], str] = {}
         entries: list[tuple[str, list[_Pair], list[tuple[str, str]]]] = []
+        self._alts = {}
         for name, entry in self._entries.items():
             resolved, unresolved = await self._resolve_entry(name, list(entry.channels), channels, resolved_from)
             entries.append((name, resolved, unresolved))
@@ -876,6 +960,11 @@ class IdentityResolver:
                     insert={**config_fields, "preferred_channel": config.preferred_channel or resolved[0][0]},
                     overwrite=config_fields,
                     phones=config.phones,
+                    alt_ids={
+                        (ch_str, norm): self._alts[(ch_str, norm)]
+                        for ch_str, _ch_type, norm in resolved
+                        if (ch_str, norm) in self._alts
+                    },
                 )
             )
             for _ch_str, ch_type, norm in resolved:

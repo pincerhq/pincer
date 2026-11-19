@@ -150,7 +150,7 @@ def call_detail(
         row = await queries.get_call(settings.db_path, call_ref)
         if row is None:
             return None, []
-        return row, await queries.get_turns(settings.db_path, row["call_id"])
+        return row, await queries.get_turns(settings.db_path, row["id"])
 
     call, turns = asyncio.run(_load())
     if call is None:
@@ -162,7 +162,7 @@ def call_detail(
         return
 
     console.print(
-        f"[bold]{call['provider_call_id'] or call['call_id']}[/bold] "
+        f"[bold]{call['provider_call_id'] or call['id']}[/bold] "
         f"{call['direction']} · {call['engine']} · {call['status']}"
         + (f" · {call['failure_code']}" if call["failure_code"] not in ("", "none") else "")
     )

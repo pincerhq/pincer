@@ -17,9 +17,9 @@ import { TelephonyLayout } from "./Layout"
 
 /** Three environments, two models — enough for a facet to hide another. */
 const CORPUS = [
-  { call_id: "1", environment: "prod", app_version: "1.0.0", model: "haiku", language: "en" },
-  { call_id: "2", environment: "staging", app_version: "1.1.0", model: "haiku", language: "de" },
-  { call_id: "3", environment: "dev", app_version: "1.1.0", model: "sonnet", language: "en" },
+  { id: "1", environment: "prod", app_version: "1.0.0", model: "haiku", language: "en" },
+  { id: "2", environment: "staging", app_version: "1.1.0", model: "haiku", language: "de" },
+  { id: "3", environment: "dev", app_version: "1.1.0", model: "sonnet", language: "en" },
 ]
 
 /** Stands in for the API: returns only the rows matching the filters it is given. */

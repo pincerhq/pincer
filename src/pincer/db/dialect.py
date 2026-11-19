@@ -48,13 +48,38 @@ def upsert(
     `excluded` for assignments like `col = col + excluded.col`, replaces
     `ON CONFLICT DO UPDATE` and `INSERT OR REPLACE`. Unlike `OR REPLACE`, the
     stored row is updated in place, not deleted and re-inserted.
+
+    A conflict never assigns the primary key, even when `set_` names it (a
+    row read back and saved again carries its `id`): the stored row keeps it.
     """
     table = _table(target)
-    stmt = (sqlite.insert(table) if dialect == "sqlite" else postgresql.insert(table)).values(values)
+    rows = _derived(table, values)
+    stmt = (sqlite.insert(table) if dialect == "sqlite" else postgresql.insert(table)).values(rows)
     if set_ is None:
         return stmt.on_conflict_do_nothing(index_elements=list(index_elements))
     assignments = set_(stmt.excluded) if callable(set_) else set_
-    return stmt.on_conflict_do_update(index_elements=list(index_elements), set_=dict(assignments), where=where)
+    keys = {column.name for column in table.primary_key.columns} - set(index_elements)
+    kept = {name: value for name, value in assignments.items() if name not in keys}
+    return stmt.on_conflict_do_update(index_elements=list(index_elements), set_=kept, where=where)
+
+
+def _derived(
+    table: Table, values: Mapping[str, Any] | Sequence[Mapping[str, Any]]
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """`values` with the columns marked `info["derive"]` filled from the rest
+    (`pincer.models.identity.profile_ref`), where the caller left them out."""
+    derived = [(column.name, column.info["derive"]) for column in table.columns if "derive" in column.info]
+
+    def fill(row: Mapping[str, Any]) -> dict[str, Any]:
+        filled = dict(row)
+        for name, derive in derived:
+            if name not in filled:
+                filled[name] = derive(filled.get)
+        return filled
+
+    if isinstance(values, Mapping):
+        return fill(values)
+    return [fill(row) for row in values]
 
 
 def json_contains(dialect: str, column: Any, value: str) -> ColumnElement[bool]:

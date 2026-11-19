@@ -18,7 +18,7 @@ let matching = 200
 /** Stands in for the API: honours limit/offset and reports the real total. */
 function fakeApi(_filters: TelephonyFilters, page: { limit: number; offset: number }) {
   const calls = Array.from({ length: Math.max(0, Math.min(page.limit, matching - page.offset)) }, (_, i) => ({
-    call_id: `CA${page.offset + i}`,
+    id: `CA${page.offset + i}`,
     provider_call_id: `CA${page.offset + i}`,
     status: "completed",
   }))

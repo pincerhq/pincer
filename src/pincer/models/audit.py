@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
 from pincer.db.types import Real, Uuid7
+from pincer.models.identity import profile_ref
 
 
 class AuditLog(SQLModel, table=True):
@@ -20,6 +21,7 @@ class AuditLog(SQLModel, table=True):
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     timestamp: str = Field(sa_column=Column(Text(), nullable=False))
     user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    profile_id: str | None = profile_ref("user_id")
     session_id: str | None = Field(default=None, sa_column=Column(Text()))
     action: str = Field(sa_column=Column(Text(), nullable=False))
     tool: str | None = Field(default=None, sa_column=Column(Text()))

@@ -31,10 +31,10 @@ whichever one the reporter happened to have:
 
 | Field | What |
 |---|---|
-| `call_id` | ours, assigned **before** the provider names the call |
+| `call_id` | ours, assigned **before** the provider names the call; the call row stores it as its `id` |
 | `provider_call_id` | Twilio CallSid (empty until the dial returns) |
 | `trace_id` | 32 hex, OTel-compatible, one per call |
-| `span_id` / `parent_span_id` | 16 hex, OTel-compatible |
+| `span_id` / `parent_span_id` | 16 hex, OTel-compatible; a span row stores its own as `reference_span_id` |
 | `turn_id` | one caller-utterance → response cycle |
 | `conversation_id` | the agent session the call is bound to |
 | `tenant_id` | workspace/organisation, where the deployment has them |

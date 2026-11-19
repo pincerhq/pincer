@@ -1256,7 +1256,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
             # Recover channel_user_id from a channel-scoped fallback canonical_id
             # (e.g. "teams:{aad_id}" when the guest gate is on and the user is
-            # not a known identity — no channel_identities row exists for them).
+            # not a known identity — no identity_channels row exists for them).
             if ch_user_id is None:
                 prefix = f"{incoming.channel_type.value}:"
                 if canonical_id.startswith(prefix):

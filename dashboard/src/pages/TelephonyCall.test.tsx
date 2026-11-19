@@ -21,8 +21,8 @@ import { TelephonyCallPage } from "./TelephonyCall"
 /** One turn per call, with ids that cannot be confused between calls. */
 function detailFor(ref: string) {
   return {
-    call: { call_id: ref, provider_call_id: ref, status: "completed" },
-    turns: [{ turn_id: `${ref}_T1`, turn_no: 1, response_latency_ms: 900 }],
+    call: { id: ref, provider_call_id: ref, status: "completed" },
+    turns: [{ id: `${ref}_T1`, turn_no: 1, response_latency_ms: 900 }],
     unavailable: [],
     telemetry_gaps: [],
   }

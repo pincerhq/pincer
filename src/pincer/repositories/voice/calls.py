@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, update
+from sqlalchemy import func, literal_column, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
 from pincer.db.ids import is_id
+from pincer.models.identity import profile_id_of
 from pincer.models.voice import CallAction, CallOrigin, CallThread, CallTranscript, VoiceCall
 from pincer.repositories.base import BaseRepository
 
@@ -34,7 +35,9 @@ class CallRepository(BaseRepository[VoiceCall, str]):
                 VoiceCall,
                 stored,
                 index_elements=["call_sid"],
-                set_=lambda excluded: {name: excluded[name] for name in stored if name != "call_sid"},
+                set_=lambda excluded: _with_profile(
+                    {name: excluded[name] for name in stored if name != "call_sid"}, stored
+                ),
             )
         )
 
@@ -131,7 +134,7 @@ class CallRepository(BaseRepository[VoiceCall, str]):
             where.append(col(VoiceCall.thread_id) == thread_id)
         stmt = (
             select(VoiceCall, CallThread.subject)
-            .outerjoin(CallThread, col(CallThread.thread_id) == col(VoiceCall.thread_id))
+            .outerjoin(CallThread, col(CallThread.id) == col(VoiceCall.thread_id))
             .where(*where)
             .order_by(col(VoiceCall.started_at).desc())
             .limit(limit)
@@ -142,7 +145,7 @@ class CallRepository(BaseRepository[VoiceCall, str]):
     async def with_thread(self, call_sid: str) -> tuple[VoiceCall, str | None] | None:
         stmt = (
             select(VoiceCall, CallThread.subject)
-            .outerjoin(CallThread, col(CallThread.thread_id) == col(VoiceCall.thread_id))
+            .outerjoin(CallThread, col(CallThread.id) == col(VoiceCall.thread_id))
             .where(col(VoiceCall.call_sid) == call_sid)
         )
         return (await self.session.exec(stmt)).first()
@@ -217,7 +220,9 @@ class CallOriginRepository(BaseRepository[CallOrigin, str]):
                 CallOrigin,
                 stored,
                 index_elements=["call_sid"],
-                set_=lambda excluded: {name: excluded[name] for name in stored if name != "call_sid"},
+                set_=lambda excluded: _with_profile(
+                    {name: excluded[name] for name in stored if name != "call_sid"}, stored
+                ),
             )
         )
 
@@ -249,3 +254,16 @@ class CallOriginRepository(BaseRepository[CallOrigin, str]):
         if since:
             where.append(col(CallOrigin.reported_at) >= since)
         return await self.list(*where, order_by=[col(CallOrigin.reported_at)])
+
+
+def _with_profile(assignments: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
+    """A conflict that sets `pincer_user_id` also sets `profile_id` from it.
+
+    The column default fills `profile_id` on insert only; a call row is often
+    made before it knows whose it is.
+    """
+    if "pincer_user_id" in stored:
+        # By name, not `excluded.pincer_user_id`: SQLAlchemy would add the
+        # `excluded` alias to the subquery's FROM, matching every row.
+        assignments["profile_id"] = profile_id_of(literal_column("excluded.pincer_user_id"))
+    return assignments

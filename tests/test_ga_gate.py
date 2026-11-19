@@ -70,8 +70,8 @@ async def _seed_costs(settings, totals: list[float]) -> None:
         await ensure_call_costs_table(db)
         for i, total in enumerate(totals):
             await db.execute(
-                "INSERT INTO pincer_call_costs (call_sid, total_usd, twilio_usd, llm_usd, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pincer_call_costs (id, call_sid, total_usd, twilio_usd, llm_usd, recorded_at) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?)",
                 (f"CAcost{i}", total, total * 0.6, total * 0.4, datetime.now(UTC).isoformat()),
             )
         await db.commit()

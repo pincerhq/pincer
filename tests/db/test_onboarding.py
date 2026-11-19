@@ -6,9 +6,10 @@ import pytest
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
-from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
+from pincer.models.identity import AuthSession, IdentityChannel, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
+from pincer.repositories.identity import profile_owned
 from pincer.repositories.sessions import SessionRepository
 from pincer.services import onboarding as onboarding_module
 from pincer.services.identity import IdentityService
@@ -17,12 +18,13 @@ from pincer.services.sessions import SessionService
 
 _TABLES = [
     IdentityProfile.__table__,
-    ChannelIdentity.__table__,
+    IdentityChannel.__table__,
     IdentityCredential.__table__,
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
     Onboarding.__table__,
+    *(table for table, _column in profile_owned()),
 ]
 
 _CONVERSATION = "22222222-2222-4222-8222-222222222222"

@@ -16,15 +16,19 @@ from pincer.core.session import SessionManager
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
-from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
+from pincer.models.identity import AuthSession, IdentityChannel, IdentityCredential, IdentityPhone, IdentityProfile
+from pincer.models.memory import Memory
 from pincer.models.onboarding import Onboarding
+from pincer.models.scheduler import BriefingConfig, Schedule
 from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage
+from pincer.models.voice import CallOrigin
 from pincer.repositories import sessions as sessions_repository
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
     IdentityPhoneRepository,
     IdentityProfileRepository,
+    profile_owned,
 )
 from pincer.repositories.sessions import SessionRepository, rekeyed_session_id
 from pincer.services.identity import IdentityService, SeedEntry
@@ -32,13 +36,14 @@ from pincer.services.sessions import SessionService
 
 _TABLES = [
     IdentityProfile.__table__,
-    ChannelIdentity.__table__,
+    IdentityChannel.__table__,
     IdentityCredential.__table__,
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
     SessionImage.__table__,
     Onboarding.__table__,
+    *(table for table, _column in profile_owned()),
 ]
 
 _NOW = "2026-10-10T12:00:00+00:00"
@@ -649,7 +654,7 @@ async def _set_password(url: str, pincer_user_id: str, password_hash: str) -> No
 
 async def _credential(url: str, pincer_user_id: str) -> IdentityCredential | None:
     async with session_scope(url) as session:
-        return await IdentityCredentialRepository(session).get(pincer_user_id)
+        return await IdentityCredentialRepository(session).for_user(pincer_user_id)
 
 
 async def test_setting_a_password_again_bumps_the_token_version(url):
@@ -733,10 +738,131 @@ async def test_merging_keeps_the_target_s_credentials(url):
     assert await service.channels_for("alice") == [("telegram", "12345"), ("whatsapp", "4930111")]
 
 
+async def _own_rows(url: str, pincer_user_id: str) -> None:
+    """A schedule, a memory, a briefing config and a call origin for this identity."""
+    async with session_scope(url) as session:
+        session.add(Schedule(pincer_user_id=pincer_user_id, name="n", cron_expr="* * * * *", action="{}"))
+        session.add(Memory(user_id=pincer_user_id, content="likes tea", created_at=1.0))
+        session.add(BriefingConfig(pincer_user_id=pincer_user_id))
+        session.add(
+            CallOrigin(call_sid=f"CA-{pincer_user_id}", user_id="chat", pincer_user_id=pincer_user_id, created_at=_NOW)
+        )
+
+
+async def _owners(url: str) -> dict[str, list[tuple[str, str | None]]]:
+    """(text owner, profile name) of every owned row, per table."""
+    async with session_scope(url) as session:
+        found: dict[str, list[tuple[str, str | None]]] = {}
+        for table, column in profile_owned():
+            if table.name not in {model.__tablename__ for model in (Schedule, Memory, BriefingConfig, CallOrigin)}:
+                continue
+            rows = (
+                await session.exec(
+                    select(table.c[column], IdentityProfile.pincer_user_id).outerjoin(
+                        IdentityProfile, IdentityProfile.id == table.c.profile_id
+                    )
+                )
+            ).all()
+            found[table.name] = sorted(
+                ((str(text), name) for text, name in rows), key=lambda row: (row[0], row[1] or "")
+            )
+        return found
+
+
+async def test_an_owned_row_is_filled_with_its_profile_and_a_stand_in_gets_none(url):
+    await IdentityService(url).create_identity("alice", channel="telegram", channel_user_id="1")
+    await _own_rows(url, "alice")
+    await _own_rows(url, "telegram:99")  # an unresolved sender: no profile
+
+    owners = await _owners(url)
+    assert owners["pincer_schedules"] == [("alice", "alice"), ("telegram:99", None)]
+
+
+async def test_renaming_changes_only_the_name_and_the_rows_follow(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="1")
+    await _own_rows(url, "usr_hash")
+    async with session_scope(url) as session:
+        before = (await IdentityProfileRepository(session).named("usr_hash")).id
+
+    await service.rename_identity("usr_hash", "alice")
+
+    async with session_scope(url) as session:
+        profiles = IdentityProfileRepository(session)
+        assert await profiles.named("usr_hash") is None
+        assert (await profiles.named("alice")).id == before
+    assert await service.channels_for("alice") == [("telegram", "1")]
+    assert all(rows == [("alice", "alice")] for rows in (await _owners(url)).values())
+
+
+async def test_merging_moves_what_the_old_identity_owned(url):
+    """Schedules, memories and call origins used to stay behind under the old name."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="1")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _own_rows(url, "usr_hash")
+    await _own_rows(url, "alice")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    owners = await _owners(url)
+    assert owners["pincer_schedules"] == [("alice", "alice"), ("alice", "alice")]
+    assert owners["pincer_memories"] == [("alice", "alice"), ("alice", "alice")]
+    assert owners["pincer_call_origins"] == [("alice", "alice"), ("alice", "alice")]
+    # One briefing config per identity: the target keeps its own.
+    assert owners["pincer_briefing_configs"] == [("alice", "alice")]
+
+
+async def test_rows_written_before_the_profile_existed_follow_a_rename(url):
+    """They name the identity only in text: `profile_id` is NULL."""
+    service = IdentityService(url)
+    await _own_rows(url, "usr_hash")  # no profile yet
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="1")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert all(rows == [("alice", "alice")] for rows in (await _owners(url)).values())
+
+
+async def test_a_merge_keeps_the_targets_briefing_config_even_with_no_profile_id(url):
+    """The config is UNIQUE by name; one that holds the target's name with a
+    NULL `profile_id` must still win, not collide with the one moving in."""
+    service = IdentityService(url)
+    await _own_rows(url, "alice")  # before alice's profile: profile_id NULL
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="1")
+    await _own_rows(url, "usr_hash")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    # Alice's own config, still without a profile_id; usr_hash's went.
+    assert (await _owners(url))["pincer_briefing_configs"] == [("alice", None)]
+
+
+async def test_a_merged_identity_s_sessions_and_onboarding_point_at_the_target(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="1")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _store_session(url, "telegram:usr_hash", user_id="usr_hash")
+    async with session_scope(url) as session:
+        session.add(Onboarding(user_id="usr_hash", channel="telegram", asked_at=1.0))
+
+    await service.rename_identity("usr_hash", "alice")
+
+    async with session_scope(url) as session:
+        alice = (await IdentityProfileRepository(session).named("alice")).id
+        sessions = (await session.exec(select(ChatSession.session_id, ChatSession.profile_id))).all()
+        onboarding = (await session.exec(select(Onboarding.user_id, Onboarding.profile_id))).all()
+    assert [(key, str(profile)) for key, profile in sessions] == [("telegram:alice", alice)]
+    assert [(user, str(profile)) for user, profile in onboarding] == [("alice", alice)]
+
+
 async def _open_session(url: str, pincer_user_id: str) -> str:
     async with session_scope(url) as session:
+        profile = await IdentityProfileRepository(session).named(pincer_user_id)
+        assert profile is not None
         row = await AuthSessionRepository(session).add(
-            AuthSession(pincer_user_id=pincer_user_id, refresh_jti="jti", expires_at=4_000_000_000.0)
+            AuthSession(profile_id=profile.id, refresh_jti="jti", expires_at=4_000_000_000.0)
         )
         return row.id
 
@@ -918,7 +1044,9 @@ async def test_rotating_a_session_needs_the_refresh_token_that_is_current(url):
     await service.create_identity("alice", channel="telegram", channel_user_id="12345")
     await _set_password(url, "alice", "hash")
     async with session_scope(url) as session:
-        row = AuthSession(pincer_user_id="alice", refresh_jti="r0", expires_at=4_000_000_000.0)
+        profile = await IdentityProfileRepository(session).named("alice")
+        assert profile is not None
+        row = AuthSession(profile_id=profile.id, refresh_jti="r0", expires_at=4_000_000_000.0)
         await AuthSessionRepository(session).add(row, refresh=False)
         session_id = row.id
 
@@ -949,7 +1077,7 @@ def _phone_seed(uid: str, channel_id: str, phones: tuple[str, ...]) -> SeedEntry
 
 async def _phone_row(url: str, phone: str):
     async with session_scope(url) as session:
-        return await IdentityPhoneRepository(session).get(phone)
+        return await IdentityPhoneRepository(session).get_by(phone=phone)
 
 
 async def test_seeding_stores_config_phones_confirmed(url):

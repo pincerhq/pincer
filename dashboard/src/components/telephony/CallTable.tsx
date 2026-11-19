@@ -71,13 +71,13 @@ export function CallTable({
           </thead>
           <tbody>
             {calls.map((call) => (
-              <tr key={call.call_id} className="border-b border-[var(--color-border)]/60 hover:bg-white/[0.03]">
+              <tr key={call.id} className="border-b border-[var(--color-border)]/60 hover:bg-white/[0.03]">
                 <td className="py-2 pr-3">
                   <Link
-                    to={ROUTES.TELEPHONY_CALL.replace(":callRef", call.provider_call_id || call.call_id)}
+                    to={ROUTES.TELEPHONY_CALL.replace(":callRef", call.provider_call_id || call.id)}
                     className="font-mono text-xs text-[var(--color-accent)] hover:underline"
                   >
-                    {call.provider_call_id || shortId(call.call_id)}
+                    {call.provider_call_id || shortId(call.id)}
                   </Link>
                   <div className="mt-0.5 font-mono text-[10px] text-[var(--color-muted)]">
                     {call.direction === "outbound" ? call.to_number_masked : call.from_number_masked}

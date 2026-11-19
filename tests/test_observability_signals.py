@@ -343,7 +343,8 @@ async def _seed_costs(settings, totals: list[float], hours_ago: float = 1.0) -> 
         await ensure_call_costs_table(db)
         for i, total in enumerate(totals):
             await db.execute(
-                "INSERT OR REPLACE INTO pincer_call_costs (call_sid, total_usd, recorded_at) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO pincer_call_costs (id, call_sid, total_usd, recorded_at) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?)",
                 (f"CA_cost_{hours_ago}_{i}", total, recorded),
             )
         await db.commit()

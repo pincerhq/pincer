@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
-from support import identity_entries
+from support import SEED_ID_SQL, identity_entries
 
 from pincer.channels.base import ChannelType
 from pincer.core.identity import IdentityResolver
@@ -139,8 +139,9 @@ class TestIdentityResolver:
         # Their LID is not yet in the DB
         async with _rows(r) as db:
             cursor = await db.execute(
-                "SELECT pincer_user_id FROM pincer_channel_identities "
-                "WHERE channel = 'whatsapp' AND channel_user_id = '35240793874528'",
+                "SELECT p.pincer_user_id FROM pincer_identity_channels c "
+                "JOIN pincer_identity_profiles p ON p.id = c.profile_id "
+                "WHERE c.channel = 'whatsapp' AND c.channel_user_id = '35240793874528'",
             )
             assert await cursor.fetchone() is None
 
@@ -554,7 +555,7 @@ class TestSeedFromConfig:
         assert await r.get_all_channels("bob") == {ChannelType.TELEGRAM: "222"}
         async with (
             _rows(r) as db,
-            db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = ''") as cur,
+            db.execute("SELECT COUNT(*) FROM pincer_identity_channels WHERE channel_user_id = ''") as cur,
         ):
             assert (await cur.fetchone())[0] == 0
         assert any("empty ID for '490000000001'" in rec.message for rec in caplog.records)
@@ -844,7 +845,7 @@ class TestCleanup:
         # Row must still exist
         async with (
             aiosqlite.connect(str(db_path)) as db,
-            db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '12345'") as cur,
+            db.execute("SELECT COUNT(*) FROM pincer_identity_channels WHERE channel_user_id = '12345'") as cur,
         ):
             assert (await cur.fetchone())[0] == 1
         assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
@@ -862,8 +863,9 @@ class TestCleanup:
         uid = await r.resolve(ChannelType.TELEGRAM, 12345)
         async with aiosqlite.connect(str(db_path)) as db:
             await db.execute(
-                "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
-                "VALUES ('whatsapp', '35240793874528', ?)",
+                "INSERT INTO pincer_identity_channels (id, channel, channel_user_id, profile_id) "
+                f"VALUES ({SEED_ID_SQL}, 'whatsapp', '35240793874528', "
+                "(SELECT id FROM pincer_identity_profiles WHERE pincer_user_id = ?))",
                 (uid,),
             )
             await db.commit()
@@ -872,12 +874,12 @@ class TestCleanup:
 
         async with aiosqlite.connect(str(db_path)) as db:
             async with db.execute(
-                "SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '35240793874528'"
+                "SELECT COUNT(*) FROM pincer_identity_channels WHERE channel_user_id = '35240793874528'"
             ) as cur:
                 assert (await cur.fetchone())[0] == 0
             # Listed channels survive
             async with db.execute(
-                "SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '12345'"
+                "SELECT COUNT(*) FROM pincer_identity_channels WHERE channel_user_id = '12345'"
             ) as cur:
                 assert (await cur.fetchone())[0] == 1
 
@@ -893,11 +895,13 @@ class TestCleanup:
         # Create an identity linked only to an unlisted channel
         async with aiosqlite.connect(str(db_path)) as db:
             await db.execute(
-                "INSERT INTO pincer_identity_profiles (pincer_user_id, preferred_channel) VALUES ('ghost', 'whatsapp')"
+                "INSERT INTO pincer_identity_profiles (id, pincer_user_id, preferred_channel) "
+                f"VALUES ({SEED_ID_SQL}, 'ghost', 'whatsapp')"
             )
             await db.execute(
-                "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
-                "VALUES ('whatsapp', '35240793874528', 'ghost')"
+                "INSERT INTO pincer_identity_channels (id, channel, channel_user_id, profile_id) "
+                f"VALUES ({SEED_ID_SQL}, 'whatsapp', '35240793874528', "
+                "(SELECT id FROM pincer_identity_profiles WHERE pincer_user_id = 'ghost'))"
             )
             await db.commit()
 
@@ -1047,7 +1051,8 @@ class TestPromoteChannelId:
         async with (
             _rows(r) as db,
             db.execute(
-                "SELECT channel_user_id, pincer_user_id FROM pincer_channel_identities WHERE channel = 'whatsapp'"
+                "SELECT c.channel_user_id, p.pincer_user_id FROM pincer_identity_channels c "
+                "JOIN pincer_identity_profiles p ON p.id = c.profile_id WHERE c.channel = 'whatsapp'"
             ) as cur,
         ):
             return sorted(await cur.fetchall())
@@ -1111,9 +1116,9 @@ class TestPromoteChannelId:
         r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE}", "jane@telegram:222")
         replace = r._store.replace_channel_links
 
-        async def racing_replace(*args):
+        async def racing_replace(*args, **kwargs):
             await r._store.link_channel("jane", "whatsapp", TOM_LID)
-            return await replace(*args)
+            return await replace(*args, **kwargs)
 
         r._store.replace_channel_links = racing_replace
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
@@ -1140,6 +1145,117 @@ class TestPromoteChannelId:
 
         assert await self._whatsapp_rows(r) == [(TOM_LID, "tom")]
         assert await r.find(ChannelType.TELEGRAM, 111) == "tom"
+
+
+@pytest.mark.asyncio
+class TestLidIsNeverSwappedBack:
+    """Once a WhatsApp link is a LID it stays one: a restart where WhatsApp is
+    off, unpaired or does not know the phone yet keeps it, and links no phone."""
+
+    TOM = f"tom@whatsapp:{TOM_PHONE}=telegram:111"
+
+    def _resolver(self, tmp_path, *people: str, mode: str = "update"):
+        return IdentityResolver(tmp_path / "lid.db", identity_entries(*(people or (self.TOM,))), mode=mode)
+
+    async def _start(self, r, channels):
+        await r.ensure_table()
+        await r.cleanup_phones()
+        await r.seed_from_config(channels)
+        await r.cleanup(channels)
+        r.mark_seeding_complete()
+
+    async def _links(self, r):
+        async with (
+            _rows(r) as db,
+            db.execute(
+                "SELECT channel_user_id, alt_id FROM pincer_identity_channels WHERE channel = 'whatsapp' "
+                "ORDER BY channel_user_id"
+            ) as cur,
+        ):
+            return [tuple(row) for row in await cur.fetchall()]
+
+    async def _legacy_lid(self, r):
+        """A LID link re-keyed before `alt_id` existed: it does not say which phone it was."""
+        async with _rows(r) as db:
+            await db.execute(
+                "UPDATE pincer_identity_channels SET channel_user_id = ?, alt_id = NULL "
+                "WHERE channel = 'whatsapp' AND channel_user_id = ?",
+                (TOM_LID, TOM_PHONE),
+            )
+            await db.commit()
+
+    async def test_seeding_records_the_phone_a_resolved_lid_stands_for(self, tmp_path):
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.WHATSAPP: _StubChannel(TOM_LID)})
+
+        assert await self._links(r) == [(TOM_LID, TOM_PHONE)]
+
+    @pytest.mark.parametrize("mode", ["update", "sync"])
+    @pytest.mark.parametrize(
+        "channels",
+        [
+            pytest.param({ChannelType.TELEGRAM: _StubChannel()}, id="whatsapp-off"),
+            pytest.param({}, id="no-channels"),
+            pytest.param({ChannelType.WHATSAPP: _StubChannel()}, id="phone-unknown-to-whatsapp"),
+        ],
+    )
+    async def test_a_restart_that_cannot_ask_whatsapp_keeps_the_lid(self, tmp_path, mode, channels):
+        await self._start(self._resolver(tmp_path, mode=mode), {ChannelType.WHATSAPP: _StubChannel(TOM_LID)})
+
+        r = self._resolver(tmp_path, mode=mode)
+        await self._start(r, channels)
+
+        assert await self._links(r) == [(TOM_LID, TOM_PHONE)]
+        assert await r.find(ChannelType.WHATSAPP, TOM_LID) == "tom"
+
+    async def test_a_lid_promoted_at_runtime_survives_a_restart_without_whatsapp(self, tmp_path):
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.WHATSAPP: _StubChannel()})
+        assert await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE]) == "tom"
+        assert await self._links(r) == [(TOM_LID, TOM_PHONE)]
+
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.TELEGRAM: _StubChannel()})
+
+        assert await self._links(r) == [(TOM_LID, TOM_PHONE)]
+
+    async def test_a_legacy_lid_without_its_phone_is_kept_and_the_phone_not_linked(self, tmp_path):
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.WHATSAPP: _StubChannel()})
+        await self._legacy_lid(r)
+
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.TELEGRAM: _StubChannel()})
+
+        assert await self._links(r) == [(TOM_LID, None)]
+        assert await r.find(ChannelType.TELEGRAM, 111) == "tom"
+
+    async def test_the_next_message_records_the_phone_of_a_legacy_lid(self, tmp_path):
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.WHATSAPP: _StubChannel()})
+        await self._legacy_lid(r)
+
+        assert await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE]) == "tom"
+
+        assert await self._links(r) == [(TOM_LID, TOM_PHONE)]
+
+    async def test_a_message_addressed_by_the_phone_finds_the_lid_identity_without_linking_it(self, tmp_path):
+        r = self._resolver(tmp_path)
+        await self._start(r, {ChannelType.WHATSAPP: _StubChannel(TOM_LID)})
+
+        assert await r.find(ChannelType.WHATSAPP, TOM_PHONE) == "tom"
+        assert await r.resolve(ChannelType.WHATSAPP, TOM_PHONE) == "tom"
+        await r.link_if_new("tom", ChannelType.WHATSAPP, TOM_PHONE)
+
+        assert await self._links(r) == [(TOM_LID, TOM_PHONE)]
+
+    async def test_a_new_phone_in_the_config_replaces_the_old_lid(self, tmp_path):
+        await self._start(self._resolver(tmp_path), {ChannelType.WHATSAPP: _StubChannel(TOM_LID)})
+
+        r = self._resolver(tmp_path, "tom@whatsapp:4915550000000=telegram:111")
+        await self._start(r, {ChannelType.TELEGRAM: _StubChannel()})
+
+        assert await self._links(r) == [("4915550000000", None)]
 
 
 @pytest.mark.asyncio

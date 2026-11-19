@@ -32,7 +32,7 @@ EXPECTED_TABLES = {
     "pincer_entities",
     "pincer_sessions",
     "pincer_identity_profiles",
-    "pincer_channel_identities",
+    "pincer_identity_channels",
     "pincer_identity_credentials",
     "pincer_auth_sessions",
     "pincer_onboarding",
@@ -42,12 +42,6 @@ EXPECTED_TABLES = {
     "pincer_briefing_configs",
     "pincer_cost_logs",
     "pincer_image_cost_logs",
-    "pincer_registry_skills",
-    "pincer_expenses",
-    "pincer_habits",
-    "pincer_habit_checkins",
-    "pincer_pomodoro_sessions",
-    "pincer_discord_threads",
     "pincer_voice_calls",
     "pincer_call_transcripts",
     "pincer_call_actions",
@@ -59,6 +53,106 @@ _ADDED_AFTER_0018 = {
     "call_transcripts": {"delivery_reason"},  # 0027
     "cost_logs": {"cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"},  # 0029
 }
+
+_DORMANT = {
+    "pincer_registry_skills",
+    "pincer_expenses",
+    "pincer_habits",
+    "pincer_habit_checkins",
+    "pincer_pomodoro_sessions",
+    "pincer_discord_threads",
+}
+
+_THREAD_0032 = "01890000-0000-7000-8000-000000000001"
+_CALL_0032 = "01890000-0000-7000-8000-000000000002"
+
+_SEED_0032 = (
+    "INSERT INTO pincer_call_threads (thread_id, subject, origin, created_at, updated_at) "
+    f"VALUES ('{_THREAD_0032}', 's', 'inbound', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+    # Inserted newest first, so key order and time order disagree.
+    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA1', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_costs (call_sid, recorded_at) VALUES ('CA2', '2026-02-01T00:00:00')",
+    "INSERT INTO pincer_call_analytics (call_sid, method, created_at) VALUES ('CA1', 'vad', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_origins (call_sid, user_id, created_at) VALUES ('CA1', 'chat-1', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_call_thread_members (call_sid, thread_id, attached_at) "
+    f"VALUES ('CA1', '{_THREAD_0032}', '2026-03-01T00:00:00')",
+    "INSERT INTO pincer_do_not_call_numbers (phone_number, added_at) VALUES ('+491', '2026-03-01T00:00:00')",
+    # Same timestamp: the monotonic clock and then `seq` decide.
+    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+    f"VALUES ('e-a', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 5, 1)",
+    "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+    f"VALUES ('e-b', '{_CALL_0032}', 'n', '2026-03-01T00:00:00', 2, 1)",
+    "INSERT INTO pincer_telephony_spans (span_id, call_id, name, start_utc) "
+    f"VALUES ('s1', '{_CALL_0032}', 'llm', '2026-03-01T00:00:00')",
+)
+
+#: (table, old name) of the UUIDv7 keys 0032 renames `id`.
+_RENAMED_0032 = (
+    ("pincer_telephony_turns", "turn_id"),
+    ("pincer_telephony_calls", "call_id"),
+    ("pincer_call_threads", "thread_id"),
+)
+
+#: (table, old name, new name) of the outside keys 0032 renames.
+_REFERENCES_0032 = (
+    ("pincer_telephony_events", "event_id", "reference_event_id"),
+    ("pincer_telephony_spans", "span_id", "reference_span_id"),
+)
+
+_TURN = "01890000-0000-7000-8000-0000000000e1"
+_TURN_CALL = "01890000-0000-7000-8000-0000000000e2"
+
+_S1 = "01890000-0000-7000-8000-0000000000a1"
+_S2 = "01890000-0000-7000-8000-0000000000a2"
+_SESSION_0033 = "01890000-0000-7000-8000-0000000000b1"
+
+_SEED_0033 = (
+    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('alice', '2026-01-02T00:00:00')",
+    "INSERT INTO pincer_identity_profiles (pincer_user_id, created_at) VALUES ('bob', '2026-01-01T00:00:00')",
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
+    "VALUES ('telegram', '1', 'alice')",
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '2', 'bob')",
+    "INSERT INTO pincer_identity_phones (phone, pincer_user_id, source) VALUES ('+491', 'alice', 'config')",
+    "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash) VALUES ('alice', 'h')",
+    "INSERT INTO pincer_auth_sessions (id, pincer_user_id, refresh_jti, expires_at) "
+    f"VALUES ('{_SESSION_0033}', 'alice', 'j', 1.0)",
+    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
+    f"VALUES ('{_S1}', 'alice', 'a', '* * * * *', '{{}}')",
+    # `system` names no profile: its schedule keeps the text and no profile_id.
+    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action) "
+    f"VALUES ('{_S2}', 'system', 'b', '* * * * *', '{{}}')",
+    "INSERT INTO pincer_memories (id, user_id, content, created_at) "
+    "VALUES ('01890000-0000-7000-8000-0000000000c1', 'alice', 'likes tea', 0)",
+)
+
+#: A link to a profile that is gone: SQLite never enforced the foreign key.
+_ORPHAN_0033 = (
+    "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '9', 'ghost')"
+)
+
+_SEED_0034 = (
+    "INSERT INTO pincer_identity_profiles (id, pincer_user_id) "
+    "VALUES ('01890000-0000-7000-8000-0000000000d1', 'alice')",
+    # Newest first, so key order and time order disagree.
+    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+    "VALUES ('unified:alice', 'alice', 'telegram', 20.0, 20.0)",
+    "INSERT INTO pincer_sessions (session_id, user_id, channel, created_at, updated_at) "
+    "VALUES ('web:guest', 'guest', 'web', 10.0, 10.0)",
+    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+    "VALUES ('unified:alice', 'aa', 'image/jpeg', X'FF', 21.0)",
+    # Onboarding has no creation time: asked, or else closed.
+    "INSERT INTO pincer_onboarding (user_id, channel, asked_at) VALUES ('alice', 'telegram', 5.0)",
+    "INSERT INTO pincer_onboarding (user_id, channel, completed_at) VALUES ('guest', 'web', 1.0)",
+)
+
+#: A photo of a session that is gone: SQLite never enforced the foreign key.
+_ORPHAN_0034 = (
+    "INSERT INTO pincer_session_images (session_id, sha256, media_type, data, created_at) "
+    "VALUES ('gone:x', 'bb', 'image/jpeg', X'FF', 1.0)"
+)
+
+#: The id of a row deleted behind the migration's back.
+_GONE = "01890000-0000-7000-8000-0000000000e0"
 
 
 def _tables(db_path: Path) -> set[str]:
@@ -171,7 +265,8 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
         links = {
             (channel, channel_user_id)
             for channel, channel_user_id in con.execute(
-                "SELECT channel, channel_user_id FROM pincer_channel_identities WHERE pincer_user_id = 'usr_abc'"
+                "SELECT c.channel, c.channel_user_id FROM pincer_identity_channels c "
+                "JOIN pincer_identity_profiles p ON p.id = c.profile_id WHERE p.pincer_user_id = 'usr_abc'"
             ).fetchall()
         }
         assert links == {("telegram", "555111"), ("whatsapp", "491234567890")}
@@ -974,7 +1069,7 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         ]
         # The thread keeps its subject and loses its old hand-made id: 0018
         # converts it, so the value is a v7 uuid rather than `th_1`.
-        ((thread_id, subject),) = con.execute("SELECT thread_id, subject FROM pincer_call_threads").fetchall()
+        ((thread_id, subject),) = con.execute("SELECT id, subject FROM pincer_call_threads").fetchall()
         assert subject == "Angebot"
         assert uuid.UUID(thread_id).version == 7
         # The member still points at its thread — both sides rewritten from one map.
@@ -1296,7 +1391,9 @@ def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(mig
     with _connect(migration_url) as conn:
         before = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
 
-    command.upgrade(cfg, "head")
+    # Up to the revision before 0032, which starts giving tables new keys and
+    # columns on purpose; everything 0019-0031 did is accounted for below.
+    command.upgrade(cfg, "0031")
 
     with _connect(migration_url) as conn:
         # 0019 has since prefixed every table; look each one up under its new
@@ -2005,9 +2102,11 @@ def test_0020_deletes_webhook_retry_schedules_and_keeps_the_rest(migration_url, 
 
 def test_0021_identity_credentials_constraints(migration_url, tmp_path):
     """Issue #228: one credentials row per identity, an API key hash names at
-    most one of them, and an identity with only a password has none."""
+    most one of them, and an identity with only a password has none.
+
+    At 0032: 0033 re-keys credentials by the profile's id (see `test_0033_*`)."""
     cfg = _config(migration_url, tmp_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0032")
     insert = sa.text(
         "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash, api_key_hash) "
         "VALUES (:uid, :password_hash, :api_key_hash)"
@@ -2082,8 +2181,9 @@ def test_0022_auth_sessions_belong_to_credentials_and_round_trip(migration_url, 
 
 
 def test_0023_onboarding_is_keyed_by_user_and_channel_and_round_trips(migration_url, tmp_path):
+    """At 0033: 0034 gives the table an `id` and keeps (user, channel) unique (see `test_0034_*`)."""
     cfg = _config(migration_url, tmp_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0033")
     engine_ = sa.create_engine(migration_url)
     try:
         inspector = sa.inspect(engine_)
@@ -2288,3 +2388,407 @@ def test_0030_session_images_hang_off_their_session_and_the_downgrade_drops_them
             assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 0
     finally:
         engine_.dispose()
+
+
+# ── 0031: dormant tables ───────────────────────────────────────────────
+
+
+def test_0031_drops_the_dormant_tables_and_the_downgrade_recreates_them_empty(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0030")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        assert set(sa.inspect(engine_).get_table_names()) >= _DORMANT
+        with engine_.begin() as conn:
+            conn.execute(sa.text("INSERT INTO pincer_habits (pincer_user_id, habit_name) VALUES ('alice', 'run')"))
+
+        command.upgrade(cfg, "0031")
+        assert not (_DORMANT & set(sa.inspect(engine_).get_table_names()))
+        assert _version(engine_) == "0031"
+
+        command.downgrade(cfg, "0030")
+        inspector = sa.inspect(engine_)
+        assert set(inspector.get_table_names()) >= _DORMANT
+        assert _version(engine_) == "0030"
+        assert {fk["referred_table"] for fk in inspector.get_foreign_keys("pincer_expenses")} == {
+            "pincer_identity_profiles"
+        }
+        with engine_.connect() as conn:
+            # An expression index: SQLite's reflection skips it, so read the catalog.
+            index_names = (
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+                if engine_.dialect.name == "sqlite"
+                else "SELECT indexname FROM pg_indexes"
+            )
+            assert "idx_habit_checkins_daily" in set(conn.execute(sa.text(index_names)).scalars())
+            assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_habits")).scalar_one() == 0
+
+        command.upgrade(cfg, "0031")
+        assert not (_DORMANT & set(sa.inspect(engine_).get_table_names()))
+    finally:
+        engine_.dispose()
+
+
+# ── 0032: UUIDv7 ids for the natural-key tables ────────────────────────
+
+
+def _0032_tables() -> tuple[tuple[str, str, str, str, tuple[str, ...]], ...]:
+    path = Path(__file__).parents[1] / "src/pincer/db/migrations/versions/0032_uuid7_natural_key_tables.py"
+    spec = importlib.util.spec_from_file_location("rev_0032", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.TABLES
+
+
+def _member_fk(inspector: sa.Inspector) -> tuple[str, list[str]]:
+    """What a thread member's foreign key points at."""
+    (fk,) = [
+        fk
+        for fk in inspector.get_foreign_keys("pincer_call_thread_members")
+        if fk["constrained_columns"] == ["thread_id"]
+    ]
+    return fk["referred_table"], fk["referred_columns"]
+
+
+def test_0032_gives_each_natural_key_table_a_dated_id_and_keeps_the_old_key_unique(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0031")
+    with _connect(migration_url) as conn:
+        for insert in _SEED_0032:
+            conn.execute(sa.text(insert))
+        conn.execute(sa.text(f"INSERT INTO pincer_telephony_calls (call_id) VALUES ('{_TURN_CALL}')"))
+        conn.execute(
+            sa.text(
+                f"INSERT INTO pincer_telephony_turns (turn_id, call_id, created_at) "
+                f"VALUES ('{_TURN}', '{_TURN_CALL}', '2026-01-01T00:00:00')"
+            )
+        )
+        before = {table: _shape(sa.inspect(conn), table) for table, *_ in _0032_tables()}
+
+    command.upgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        for table, key, *_ in _0032_tables():
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+            assert [key] in [u["column_names"] for u in inspector.get_unique_constraints(table)], table
+            columns = {c["name"]: c["nullable"] for c in inspector.get_columns(table)}
+            assert (columns["id"], columns[key]) == (False, False), table
+            assert conn.execute(sa.text(f"SELECT COUNT(*) FROM {table} WHERE id IS NULL")).scalar_one() == 0  # noqa: S608
+
+        def ids(table: str, key: str) -> list[str]:
+            rows = conn.execute(sa.text(f"SELECT {key}, id FROM {table} ORDER BY id")).all()  # noqa: S608
+            return [str(row[0]) for row in rows]
+
+        # The UUIDv7 keys since 0018 are renamed `id`, not re-minted.
+        for table, old in _RENAMED_0032:
+            names = {c["name"] for c in inspector.get_columns(table)}
+            assert "id" in names and old not in names, table
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+        assert str(conn.execute(sa.text("SELECT id FROM pincer_telephony_turns")).scalar_one()) == _TURN
+        assert str(conn.execute(sa.text("SELECT id FROM pincer_call_threads")).scalar_one()) == _THREAD_0032
+        assert _member_fk(inspector) == ("pincer_call_threads", ["id"])
+        # The outside keys say they are one, and their constraints say so too.
+        for table, old, new in _REFERENCES_0032:
+            assert old not in {c["name"] for c in inspector.get_columns(table)}, table
+            assert {u["name"] for u in inspector.get_unique_constraints(table)} == {f"uq_{table[7:]}_{new}"}, table
+
+        # Ordered by the row's own time, not its key.
+        assert ids("pincer_call_costs", "call_sid") == ["CA2", "CA1"]
+        assert ids("pincer_telephony_events", "reference_event_id") == ["e-b", "e-a"]
+
+        with pytest.raises(sa.exc.IntegrityError), conn.begin_nested():
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_call_costs (id, call_sid, recorded_at) "
+                    "VALUES ('01890000-0000-7000-8000-0000000000ff', 'CA1', '2026-04-01T00:00:00')"
+                )
+            )
+
+    command.downgrade(cfg, "0031")
+    with _connect(migration_url) as conn:
+        after = {table: _shape(sa.inspect(conn), table) for table, *_ in _0032_tables()}
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_call_costs")).scalar_one() == 2
+        inspector = sa.inspect(conn)
+        for table, old in _RENAMED_0032:
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == [old], table
+        assert _member_fk(inspector) == ("pincer_call_threads", ["thread_id"])
+    if migration_url.startswith("sqlite"):
+        # SQLite let these TEXT primary keys hold NULL; the restored key says
+        # NOT NULL (`unswap_primary_key`). Everything else is as it was.
+        old_names = {new: old for _table, old, new in _REFERENCES_0032}
+        for table, key, *_ in _0032_tables():
+            old = old_names.get(key, key)
+            before[table]["columns"] = [(n, False if n == old else null) for n, null in before[table]["columns"]]
+    assert after == before
+
+    command.upgrade(cfg, "0032")
+
+
+def test_0032_drops_rows_whose_sqlite_text_key_is_null(migration_url, tmp_path):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("only SQLite let a TEXT primary key hold NULL")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0031")
+    with _connect(migration_url) as conn:
+        for phone in ("NULL", "NULL", "'+15550001'"):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_do_not_call_numbers (phone_number, added_at) "  # noqa: S608
+                    f"VALUES ({phone}, '2026-01-01T00:00:00')"
+                )
+            )
+
+    command.upgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        rows = conn.execute(sa.text("SELECT phone_number, id FROM pincer_do_not_call_numbers")).all()
+    assert [row[0] for row in rows] == ["+15550001"]
+    assert rows[0][1] is not None
+
+
+# ── 0033: identity profile ids ─────────────────────────────────────────
+
+
+def test_0033_keys_identities_by_id_and_points_every_user_reference_at_it(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0032")
+    sqlite = migration_url.startswith("sqlite")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0033, *((_ORPHAN_0033,) if sqlite else ())):
+            conn.execute(sa.text(insert))
+        before = {
+            table: _shape(sa.inspect(conn), table)
+            for table in ("pincer_identity_profiles", "pincer_channel_identities", "pincer_schedules")
+        }
+
+    command.upgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        tables = set(inspector.get_table_names())
+        assert "pincer_identity_channels" in tables
+        assert "pincer_channel_identities" not in tables
+        assert inspector.get_pk_constraint("pincer_identity_profiles")["constrained_columns"] == ["id"]
+        for table in ("pincer_identity_channels", "pincer_identity_phones", "pincer_identity_credentials"):
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+        for table in (
+            "pincer_identity_channels",
+            "pincer_identity_phones",
+            "pincer_identity_credentials",
+            "pincer_auth_sessions",
+        ):
+            columns = {c["name"]: c["nullable"] for c in inspector.get_columns(table)}
+            assert "pincer_user_id" not in columns, table
+            assert columns["profile_id"] is False, table
+
+        ids = dict(conn.execute(sa.text("SELECT pincer_user_id, id FROM pincer_identity_profiles")).all())
+        # Dated by `created_at`: bob was made first.
+        assert str(ids["bob"]) < str(ids["alice"])
+
+        def owner(sql: str) -> list[str]:
+            return [str(row[0]) for row in conn.execute(sa.text(sql)).all()]
+
+        assert owner(
+            "SELECT p.pincer_user_id FROM pincer_identity_channels c "
+            "JOIN pincer_identity_profiles p ON p.id = c.profile_id ORDER BY c.channel_user_id"
+        ) == ["alice", "bob"]  # the orphan is gone
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_identity_channels")).scalar_one() == 2
+        # Which phone a LID link stands for is not known yet: the next message records it.
+        assert {c["name"]: c["nullable"] for c in inspector.get_columns("pincer_identity_channels")}["alt_id"]
+        assert "idx_identity_channels_alt" in {i["name"] for i in inspector.get_indexes("pincer_identity_channels")}
+        assert (
+            conn.execute(sa.text("SELECT COUNT(*) FROM pincer_identity_channels WHERE alt_id IS NOT NULL")).scalar_one()
+            == 0
+        )
+        assert owner("SELECT CAST(profile_id AS TEXT) FROM pincer_identity_phones") == [str(ids["alice"])]
+        assert owner("SELECT CAST(profile_id AS TEXT) FROM pincer_auth_sessions") == [str(ids["alice"])]
+        schedules = {
+            str(row[0]): (row[1], None if row[2] is None else str(row[2]))
+            for row in conn.execute(sa.text("SELECT id, pincer_user_id, profile_id FROM pincer_schedules")).all()
+        }
+        assert schedules == {_S1: ("alice", str(ids["alice"])), _S2: ("system", None)}
+        assert owner("SELECT CAST(profile_id AS TEXT) FROM pincer_memories") == [str(ids["alice"])]
+        if sqlite:
+            # The rebuild kept the full-text index in step with the table.
+            assert (
+                conn.execute(
+                    sa.text("SELECT COUNT(*) FROM pincer_memories_fts WHERE pincer_memories_fts MATCH 'tea'")
+                ).scalar_one()
+                == 1
+            )
+
+    command.downgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        assert "pincer_channel_identities" in set(inspector.get_table_names())
+        after = {table: _shape(inspector, table) for table in before}
+        links = conn.execute(
+            sa.text("SELECT channel_user_id, pincer_user_id FROM pincer_channel_identities ORDER BY channel_user_id")
+        ).all()
+        assert [tuple(row) for row in links] == [("1", "alice"), ("2", "bob")]
+        assert conn.execute(sa.text("SELECT pincer_user_id FROM pincer_identity_credentials")).scalar_one() == "alice"
+        assert conn.execute(sa.text("SELECT pincer_user_id FROM pincer_auth_sessions")).scalar_one() == "alice"
+        assert "profile_id" not in {c["name"] for c in inspector.get_columns("pincer_schedules")}
+    if sqlite:
+        # The restored keys say NOT NULL, as `unswap_primary_key` documents.
+        before["pincer_identity_profiles"]["columns"] = [
+            (n, False if n == "pincer_user_id" else null) for n, null in before["pincer_identity_profiles"]["columns"]
+        ]
+        before["pincer_channel_identities"]["columns"] = [
+            (n, False if n in ("channel", "channel_user_id") else null)
+            for n, null in before["pincer_channel_identities"]["columns"]
+        ]
+    assert after == before
+
+    command.upgrade(cfg, "0033")
+
+
+# ── 0034: session ids ──────────────────────────────────────────────────
+
+
+def test_0034_gives_sessions_photos_and_onboarding_an_id(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0033")
+    sqlite = migration_url.startswith("sqlite")
+    seed = [*_SEED_0034, *((_ORPHAN_0034,) if sqlite else ())]
+    if not sqlite:
+        seed = [insert.replace("X'FF'", "'\\xff'::bytea") for insert in seed]
+    with _connect(migration_url) as conn:
+        for insert in seed:
+            conn.execute(sa.text(insert))
+        before = {
+            table: _shape(sa.inspect(conn), table)
+            for table in ("pincer_sessions", "pincer_session_images", "pincer_onboarding")
+        }
+
+    command.upgrade(cfg, "0034")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        for table in ("pincer_sessions", "pincer_session_images", "pincer_onboarding"):
+            assert inspector.get_pk_constraint(table)["constrained_columns"] == ["id"], table
+        (fk,) = inspector.get_foreign_keys("pincer_session_images")
+        assert (fk["constrained_columns"], fk["referred_columns"]) == (["session_ref"], ["id"])
+
+        def ordered(sql: str) -> list[str]:
+            return [str(row[0]) for row in conn.execute(sa.text(sql)).all()]
+
+        assert ordered("SELECT session_id FROM pincer_sessions ORDER BY id") == ["web:guest", "unified:alice"]
+        assert ordered("SELECT user_id FROM pincer_onboarding ORDER BY id") == ["guest", "alice"]
+        photos = conn.execute(
+            sa.text(
+                "SELECT s.session_id, i.sha256 FROM pincer_session_images i "
+                "JOIN pincer_sessions s ON s.id = i.session_ref"
+            )
+        ).all()
+        assert [tuple(row) for row in photos] == [("unified:alice", "aa")]  # the orphan is gone
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 1
+        profiles = dict(conn.execute(sa.text("SELECT user_id, CAST(profile_id AS TEXT) FROM pincer_sessions")).all())
+        assert profiles == {"alice": "01890000-0000-7000-8000-0000000000d1", "guest": None}
+
+    command.downgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        after = {table: _shape(sa.inspect(conn), table) for table in before}
+        photos = conn.execute(sa.text("SELECT session_id, sha256 FROM pincer_session_images")).all()
+        assert [tuple(row) for row in photos] == [("unified:alice", "aa")]
+    if sqlite:
+        # The restored keys say NOT NULL, as `unswap_primary_key` documents.
+        before["pincer_sessions"]["columns"] = [
+            (n, False if n == "session_id" else null) for n, null in before["pincer_sessions"]["columns"]
+        ]
+    assert after == before
+
+    command.upgrade(cfg, "0034")
+
+
+# ── 0031–0034: retryable on SQLite, and no silent drops ────────────────
+
+
+def test_a_failed_sqlite_downgrade_rolls_back_whole_and_can_be_retried(migration_url, tmp_path, monkeypatch):
+    """The 0034 downgrade starts with a DROP INDEX. Without `hold_transaction`
+    the sqlite3 driver committed it on its own, so a failure further on left
+    the index gone at revision 0034 and the retry died on "no such index"."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres DDL is transactional")
+    import pincer.db.migration_helpers as helpers
+
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0034")
+    unswap = helpers.unswap_primary_key
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("fails part-way")
+
+    monkeypatch.setattr(helpers, "unswap_primary_key", fail)
+    with pytest.raises(RuntimeError, match="part-way"):
+        command.downgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT version_num FROM pincer_alembic_version")).scalar_one() == "0034"
+        index = "SELECT COUNT(*) FROM sqlite_master WHERE name = 'ix_pincer_onboarding_profile_id'"
+        assert conn.execute(sa.text(index)).scalar_one() == 1
+
+    monkeypatch.setattr(helpers, "unswap_primary_key", unswap)
+    command.downgrade(cfg, "0033")
+
+
+def test_0034_downgrade_drops_and_logs_photos_whose_session_is_gone(migration_url, tmp_path, caplog):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres enforces the CASCADE: no such photo can exist")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0034")
+    with _connect(migration_url) as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO pincer_sessions (id, session_id, user_id, channel, created_at, updated_at) "
+                f"VALUES ('{_GONE}', 'unified:alice', 'alice', 'telegram', 1.0, 1.0)"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO pincer_session_images (id, session_ref, sha256, media_type, data, created_at) "
+                f"VALUES ('01890000-0000-7000-8000-0000000000e1', '{_GONE}', 'aa', 'image/jpeg', X'FF', 1.0)"
+            )
+        )
+        conn.execute(sa.text("DELETE FROM pincer_sessions"))  # foreign keys off: the photo stays
+
+    with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+        command.downgrade(cfg, "0033")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_session_images")).scalar_one() == 0
+    assert any("pincer_session_images" in line and _GONE in line for line in caplog.messages)
+
+
+def test_0033_downgrade_drops_and_logs_identity_rows_whose_profile_is_gone(migration_url, tmp_path, caplog):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres enforces the foreign keys: no such row can exist")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0033")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(f"INSERT INTO pincer_identity_profiles (id, pincer_user_id) VALUES ('{_GONE}', 'alice')"))
+        conn.execute(
+            sa.text(
+                "INSERT INTO pincer_identity_phones (id, phone, profile_id, source) "
+                f"VALUES ('01890000-0000-7000-8000-0000000000e2', '+491', '{_GONE}', 'config')"
+            )
+        )
+        conn.execute(sa.text("DELETE FROM pincer_identity_profiles"))  # foreign keys off: the phone stays
+
+    with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+        command.downgrade(cfg, "0032")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM pincer_identity_phones")).scalar_one() == 0
+    assert any("pincer_identity_phones" in line and _GONE in line for line in caplog.messages)
+
+
+def test_0033_upgrade_logs_the_identity_rows_it_drops(migration_url, tmp_path, caplog):
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres enforced the foreign key: no orphan link to drop")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0032")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(_ORPHAN_0033))
+
+    with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+        command.upgrade(cfg, "0033")
+
+    assert any("pincer_identity_channels" in line and "ghost" in line for line in caplog.messages)

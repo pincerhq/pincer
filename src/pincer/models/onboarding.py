@@ -3,10 +3,12 @@
 from typing import Literal
 
 import sqlalchemy as sa
-from sqlalchemy import Column, Integer, Text
+from sqlalchemy import Column, Integer, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import Real
+from pincer.db.ids import new_id
+from pincer.db.types import Real, Uuid7
+from pincer.models.identity import profile_ref
 
 # Why a row's gate was closed: an answer, the answer window expiring, too many
 # replies with no answer, or a user never asked (onboarded before the table
@@ -25,9 +27,13 @@ class Onboarding(SQLModel, table=True):
     """
 
     __tablename__ = "pincer_onboarding"
+    __table_args__ = (UniqueConstraint("user_id", "channel", name="uq_onboarding_user_id_channel"),)
 
-    user_id: str = Field(sa_column=Column(Text(), primary_key=True))
-    channel: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    user_id: str = Field(sa_column=Column(Text(), nullable=False))
+    # Moved on a rename by its own repository (`move_user`, `reassign_user`), not `follow_profile`.
+    profile_id: str | None = profile_ref("user_id", follows=False)
+    channel: str = Field(sa_column=Column(Text(), nullable=False))
     asked_session_id: str | None = Field(default=None, sa_column=Column(Text()))
     asked_at: float | None = Field(default=None, sa_column=Column(Real()))
     completed_at: float | None = Field(default=None, sa_column=Column(Real()))

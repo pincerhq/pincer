@@ -7,6 +7,7 @@ from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
+from pincer.models.identity import IdentityProfile
 from pincer.models.observability import AppointmentOutcome, CallCost, CanaryRun
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
 from pincer.models.voice import (
@@ -25,6 +26,7 @@ from pincer.services.retention import RetentionService
 _TABLES = [
     model.__table__
     for model in (
+        IdentityProfile,
         AppointmentOutcome,
         CallCost,
         CanaryRun,
@@ -101,10 +103,15 @@ async def test_booking_counts_respect_the_window(url):
 async def test_a_call_cost_is_replaced_when_re_priced(url):
     service = CallCostsService(url)
     await service.save({"call_sid": "CA1", "engine": "media_streams", "total_usd": 1.0, "recorded_at": RECENT})
+    first = await service.get("CA1")
     await service.save({"call_sid": "CA1", "engine": "media_streams", "total_usd": 2.5, "recorded_at": RECENT})
 
     stored = await service.get("CA1")
     assert stored["total_usd"] == pytest.approx(2.5)
+    assert stored["id"] == first["id"]  # replaced in place, not re-keyed
+    # A row read back and saved again carries its id; that must not re-key it either.
+    await service.save({**stored, "id": "01890000-0000-7000-8000-000000000000", "total_usd": 3.0})
+    assert (await service.get("CA1"))["id"] == first["id"]
     assert await service.get("CA-unknown") is None
 
 
@@ -200,11 +207,11 @@ async def test_an_analytics_row_survives_but_its_rationale_does_not(url):
 async def test_the_telemetry_purge_has_its_own_window(url):
     await _add(
         url,
-        TelephonyCall(call_id=seeded_id("c_old"), registered_at=OLD),
-        TelephonyCall(call_id=seeded_id("c_new"), registered_at=RECENT),
-        TelephonyEvent(event_id="e1", call_id=seeded_id("c_old"), name="dial", ts_utc=OLD),
-        TelephonySpan(span_id="s1", call_id=seeded_id("c_old"), name="llm", start_utc=OLD),
-        TelephonyTurn(turn_id=seeded_id("t1"), call_id=seeded_id("c_old"), created_at=OLD),
+        TelephonyCall(id=seeded_id("c_old"), registered_at=OLD),
+        TelephonyCall(id=seeded_id("c_new"), registered_at=RECENT),
+        TelephonyEvent(reference_event_id="e1", call_id=seeded_id("c_old"), name="dial", ts_utc=OLD),
+        TelephonySpan(reference_span_id="s1", call_id=seeded_id("c_old"), name="llm", start_utc=OLD),
+        TelephonyTurn(id=seeded_id("t1"), call_id=seeded_id("c_old"), created_at=OLD),
     )
 
     deleted = await RetentionService(url).purge_telemetry(CUTOFF)

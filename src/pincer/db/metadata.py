@@ -37,13 +37,6 @@ HAND_WRITTEN_TABLES = frozenset(
         "pincer_memories_fts_data",
         "pincer_memories_fts_docsize",
         "pincer_memories_fts_idx",
-        # Dormant: created by 0001, read and written by nothing.
-        "pincer_registry_skills",
-        "pincer_expenses",
-        "pincer_habits",
-        "pincer_habit_checkins",
-        "pincer_pomodoro_sessions",
-        "pincer_discord_threads",
     }
 )
 

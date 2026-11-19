@@ -1,7 +1,7 @@
 """Voice observability: appointment outcomes, per-call costs and canary runs."""
 
 import sqlalchemy as sa
-from sqlalchemy import Column, Index, Integer, Text
+from sqlalchemy import Column, Index, Integer, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
@@ -27,9 +27,13 @@ class AppointmentOutcome(SQLModel, table=True):
 
 class CallCost(SQLModel, table=True):
     __tablename__ = "pincer_call_costs"
-    __table_args__ = (Index("idx_call_costs_recorded", "recorded_at"),)
+    __table_args__ = (
+        UniqueConstraint("call_sid", name="uq_call_costs_call_sid"),
+        Index("idx_call_costs_recorded", "recorded_at"),
+    )
 
-    call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    call_sid: str = Field(sa_column=Column(Text(), nullable=False))
     direction: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     engine: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     language: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))

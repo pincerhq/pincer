@@ -34,7 +34,7 @@ def _is_unresolved_identity(pincer_user_id: str) -> bool:
     When the guest gate is on and a sender is not a known, active identity,
     the middleware hands downstream code a "{channel}:{native_id}" pseudo-id
     (see channels/middleware.py) purely so nothing sees an empty string —
-    it's never persisted to identity_profiles/channel_identities, so a schedule
+    it's never persisted to identity_profiles/identity_channels, so a schedule
     stored under it can never be delivered later. This is a heuristic (a
     genuinely configured canonical name could coincidentally collide with
     this pattern), matching the same prefix check cli.py already uses to

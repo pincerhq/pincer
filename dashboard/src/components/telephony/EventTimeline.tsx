@@ -77,7 +77,7 @@ export function EventTimeline({ events, turnId }: { events: TelephonyEvent[]; tu
               const offset = Date.parse(event.ts_utc) - first
               const attrs = Object.entries(event.attributes).filter(([, v]) => v !== null && v !== "")
               return (
-                <tr key={event.event_id} className="border-b border-[var(--color-border)]/50 align-top">
+                <tr key={event.reference_event_id} className="border-b border-[var(--color-border)]/50 align-top">
                   <td className="w-20 py-1 pr-2 text-right tabular-nums text-[var(--color-muted)]">
                     +{(offset / 1000).toFixed(2)}s
                   </td>

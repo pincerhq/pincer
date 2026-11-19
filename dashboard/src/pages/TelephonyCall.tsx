@@ -52,7 +52,7 @@ function CallDetail() {
   }
 
   const { call, turns, unavailable, telemetry_gaps: gaps } = detail.data
-  const reference = call.provider_call_id || call.call_id
+  const reference = call.provider_call_id || call.id
   const slowest = [...turns]
     .filter((t) => t.response_latency_ms !== null)
     .sort((a, b) => (b.response_latency_ms ?? 0) - (a.response_latency_ms ?? 0))
@@ -91,12 +91,12 @@ function CallDetail() {
                 items: [
                   {
                     label: "Archive · ZIP",
-                    path: `api/telephony/calls/${encodeURIComponent(callRef ?? call.call_id)}/export?format=zip`,
+                    path: `api/telephony/calls/${encodeURIComponent(callRef ?? call.id)}/export?format=zip`,
                     filename: `telephony-call-${reference}.zip`,
                   },
                   {
                     label: "Bundle · JSON",
-                    path: `api/telephony/calls/${encodeURIComponent(callRef ?? call.call_id)}/export?format=json`,
+                    path: `api/telephony/calls/${encodeURIComponent(callRef ?? call.id)}/export?format=json`,
                     filename: `telephony-call-${reference}.json`,
                   },
                 ],
@@ -121,10 +121,10 @@ function CallDetail() {
             <div className="flex flex-wrap gap-2">
               {slowest.map((turn) => (
                 <button
-                  key={turn.turn_id}
-                  onClick={() => setSelectedTurn(turn.turn_id)}
+                  key={turn.id}
+                  onClick={() => setSelectedTurn(turn.id)}
                   className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors hover:bg-white/[0.04] ${
-                    selectedTurn === turn.turn_id
+                    selectedTurn === turn.id
                       ? "border-[var(--color-accent)]/50 bg-white/[0.04]"
                       : "border-[var(--color-border)]"
                   }`}
@@ -212,7 +212,7 @@ function CallDetail() {
                   label: "Spans",
                   filename: `telephony-spans-${reference}`,
                   columns: [
-                    "span_id",
+                    "reference_span_id",
                     "turn_id",
                     "name",
                     "start_offset_ms",
@@ -230,13 +230,13 @@ function CallDetail() {
           {spans.isLoading ? (
             <Skeleton className="h-40 rounded-lg" />
           ) : (
-            <Waterfall spans={turnSpans} onSelect={setSelectedSpan} selectedSpanId={selectedSpan?.span_id} />
+            <Waterfall spans={turnSpans} onSelect={setSelectedSpan} selectedSpanId={selectedSpan?.reference_span_id} />
           )}
           {selectedSpan && (
             <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-white/[0.02] p-3 text-xs">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{stageLabel(selectedSpan.name)}</span>
-                <span className="font-mono text-[10px] text-[var(--color-muted)]">{selectedSpan.span_id}</span>
+                <span className="font-mono text-[10px] text-[var(--color-muted)]">{selectedSpan.reference_span_id}</span>
                 <span className="ml-auto tabular-nums">
                   <Ms value={selectedSpan.duration_ms} />
                 </span>

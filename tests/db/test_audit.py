@@ -8,10 +8,11 @@ import pytest
 
 from pincer.db.engine import get_engine
 from pincer.models.audit import AuditLog
+from pincer.models.identity import IdentityProfile
 from pincer.security.audit import AuditAction, AuditEntry
 from pincer.services.audit import MAX_SUMMARY_LENGTH, AuditService
 
-_TABLES = [AuditLog.__table__]
+_TABLES = [IdentityProfile.__table__, AuditLog.__table__]
 
 
 @pytest.fixture

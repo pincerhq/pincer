@@ -5,7 +5,7 @@ import type { TelephonyMetricDefinition, TelephonyTurn } from "@/api/types"
 
 function turn(engine: string, source: string): TelephonyTurn {
   return {
-    turn_id: "T1",
+    id: "T1",
     call_id: "CA1",
     turn_no: 1,
     engine,

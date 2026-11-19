@@ -8,7 +8,7 @@ rows, and keeps each multi-table operation in one transaction.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -18,10 +18,11 @@ from pincer.db.engine import get_database_url
 from pincer.db.session import session_scope
 from pincer.repositories.identity import (
     AuthSessionRepository,
-    ChannelIdentityRepository,
+    IdentityChannelRepository,
     IdentityCredentialRepository,
     IdentityPhoneRepository,
     IdentityProfileRepository,
+    follow_profile,
 )
 from pincer.repositories.onboarding import OnboardingRepository
 from pincer.repositories.sessions import SessionRepository
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-from collections.abc import Sequence  # noqa: TC003 - dataclass field annotation
+from collections.abc import Mapping, Sequence  # noqa: TC003 - dataclass field annotations
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ class SeedEntry:
     insert: dict[str, Any]
     overwrite: dict[str, Any]
     phones: Sequence[str] = ()
+    #: The configured id each resolved channel id stands for, where they differ
+    #: (a WhatsApp LID → the phone in the TOML), recorded as the link's `alt_id`.
+    alt_ids: Mapping[tuple[str, str], str] = field(default_factory=dict)
 
 
 class ChannelTakenError(Exception):
@@ -126,12 +130,32 @@ class IdentityService(DatabaseService):
     async def user_for_channel(self, channel: str, channel_user_id: str) -> str | None:
         """The active identity this channel id is linked to; a deactivated one counts as none."""
         async with session_scope(self._url) as session:
-            return await ChannelIdentityRepository(session).user_for(channel, channel_user_id, active_only=True)
+            return await IdentityChannelRepository(session).user_for(channel, channel_user_id, active_only=True)
 
     async def owner_any(self, channel: str, channel_user_id: str) -> tuple[str, bool] | None:
         """(owner, active) of this channel id whatever the owner's status, if linked."""
         async with session_scope(self._url) as session:
-            return await ChannelIdentityRepository(session).owner(channel, channel_user_id)
+            return await IdentityChannelRepository(session).owner(channel, channel_user_id)
+
+    async def owner_by_alt(self, channel: str, alt_id: str) -> tuple[str, bool] | None:
+        """(owner, active) of the link stored under this alternate id (a phone behind a LID)."""
+        async with session_scope(self._url) as session:
+            return await IdentityChannelRepository(session).owner_by_alt(channel, alt_id)
+
+    async def linked_as(self, channel: str, alt_id: str) -> str | None:
+        """The channel id stored for this alternate id: the LID a phone number became."""
+        async with session_scope(self._url) as session:
+            return await IdentityChannelRepository(session).linked_as(channel, alt_id)
+
+    async def unaltered_ids(self, pincer_user_id: str, channel: str) -> Sequence[str]:
+        """This identity's ids on `channel` with no alternate id recorded."""
+        async with session_scope(self._url) as session:
+            return await IdentityChannelRepository(session).unaltered_ids(pincer_user_id, channel)
+
+    async def remember_alt(self, channel: str, channel_user_id: str, alt_id: str) -> int:
+        """Record the alternate id (the phone) of a stored link (its LID)."""
+        async with session_scope(self._url) as session:
+            return await IdentityChannelRepository(session).remember_alt(channel, channel_user_id, alt_id)
 
     async def has_roster(self) -> bool:
         """True when a configured or hand-made identity, active or not, has a channel (see the guest gate)."""
@@ -163,22 +187,22 @@ class IdentityService(DatabaseService):
 
     async def profile(self, pincer_user_id: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
-            row = await IdentityProfileRepository(session).get(pincer_user_id)
+            row = await IdentityProfileRepository(session).named(pincer_user_id)
             return None if row is None else {name: getattr(row, name) for name in row.__class__.model_fields}
 
     async def channels_for(self, pincer_user_id: str) -> Sequence[tuple[str, str]]:
         async with session_scope(self._url) as session:
-            return await ChannelIdentityRepository(session).channels_for(pincer_user_id)
+            return await IdentityChannelRepository(session).channels_for(pincer_user_id)
 
     async def owners_on(self, channel: str) -> Sequence[tuple[str, str]]:
         async with session_scope(self._url) as session:
-            return await ChannelIdentityRepository(session).owners_on(channel)
+            return await IdentityChannelRepository(session).owners_on(channel)
 
     async def list_profiles(self, *, search: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Identities with their linked channels, for the dashboard."""
         async with session_scope(self._url) as session:
             profiles = await IdentityProfileRepository(session).search(search, limit)
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             phones = await IdentityPhoneRepository(session).phones_for_many([row.pincer_user_id for row in profiles])
             return [
                 _with_channels(row, await links.links_for(row.pincer_user_id), phones.get(row.pincer_user_id, ()))
@@ -187,10 +211,10 @@ class IdentityService(DatabaseService):
 
     async def profile_with_channels(self, pincer_user_id: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
-            row = await IdentityProfileRepository(session).get(pincer_user_id)
+            row = await IdentityProfileRepository(session).named(pincer_user_id)
             if row is None:
                 return None
-            links = await ChannelIdentityRepository(session).links_for(pincer_user_id)
+            links = await IdentityChannelRepository(session).links_for(pincer_user_id)
             phones = await IdentityPhoneRepository(session).phones_for(pincer_user_id)
         return _with_channels(row, links, phones)
 
@@ -221,7 +245,7 @@ class IdentityService(DatabaseService):
                     "source": source,
                 }
             )
-            await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
+            await IdentityChannelRepository(session).link(channel, channel_user_id, pincer_user_id)
 
     async def create_profile(
         self,
@@ -244,9 +268,9 @@ class IdentityService(DatabaseService):
         now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
-            if await profiles.get(pincer_user_id) is not None:
+            if await profiles.named(pincer_user_id) is not None:
                 return False
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             for channel, channel_user_id in channels:
                 owner = await links.user_for(channel, channel_user_id)
                 if owner is not None:
@@ -279,16 +303,16 @@ class IdentityService(DatabaseService):
 
     async def link_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> None:
         async with session_scope(self._url) as session:
-            await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
+            await IdentityChannelRepository(session).link(channel, channel_user_id, pincer_user_id)
 
     async def add_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> bool:
         """Link a channel id to an existing identity. False when it is already
         linked to it; raises `ChannelTakenError` when it belongs to another
         and `LookupError` when the identity does not exist."""
         async with session_scope(self._url) as session:
-            if await IdentityProfileRepository(session).get(pincer_user_id) is None:
+            if await IdentityProfileRepository(session).named(pincer_user_id) is None:
                 raise LookupError(pincer_user_id)
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             owner = await links.user_for(channel, channel_user_id)
             if owner == pincer_user_id:
                 return False
@@ -300,7 +324,7 @@ class IdentityService(DatabaseService):
     async def unlink_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> bool:
         """Remove one channel id from this identity. False when it was not linked to it."""
         async with session_scope(self._url) as session:
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             if await links.user_for(channel, channel_user_id) != pincer_user_id:
                 return False
             await links.unlink(channel, channel_user_id)
@@ -310,7 +334,7 @@ class IdentityService(DatabaseService):
         """Set the given profile fields (None ones are left alone). False for an unknown identity."""
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
-            if await profiles.get(pincer_user_id) is None:
+            if await profiles.named(pincer_user_id) is None:
                 return False
             await profiles.overwrite(pincer_user_id, values)
         return True
@@ -333,7 +357,7 @@ class IdentityService(DatabaseService):
         now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
-            if await profiles.get(pincer_user_id) is None:
+            if await profiles.named(pincer_user_id) is None:
                 raise LookupError(pincer_user_id)
             phones = IdentityPhoneRepository(session)
             for phone in add_phones:
@@ -364,7 +388,7 @@ class IdentityService(DatabaseService):
         when the identity does not exist."""
         now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
-            if await IdentityProfileRepository(session).get(pincer_user_id) is None:
+            if await IdentityProfileRepository(session).named(pincer_user_id) is None:
                 raise LookupError(pincer_user_id)
             phones = IdentityPhoneRepository(session)
             owner = await phones.owner_of(phone)
@@ -378,7 +402,7 @@ class IdentityService(DatabaseService):
             return bool(await IdentityPhoneRepository(session).delete_for(phone, pincer_user_id))
 
     async def replace_channel_links(
-        self, pincer_user_id: str, channel: str, new_id: str, old_ids: Iterable[str]
+        self, pincer_user_id: str, channel: str, new_id: str, old_ids: Iterable[str], *, alt_id: str | None = None
     ) -> str | None:
         """Re-key an identity on one channel: link `new_id`, drop `old_ids`.
 
@@ -387,37 +411,51 @@ class IdentityService(DatabaseService):
         changes and that owner is returned; None means the re-key happened.
         """
         async with session_scope(self._url) as session:
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             owner = await links.user_for(channel, new_id)
             if owner is not None and owner != pincer_user_id:
                 return owner
-            await links.link(channel, new_id, pincer_user_id)
+            await links.link(channel, new_id, pincer_user_id, alt_id=alt_id)
             for old_id in old_ids:
                 if old_id != new_id:
                     await links.unlink(channel, old_id)
         return None
 
     async def rename_identity(self, old_id: str, new_id: str) -> None:
-        """Move an identity to a new id: profile, links, phones, credentials, its sessions and onboarding.
+        """Move an identity to a new name, or fold it into the identity that already has it.
 
-        One transaction — a half-applied rename would leave channel links
-        pointing at a profile that no longer exists.
+        A rename changes the profile's name; the identity's links, phones and
+        credentials point at its `id` and need nothing more. A merge moves
+        those to the target, then deletes the old profile. Either way the rows
+        it owns by name — schedules, memories, calls — follow (`follow_profile`),
+        those written before it had a profile included, and the old name's
+        signed-in sessions end: their tokens name it.
+
+        One transaction, so a half-applied rename leaves nothing pointing nowhere.
         """
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
-            await profiles.copy_to(old_id, new_id)
-            await ChannelIdentityRepository(session).reassign(old_id, new_id)
-            await IdentityPhoneRepository(session).reassign(old_id, new_id)
-            # Before the old profile goes: on Postgres its deletion cascades to
-            # the credentials, and SQLite (foreign keys off) would strand them.
-            credentials = IdentityCredentialRepository(session)
-            # Sessions name the old id in their tokens, so they cannot follow.
+            old = await profiles.named(old_id)
+            target = await profiles.named(new_id)
             await AuthSessionRepository(session).delete_for_user(old_id)
-            if await profiles.get(new_id) is not None:
-                await credentials.move(old_id, new_id)
-            else:
-                await credentials.delete_by_id(old_id)
-            await profiles.delete_by_id(old_id)
+            if old is not None and target is None:
+                await profiles.rename(old_id, new_id)
+            elif old is not None and target is not None:
+                await IdentityChannelRepository(session).reassign(old_id, new_id)
+                await IdentityPhoneRepository(session).reassign(old_id, new_id)
+                # Before the old profile goes: on Postgres its deletion cascades
+                # to the credentials, and SQLite (foreign keys off) would strand them.
+                await IdentityCredentialRepository(session).move(old_id, new_id)
+            kept = target or old
+            await follow_profile(
+                session,
+                old_id,
+                new_id,
+                profile_id=old.id if old else None,
+                target_id=kept.id if kept else None,
+            )
+            if old is not None and target is not None:
+                await profiles.delete_by_id(old_id)
 
             await SessionRepository(session).move_user(old_id, new_id)
             await OnboardingRepository(session).reassign_user(old_id, new_id)
@@ -443,7 +481,7 @@ class IdentityService(DatabaseService):
         now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             phones = IdentityPhoneRepository(session)
             for entry in identities:
                 await profiles.add_if_new(
@@ -453,7 +491,8 @@ class IdentityService(DatabaseService):
                 # made by resolve() or the CLI) the config wins per field.
                 await profiles.overwrite(entry.pincer_user_id, {**entry.overwrite, "source": SOURCE_CONFIG})
                 for channel, channel_user_id in entry.channels:
-                    await links.link(channel, channel_user_id, entry.pincer_user_id)
+                    alt_id = entry.alt_ids.get((channel, channel_user_id))
+                    await links.link(channel, channel_user_id, entry.pincer_user_id, alt_id=alt_id)
                 for phone in entry.phones:
                     await phones.upsert(phone, entry.pincer_user_id, confirmed=True, source="config", now=now)
 
@@ -481,7 +520,7 @@ class IdentityService(DatabaseService):
         allowed = set(keep)
         scope = None if listed is None else set(listed)
         async with session_scope(self._url) as session:
-            links = ChannelIdentityRepository(session)
+            links = IdentityChannelRepository(session)
             removed = 0
             for channel, channel_user_id, owner, source in await links.pairs_with_owner():
                 if (channel, channel_user_id) in allowed:

@@ -418,6 +418,10 @@ async def make_phone_call(
     # holds it (demo, dashboard, canary and context-less calls stay `remote`,
     # where a grant would be silently ignored) — so refuse instead of dropping.
     owner_identity = str(ctx.get("pincer_user_id") or "")
+    # The call log and the audit trail name the Pincer identity when there is
+    # one, so `profile_id` resolves and the rows follow a rename; `user_id` is
+    # the channel's own id (Telegram `12345`), which names no profile.
+    logged_user = owner_identity or user_id
     if tool_grants and not is_owner_identity(owner_identity):
         logger.info("make_phone_call aborted: allow_tools without an owner identity (user %s)", user_id)
         return "Error: allow_tools needs a signed-in Pincer user. Place the call without it."
@@ -455,7 +459,7 @@ async def make_phone_call(
             decision.reason,
             user_id,
         )
-        await _audit_block(decision, validated, user_id, ctx.get("channel", ""))
+        await _audit_block(decision, validated, logged_user, ctx.get("channel", ""))
         return f"Error: {decision.message}"
 
     try:
@@ -579,7 +583,7 @@ async def make_phone_call(
                 _increment_daily_count(user_id)
                 await asyncio.shield(telemetry.dial_unknown(trace_key, error="CancelledError: dial outcome unknown"))
                 await asyncio.shield(
-                    record_outbound_call(settings, validated, user_id=user_id, channel=ctx.get("channel", ""))
+                    record_outbound_call(settings, validated, user_id=logged_user, channel=ctx.get("channel", ""))
                 )
                 raise
             except DialOutcomeUnknown as unknown:
@@ -615,7 +619,7 @@ async def make_phone_call(
                     if engine is not None and pre_state is not None:
                         engine.discard_pending(pre_state)
                     _increment_daily_count(user_id)
-                    await record_outbound_call(settings, validated, user_id=user_id, channel=ctx.get("channel", ""))
+                    await record_outbound_call(settings, validated, user_id=logged_user, channel=ctx.get("channel", ""))
                     return (
                         f"Error: Twilio did not confirm the call to {validated}, and it may still "
                         "be ringing. Do not call again right away; check the call log first."
@@ -631,7 +635,7 @@ async def make_phone_call(
                 engine.discard_pending(pre_state)
             _increment_daily_count(user_id)
             await record_outbound_call(
-                settings, validated, user_id=user_id, channel=ctx.get("channel", ""), call_sid=ended.call_sid
+                settings, validated, user_id=logged_user, channel=ctx.get("channel", ""), call_sid=ended.call_sid
             )
             return f"Error: the call to {validated} was placed ({ended.call_sid}) but already ended: {ended.status}."
         except Exception as e:
@@ -653,7 +657,7 @@ async def make_phone_call(
         await record_outbound_call(
             settings,
             validated,
-            user_id=user_id,
+            user_id=logged_user,
             channel=ctx.get("channel", ""),
             call_sid=call_sid,
         )

@@ -8,6 +8,7 @@ from sqlalchemy import case, func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
+from pincer.models.identity import profile_id_of
 from pincer.models.onboarding import Onboarding
 from pincer.repositories.base import BaseRepository
 from pincer.repositories.sessions import rekeyed_session_id
@@ -19,7 +20,7 @@ _TABLE = Onboarding.__table__  # type: ignore[attr-defined]
 _ANSWER_TAKES_OVER = ("empty", "expired")
 
 
-class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
+class OnboardingRepository(BaseRepository[Onboarding, str]):
     model = Onboarding
 
     async def insert_if_absent(self, values: dict[str, Any]) -> bool:
@@ -129,5 +130,5 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
             await self.session.exec(
                 update(Onboarding)
                 .where(col(Onboarding.user_id) == old_user_id, col(Onboarding.channel) == channel)
-                .values(user_id=new_user_id, asked_session_id=moved or asked)
+                .values(user_id=new_user_id, profile_id=profile_id_of(new_user_id), asked_session_id=moved or asked)
             )

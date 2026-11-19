@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from pincer.db.engine import get_engine
+from pincer.db.ids import new_id
 from pincer.repositories.telemetry import EVENT_COLUMNS, SPAN_COLUMNS, TelemetryStatements
 from pincer.repositories.telemetry_reads import CallFilters, TelemetryReads, TenantScope
 from pincer.services.base import DatabaseService
@@ -44,9 +45,9 @@ class TelemetryService(DatabaseService):
         engine = get_engine(self._url)
         async with engine.begin() as conn:
             if events:
-                await conn.execute(self._sql.events(), list(events))
+                await conn.execute(self._sql.events(), [{"id": new_id(), **event} for event in events])
             if spans:
-                await conn.execute(self._sql.spans(), list(spans))
+                await conn.execute(self._sql.spans(), [{"id": new_id(), **span} for span in spans])
 
     async def write_rows(self, events: Sequence[tuple[Any, ...]], spans: Sequence[tuple[Any, ...]]) -> None:
         """`write_records` for positional rows, in the order records' `to_row()` produces them."""
@@ -65,9 +66,9 @@ class TelemetryService(DatabaseService):
     async def upsert_call(self, call_id: str, known: dict[str, Any]) -> None:
         if not known:
             return
-        await self._run(self._sql.call(known), {"call_id": call_id, **known})
+        await self._run(self._sql.call(known), {"id": call_id, **known})
 
     async def upsert_turn(self, turn_id: str, known: dict[str, Any]) -> None:
         if not known:
             return
-        await self._run(self._sql.turn(known), {"turn_id": turn_id, **known})
+        await self._run(self._sql.turn(known), {"id": turn_id, **known})

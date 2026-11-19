@@ -199,7 +199,7 @@ class CallsService(DatabaseService):
 
     async def get_call_origin(self, call_sid: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
-            row = await CallOriginRepository(session).get(call_sid)
+            row = await CallOriginRepository(session).get_by(call_sid=call_sid)
         return None if row is None else _as_dict(row)
 
     async def list_unreported_since(self, cutoff: str) -> list[dict[str, Any]]:
