@@ -66,11 +66,11 @@ warns about that in production.
     Run the API behind a proxy that overwrites that header; otherwise a client
     can choose its own IP bucket.
 
-The limiter lives in `pincer.core.ratelimit`, an async reimplementation of the
-design of [FastAPI-RateLimiter](https://github.com/awais7012/FastAPI-RateLimiter).
-It provides `SlidingWindowStrategy` and `TokenBucketStrategy` strategies, memory and
-Redis storage (one atomic Lua script per check), `Limiter` and the ASGI
-`RateLimitMiddleware`.
+The limiter lives in `pincer.core.ratelimit`, a reimplementation of the design
+of [FastAPI-RateLimiter](https://github.com/awais7012/FastAPI-RateLimiter). It
+provides `SlidingWindowStrategy` and `TokenBucketStrategy`, memory and Redis
+storage (one atomic Lua script per check), sync and async limiters (see
+[Sync and async](#sync-and-async)) and the ASGI `RateLimitMiddleware`.
 
 ## HTTP response cache
 
@@ -98,6 +98,58 @@ async def slo_report() -> SLOReportOut: ...
 
 Cached today: `/api/ops/slo`, `/api/ops/failures`, `/api/ops/digest`,
 `/api/ops/ga-gate` and `/api/ops/ga-gate/report`, for 60 seconds.
+
+## Sync and async
+
+Both packages work from sync code (CLI commands, threads, sync httpx) and from
+async code. The plain name is sync and the `Async` prefix is async, as in
+hishel (`BaseStorage` / `AsyncBaseStorage`) and httpx (`Client` / `AsyncClient`).
+
+| | Sync | Async |
+|---|---|---|
+| Limiter | `Limiter` | `AsyncLimiter` |
+| Rate-limit storage base | `RateLimitStorage` | `AsyncRateLimitStorage` |
+| In-memory buckets | `MemoryStorage` (thread-safe) | `AsyncMemoryStorage` |
+| Redis buckets | `RedisStorage` (`redis.Redis`) | `AsyncRedisStorage` (`redis.asyncio.Redis`) |
+| Storage for a backend URL | `create_storage(url)` | `create_async_storage(url)` |
+| Shared Redis client | `pincer.core.cache.backend.get_redis(url)` | `get_async_redis(url)` |
+| hishel storage, in memory | `pincer.core.cache.storage.MemoryStorage` | `AsyncMemoryStorage` |
+| hishel storage for the backend | `create_http_cache_storage(settings)` | `create_async_http_cache_storage(settings)` |
+| Cached outbound client | `pincer.core.cache.client.cached_client(...)` | `async_cached_client(...)` |
+
+Both modes use the same strategies, bucket names and prefix. A sync and an
+async limiter with the same scope on one Redis count the same requests.
+
+```python
+from pincer.core.cache.keys import KeySpace
+from pincer.core.ratelimit import Limiter, Rate, create_storage
+
+limiter = Limiter(
+    create_storage(settings.cache_backend_url), Rate.per_minute(10), KeySpace.for_cache(settings), "export"
+)
+if not limiter.hit(user_id).allowed:
+    ...
+```
+
+### Cached outbound HTTP
+
+`cached_client` / `async_cached_client` return httpx clients whose `GET`/`HEAD`
+`2xx` responses are cached for `PINCER_CACHE_DEFAULT_TTL` seconds, under
+`<prefix>:kv:httpclient:<namespace>`. Other methods and statuses always go to
+the network. With `memory://` the storage lasts for the whole process, so
+short-lived clients still share it; with `redis://` every process does.
+`key_headers` adds a hash of those header values (the credential) to the cache
+key, so two accounts never share an entry:
+
+```python
+from pincer.core.cache.client import cached_client
+
+with cached_client(settings, "elevenlabs", key_headers=("xi-api-key",), base_url=API_BASE) as client:
+    client.get("/v2/voices", headers={"xi-api-key": api_key})
+```
+
+The ElevenLabs voice lookups (`pincer voice list`, the doctor voice checks and
+the startup validation) use it.
 
 ## Configuration
 

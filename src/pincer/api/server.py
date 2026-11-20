@@ -132,10 +132,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.getLogger(__name__).debug("Telephony telemetry shutdown failed", exc_info=True)
     await audit.shutdown()
 
-    # The rate limiter and a redis:// HTTP cache share these clients.
-    from pincer.core.cache.backend import aclose_all as close_backend_clients
+    # The rate limiter and a redis:// HTTP cache share these clients; sync
+    # callers in this process (cached outbound clients) use the sync registry.
+    from pincer.core.cache.backend import aclose_all, close_all
 
-    await close_backend_clients()
+    await aclose_all()
+    close_all()
 
     from pincer.db.engine import dispose_engines
 
@@ -196,9 +198,9 @@ def create_app() -> FastAPI:
     # `request.state.identity` (`scope["state"]`); the cache sits innermost so a
     # hit still passes auth and both limits. See pincer.api.rate_limits.
     from pincer.core.cache.middleware import HTTPCacheMiddleware
-    from pincer.core.cache.storage import create_http_cache_storage
+    from pincer.core.cache.storage import create_async_http_cache_storage
 
-    app.state.http_cache_storage = create_http_cache_storage(settings)
+    app.state.http_cache_storage = create_async_http_cache_storage(settings)
     app.add_middleware(HTTPCacheMiddleware, storage=app.state.http_cache_storage)
     rate_limits = None if settings.rate_api_disabled else APIRateLimits.from_settings(settings)
     app.state.rate_limits = rate_limits

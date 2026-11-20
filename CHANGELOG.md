@@ -22,10 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hishel's RFC 9111 cache, inside auth and the rate limits. The
   `/api/ops/slo`, `failures`, `digest` and `ga-gate` aggregates are cached
   for 60 s.
-- New packages `pincer.core.ratelimit` (async limiter, memory and Redis
-  storage, ASGI middleware) and `pincer.core.cache` (`KeySpace`, shared Redis
-  clients, hishel storages). The `redis` extra replaces `tasks-redis`, which
-  stays as an alias.
+- New packages `pincer.core.ratelimit` (limiters, memory and Redis storage,
+  ASGI middleware) and `pincer.core.cache` (`KeySpace`, shared Redis clients,
+  hishel storages, cached outbound httpx clients). Both work in sync and async
+  modes: `Limiter` / `AsyncLimiter`, `MemoryStorage` / `AsyncMemoryStorage`,
+  `cached_client` / `async_cached_client`, and so on. The `redis` extra replaces
+  `tasks-redis`, which stays as an alias.
+- The ElevenLabs voice lookups are cached for `PINCER_CACHE_DEFAULT_TTL`,
+  per API key. Errors and missing voices are not cached.
 - See [Rate limiting and caching](docs/core-components/rate-limiting-and-caching.md).
 
 #### `search_path=` in `PINCER_DATABASE_URL`

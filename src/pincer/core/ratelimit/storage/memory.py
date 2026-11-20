@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import TYPE_CHECKING
 
-from pincer.core.ratelimit.storage.base import RateLimitStorage
+from pincer.core.ratelimit.storage.base import AsyncRateLimitStorage, RateLimitStorage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -18,23 +19,20 @@ SWEEP_INTERVAL = 60.0
 DEFAULT_MAX_KEYS = 100_000
 
 
-class MemoryStorage(RateLimitStorage):
-    """A dict of bucket states with per-key expiry, so idle buckets don't pile up.
+class _Buckets:
+    """The bucket table both memory storages share: per-key expiry, a size bound, no I/O."""
 
-    `hit` never awaits between reading and writing a bucket, so on one event
-    loop it is atomic without a lock.
-    """
-
-    def __init__(self, *, clock: Callable[[], float] = time.time, max_keys: int = DEFAULT_MAX_KEYS) -> None:
+    def __init__(self, clock: Callable[[], float], max_keys: int) -> None:
         self._clock = clock
         self._max_keys = max_keys
         self._buckets: dict[str, tuple[list[float], float]] = {}
         self._next_sweep = 0.0
 
-    def __len__(self) -> int:
+    @property
+    def size(self) -> int:
         return len(self._buckets)
 
-    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int) -> RateLimitResult:
         now = self._clock()
         self._sweep(now)
         stored = self._buckets.get(key)
@@ -43,7 +41,7 @@ class MemoryStorage(RateLimitStorage):
         self._buckets[key] = (new_state, now + strategy.ttl(rate))
         return result
 
-    async def reset(self, key: str) -> None:
+    def reset(self, key: str) -> None:
         self._buckets.pop(key, None)
 
     def _sweep(self, now: float) -> None:
@@ -57,3 +55,44 @@ class MemoryStorage(RateLimitStorage):
         if overflow > 0:
             for key in list(self._buckets)[:overflow]:
                 del self._buckets[key]
+
+
+class MemoryStorage(RateLimitStorage):
+    """Sync in-process buckets. A lock makes each check atomic across threads."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.time, max_keys: int = DEFAULT_MAX_KEYS) -> None:
+        self._buckets = _Buckets(clock, max_keys)
+        self._lock = threading.Lock()
+
+    @property
+    def size(self) -> int:
+        return self._buckets.size
+
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
+        with self._lock:
+            return self._buckets.hit(key, strategy, rate, cost)
+
+    def reset(self, key: str) -> None:
+        with self._lock:
+            self._buckets.reset(key)
+
+
+class AsyncMemoryStorage(AsyncRateLimitStorage):
+    """Async in-process buckets.
+
+    A check never awaits between reading and writing a bucket, so on one event
+    loop it is atomic without a lock.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.time, max_keys: int = DEFAULT_MAX_KEYS) -> None:
+        self._buckets = _Buckets(clock, max_keys)
+
+    @property
+    def size(self) -> int:
+        return self._buckets.size
+
+    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
+        return self._buckets.hit(key, strategy, rate, cost)
+
+    async def reset(self, key: str) -> None:
+        self._buckets.reset(key)

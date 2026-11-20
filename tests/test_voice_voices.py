@@ -334,3 +334,45 @@ class TestCredentialRotation:
 
         assert voices._account_fingerprint(_settings(api_key="")) == ""
         assert voices._account_fingerprint(SimpleNamespace()) == ""  # no attribute at all
+
+
+class TestLookupCache:
+    """`list_voices` / `get_voice` go through the sync cached client (issue #404)."""
+
+    @pytest.fixture(autouse=True)
+    def _upstream(self, monkeypatch):
+        import httpx
+
+        from pincer.core.cache.client import reset_client_storages
+
+        self.calls = []
+
+        def handler(request):
+            self.calls.append((request.url.path, request.headers["xi-api-key"]))
+            if request.url.path == "/v1/voices/gone":
+                return httpx.Response(404)
+            if request.url.path.startswith("/v1/voices/"):
+                return httpx.Response(200, json=VOICE_JSON)
+            return httpx.Response(200, json={"voices": [VOICE_JSON], "has_more": False})
+
+        reset_client_storages()
+        monkeypatch.setattr("httpx.HTTPTransport", lambda *a, **k: httpx.MockTransport(handler))
+        yield
+        reset_client_storages()
+
+    def test_repeated_lookups_are_served_from_cache(self):
+        assert [v.voice_id for v in list_voices("key-a")] == ["abc123"]
+        assert [v.voice_id for v in list_voices("key-a")] == ["abc123"]
+        assert get_voice("key-a", "abc123").name == "My Clone"
+        assert get_voice("key-a", "abc123").name == "My Clone"
+        assert self.calls == [("/v2/voices", "key-a"), ("/v1/voices/abc123", "key-a")]
+
+    def test_another_api_key_is_asked_itself(self):
+        list_voices("key-a")
+        list_voices("key-b")
+        assert [key for _, key in self.calls] == ["key-a", "key-b"]
+
+    def test_a_missing_voice_is_never_cached(self):
+        assert get_voice("key-a", "gone") is None
+        assert get_voice("key-a", "gone") is None
+        assert len(self.calls) == 2

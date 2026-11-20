@@ -12,7 +12,7 @@ import math
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import TYPE_CHECKING, Any
 
-from pincer.core.ratelimit.limiter import Limiter
+from pincer.core.ratelimit.limiter import AsyncLimiter
 
 if TYPE_CHECKING:
     from pincer.core.ratelimit.types import RateLimitResult
@@ -23,7 +23,7 @@ Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
-Identify = Callable[[Scope], tuple[Limiter, str] | None]
+Identify = Callable[[Scope], tuple[AsyncLimiter, str] | None]
 """Picks the limiter and bucket for a request: `(limiter, identifier)`, or None to let it pass."""
 
 

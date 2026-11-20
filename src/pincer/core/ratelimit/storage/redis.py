@@ -1,43 +1,75 @@
-"""Buckets in Redis: one atomic Lua script per check, shared by every app process."""
+"""Buckets in Redis: one atomic Lua script per check, shared by every app process.
+
+`RedisStorage` takes a sync `redis.Redis`, `AsyncRedisStorage` a
+`redis.asyncio.Redis`. Both run the strategy's own `script` through redis-py's
+`register_script` (`EVALSHA`, reloaded on `NOSCRIPT`), so sync and async
+callers share buckets.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pincer.core.ratelimit.storage.base import RateLimitStorage
+from pincer.core.ratelimit.storage.base import AsyncRateLimitStorage, RateLimitStorage
 from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 if TYPE_CHECKING:
-    from redis.asyncio import Redis
+    from redis import Redis
+    from redis.asyncio import Redis as AsyncRedis
 
     from pincer.core.ratelimit.strategies import Strategy
 
 
-class RedisStorage(RateLimitStorage):
-    """Runs each strategy's Lua script via `EVALSHA` (redis-py `Script` reloads it on `NOSCRIPT`)."""
+def _parse(reply: Any, rate: Rate) -> RateLimitResult:
+    """A script's `{allowed, remaining, reset_after_ms, retry_after_ms}` reply."""
+    allowed, remaining, reset_ms, retry_ms = reply
+    return RateLimitResult(
+        allowed=bool(int(allowed)),
+        limit=rate.limit,
+        remaining=int(remaining),
+        reset_after=int(reset_ms) / 1000,
+        retry_after=int(retry_ms) / 1000,
+    )
 
-    def __init__(self, client: Redis) -> None:
+
+class _Scripts:
+    """One registered script per strategy, per client."""
+
+    def __init__(self, client: Any) -> None:
         self._client = client
         self._scripts: dict[str, Any] = {}
 
-    def _script(self, strategy: Strategy) -> Any:
+    def __call__(self, strategy: Strategy) -> Any:
         script = self._scripts.get(strategy.name)
         if script is None:
             script = self._client.register_script(strategy.script)
             self._scripts[strategy.name] = script
         return script
 
+
+class RedisStorage(RateLimitStorage):
+    """Sync Redis buckets (`redis.Redis`)."""
+
+    def __init__(self, client: Redis) -> None:
+        self._client = client
+        self._script = _Scripts(client)
+
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
+        return _parse(self._script(strategy)(keys=[key], args=[rate.limit, rate.period, cost]), rate)
+
+    def reset(self, key: str) -> None:
+        self._client.delete(key)
+
+
+class AsyncRedisStorage(AsyncRateLimitStorage):
+    """Async Redis buckets (`redis.asyncio.Redis`)."""
+
+    def __init__(self, client: AsyncRedis) -> None:
+        self._client = client
+        self._script = _Scripts(client)
+
     async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
-        allowed, remaining, reset_ms, retry_ms = await self._script(strategy)(
-            keys=[key], args=[rate.limit, rate.period, cost]
-        )
-        return RateLimitResult(
-            allowed=bool(int(allowed)),
-            limit=rate.limit,
-            remaining=int(remaining),
-            reset_after=int(reset_ms) / 1000,
-            retry_after=int(retry_ms) / 1000,
-        )
+        return _parse(await self._script(strategy)(keys=[key], args=[rate.limit, rate.period, cost]), rate)
 
     async def reset(self, key: str) -> None:
         await self._client.delete(key)

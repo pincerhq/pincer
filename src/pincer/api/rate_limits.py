@@ -31,7 +31,7 @@ from starlette.requests import HTTPConnection
 
 from pincer.api.auth_guard import SELF_AUTHENTICATED_PREFIXES, client_ip
 from pincer.core.cache.keys import KeySpace
-from pincer.core.ratelimit import Limiter, Rate, create_storage
+from pincer.core.ratelimit import AsyncLimiter, Rate, create_async_storage
 from pincer.core.ratelimit.middleware import Scope
 
 EXEMPT_PATHS = frozenset({"/api/health"})
@@ -45,27 +45,27 @@ def is_exempt(path: str) -> bool:
 class APIRateLimits:
     """The three limiters, sharing one storage on `cache_backend_url`."""
 
-    ip: Limiter
-    user: Limiter
-    anon: Limiter
+    ip: AsyncLimiter
+    user: AsyncLimiter
+    anon: AsyncLimiter
 
     @classmethod
     def from_settings(cls, settings: Any) -> APIRateLimits:
-        storage = create_storage(settings.cache_backend_url)
+        storage = create_async_storage(settings.cache_backend_url)
         keys = KeySpace.for_cache(settings)
         return cls(
-            ip=Limiter(storage, Rate.per_minute(settings.rate_api_ip_per_min), keys, "ip"),
-            user=Limiter(storage, Rate.per_minute(settings.rate_api_user_per_min), keys, "user"),
-            anon=Limiter(storage, Rate.per_minute(settings.rate_api_anon_per_min), keys, "anon"),
+            ip=AsyncLimiter(storage, Rate.per_minute(settings.rate_api_ip_per_min), keys, "ip"),
+            user=AsyncLimiter(storage, Rate.per_minute(settings.rate_api_user_per_min), keys, "user"),
+            anon=AsyncLimiter(storage, Rate.per_minute(settings.rate_api_anon_per_min), keys, "anon"),
         )
 
-    def by_ip(self, scope: Scope) -> tuple[Limiter, str] | None:
+    def by_ip(self, scope: Scope) -> tuple[AsyncLimiter, str] | None:
         """The pre-auth ceiling: every non-exempt request, by client IP."""
         if is_exempt(scope["path"]):
             return None
         return self.ip, client_ip(HTTPConnection(scope))
 
-    def by_identity(self, scope: Scope) -> tuple[Limiter, str] | None:
+    def by_identity(self, scope: Scope) -> tuple[AsyncLimiter, str] | None:
         """After auth: the user's bucket when `auth_middleware` found one, else the anonymous one by IP."""
         if is_exempt(scope["path"]):
             return None

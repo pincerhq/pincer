@@ -12,7 +12,7 @@ from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
 from pincer.core.cache.keys import KeySpace
-from pincer.core.ratelimit import Limiter, MemoryStorage, Rate, RateLimitMiddleware
+from pincer.core.ratelimit import AsyncLimiter, AsyncMemoryStorage, Rate, RateLimitMiddleware
 
 
 def _client(monkeypatch: pytest.MonkeyPatch, *, ip: int = 1000, user: int = 1000, anon: int = 1000) -> TestClient:
@@ -134,7 +134,7 @@ async def _stream(request: Any) -> StreamingResponse:
 
 
 def _bare_app(limit: int) -> Starlette:
-    limiter = Limiter(MemoryStorage(), Rate(limit, 60), KeySpace("t:pincer"), "ip")
+    limiter = AsyncLimiter(AsyncMemoryStorage(), Rate(limit, 60), KeySpace("t:pincer"), "ip")
     app = Starlette(routes=[Route("/stream", _stream)])
     app.add_middleware(RateLimitMiddleware, identify=lambda scope: (limiter, "client"))
     return app

@@ -1,63 +1,100 @@
-"""The opt-in HTTP response cache (pincer.core.cache): storages, middleware and API wiring."""
+"""The HTTP caches (pincer.core.cache): storages in both modes, middleware, cached clients, API wiring."""
 
 from __future__ import annotations
 
+import inspect
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
-from hishel import AsyncRedisStorage, Headers, Request, Response
+from hishel import AsyncRedisStorage, Headers, RedisStorage, Request, Response
 
+from pincer.core.cache.client import (
+    async_cached_client,
+    cache_key,
+    cached_client,
+    client_cache_prefix,
+    reset_client_storages,
+)
 from pincer.core.cache.middleware import HTTPCacheMiddleware, cache_control, cached_paths
-from pincer.core.cache.storage import AsyncMemoryStorage, create_http_cache_storage
+from pincer.core.cache.storage import (
+    AsyncMemoryStorage,
+    MemoryStorage,
+    create_async_http_cache_storage,
+    create_http_cache_storage,
+)
 
-# ── AsyncMemoryStorage ───────────────────────────────────────────────────────
+fakeredis = pytest.importorskip("fakeredis")
+MODES = ["sync", "async"]
 
-
-async def _body(*chunks: bytes) -> AsyncIterator[bytes]:
-    for chunk in chunks:
-        yield chunk
-
-
-async def _store(storage: AsyncMemoryStorage, key: str, *chunks: bytes) -> bytes:
-    entry = await storage.create_entry(
-        Request("GET", f"http://t/{key}"), Response(200, Headers({"x": "1"}), _body(*chunks)), key
-    )
-    assert entry.response.stream is not None
-    return b"".join([c async for c in entry.response.stream])  # type: ignore[union-attr]
+# ── Memory storages, both modes ──────────────────────────────────────────────
 
 
-async def _read(storage: AsyncMemoryStorage, key: str) -> list[bytes]:
-    bodies = []
-    for entry in await storage.get_entries(key):
-        bodies.append(b"".join([c async for c in entry.response.stream]))  # type: ignore[union-attr]
-    return bodies
+def _memory(mode: str, prefix: str = "p", **kwargs: Any) -> MemoryStorage | AsyncMemoryStorage:
+    return MemoryStorage(prefix, **kwargs) if mode == "sync" else AsyncMemoryStorage(prefix, **kwargs)
 
 
-async def test_memory_storage_stores_after_the_body_is_read() -> None:
-    storage = AsyncMemoryStorage("p:pincer:kv:httpcache")
-    entry = await storage.create_entry(Request("GET", "http://t/a"), Response(200, stream=_body(b"a", b"b")), "k")
-    assert await storage.get_entries("k") == []  # not visible until the stream is consumed
-    assert b"".join([c async for c in entry.response.stream]) == b"ab"  # type: ignore[union-attr]
+def _body(storage: Any, *chunks: bytes) -> Iterator[bytes] | AsyncIterator[bytes]:
+    if isinstance(storage, (MemoryStorage, RedisStorage)):
+        return iter(chunks)
+
+    async def agen() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    return agen()
+
+
+async def _maybe(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _drain(stream: Any) -> bytes:
+    if isinstance(stream, AsyncIterator):
+        return b"".join([c async for c in stream])
+    return b"".join(stream)
+
+
+async def _create(storage: Any, key: str, *chunks: bytes) -> Any:
+    response = Response(200, Headers({"x": "1"}), _body(storage, *chunks))
+    return await _maybe(storage.create_entry(Request("GET", f"http://t/{key}"), response, key))
+
+
+async def _store(storage: Any, key: str, *chunks: bytes) -> bytes:
+    return await _drain((await _create(storage, key, *chunks)).response.stream)
+
+
+async def _read(storage: Any, key: str) -> list[bytes]:
+    return [await _drain(entry.response.stream) for entry in await _maybe(storage.get_entries(key))]
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_memory_storage_stores_after_the_body_is_read(mode: str) -> None:
+    storage = _memory(mode, "p:pincer:kv:httpcache")
+    entry = await _create(storage, "k", b"a", b"b")
+    assert await _maybe(storage.get_entries("k")) == []  # not visible until the stream is consumed
+    assert await _drain(entry.response.stream) == b"ab"
     assert await _read(storage, "k") == [b"ab"]
     assert storage.index_key("k") == "p:pincer:kv:httpcache:idx:k"
 
 
-async def test_memory_storage_expires_by_ttl_and_tti() -> None:
+@pytest.mark.parametrize("mode", MODES)
+async def test_memory_storage_expires_by_ttl_and_tti(mode: str) -> None:
     now = [1000.0]
-    storage = AsyncMemoryStorage("p", default_ttl=300, clock=lambda: now[0])
+    storage = _memory(mode, default_ttl=300, clock=lambda: now[0])
     await _store(storage, "k", b"x")
     now[0] += 299
     assert await _read(storage, "k") == [b"x"]
     now[0] += 2
     assert await _read(storage, "k") == []
 
-    idle = AsyncMemoryStorage("p", default_tti=10, clock=lambda: now[0])
+    idle = _memory(mode, default_tti=10, clock=lambda: now[0])
     await _store(idle, "k", b"x")
     now[0] += 9
     assert await _read(idle, "k") == [b"x"]  # restarts the idle timer
@@ -67,8 +104,9 @@ async def test_memory_storage_expires_by_ttl_and_tti() -> None:
     assert await _read(idle, "k") == []
 
 
-async def test_memory_storage_is_bounded_and_skips_large_bodies() -> None:
-    storage = AsyncMemoryStorage("p", max_entries=2, max_stream_size=4)
+@pytest.mark.parametrize("mode", MODES)
+async def test_memory_storage_is_bounded_and_skips_large_bodies(mode: str) -> None:
+    storage = _memory(mode, max_entries=2, max_stream_size=4)
     for key in ("a", "b", "c"):
         await _store(storage, key, b"1")
     assert storage.size == 2
@@ -77,32 +115,168 @@ async def test_memory_storage_is_bounded_and_skips_large_bodies() -> None:
     assert await _read(storage, "big") == []  # ...but not stored
 
 
-async def test_memory_storage_update_and_remove() -> None:
-    storage = AsyncMemoryStorage("p")
+@pytest.mark.parametrize("mode", MODES)
+async def test_memory_storage_update_and_remove(mode: str) -> None:
+    storage = _memory(mode)
     await _store(storage, "k", b"x")
-    (entry,) = await storage.get_entries("k")
-    await storage.update_headers(entry.id, Headers({"etag": "v2"}))
-    (updated,) = await storage.get_entries("k")
+    (entry,) = await _maybe(storage.get_entries("k"))
+    await _maybe(storage.update_headers(entry.id, Headers({"etag": "v2"})))
+    (updated,) = await _maybe(storage.get_entries("k"))
     assert updated.response.headers.get("etag") == "v2"
-    await storage.remove_entry(entry.id)
-    await storage.remove_entry(uuid.uuid4())  # unknown ids are ignored
-    assert await storage.get_entries("k") == []
+    await _maybe(storage.remove_entry(entry.id))
+    await _maybe(storage.remove_entry(uuid.uuid4()))  # unknown ids are ignored
+    assert await _maybe(storage.get_entries("k")) == []
 
 
-def test_create_http_cache_storage_picks_backend_and_prefix() -> None:
-    settings = SimpleNamespace(
-        cache_backend_url="memory://",
-        cache_prefix="{environment}:{service}",
-        environment="production",
-        cache_default_ttl=300,
+@pytest.mark.parametrize("mode", MODES)
+def test_empty_memory_storage_is_truthy(mode: str) -> None:
+    """hishel does `storage or SqliteStorage()`: an empty storage must not read as "none given"."""
+    assert _memory(mode)
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_redis_storage_keys_carry_the_prefix(mode: str) -> None:
+    # hishel's Redis storages on the redis-py 7 that repid pins (pyproject `redis` extra).
+    client = fakeredis.FakeRedis() if mode == "sync" else fakeredis.FakeAsyncRedis()
+    storage_cls = RedisStorage if mode == "sync" else AsyncRedisStorage
+    storage = storage_cls(client, default_ttl=300, key_prefix="production:pincer:kv:httpcache")
+    assert await _store(storage, "k", b"hello") == b"hello"
+    assert await _read(storage, "k") == [b"hello"]
+    keys = {k.decode() for k in await _maybe(client.keys("*"))}
+    assert keys and all(k.startswith("production:pincer:kv:httpcache:") for k in keys)
+    ttls = [await _maybe(client.pttl(k)) for k in keys]
+    assert all(0 < ttl <= 480_000 for ttl in ttls)  # TTL + soft-delete window
+    await _maybe(client.aclose() if mode == "async" else client.close())
+
+
+def _settings(url: str = "memory://") -> SimpleNamespace:
+    return SimpleNamespace(
+        cache_backend_url=url, cache_prefix="{environment}:{service}", environment="production", cache_default_ttl=300
     )
-    memory = create_http_cache_storage(settings)
-    assert isinstance(memory, AsyncMemoryStorage)
-    assert memory.prefix == "production:pincer:kv:httpcache"
-    assert memory.default_ttl == 300
+
+
+def test_storage_factories_pick_backend_mode_and_prefix() -> None:
+    settings = _settings()
+    sync_memory, async_memory = create_http_cache_storage(settings), create_async_http_cache_storage(settings)
+    assert isinstance(sync_memory, MemoryStorage)
+    assert isinstance(async_memory, AsyncMemoryStorage)
+    assert sync_memory.prefix == async_memory.prefix == "production:pincer:kv:httpcache"
+    assert sync_memory.default_ttl == async_memory.default_ttl == 300
+    assert create_http_cache_storage(settings, prefix="x:pincer:kv:other").prefix == "x:pincer:kv:other"
 
     settings.cache_backend_url = "redis://localhost:6379/0"
-    assert isinstance(create_http_cache_storage(settings), AsyncRedisStorage)
+    assert isinstance(create_http_cache_storage(settings), RedisStorage)
+    assert isinstance(create_async_http_cache_storage(settings), AsyncRedisStorage)
+
+
+# ── Cached outbound clients, both modes ──────────────────────────────────────
+
+
+class _Upstream:
+    """A counting stand-in for the remote API."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if request.url.path == "/missing":
+            return httpx.Response(404, json={"detail": "nope"})
+        return httpx.Response(200, json={"n": self.calls, "path": request.url.path})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_client_storages() -> Iterator[None]:
+    reset_client_storages()
+    yield
+    reset_client_storages()
+
+
+async def _get(mode: str, upstream: _Upstream, path: str, *, key: str = "k1", method: str = "GET") -> httpx.Response:
+    settings = _settings()
+    headers = {"xi-api-key": key}
+    if mode == "sync":
+        with cached_client(
+            settings,
+            "test-api",
+            key_headers=("xi-api-key",),
+            transport=httpx.MockTransport(upstream),
+            base_url="https://api.test",
+        ) as client:
+            response = client.request(method, path, headers=headers)
+            response.read()
+            return response
+    async with async_cached_client(
+        settings,
+        "test-api",
+        key_headers=("xi-api-key",),
+        transport=httpx.MockTransport(upstream),
+        base_url="https://api.test",
+    ) as client:
+        response = await client.request(method, path, headers=headers)
+        await response.aread()
+        return response
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_cached_client_reuses_a_get_across_clients(mode: str) -> None:
+    upstream = _Upstream()
+    first = await _get(mode, upstream, "/v2/voices")
+    second = await _get(mode, upstream, "/v2/voices")  # a new client, the same process-wide storage
+    assert first.json() == second.json() == {"n": 1, "path": "/v2/voices"}
+    assert upstream.calls == 1
+    assert second.extensions["caching"]["from_cache"] is True
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_cached_client_keys_by_credential(mode: str) -> None:
+    upstream = _Upstream()
+    await _get(mode, upstream, "/v2/voices", key="account-a")
+    other = await _get(mode, upstream, "/v2/voices", key="account-b")
+    assert other.json()["n"] == 2  # another account never gets account-a's answer
+    assert upstream.calls == 2
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_cached_client_skips_errors_and_posts(mode: str) -> None:
+    upstream = _Upstream()
+    for _ in range(2):
+        assert (await _get(mode, upstream, "/missing")).status_code == 404
+        await _get(mode, upstream, "/v1/text-to-speech/x", method="POST")
+    assert upstream.calls == 4
+
+
+async def test_sync_and_async_clients_share_a_redis_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = fakeredis.FakeServer()
+    monkeypatch.setattr("pincer.core.cache.storage.get_redis", lambda url: fakeredis.FakeRedis(server=server))
+    monkeypatch.setattr(
+        "pincer.core.cache.storage.get_async_redis", lambda url: fakeredis.FakeAsyncRedis(server=server)
+    )
+    settings = _settings("redis://localhost:6379/0")
+    upstream = _Upstream()
+    with cached_client(
+        settings, "shared", transport=httpx.MockTransport(upstream), base_url="https://api.test"
+    ) as client:
+        client.get("/thing").read()
+    async with async_cached_client(
+        settings, "shared", transport=httpx.MockTransport(upstream), base_url="https://api.test"
+    ) as aclient:
+        response = await aclient.get("/thing")
+        await response.aread()
+    assert upstream.calls == 1
+    assert response.extensions["caching"]["from_cache"] is True
+    keys = {k.decode() for k in fakeredis.FakeRedis(server=server).keys("*")}
+    assert keys and all(k.startswith("production:pincer:kv:httpclient:shared:") for k in keys)
+
+
+def test_client_cache_key_hashes_the_credential() -> None:
+    request = httpx.Request("GET", "https://api.test/v2/voices", headers={"xi-api-key": "secret"})
+    key = cache_key(request, ("xi-api-key",))
+    assert "secret" not in key
+    assert key != cache_key(
+        httpx.Request("GET", "https://api.test/v2/voices", headers={"xi-api-key": "other"}), ("xi-api-key",)
+    )
+    assert client_cache_prefix(_settings(), "eleven labs") == "production:pincer:kv:httpclient:eleven-labs"
 
 
 # ── HTTPCacheMiddleware on a bare app ────────────────────────────────────────
@@ -178,22 +352,6 @@ def test_post_passes_through() -> None:
     app, _ = _app(storage)
     assert TestClient(app).post("/api/things/public").json() == {"ok": "yes"}
     assert storage.size == 0
-
-
-async def test_redis_storage_keys_carry_the_prefix() -> None:
-    fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeAsyncRedis()
-    # hishel's AsyncRedisStorage on the redis-py 7 that repid pins (pyproject `redis` extra).
-    storage = AsyncRedisStorage(client, default_ttl=300, key_prefix="production:pincer:kv:httpcache")
-    entry = await storage.create_entry(Request("GET", "http://t/a"), Response(200, stream=_body(b"hello")), "k")
-    assert b"".join([c async for c in entry.response.stream]) == b"hello"  # type: ignore[union-attr]
-    (stored,) = await storage.get_entries("k")
-    assert b"".join([c async for c in stored.response.stream]) == b"hello"  # type: ignore[union-attr]
-    keys = {k.decode() for k in await client.keys("*")}
-    assert keys and all(k.startswith("production:pincer:kv:httpcache:") for k in keys)
-    ttls = [await client.pttl(k) for k in keys]
-    assert all(0 < ttl <= 480_000 for ttl in ttls)  # TTL + soft-delete window
-    await client.aclose()
 
 
 # ── API wiring ───────────────────────────────────────────────────────────────
