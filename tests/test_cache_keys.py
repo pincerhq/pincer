@@ -106,3 +106,12 @@ def test_key_requires_a_part() -> None:
 def test_prefix_itself_is_validated() -> None:
     with pytest.raises(ValueError):
         KeySpace("bad:{tag}")
+
+
+def test_route_scoped_names() -> None:
+    keys = KeySpace("production:pincer")
+    assert (
+        keys.ratelimit("user", "alice", route="chat.20per60s")
+        == "production:pincer:kv:ratelimit:user:chat.20per60s:alice"
+    )
+    assert keys.api_cache("costs", "alice", "abc") == "production:pincer:kv:apicache:costs:alice:abc"

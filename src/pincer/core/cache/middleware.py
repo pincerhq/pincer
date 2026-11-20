@@ -64,15 +64,21 @@ def cached_paths(routes: Iterable[Any]) -> list[re.Pattern[str]]:
     """Path patterns of the routes whose dependencies include `cache_control`.
 
     Walks included routers too (`fastapi.routing.iter_route_contexts`, which
-    resolves each route's full path under its router prefixes).
+    resolves each route's full path under its router prefixes). Routes with
+    `@cache_response` are left out: the decorator caches them.
     """
     from fastapi.routing import APIRoute, iter_route_contexts
     from starlette.routing import compile_path
 
+    from pincer.core.cache.decorators import cache_rule
+
     patterns = []
     for context in iter_route_contexts(list(routes)):
         route = context.original_route
-        if isinstance(route, APIRoute) and context.path and _uses_cache_control(route.dependant):
+        if not isinstance(route, APIRoute) or not context.path:
+            continue
+        # `@cache_response` caches the route itself; it overrides `cache_control` here.
+        if cache_rule(route.endpoint) is None and _uses_cache_control(route.dependant):
             patterns.append(compile_path(context.path)[0])
     return patterns
 

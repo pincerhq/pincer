@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -30,7 +30,7 @@ from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.ops import router as ops_router
 from pincer.api.public_demo import router as public_demo_router
-from pincer.api.rate_limits import APIRateLimits
+from pincer.api.rate_limits import APIRateLimits, enforce_rate_limits
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
 from pincer.api.storage import router as storage_router
@@ -152,6 +152,8 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",  # if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
+        # After routing and auth: the route's @rate_limit settings, else the default user/anon limit.
+        dependencies=[Depends(enforce_rate_limits)],
     )
 
     # Add Bearer token security scheme so the Swagger UI shows an Authorize button.
@@ -192,20 +194,21 @@ def create_app() -> FastAPI:
     # Middleware order, outermost first (Starlette builds the stack from the
     # last-added middleware inwards, so these are registered inside-out):
     #
-    #   CORS → IP ceiling → auth_middleware → user | anon limit → HTTP cache → routes
+    #   CORS → IP ceiling → auth_middleware → HTTP cache → routing
+    #        → enforce_rate_limits (app dependency) → @cache_response → endpoint
     #
-    # The identity limiter must run after auth, which leaves the caller on
-    # `request.state.identity` (`scope["state"]`); the cache sits innermost so a
-    # hit still passes auth and both limits. See pincer.api.rate_limits.
+    # The user/anon and per-route limits need the route, so they run as the
+    # app-level dependency `enforce_rate_limits`, after routing; auth has left
+    # the caller on `request.state.identity` by then. See pincer.api.rate_limits.
+    from pincer.core.cache.decorators import ResponseCache
     from pincer.core.cache.middleware import HTTPCacheMiddleware
     from pincer.core.cache.storage import create_async_http_cache_storage
 
     app.state.http_cache_storage = create_async_http_cache_storage(settings)
     app.add_middleware(HTTPCacheMiddleware, storage=app.state.http_cache_storage)
+    app.state.response_cache = ResponseCache.from_settings(settings)
     rate_limits = None if settings.rate_api_disabled else APIRateLimits.from_settings(settings)
     app.state.rate_limits = rate_limits
-    if rate_limits is not None:
-        app.add_middleware(RateLimitMiddleware, identify=rate_limits.by_identity)
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]

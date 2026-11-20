@@ -101,3 +101,18 @@ def test_a_strategy_must_define_name_and_script() -> None:
             script = "return 1"
 
         Unfinished()  # type: ignore[abstract]
+
+
+@pytest.mark.parametrize(
+    ("text", "rate"),
+    [("20/minute", Rate(20, 60)), ("500/day", Rate(500, 86400)), ("1/Hours", Rate(1, 3600)), ("3/90s", Rate(3, 90))],
+)
+def test_rate_parse(text: str, rate: Rate) -> None:
+    assert Rate.parse(text) == rate
+    assert Rate.parse(rate) is rate
+
+
+@pytest.mark.parametrize("text", ["", "20", "20/fortnight", "x/minute", "0/minute"])
+def test_rate_parse_rejects(text: str) -> None:
+    with pytest.raises(ValueError):
+        Rate.parse(text)

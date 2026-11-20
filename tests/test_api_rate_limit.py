@@ -100,10 +100,17 @@ def test_rejected_token_is_not_charged_to_the_user(authed_app: Any, monkeypatch:
 
 
 def test_requests_without_identity_use_the_anon_limit(authed_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_AUTH_DISABLED", "true")  # /api/status reached without an identity
     client = _client(monkeypatch, anon=2, user=100)
-    assert _statuses(client, 3, path="/api/docs") == [200, 200, 429]
+    assert _statuses(client, 3, path="/api/status") == [200, 200, 429]
     # The user bucket is a different one.
     assert client.get("/api/identity/me", headers=authed_app.api_key_headers).status_code == 200
+
+
+def test_docs_only_have_the_ip_ceiling(authed_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/api/docs` is a plain Starlette route: app-level dependencies (the anon limit) don't run for it."""
+    client = _client(monkeypatch, anon=1, ip=3)
+    assert _statuses(client, 4, path="/api/docs") == [200, 200, 200, 429]
 
 
 @pytest.mark.parametrize("path", ["/api/health", "/", "/api/apps/twilio/voice/status"])

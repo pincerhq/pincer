@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tasks-redis`, which stays as an alias.
 - The ElevenLabs voice lookups are cached for `PINCER_CACHE_DEFAULT_TTL`,
   per API key. Errors and missing voices are not cached.
+- Per-route decorators override the defaults. `@rate_limit("20/minute", scope=...)`
+  (stackable) and `@no_rate_limit` replace the user/anon limit on a route, each
+  limit with a bucket of its own. `@cache_response(ttl=..., scope="user" | "public")`
+  caches an endpoint's return value per user, applies `response_model` on a hit,
+  and takes precedence over `cache_control`. Invalidate with
+  `response_cache(app).invalidate(route, user=...)`.
+- The user/anon limit now runs after routing, as an app-level dependency, so the
+  decorators can be read. As a result, `/api/docs` and `/openapi.json` have the IP
+  ceiling only, and a hit in the shared `cache_control` cache no longer counts
+  against the user limit.
 - See [Rate limiting and caching](docs/core-components/rate-limiting-and-caching.md).
 
 #### `search_path=` in `PINCER_DATABASE_URL`

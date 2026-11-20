@@ -26,15 +26,19 @@ class _LimiterBase:
     the caller down.
     """
 
-    def __init__(self, rate: Rate, keys: KeySpace, scope: str, strategy: Strategy | None) -> None:
+    def __init__(
+        self, rate: Rate, keys: KeySpace, scope: str, strategy: Strategy | None, route: str | None = None
+    ) -> None:
         self.rate = rate
         self.keys = keys
         self.scope = scope
+        self.route = route
         self.strategy: Strategy = strategy or SlidingWindowStrategy()
-        self._outage = LogOnce(logger, recovery=f"Rate limit backend for scope {scope!r} recovered")
+        label = scope if route is None else f"{scope}:{route}"
+        self._outage = LogOnce(logger, recovery=f"Rate limit backend for scope {label!r} recovered")
 
     def key(self, identifier: str) -> str:
-        return self.keys.ratelimit(self.scope, identifier)
+        return self.keys.ratelimit(self.scope, identifier, route=self.route)
 
     def _failed(self) -> RateLimitResult:
         self._outage.log(
@@ -59,8 +63,10 @@ class Limiter(_LimiterBase):
         keys: KeySpace,
         scope: str,
         strategy: Strategy | None = None,
+        *,
+        route: str | None = None,
     ) -> None:
-        super().__init__(rate, keys, scope, strategy)
+        super().__init__(rate, keys, scope, strategy, route)
         self.storage = storage
 
     def hit(self, identifier: str, cost: int = 1) -> RateLimitResult:
@@ -84,8 +90,10 @@ class AsyncLimiter(_LimiterBase):
         keys: KeySpace,
         scope: str,
         strategy: Strategy | None = None,
+        *,
+        route: str | None = None,
     ) -> None:
-        super().__init__(rate, keys, scope, strategy)
+        super().__init__(rate, keys, scope, strategy, route)
         self.storage = storage
 
     async def hit(self, identifier: str, cost: int = 1) -> RateLimitResult:

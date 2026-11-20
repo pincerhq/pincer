@@ -151,9 +151,18 @@ class KeySpace:
     def pubsub(self, channel: str) -> str:
         return self.key("pubsub", channel)
 
-    def ratelimit(self, scope: str, identifier: str) -> str:
-        """A rate-limit bucket: `<prefix>:kv:ratelimit:<scope>:<identifier>` (identifier sanitised)."""
-        return self.kv("ratelimit", scope, key_part(identifier))
+    def ratelimit(self, scope: str, identifier: str, *, route: str | None = None) -> str:
+        """A rate-limit bucket: `<prefix>:kv:ratelimit:<scope>[:<route>]:<identifier>` (route, identifier sanitised).
+
+        `route` keeps a per-route limit (`@rate_limit`) apart from the default bucket of the same scope.
+        """
+        if route is None:
+            return self.kv("ratelimit", scope, key_part(identifier))
+        return self.kv("ratelimit", scope, key_part(route), key_part(identifier))
+
+    def api_cache(self, route: str, owner: str, *parts: str) -> str:
+        """A cached endpoint result (`@cache_response`): `<prefix>:kv:apicache:<route>:<owner>[:<part>...]`."""
+        return self.kv("apicache", key_part(route), key_part(owner), *parts)
 
     def http_cache(self) -> str:
         """Prefix of the HTTP response cache entries: `<prefix>:kv:httpcache`."""

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+_UNITS = {"second": 1.0, "minute": 60.0, "hour": 3600.0, "day": 86400.0}
+_RATE = re.compile(r"^\s*(\d+)\s*/\s*(?:(second|minute|hour|day)s?|(\d+(?:\.\d+)?)\s*s)\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,17 @@ class Rate:
     @classmethod
     def per_minute(cls, limit: int) -> Rate:
         return cls(limit, 60.0)
+
+    @classmethod
+    def parse(cls, value: str | Rate) -> Rate:
+        """`"20/minute"`, `"500/day"`, `"10/second"`, `"3/90s"` (or a `Rate`, returned as is)."""
+        if isinstance(value, Rate):
+            return value
+        match = _RATE.match(value)
+        if match is None:
+            raise ValueError(f"Invalid rate {value!r}: expected '<n>/<second|minute|hour|day>' or '<n>/<seconds>s'")
+        limit, unit, seconds = match.groups()
+        return cls(int(limit), _UNITS[unit.lower()] if unit else float(seconds))
 
 
 @dataclass(frozen=True)

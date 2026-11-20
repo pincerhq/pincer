@@ -14,10 +14,12 @@ Every key lives under `PINCER_CACHE_PREFIX`; see
 
 ## Rate limiting
 
-Two middlewares sit on either side of authentication:
+The IP ceiling is a middleware before authentication. The user and anonymous
+limits need to know the route, so they run after routing, as an app-level
+dependency (`pincer.api.rate_limits.enforce_rate_limits`):
 
 ```
-CORS → IP ceiling → auth → user | anon limit → HTTP cache → routes
+CORS → IP ceiling → auth → HTTP cache → routing → user | anon or route limits → @cache_response → endpoint
 ```
 
 | Limit | Checked | Keyed by | Default | Variable |
@@ -33,6 +35,11 @@ CORS → IP ceiling → auth → user | anon limit → HTTP cache → routes
 - **The user limit** gives each user their own budget, whichever IP they come
   from. A request with a bad token is answered `401` by auth and never charged
   to a user. Repeated bad tokens lock the IP out (`PINCER_AUTH_MAX_FAILURES`).
+- **Only FastAPI routes run the post-auth limits.** The built-in `/api/docs`
+  and `/openapi.json` pages have the IP ceiling only.
+- FastAPI reads a request's body before it runs dependencies, so a request
+  refused by the user/anon limit has had its body read. The IP ceiling refuses
+  floods before that.
 - **Exempt paths:** `/api/health`, everything outside `/api/` (dashboard
   assets), and the self-authenticated webhooks under `/api/apps/twilio/`,
   `/api/apps/teams/` and `/api/storage/signed/`, whose callers share platform
@@ -89,8 +96,10 @@ async def slo_report() -> SLOReportOut: ...
   asked, so mark only responses that are the same for every caller, with
   `public=True`. A response without `public` (or with `private=True`) is not
   stored.
-- It sits inside auth and the rate limits, so a cached answer still needs a
-  valid token and still counts against the limits.
+- It sits inside auth and the IP ceiling, so a cached answer still needs a
+  valid token and counts against the ceiling. It sits before routing, so a
+  hit is answered before the user/anon limit runs and doesn't count against
+  it. Use `@cache_response` when cached answers must count.
 - Routes that are not marked never pass through it. hishel reads a whole
   response before sending it, which would break streaming endpoints.
 - Entries live at most `PINCER_CACHE_DEFAULT_TTL` seconds (default 300), or
@@ -98,6 +107,92 @@ async def slo_report() -> SLOReportOut: ...
 
 Cached today: `/api/ops/slo`, `/api/ops/failures`, `/api/ops/digest`,
 `/api/ops/ga-gate` and `/api/ops/ga-gate/report`, for 60 seconds.
+
+## Per-route limits
+
+A decorator on an endpoint replaces the default user/anon limit for that
+route:
+
+```python
+from pincer.core.ratelimit import no_rate_limit, rate_limit
+
+
+@router.post("/chat")
+@rate_limit("20/minute")  # scope="user": per caller
+@rate_limit("500/day", strategy="token_bucket")  # stacked: every limit must allow
+async def chat(...): ...
+
+
+@router.get("/ops/digest")
+@rate_limit("5/minute", scope="ip")
+def digest(...): ...
+
+
+@router.get("/status")
+@no_rate_limit  # no post-auth limit; the IP ceiling still applies
+async def status(...): ...
+```
+
+- **Rates:** `"<n>/second|minute|hour|day"` or `"<n>/<seconds>s"`, or a `Rate`.
+- **`scope`** names who is counted:
+  - `"user"` (default): the caller's identity, or their IP if there is none;
+  - `"ip"`: everyone on one address together;
+  - `"anon"`: by IP;
+  - a function `request -> str | None` that returns the identifier, where None means not limited.
+- **`strategy`:** `"sliding_window"` (default) or `"token_bucket"`. `cost` is how many units one request uses.
+- **Buckets:** each declared limit has its own:
+  `<prefix>:kv:ratelimit:<scope>:<route>.<n>per<period>s[.<strategy>]:<id>`. A tight route limit
+  doesn't spend the default budget, and stacked limits don't share state. The
+  route part is the route's name (the function name), or `name=`.
+- **Headers:** a refusal is the usual `429` with `Retry-After` and `X-RateLimit-*`. On success,
+  `X-RateLimit-*` reports the tightest of the route's limits.
+- **Decorators only change the post-auth limits.** The IP ceiling is the same for every route.
+
+## Per-route response cache
+
+`@cache_response` caches an endpoint's return value, per user by default.
+It runs inside the route, after auth and the rate limits:
+
+```python
+from pincer.core.cache.decorators import cache_response, response_cache
+
+
+@router.get("/costs/today")
+@cache_response(ttl=60)  # scope="user": one entry per caller
+async def get_today_costs(...): ...
+
+
+@router.get("/integrations")
+@cache_response(ttl=300, scope="public", vary_headers=("accept-language",))
+def list_integrations(): ...  # sync endpoints work too
+
+
+# after a change, from the route that makes it:
+await response_cache(request.app).ainvalidate("get_today_costs", user=identity.pincer_user_id)
+```
+
+- **What is stored:** the return value, as JSON, under
+  `<prefix>:kv:apicache:<route>:<owner>:<hash>`. The hash covers method, path, the query
+  string (`vary_query=True`) and `vary_headers`.
+- **On a hit,** the stored value goes back through FastAPI, so `response_model` filtering
+  applies exactly as on a miss.
+- **Responses are never stored:** an endpoint that returns a `Response` (file, stream,
+  redirect) is passed through.
+- **`scope`:**
+  - `"user"` (default): a request without an identity is not cached;
+  - `"public"`: everyone shares the entry;
+  - a function `request -> str | None`.
+- **Headers:** `X-Cache: HIT | MISS | BYPASS`, and `Cache-Control: private` (or `public`)
+  `, max-age=<ttl>`. The TTL defaults to `PINCER_CACHE_DEFAULT_TTL`.
+- **Hits still count against the route's rate limits**, whichever order the two
+  decorators are in. A refused request never reaches the cache.
+- **The decorator wins over `cache_control`:** a route with both is cached only by the
+  decorator, never by the shared hishel cache.
+- **Invalidation:** `invalidate(route, user=None)` and `ainvalidate(...)` drop a route's
+  entries, for one owner or all. Keep TTLs short on user data: nothing else expires an
+  entry when the data changes.
+- **Failures:** if the store fails, the route is served uncached and a warning is logged
+  once.
 
 ## Sync and async
 
@@ -116,6 +211,8 @@ hishel (`BaseStorage` / `AsyncBaseStorage`) and httpx (`Client` / `AsyncClient`)
 | hishel storage, in memory | `pincer.core.cache.storage.MemoryStorage` | `AsyncMemoryStorage` |
 | hishel storage for the backend | `create_http_cache_storage(settings)` | `create_async_http_cache_storage(settings)` |
 | Cached outbound client | `pincer.core.cache.client.cached_client(...)` | `async_cached_client(...)` |
+| Key-value store | `pincer.core.cache.kv.MemoryKeyValueStore`, `RedisKeyValueStore` | `AsyncMemoryKeyValueStore`, `AsyncRedisKeyValueStore` |
+| Response cache | `ResponseCache.invalidate(...)`; sync endpoints | `ainvalidate(...)`; async endpoints |
 
 Both modes use the same strategies, bucket names and prefix. A sync and an
 async limiter with the same scope on one Redis count the same requests.
