@@ -68,7 +68,7 @@ warns about that in production.
 
 The limiter lives in `pincer.core.ratelimit`, an async reimplementation of the
 design of [FastAPI-RateLimiter](https://github.com/awais7012/FastAPI-RateLimiter).
-It provides `SlidingWindowCounter` and `TokenBucket` strategies, memory and
+It provides `SlidingWindowStrategy` and `TokenBucketStrategy` strategies, memory and
 Redis storage (one atomic Lua script per check), `Limiter` and the ASGI
 `RateLimitMiddleware`.
 

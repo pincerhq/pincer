@@ -16,7 +16,7 @@ from __future__ import annotations
 from pincer.core.ratelimit.limiter import Limiter
 from pincer.core.ratelimit.middleware import RateLimitMiddleware
 from pincer.core.ratelimit.storage import MemoryStorage, RateLimitStorage, RedisStorage, create_storage
-from pincer.core.ratelimit.strategies import SlidingWindowCounter, Strategy, TokenBucket
+from pincer.core.ratelimit.strategies import SlidingWindowStrategy, Strategy, TokenBucketStrategy
 from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 __all__ = [
@@ -27,8 +27,8 @@ __all__ = [
     "RateLimitResult",
     "RateLimitStorage",
     "RedisStorage",
-    "SlidingWindowCounter",
+    "SlidingWindowStrategy",
     "Strategy",
-    "TokenBucket",
+    "TokenBucketStrategy",
     "create_storage",
 ]

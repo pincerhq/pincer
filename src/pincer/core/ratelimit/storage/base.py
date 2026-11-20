@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pincer.core.ratelimit.strategies import Strategy
     from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 
-class RateLimitStorage(Protocol):
-    """Applies a strategy to one bucket atomically and keeps its state."""
+class RateLimitStorage(ABC):
+    """Base class of the bucket stores: applies a strategy to one bucket atomically and keeps its state."""
 
-    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult: ...
+    @abstractmethod
+    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
+        """Charge `cost` to the bucket `key` and return the outcome."""
 
-    async def reset(self, key: str) -> None: ...
+    @abstractmethod
+    async def reset(self, key: str) -> None:
+        """Forget the bucket `key`."""

@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from pincer.core.ratelimit.storage.base import RateLimitStorage
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -16,7 +18,7 @@ SWEEP_INTERVAL = 60.0
 DEFAULT_MAX_KEYS = 100_000
 
 
-class MemoryStorage:
+class MemoryStorage(RateLimitStorage):
     """A dict of bucket states with per-key expiry, so idle buckets don't pile up.
 
     `hit` never awaits between reading and writing a bucket, so on one event

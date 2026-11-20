@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from pincer.core.log_once import LogOnce
-from pincer.core.ratelimit.strategies import SlidingWindowCounter, Strategy
+from pincer.core.ratelimit.strategies import SlidingWindowStrategy, Strategy
 from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ class Limiter:
         self.rate = rate
         self.keys = keys
         self.scope = scope
-        self.strategy: Strategy = strategy or SlidingWindowCounter()
+        self.strategy: Strategy = strategy or SlidingWindowStrategy()
         self._outage = LogOnce(logger, recovery=f"Rate limit backend for scope {scope!r} recovered")
 
     def key(self, identifier: str) -> str:

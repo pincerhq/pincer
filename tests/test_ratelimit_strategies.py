@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from pincer.core.ratelimit import Rate, SlidingWindowCounter, TokenBucket
+from pincer.core.ratelimit import Rate, SlidingWindowStrategy, Strategy, TokenBucketStrategy
 
 if TYPE_CHECKING:
     from pincer.core.ratelimit.types import RateLimitResult
 
 
-def _run(strategy: SlidingWindowCounter | TokenBucket, rate: Rate, times: list[float]) -> list[RateLimitResult]:
+def _run(strategy: Strategy, rate: Rate, times: list[float]) -> list[RateLimitResult]:
     state = None
     results = []
     for now in times:
@@ -30,7 +30,7 @@ def test_rate_validates() -> None:
 
 
 def test_sliding_window_allows_up_to_the_limit_then_denies() -> None:
-    results = _run(SlidingWindowCounter(), Rate(3, 60), [600.0, 601.0, 602.0, 603.0])
+    results = _run(SlidingWindowStrategy(), Rate(3, 60), [600.0, 601.0, 602.0, 603.0])
     assert [r.allowed for r in results] == [True, True, True, False]
     assert [r.remaining for r in results] == [2, 1, 0, 0]
     denied = results[-1]
@@ -39,7 +39,7 @@ def test_sliding_window_allows_up_to_the_limit_then_denies() -> None:
 
 
 def test_sliding_window_weighs_the_previous_window() -> None:
-    strategy, rate = SlidingWindowCounter(), Rate(4, 60)
+    strategy, rate = SlidingWindowStrategy(), Rate(4, 60)
     state = None
     for now in (650.0, 651.0, 652.0, 653.0):  # 4 hits late in window 10
         state, _ = strategy.apply(state, now, rate)
@@ -56,7 +56,7 @@ def test_sliding_window_weighs_the_previous_window() -> None:
 
 
 def test_sliding_window_forgets_windows_older_than_the_previous_one() -> None:
-    strategy, rate = SlidingWindowCounter(), Rate(2, 60)
+    strategy, rate = SlidingWindowStrategy(), Rate(2, 60)
     state = None
     for now in (600.0, 601.0):
         state, _ = strategy.apply(state, now, rate)
@@ -66,12 +66,38 @@ def test_sliding_window_forgets_windows_older_than_the_previous_one() -> None:
 
 
 def test_token_bucket_bursts_then_refills() -> None:
-    results = _run(TokenBucket(), Rate(2, 60), [0.0, 0.0, 0.0, 30.0, 30.0])
+    results = _run(TokenBucketStrategy(), Rate(2, 60), [0.0, 0.0, 0.0, 30.0, 30.0])
     assert [r.allowed for r in results] == [True, True, False, True, False]
     assert results[2].retry_after == pytest.approx(30.0)  # one token per 30 s
     assert results[1].reset_after == pytest.approx(60.0)
 
 
 def test_token_bucket_never_exceeds_its_capacity() -> None:
-    results = _run(TokenBucket(), Rate(2, 60), [0.0, 10_000.0, 10_000.0, 10_000.0])
+    results = _run(TokenBucketStrategy(), Rate(2, 60), [0.0, 10_000.0, 10_000.0, 10_000.0])
     assert [r.allowed for r in results] == [True, True, True, False]
+
+
+def test_strategies_share_the_base_class_and_registry() -> None:
+    from pincer.core.ratelimit.strategies import STRATEGIES
+
+    assert {"sliding_window": SlidingWindowStrategy, "token_bucket": TokenBucketStrategy} == STRATEGIES
+    assert all(issubclass(cls, Strategy) for cls in STRATEGIES.values())
+    assert SlidingWindowStrategy().ttl(Rate(1, 30)) == 60
+
+
+def test_a_strategy_must_define_name_and_script() -> None:
+    with pytest.raises(TypeError, match="must define a non-empty `script`"):
+
+        class NoScript(Strategy):
+            name = "no_script"
+
+            def apply(self, state, now, rate, cost=1):  # type: ignore[no-untyped-def]
+                raise NotImplementedError
+
+    with pytest.raises(TypeError, match="abstract"):
+
+        class Unfinished(Strategy):
+            name = "x"
+            script = "return 1"
+
+        Unfinished()  # type: ignore[abstract]

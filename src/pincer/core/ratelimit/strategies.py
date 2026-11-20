@@ -12,25 +12,41 @@ on the bucket.
 from __future__ import annotations
 
 import math
-from typing import ClassVar, Protocol
+from abc import ABC, abstractmethod
+from typing import ClassVar
 
 from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 
-class Strategy(Protocol):
+class Strategy(ABC):
+    """Base class of every rate-limit algorithm.
+
+    A subclass sets `name` (its registry key) and `script` (the Lua twin of
+    `apply`) and implements `apply`; both are checked when the class is defined.
+    """
+
     name: ClassVar[str]
     script: ClassVar[str]
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if not getattr(cls, "__abstractmethods__", None):  # concrete strategies only
+            for attr in ("name", "script"):
+                if not isinstance(getattr(cls, attr, None), str) or not getattr(cls, attr):
+                    raise TypeError(f"{cls.__name__} must define a non-empty `{attr}`")
+
+    @abstractmethod
     def apply(
         self, state: list[float] | None, now: float, rate: Rate, cost: int = 1
-    ) -> tuple[list[float], RateLimitResult]: ...
+    ) -> tuple[list[float], RateLimitResult]:
+        """Charge `cost` to a bucket in `state` at `now`: the new state and the outcome."""
 
     def ttl(self, rate: Rate) -> float:
-        """Seconds a bucket must outlive its last hit."""
-        ...
+        """Seconds a bucket must outlive its last hit (the Lua scripts use the same, `period * 2`)."""
+        return rate.period * 2
 
 
-class SlidingWindowCounter:
+class SlidingWindowStrategy(Strategy):
     """Weighted current + previous fixed window: smooth like a sliding log, O(1) memory.
 
     State: `[window_index, current_count, previous_count]`. The estimate is
@@ -39,9 +55,6 @@ class SlidingWindowCounter:
     """
 
     name: ClassVar[str] = "sliding_window"
-
-    def ttl(self, rate: Rate) -> float:
-        return rate.period * 2
 
     def apply(
         self, state: list[float] | None, now: float, rate: Rate, cost: int = 1
@@ -105,16 +118,13 @@ return {allowed, remaining, math.ceil(reset_after * 1000), math.ceil(retry_after
 """
 
 
-class TokenBucket:
+class TokenBucketStrategy(Strategy):
     """`limit` tokens, refilled continuously at `limit / period` per second; allows bursts up to `limit`.
 
     State: `[tokens, updated_at]`.
     """
 
     name: ClassVar[str] = "token_bucket"
-
-    def ttl(self, rate: Rate) -> float:
-        return rate.period * 2
 
     def apply(
         self, state: list[float] | None, now: float, rate: Rate, cost: int = 1
@@ -158,7 +168,7 @@ return {allowed, remaining, math.ceil(reset_after * 1000), math.ceil(retry_after
 """
 
 
-STRATEGIES: dict[str, type[SlidingWindowCounter] | type[TokenBucket]] = {
-    SlidingWindowCounter.name: SlidingWindowCounter,
-    TokenBucket.name: TokenBucket,
+STRATEGIES: dict[str, type[Strategy]] = {
+    SlidingWindowStrategy.name: SlidingWindowStrategy,
+    TokenBucketStrategy.name: TokenBucketStrategy,
 }

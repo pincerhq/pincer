@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from pincer.core.ratelimit.storage.base import RateLimitStorage
 from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 if TYPE_CHECKING:
@@ -12,7 +13,7 @@ if TYPE_CHECKING:
     from pincer.core.ratelimit.strategies import Strategy
 
 
-class RedisStorage:
+class RedisStorage(RateLimitStorage):
     """Runs each strategy's Lua script via `EVALSHA` (redis-py `Script` reloads it on `NOSCRIPT`)."""
 
     def __init__(self, client: Redis) -> None:
