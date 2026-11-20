@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from pincer.config.dsn import BackendDsn  # noqa: TC001 (pydantic resolves it at runtime)
 from pincer.config.prefix import validate_prefix_template
 
 
 class TaskSettings(BaseModel):
+    # A URL that fails validation may carry a password: keep it out of the error.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     # ── Background task execution (repid) ─────────────────
     # Both default to the cache settings (`Settings.resolve_task_backend`); set
     # PINCER_TASK_BROKER_URL / PINCER_TASK_PREFIX only to give tasks their own.

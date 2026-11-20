@@ -48,6 +48,9 @@ class Settings(
         env_ignore_empty=True,
         case_sensitive=False,
         extra="ignore",
+        # Several settings are credentialed URLs (cache, task broker, database):
+        # a validation error names the field and the reason, never the value.
+        hide_input_in_errors=True,
     )
 
     # Shared by every backend user: rate limiting, the HTTP cache and (unless

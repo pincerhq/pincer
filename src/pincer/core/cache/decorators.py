@@ -65,6 +65,9 @@ _RESPONSE_PARAM = "_pincer_cache_response"
 
 OwnerFunc = Callable[[Any], "str | None"]
 
+Route = str | Callable[..., Any]
+"""A cached endpoint, or its cache name (`CacheRule.name`)."""
+
 
 @dataclass(frozen=True)
 class CacheRule:
@@ -278,10 +281,6 @@ def cache_response(
 def cache_rule(endpoint: Any) -> CacheRule | None:
     """The `@cache_response` rule on *endpoint* (the outermost one), if any."""
     return getattr(endpoint, CACHE_ATTR, None)
-
-
-Route = str | Callable[..., Any]
-"""A cached endpoint, or its cache name (`CacheRule.name`)."""
 
 
 def cache_name(route: Route) -> str:

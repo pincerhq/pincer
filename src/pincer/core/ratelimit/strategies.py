@@ -74,7 +74,10 @@ class SlidingWindowStrategy(Strategy):
             remaining = max(0, math.floor(rate.limit - estimate - cost))
             return [window, current, previous], RateLimitResult(True, rate.limit, remaining, reset_after)
         if current + cost > rate.limit or previous <= 0:
-            retry_after = reset_after  # only the next window can make room
+            # Only the next window can make room, and there this window's count is
+            # `previous`: current * (1 - x) + cost <= limit  =>  x >= 1 - (limit - cost) / current
+            carried = max(0.0, 1 - (rate.limit - cost) / current) if current > 0 else 0.0
+            retry_after = reset_after + carried * rate.period
         else:
             # previous * (1 - x) + current + cost <= limit  =>  x >= 1 - (limit - current - cost) / previous
             needed = 1 - (rate.limit - current - cost) / previous
@@ -108,7 +111,9 @@ if estimate + cost <= limit then
   current = current + cost
   remaining = math.max(0, math.floor(limit - estimate - cost))
 elseif current + cost > limit or previous <= 0 then
-  retry_after = reset_after
+  local carried = 0
+  if current > 0 then carried = math.max(0, 1 - (limit - cost) / current) end
+  retry_after = reset_after + carried * period
 else
   local needed = 1 - (limit - current - cost) / previous
   retry_after = math.max(0, (needed - elapsed) * period)

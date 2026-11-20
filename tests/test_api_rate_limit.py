@@ -159,3 +159,12 @@ def test_middleware_rejects_once_the_bucket_is_empty() -> None:
     client = TestClient(_bare_app(1))
     assert client.get("/stream").status_code == 200
     assert client.get("/stream").status_code == 429
+
+
+def test_websocket_routes_open_with_rate_limiting_on(authed_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The app-level dependency also runs for WebSocket routes; it must leave them alone."""
+    from pincer.voice.monitor import END_UNAVAILABLE
+
+    client = _client(monkeypatch, user=1)
+    with client.websocket_connect("/api/voice/listen/CA1", headers=authed_app.jwt_headers) as ws:
+        assert ws.receive_json()["reason"] == END_UNAVAILABLE

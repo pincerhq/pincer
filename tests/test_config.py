@@ -601,3 +601,18 @@ def test_config_does_not_import_the_cache_package() -> None:
     code = "import sys, pincer.config; print(any(m.startswith('pincer.core.cache') for m in sys.modules))"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
+
+
+@pytest.mark.parametrize("field", ["cache_backend_url", "task_broker_url"])
+def test_invalid_backend_url_error_hides_the_password(field: str) -> None:
+    """A typo in a credentialed URL must not print the password (pydantic's `input_value`)."""
+    from pydantic import ValidationError
+
+    from pincer.config.cache import CacheSettings
+    from pincer.config.tasks import TaskSettings
+
+    model = CacheSettings if field == "cache_backend_url" else TaskSettings
+    with pytest.raises(ValidationError) as exc:
+        model(**{field: "redis://:hunter2@h:abc/0"})
+    assert "hunter2" not in str(exc.value)
+    assert field in str(exc.value)

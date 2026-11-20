@@ -269,6 +269,31 @@ async def test_sync_and_async_clients_share_a_redis_cache(monkeypatch: pytest.Mo
     assert keys and all(k.startswith("production:pincer:kv:httpclient:shared:") for k in keys)
 
 
+async def test_closing_a_cached_client_leaves_the_shared_redis_client_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The storage's Redis client is process-wide (rate limiter, kv store): only `close_all()` closes it."""
+    server = fakeredis.FakeServer()
+    sync_redis, async_redis = fakeredis.FakeRedis(server=server), fakeredis.FakeAsyncRedis(server=server)
+    closed: list[str] = []
+    monkeypatch.setattr(sync_redis, "close", lambda: closed.append("sync"))
+
+    async def aclose() -> None:
+        closed.append("async")
+
+    monkeypatch.setattr(async_redis, "close", aclose)
+    monkeypatch.setattr(async_redis, "aclose", aclose)
+    monkeypatch.setattr("pincer.core.cache.storage.get_redis", lambda url: sync_redis)
+    monkeypatch.setattr("pincer.core.cache.storage.get_async_redis", lambda url: async_redis)
+    settings = _settings("redis://localhost:6379/0")
+    upstream = _Upstream()
+    with cached_client(settings, "shared", transport=httpx.MockTransport(upstream), base_url="https://api.test") as c:
+        c.get("/thing").read()
+    async with async_cached_client(
+        settings, "shared", transport=httpx.MockTransport(upstream), base_url="https://api.test"
+    ) as ac:
+        await (await ac.get("/thing")).aread()
+    assert closed == []
+
+
 def test_client_cache_key_hashes_the_credential() -> None:
     request = httpx.Request("GET", "https://api.test/v2/voices", headers={"xi-api-key": "secret"})
     key = cache_key(request, ("xi-api-key",))

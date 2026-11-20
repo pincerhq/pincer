@@ -77,6 +77,8 @@ class RateLimiter:
 
         async def remaining(limiter: AsyncLimiter) -> int:
             result = await limiter.check(user_id)
+            if result.failed:  # backend unreachable: nothing is known, report the full limit
+                return result.limit if result.allowed else 0
             # `check` reports what would be left after one more; add it back.
             return result.remaining + 1 if result.allowed else 0
 

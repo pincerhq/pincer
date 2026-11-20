@@ -67,7 +67,9 @@ class _KeyedTransport(httpx.BaseTransport):
         return self._inner.handle_request(request)
 
     def close(self) -> None:
-        self._inner.close()
+        # Not `self._inner.close()`: hishel would also close the storage, which is
+        # process-wide (with redis://, the shared client); `close_all()` owns it.
+        self._inner.next_transport.close()
 
 
 class _AsyncKeyedTransport(httpx.AsyncBaseTransport):
@@ -80,7 +82,8 @@ class _AsyncKeyedTransport(httpx.AsyncBaseTransport):
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
-        await self._inner.aclose()
+        # The network transport only; the shared storage is `aclose_all()`'s.
+        await self._inner.next_transport.aclose()
 
 
 def _storage_key(settings: Any, namespace: str) -> tuple[str, str, str]:

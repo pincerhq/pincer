@@ -39,6 +39,13 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 LIMITS_ATTR = "__pincer_rate_limits__"
 
+ScopeFunc = Callable[[Any], "str | None"]
+"""`request -> identifier` for a custom scope (None: the request is not limited)."""
+
+RateSource = Rate | Callable[[], "str | Rate"]
+"""A rate, or a function returning one, read on each request (e.g. from settings).
+`@rate_limit` also takes the string form, parsed once."""
+
 
 class LimitScope(StrEnum):
     """Who a route limit counts (`@rate_limit(scope=...)`); a function is the custom case."""
@@ -47,13 +54,6 @@ class LimitScope(StrEnum):
     IP = "ip"  # everyone on one address together
     ANON = "anon"  # by IP
     GLOBAL = "global"  # one bucket for everyone
-
-
-ScopeFunc = Callable[[Any], "str | None"]
-"""`request -> identifier` for a custom scope (None: the request is not limited)."""
-
-RateSource = str | Rate | Callable[[], "str | Rate"]
-"""A rate, or a function returning one, read on each request (e.g. from settings)."""
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class RouteLimit:
         detail: The 429 message, or a function of the refused result.
     """
 
-    rate: Rate | Callable[[], str | Rate]
+    rate: RateSource
     scope: LimitScope | ScopeFunc = LimitScope.USER
     strategy: Strategy = SlidingWindowStrategy()
     cost: int = 1
@@ -117,7 +117,7 @@ def _strategy(value: str | Strategy | None) -> Strategy:
 
 
 def rate_limit(
-    rate: RateSource,
+    rate: str | RateSource,
     *,
     scope: LimitScope | str | ScopeFunc = LimitScope.USER,
     strategy: str | Strategy | None = None,

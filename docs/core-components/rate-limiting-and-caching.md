@@ -44,6 +44,9 @@ CORS → IP ceiling → auth → HTTP cache → routing → user | anon or route
   assets), and the self-authenticated webhooks under `/api/apps/twilio/`,
   `/api/apps/teams/` and `/api/storage/signed/`, whose callers share platform
   IPs.
+- **WebSockets** (voice listen-in, the Twilio relay/stream/monitor sockets)
+  are not rate limited by either layer: each authenticates itself (a ticket or
+  a Twilio signature) when it opens.
 
 A refused request gets:
 

@@ -99,6 +99,16 @@ async def test_storage_allows_then_denies(harness: Harness, strategy: Strategy) 
     assert all(r.limit == 3 for r in results)
 
 
+async def test_sliding_window_retry_after_counts_the_carried_window(harness: Harness) -> None:
+    """Python and Lua agree: a full window still weighs on the next, so retry_after goes past reset_after."""
+    rate = Rate(4, 60)
+    results = [await harness.hit("test:pincer:kv:ratelimit:ip:1", SlidingWindowStrategy(), rate) for _ in range(5)]
+    denied = results[-1]
+    assert not denied.allowed
+    # 4 * (1 - x) + 1 <= 4  =>  x >= 0.25 of the next window: 15 s past the reset.
+    assert denied.retry_after == pytest.approx(denied.reset_after + 15.0, abs=0.01)
+
+
 async def test_storage_buckets_are_independent(harness: Harness) -> None:
     rate, strategy = Rate(1, 60), SlidingWindowStrategy()
     assert (await harness.hit("a", strategy, rate)).allowed

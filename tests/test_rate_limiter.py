@@ -54,6 +54,25 @@ async def test_user_status_reports_rates_but_no_spend():
 
 
 @pytest.mark.asyncio
+async def test_user_status_with_the_backend_down_never_exceeds_the_limit():
+    """A fail-open result carries no count: report the limit, not limit + 1."""
+    from pincer.core.cache.keys import KeySpace
+    from pincer.core.ratelimit import AsyncLimiterFactory, AsyncRateLimitStorage
+
+    class _Down(AsyncRateLimitStorage):
+        async def hit(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+        async def reset(self, key):
+            return None
+
+    limiter = RateLimiter(30, 20, limiters=AsyncLimiterFactory(_Down(), KeySpace("t:pincer")))
+    status = await limiter.get_status("u1")
+    assert status["messages_remaining"] == status["messages_limit"] == 30
+    assert status["tool_calls_remaining"] == status["tool_calls_limit"] == 20
+
+
+@pytest.mark.asyncio
 async def test_per_user_isolation():
     limiter = RateLimiter(messages_per_minute=2)
     await limiter.check_message("alice")

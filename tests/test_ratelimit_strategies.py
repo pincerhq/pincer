@@ -34,8 +34,25 @@ def test_sliding_window_allows_up_to_the_limit_then_denies() -> None:
     assert [r.allowed for r in results] == [True, True, True, False]
     assert [r.remaining for r in results] == [2, 1, 0, 0]
     denied = results[-1]
-    assert denied.retry_after == pytest.approx(57.0)  # the rest of this window: only the next one makes room
+    # Only the next window makes room, where these 3 hits still weigh 3 * (1 - x):
+    # 3 * (1 - x) + 1 <= 3  =>  x >= 1/3  =>  57 s + 20 s.
+    assert denied.retry_after == pytest.approx(77.0)
     assert denied.reset_after == pytest.approx(57.0)
+
+
+def test_sliding_window_retry_after_is_honest_when_the_window_is_full() -> None:
+    """Waiting exactly `retry_after` after a full window is allowed, not refused again."""
+    strategy, rate = SlidingWindowStrategy(), Rate(10, 60)
+    state = None
+    for _ in range(10):
+        state, _ = strategy.apply(state, 630.0, rate)
+    state, denied = strategy.apply(state, 631.0, rate)
+    assert not denied.allowed
+    assert denied.retry_after == pytest.approx(29.0 + 6.0)  # 10 * (1 - x) + 1 <= 10  =>  x >= 0.1
+    _, too_early = strategy.apply(state, 631.0 + denied.retry_after - 0.5, rate)
+    assert not too_early.allowed
+    _, retried = strategy.apply(state, 631.0 + denied.retry_after, rate)
+    assert retried.allowed
 
 
 def test_sliding_window_weighs_the_previous_window() -> None:

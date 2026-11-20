@@ -98,11 +98,17 @@ class APIRateLimits:
         return Charge(limiter, identifier, limit.cost, limit.detail)
 
 
-async def enforce_rate_limits(request: Request, response: Response) -> None:
+async def enforce_rate_limits(request: HTTPConnection, response: Response) -> None:
     """App-level dependency: the route's `@rate_limit`s, none for `@no_rate_limit`, else the default.
 
-    The limits are checked before any is charged (`acharge_all`).
+    The limits are checked before any is charged (`acharge_all`). FastAPI also
+    runs app-level dependencies for WebSocket routes, so this takes an
+    `HTTPConnection` and leaves WebSockets alone, like the IP ceiling does:
+    each socket authenticates itself (tickets, Twilio signatures).
     """
+    if request.scope["type"] != "http":
+        return
+    assert isinstance(request, Request)
     limits: APIRateLimits | None = getattr(request.app.state, "rate_limits", None)
     if limits is None or is_exempt(request.url.path):
         return
