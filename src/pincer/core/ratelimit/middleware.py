@@ -74,7 +74,7 @@ class RateLimitMiddleware:
         if not result.allowed:
             await self._reject(result, send)
             return
-        if not self.expose_headers or (result.reset_after <= 0 and result.remaining == result.limit):
+        if not self.expose_headers or result.failed:
             # Nothing to report (or a fail-open result that knows nothing about the bucket).
             await self.app(scope, receive, send)
             return

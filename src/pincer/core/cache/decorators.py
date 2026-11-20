@@ -20,8 +20,9 @@ route, after auth and the rate limits, so it can cache per user:
   function `request -> str | None` (None: not cached).
 - **The key** is `<prefix>:kv:apicache:<route>:<owner>:<hash>`, the hash covering
   method, path, the query string (`vary_query`) and `vary_headers`.
-- **Headers:** `X-Cache: HIT | MISS | BYPASS`, and `Cache-Control: private` (or
-  `public`) `, max-age=<ttl>`.
+- **Headers:** `X-Cache: HIT | MISS | BYPASS`, and `Cache-Control: private,
+  max-age=<ttl>`; `public` only for `scope="public"` on a request without an
+  `Authorization` header, so a proxy never shares an authenticated answer.
 - **Invalidation:** `response_cache(app).invalidate("route_name", user=...)` (or
   `ainvalidate`) from the routes that change the data.
 - A store failure is logged once and the route is served uncached.
@@ -155,11 +156,14 @@ def _with_injected(signature: inspect.Signature) -> inspect.Signature:
     return signature.replace(parameters=[*head, *extra, *tail])
 
 
-def _headers(response: Response, rule: CacheRule, ttl: float, state: str) -> None:
+def _headers(request: Request, response: Response, rule: CacheRule, ttl: float, state: str) -> None:
     response.headers["X-Cache"] = state
     if state != "BYPASS":
-        visibility = "public" if rule.scope == "public" else "private"
-        response.headers["Cache-Control"] = f"{visibility}, max-age={int(ttl)}"
+        # `scope="public"` shares the entry inside pincer. Downstream caches
+        # (proxies, CDNs) only get `public` for a request without credentials:
+        # an authenticated answer must never be handed to someone else by them.
+        shared = rule.scope == "public" and "authorization" not in request.headers
+        response.headers["Cache-Control"] = f"{'public' if shared else 'private'}, max-age={int(ttl)}"
 
 
 def _encode(result: Any) -> bytes:
@@ -194,7 +198,7 @@ def cache_response(
                 lifetime = rule.ttl or cache.default_ttl
                 owner = rule.owner(request)
                 if owner is None:
-                    _headers(response, rule, lifetime, "BYPASS")
+                    _headers(request, response, rule, lifetime, "BYPASS")
                     return await func(*args, **kwargs)
                 key = cache.key(rule, owner, request)
                 try:
@@ -204,7 +208,7 @@ def cache_response(
                     hit = None
                 if hit is not None:
                     _STORE_FAILED.clear()
-                    _headers(response, rule, lifetime, "HIT")
+                    _headers(request, response, rule, lifetime, "HIT")
                     return json.loads(hit)
                 result = await func(*args, **kwargs)
                 if isinstance(result, StarletteResponse):
@@ -214,7 +218,7 @@ def cache_response(
                     _STORE_FAILED.clear()
                 except Exception:  # noqa: BLE001
                     _STORE_FAILED.log("Response cache store failed; serving %s uncached", rule.name, exc_info=True)
-                _headers(response, rule, lifetime, "MISS")
+                _headers(request, response, rule, lifetime, "MISS")
                 return result
 
             wrapper: Any = async_wrapper
@@ -228,7 +232,7 @@ def cache_response(
                 lifetime = rule.ttl or cache.default_ttl
                 owner = rule.owner(request)
                 if owner is None:
-                    _headers(response, rule, lifetime, "BYPASS")
+                    _headers(request, response, rule, lifetime, "BYPASS")
                     return func(*args, **kwargs)
                 key = cache.key(rule, owner, request)
                 try:
@@ -238,7 +242,7 @@ def cache_response(
                     hit = None
                 if hit is not None:
                     _STORE_FAILED.clear()
-                    _headers(response, rule, lifetime, "HIT")
+                    _headers(request, response, rule, lifetime, "HIT")
                     return json.loads(hit)
                 result = func(*args, **kwargs)
                 if isinstance(result, StarletteResponse):
@@ -248,7 +252,7 @@ def cache_response(
                     _STORE_FAILED.clear()
                 except Exception:  # noqa: BLE001
                     _STORE_FAILED.log("Response cache store failed; serving %s uncached", rule.name, exc_info=True)
-                _headers(response, rule, lifetime, "MISS")
+                _headers(request, response, rule, lifetime, "MISS")
                 return result
 
             wrapper = sync_wrapper

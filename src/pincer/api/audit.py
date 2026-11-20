@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from pincer.core.cache.decorators import cache_response
 from pincer.security.audit import AuditAction
 from pincer.services.audit import AuditServiceDep
 
@@ -64,6 +65,8 @@ async def get_audit(
 
 
 @router.get("/stats")
+# Deployment-wide aggregates (no per-user filter): one shared entry per `since` for 30 s.
+@cache_response(ttl=30, scope="public")
 async def get_audit_stats(
     audit: AuditServiceDep,
     since: str | None = Query(default=None, description="ISO date for 'today' filter"),

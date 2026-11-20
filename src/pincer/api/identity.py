@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, SecretStr, field_serializer
 
 from pincer.api.auth import CurrentIdentity, InteractiveIdentity, TokenPairOut, guards
+from pincer.core.ratelimit import rate_limit
 from pincer.services.auth import (
     ApiKeyExistsError,
     AuthServiceDep,
@@ -72,6 +73,7 @@ async def get_me(identity: CurrentIdentity, identities: IdentityServiceDep) -> d
 
 
 @router.put("/me/password", response_model=TokenPairOut)
+@rate_limit("5/hour", detail="Too many password changes this hour; try again later.")
 async def change_my_password(
     body: PasswordChangeIn,
     request: Request,
@@ -120,6 +122,7 @@ async def get_my_api_key(identity: CurrentIdentity, auth: AuthServiceDep) -> Api
 
 
 @router.post("/me/api-key", response_model=ApiKeyCreatedOut, status_code=201)
+@rate_limit("5/hour", detail="Too many API keys created this hour; try again later.")
 async def create_my_api_key(
     response: Response,
     identity: InteractiveIdentity,

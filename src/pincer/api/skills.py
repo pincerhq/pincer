@@ -6,7 +6,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from pincer.core.cache.decorators import cache_response, response_cache
+from pincer.core.ratelimit import rate_limit
 
 if TYPE_CHECKING:
     from pincer.tools.skills.index import SkillEntry, SkillIndex
@@ -60,7 +63,14 @@ def _skill_detail(dir_name: str) -> dict[str, Any] | None:
     return None
 
 
+# Same for every caller. The skill index has its own rescan interval; this only
+# saves rebuilding the JSON. `POST /rebuild` drops both entries at once.
+_CACHED = cache_response(ttl=30, scope="public")
+_CACHED_ROUTES = ("list_skills", "get_skill")
+
+
 @router.get("")
+@_CACHED
 async def list_skills() -> dict[str, list[dict[str, Any]]]:
     """List discovered SKILL.md skills (bundled + user)."""
     return {"skills": await asyncio.to_thread(_skill_entries)}
@@ -86,7 +96,9 @@ async def _enqueue_rebuild_job(generation: str, clear_cache: bool, disk_id: str 
 
 
 @router.post("/rebuild")
+@rate_limit("2/minute", detail="The skill index was just rebuilt; try again in a minute.")
 async def rebuild_skills(
+    request: Request,
     keep_cache: bool = Query(False, description="Keep cached copies of remote skill files instead of re-fetching"),
 ) -> dict[str, Any]:
     """Rebuild the skill index — the API counterpart of `pincer skills rebuild`.
@@ -120,6 +132,9 @@ async def rebuild_skills(
 
     generation = service.generation
     assert generation is not None  # rebuild() always records one
+    cache = response_cache(request.app)
+    for route in _CACHED_ROUTES:
+        await cache.ainvalidate(route)
     return {
         "generation": generation,
         "cache_cleared": clear_cache,
@@ -129,6 +144,7 @@ async def rebuild_skills(
 
 
 @router.get("/{name}")
+@_CACHED
 async def get_skill(name: str) -> dict[str, Any]:
     """Get a single skill's full SKILL.md body and file manifest, by directory name."""
     detail = await asyncio.to_thread(_skill_detail, name)

@@ -406,6 +406,9 @@ def _mock_settings_for_build_core(tmp_path: Path):
     settings.rate_messages_per_min = 20
     settings.rate_tools_per_min = 20
     settings.max_concurrent_llm = 2
+    settings.cache_backend_url = "memory://"
+    settings.cache_prefix = "{environment}:{service}"
+    settings.environment = "test"
     settings.memory_enabled = False
     settings.skills_dir = tmp_path / "skills"
     settings.skills_max_loaded_per_root = 50

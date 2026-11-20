@@ -9,18 +9,35 @@ So it is off unless switched on, it takes a number only with an explicit
 per number, a daily cap per client, a daily cap overall, and every guardrail
 `make_phone_call` already applies (do-not-call, quiet hours, the outbound
 budget). The demo is worth having; it is not worth a harassment vector.
+
+The three counters are `pincer.core.ratelimit` limiters on the cache backend
+(`PINCER_CACHE_BACKEND_URL`), so with Redis they hold across workers and
+restarts. They are not route decorators: the number comes from the body, and a
+request refused for another reason (no consent, a bad number, another cap) must
+not spend a slot, so all three are checked first and charged only together.
+They fail closed: when the backend can't be asked, nobody is called.
 """
 
 from __future__ import annotations
 
 import logging
-import time
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from pincer.api.auth_guard import client_ip
 from pincer.config import get_settings_relaxed
+from pincer.core.cache.keys import KeySpace
+from pincer.core.ratelimit import (
+    AsyncLimiter,
+    Rate,
+    RateLimitResult,
+    SlidingWindowStrategy,
+    TokenBucketStrategy,
+    create_async_storage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,70 +59,93 @@ DEMO_TASK = (
     "and end the call politely within two minutes."
 )
 
-# In-process counters. A restart forgives everything, which is the right
-# trade-off for a demo: no schema, no cleanup job, and the global cap still
-# bounds a running process. A multi-worker deployment gets per-worker limits —
-# noted in the docs rather than pretended away.
-_last_call_at: dict[str, float] = {}
-_client_calls: dict[str, list[float]] = {}
-_global_calls: list[float] = []
-
 _DAY_S = 24 * 60 * 60
 
-
-def _prune(stamps: list[float], now: float) -> list[float]:
-    return [t for t in stamps if now - t < _DAY_S]
-
-
-def _client_key(request: Request) -> str:
-    """Best-effort caller identity: the proxy's forwarded address, else the peer."""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+#: Why each limiter refuses, in words the website shows as-is.
+_UNAVAILABLE = "The demo line is not available right now. Please try again later."
 
 
-def _check_limits(number: str, client: str, now: float | None = None) -> None:
-    """Raise 429 with a sentence the website can show as-is."""
-    stamp = time.time() if now is None else now
+def _cooldown_message(result: RateLimitResult) -> str:
+    wait_min = int(result.retry_after // 60) + 1
+    return f"This number was just called. Try again in about {wait_min} minutes."
 
-    last = _last_call_at.get(number)
-    if last is not None and stamp - last < NUMBER_COOLDOWN_S:
-        wait_min = int((NUMBER_COOLDOWN_S - (stamp - last)) // 60) + 1
-        raise HTTPException(
-            status_code=429,
-            detail=f"This number was just called. Try again in about {wait_min} minutes.",
+
+_CLIENT_MESSAGE = "You have used today's demo calls. Book a demo and we will call you properly."
+_GLOBAL_MESSAGE = "The demo line is busy today. Book a demo and we will call you back."
+
+
+@dataclass(frozen=True)
+class _DemoLimits:
+    """The three caps, under `<prefix>:kv:ratelimit:demo_*`."""
+
+    number: AsyncLimiter
+    client: AsyncLimiter
+    everyone: AsyncLimiter
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> _DemoLimits:
+        storage = create_async_storage(settings.cache_backend_url)
+        keys = KeySpace.for_cache(settings)
+        return cls(
+            # A token bucket of one: exactly NUMBER_COOLDOWN_S between calls to a number.
+            number=AsyncLimiter(
+                storage, Rate(1, NUMBER_COOLDOWN_S), keys, "demo_number", TokenBucketStrategy(), fail_open=False
+            ),
+            client=AsyncLimiter(
+                storage, Rate(PER_CLIENT_DAILY, _DAY_S), keys, "demo_client", SlidingWindowStrategy(), fail_open=False
+            ),
+            everyone=AsyncLimiter(
+                storage, Rate(GLOBAL_DAILY, _DAY_S), keys, "demo_global", SlidingWindowStrategy(), fail_open=False
+            ),
         )
 
-    mine = _prune(_client_calls.get(client, []), stamp)
-    _client_calls[client] = mine
-    if len(mine) >= PER_CLIENT_DAILY:
-        raise HTTPException(
-            status_code=429,
-            detail="You have used today's demo calls. Book a demo and we will call you properly.",
-        )
-
-    everyone = _prune(_global_calls, stamp)
-    _global_calls[:] = everyone
-    if len(everyone) >= GLOBAL_DAILY:
-        raise HTTPException(
-            status_code=429,
-            detail="The demo line is busy today. Book a demo and we will call you back.",
-        )
+    def checks(self, number: str, client: str) -> list[tuple[AsyncLimiter, str, Any]]:
+        """Each cap with its identifier and refusal message, in the order a refusal is reported."""
+        return [
+            (self.number, number, _cooldown_message),
+            (self.client, client, _CLIENT_MESSAGE),
+            (self.everyone, "all", _GLOBAL_MESSAGE),
+        ]
 
 
-def _record(number: str, client: str, now: float | None = None) -> None:
-    stamp = time.time() if now is None else now
-    _last_call_at[number] = stamp
-    _client_calls.setdefault(client, []).append(stamp)
-    _global_calls.append(stamp)
+_limits: _DemoLimits | None = None
+
+
+def _demo_limits() -> _DemoLimits:
+    global _limits
+    if _limits is None:
+        _limits = _DemoLimits.from_settings(get_settings_relaxed())
+    return _limits
+
+
+def _refusal(result: RateLimitResult, message: Any) -> HTTPException:
+    if result.failed:
+        return HTTPException(status_code=503, detail=_UNAVAILABLE)
+    return HTTPException(status_code=429, detail=message(result) if callable(message) else message)
+
+
+async def _charge_limits(number: str, client: str) -> None:
+    """Raise 429 (or 503) unless all three caps allow a call; then count it against all three.
+
+    Checked first, charged only together: a request any cap refuses spends
+    nothing. Two requests racing can both pass the check; the charge itself
+    still refuses the one that went over.
+    """
+    checks = _demo_limits().checks(number, client)
+    for limiter, identifier, message in checks:
+        result = await limiter.check(identifier)
+        if not result.allowed:
+            raise _refusal(result, message)
+    for limiter, identifier, message in checks:
+        result = await limiter.hit(identifier)
+        if not result.allowed:
+            raise _refusal(result, message)
 
 
 def reset_limits() -> None:
-    """Test hook — the counters are process state, not a database."""
-    _last_call_at.clear()
-    _client_calls.clear()
-    _global_calls.clear()
+    """Test hook: the next request builds fresh limiters (a fresh in-memory backend)."""
+    global _limits
+    _limits = None
 
 
 class DemoCallIn(BaseModel):
@@ -143,12 +183,10 @@ async def demo_call(body: DemoCallIn, request: Request) -> DemoCallOut:
             detail=f"That does not look like a phone number: {body.phone_number}",
         )
 
-    client = _client_key(request)
-    _check_limits(number, client)
-
+    client = client_ip(request)
     # Counted before the call, not after: two requests racing must not both
     # get through on "nobody has called yet".
-    _record(number, client)
+    await _charge_limits(number, client)
 
     logger.info("Demo call requested: to=%s client=%s", number, client)
     result = await make_phone_call(

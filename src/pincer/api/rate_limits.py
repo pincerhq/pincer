@@ -44,7 +44,7 @@ from starlette.requests import HTTPConnection
 from pincer.api.auth_guard import SELF_AUTHENTICATED_PREFIXES, client_ip
 from pincer.core.cache.keys import KeySpace
 from pincer.core.ratelimit import AsyncLimiter, AsyncRateLimitStorage, Rate, RateLimitResult, create_async_storage
-from pincer.core.ratelimit.decorators import RouteLimit, route_limits
+from pincer.core.ratelimit.decorators import DEFAULT_DETAIL, RouteLimit, route_limits
 from pincer.core.ratelimit.middleware import Scope, rate_limit_headers
 
 EXEMPT_PATHS = frozenset({"/api/health"})
@@ -100,27 +100,30 @@ class APIRateLimits:
             identifier: str | None = identity.pincer_user_id
         elif scope in ("ip", "anon"):
             identifier = client_ip(request)
+        elif scope == "global":
+            identifier = "all"
         else:
             assert callable(scope)
             identifier = scope(request)
         if identifier is None:
             return None
         scope_name = scope if isinstance(scope, str) else limit.scope_name
-        bucket = limit.bucket_name(route)
+        rate = limit.current_rate()
+        bucket = limit.bucket_name(route, rate)
         cache_key = (f"{scope_name}:{bucket}", limit)
         limiter = self._routes.get(cache_key)
         if limiter is None:
-            limiter = AsyncLimiter(self.storage, limit.rate, self.keys, scope_name, limit.strategy, route=bucket)
+            limiter = AsyncLimiter(self.storage, rate, self.keys, scope_name, limit.strategy, route=bucket)
             self._routes[cache_key] = limiter
         return limiter, identifier
 
 
-def _tightest(results: list[RateLimitResult]) -> RateLimitResult:
-    """The result to report: a refusal with the longest wait, else the one with the least room left."""
-    denied = [r for r in results if not r.allowed]
+def _tightest(results: list[RateLimitResult]) -> int:
+    """Which result to report: a refusal with the longest wait, else the one with the least room left."""
+    denied = [i for i, r in enumerate(results) if not r.allowed]
     if denied:
-        return max(denied, key=lambda r: r.retry_after)
-    return min(results, key=lambda r: (r.remaining / r.limit, r.remaining))
+        return max(denied, key=lambda i: results[i].retry_after)
+    return min(range(len(results)), key=lambda i: (results[i].remaining / results[i].limit, results[i].remaining))
 
 
 async def enforce_rate_limits(request: Request, response: Response) -> None:
@@ -132,19 +135,24 @@ async def enforce_rate_limits(request: Request, response: Response) -> None:
     declared = route_limits(getattr(route, "endpoint", None))
     if declared is None:
         return
+    charges: list[tuple[AsyncLimiter, str, int, RouteLimit | None]] = []
     if declared:
         route_name = str(getattr(route, "name", "") or "route")
-        buckets = [limits.for_route(route_name, limit, request) for limit in declared]
-        charges = [(bucket, limit.cost) for bucket, limit in zip(buckets, declared, strict=True) if bucket is not None]
+        for limit in declared:
+            bucket = limits.for_route(route_name, limit, request)
+            if bucket is not None:
+                charges.append((*bucket, limit.cost, limit))
     else:
-        charges = [(limits.default_for(request), 1)]
+        charges.append((*limits.default_for(request), 1, None))
     if not charges:
         return
-    results = [await limiter.hit(identifier, cost) for (limiter, identifier), cost in charges]
-    reported = _tightest(results)
+    results = [await limiter.hit(identifier, cost) for limiter, identifier, cost, _ in charges]
+    index = _tightest(results)
+    reported, declared_by = results[index], charges[index][3]
     headers = {name.decode(): value.decode() for name, value in rate_limit_headers(reported)}
     if not reported.allowed:
         headers["Retry-After"] = str(max(1, math.ceil(reported.retry_after or 1)))
-        raise HTTPException(status_code=429, detail="Rate limit exceeded", headers=headers)
-    if reported.reset_after > 0 or reported.remaining != reported.limit:  # skip fail-open results
+        detail = declared_by.message(reported) if declared_by is not None else DEFAULT_DETAIL
+        raise HTTPException(status_code=429, detail=detail, headers=headers)
+    if not reported.failed:  # a fail-open result knows nothing about the bucket
         response.headers.update(headers)

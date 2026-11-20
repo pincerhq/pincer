@@ -204,7 +204,7 @@ class _Broken:
 
 
 class _BrokenStorage(_Broken, RateLimitStorage):
-    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> Any:
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False) -> Any:
         return self._hit(key, strategy, rate, cost)
 
     def reset(self, key: str) -> None:
@@ -212,7 +212,7 @@ class _BrokenStorage(_Broken, RateLimitStorage):
 
 
 class _AsyncBrokenStorage(_Broken, AsyncRateLimitStorage):
-    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> Any:
+    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False) -> Any:
         return self._hit(key, strategy, rate, cost)
 
     async def reset(self, key: str) -> None:
@@ -244,3 +244,28 @@ def test_create_storage_picks_backend_and_mode() -> None:
     assert isinstance(create_storage("redis://localhost:6379/0"), RedisStorage)
     assert isinstance(create_async_storage("memory://"), AsyncMemoryStorage)
     assert isinstance(create_async_storage("redis://localhost:6379/0"), AsyncRedisStorage)
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES, ids=lambda s: s.name)
+async def test_check_reports_without_charging(harness: Harness, strategy: Strategy) -> None:
+    limiter = harness.limiter(Rate(2, 60), "user", strategy)
+    for _ in range(5):
+        checked = await _maybe(limiter.check("alice"))
+        assert checked.allowed and checked.remaining == 1  # nothing spent by checking
+    await _maybe(limiter.hit("alice"))
+    await _maybe(limiter.hit("alice"))
+    refused = await _maybe(limiter.check("alice"))
+    assert not refused.allowed and refused.retry_after > 0
+
+
+@pytest.mark.parametrize(
+    ("storage_cls", "limiter_cls"), [(_BrokenStorage, Limiter), (_AsyncBrokenStorage, AsyncLimiter)]
+)
+async def test_limiter_can_fail_closed(storage_cls: type[_Broken], limiter_cls: Any) -> None:
+    closed = limiter_cls(storage_cls(), Rate(5, 60), KEYS, "demo", fail_open=False)
+    for call in (closed.hit, closed.check):
+        result = await _maybe(call("x"))
+        assert not result.allowed and result.failed and result.retry_after > 0
+    opened = limiter_cls(storage_cls(), Rate(5, 60), KEYS, "demo")
+    result = await _maybe(opened.hit("x"))
+    assert result.allowed and result.failed

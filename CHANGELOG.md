@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decorators can be read. As a result, `/api/docs` and `/openapi.json` have the IP
   ceiling only, and a hit in the shared `cache_control` cache no longer counts
   against the user limit.
+- The limits and caches now cover pincer's own routes:
+  - Web chat (`/api/chat/message`, `/stream`) gets the channels' per-user
+    message limit and its "sending messages too fast" 429.
+  - Outbound calls (10/h), the canary (6/h), listen-in tickets, storage writes,
+    skills rebuild and credential changes (5/h) have route limits.
+  - The ops reports, integrations, skills, costs and audit stats are cached for
+    30–60 s, shared. A skills rebuild drops its cache.
+  - The channels' message and tool limits and the demo call's caps use the cache
+    backend, so with Redis they hold across processes. The demo call fails closed
+    (503) when the backend is down.
+  - `@rate_limit` gained `detail=`, `scope="global"` and rate functions.
+    Limiters gained `check()` and `fail_open=False`.
+  - `@cache_response(scope="public")` sends `Cache-Control: public` only
+    without credentials.
+  - `pincer.security.TokenBucket` is removed, and `RateLimiter.cleanup_user` is
+    now async.
 - See [Rate limiting and caching](docs/core-components/rate-limiting-and-caching.md).
 
 #### `search_path=` in `PINCER_DATABASE_URL`

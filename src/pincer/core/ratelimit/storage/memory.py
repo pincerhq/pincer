@@ -32,13 +32,14 @@ class _Buckets:
     def size(self) -> int:
         return len(self._buckets)
 
-    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int) -> RateLimitResult:
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int, dry_run: bool = False) -> RateLimitResult:
         now = self._clock()
         self._sweep(now)
         stored = self._buckets.get(key)
         state = stored[0] if stored is not None and stored[1] > now else None
         new_state, result = strategy.apply(state, now, rate, cost)
-        self._buckets[key] = (new_state, now + strategy.ttl(rate))
+        if not dry_run:
+            self._buckets[key] = (new_state, now + strategy.ttl(rate))
         return result
 
     def reset(self, key: str) -> None:
@@ -68,9 +69,9 @@ class MemoryStorage(RateLimitStorage):
     def size(self) -> int:
         return self._buckets.size
 
-    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False) -> RateLimitResult:
         with self._lock:
-            return self._buckets.hit(key, strategy, rate, cost)
+            return self._buckets.hit(key, strategy, rate, cost, dry_run)
 
     def reset(self, key: str) -> None:
         with self._lock:
@@ -91,8 +92,10 @@ class AsyncMemoryStorage(AsyncRateLimitStorage):
     def size(self) -> int:
         return self._buckets.size
 
-    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
-        return self._buckets.hit(key, strategy, rate, cost)
+    async def hit(
+        self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False
+    ) -> RateLimitResult:
+        return self._buckets.hit(key, strategy, rate, cost, dry_run)
 
     async def reset(self, key: str) -> None:
         self._buckets.reset(key)

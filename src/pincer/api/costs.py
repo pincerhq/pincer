@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from pincer.core.cache.decorators import cache_response
 from pincer.services.costs import CostServiceDep
 
 # Token counts added beside the existing fields (issue #357); `total_tokens` stays uncached input + output
@@ -14,8 +15,13 @@ _CACHE_COUNTS = ("cache_read_tokens", "cache_write_5m_tokens", "cache_write_1h_t
 
 router = APIRouter(prefix="/api/costs", tags=["costs"])
 
+# Deployment-wide figures, the same for every caller (no per-user filter): one
+# shared entry for 30 s. The dashboard's budget bar may lag a turn by that much.
+_CACHED = cache_response(ttl=30, scope="public")
+
 
 @router.get("/today")
+@_CACHED
 async def get_today_costs(service: CostServiceDep) -> dict[str, Any]:
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     costs = await service.get_daily_costs(today)
@@ -38,6 +44,7 @@ async def get_today_costs(service: CostServiceDep) -> dict[str, Any]:
 
 
 @router.get("/history")
+@_CACHED
 async def get_cost_history(
     service: CostServiceDep,
     days: int = Query(default=30, ge=1, le=365),
@@ -69,6 +76,7 @@ async def get_cost_history(
 
 
 @router.get("/by-tool")
+@_CACHED
 async def get_costs_by_tool(
     service: CostServiceDep,
     days: int = Query(default=7, ge=1, le=90),
@@ -94,6 +102,7 @@ async def get_costs_by_tool(
 
 
 @router.get("/by-model")
+@_CACHED
 async def get_costs_by_model(
     service: CostServiceDep,
     days: int = Query(default=7, ge=1, le=90),

@@ -105,8 +105,8 @@ async def slo_report() -> SLOReportOut: ...
 - Entries live at most `PINCER_CACHE_DEFAULT_TTL` seconds (default 300), or
   less if `max-age` says so.
 
-Cached today: `/api/ops/slo`, `/api/ops/failures`, `/api/ops/digest`,
-`/api/ops/ga-gate` and `/api/ops/ga-gate/report`, for 60 seconds.
+No route uses it today: the shared caches moved to `@cache_response(scope="public")`
+(below), whose hits count against the rate limits.
 
 ## Per-route limits
 
@@ -133,12 +133,17 @@ def digest(...): ...
 async def status(...): ...
 ```
 
-- **Rates:** `"<n>/second|minute|hour|day"` or `"<n>/<seconds>s"`, or a `Rate`.
+- **Rates:** `"<n>/second|minute|hour|day"` or `"<n>/<seconds>s"`, or a `Rate`, or a
+  function returning one. A function is read on each request, so a limit can follow a
+  setting.
 - **`scope`** names who is counted:
   - `"user"` (default): the caller's identity, or their IP if there is none;
   - `"ip"`: everyone on one address together;
   - `"anon"`: by IP;
+  - `"global"`: one bucket for everyone;
   - a function `request -> str | None` that returns the identifier, where None means not limited.
+- **`detail`:** replaces the 429 message, with a string or a function of the refused result
+  (e.g. to say how long to wait).
 - **`strategy`:** `"sliding_window"` (default) or `"token_bucket"`. `cost` is how many units one request uses.
 - **Buckets:** each declared limit has its own:
   `<prefix>:kv:ratelimit:<scope>:<route>.<n>per<period>s[.<strategy>]:<id>`. A tight route limit
@@ -182,8 +187,10 @@ await response_cache(request.app).ainvalidate("get_today_costs", user=identity.p
   - `"user"` (default): a request without an identity is not cached;
   - `"public"`: everyone shares the entry;
   - a function `request -> str | None`.
-- **Headers:** `X-Cache: HIT | MISS | BYPASS`, and `Cache-Control: private` (or `public`)
-  `, max-age=<ttl>`. The TTL defaults to `PINCER_CACHE_DEFAULT_TTL`.
+- **Headers:** `X-Cache: HIT | MISS | BYPASS`, and `Cache-Control: private, max-age=<ttl>`.
+  `public` is sent only for `scope="public"` on a request without an `Authorization` header,
+  so a proxy or CDN never shares an authenticated answer. The TTL defaults to
+  `PINCER_CACHE_DEFAULT_TTL`.
 - **Hits still count against the route's rate limits**, whichever order the two
   decorators are in. A refused request never reaches the cache.
 - **The decorator wins over `cache_control`:** a route with both is cached only by the
@@ -193,6 +200,32 @@ await response_cache(request.app).ainvalidate("get_today_costs", user=identity.p
   entry when the data changes.
 - **Failures:** if the store fails, the route is served uncached and a warning is logged
   once.
+
+## Where pincer uses them
+
+| Route | Rule |
+|---|---|
+| `POST /api/chat/message`, `/stream` | `PINCER_RATE_MESSAGES_PER_MIN` per user (token bucket), one budget for both routes; the same limit and wording as the messaging channels |
+| `POST /api/voice/calls`, `/calls/scheduled` | 10 per hour per user, in front of the outbound safety gates |
+| `POST /api/ops/canary` | 6 per hour for the whole deployment |
+| `POST /api/voice/listen/{call_sid}/ticket` | 30 per minute per user |
+| Storage writes (`PUT /text`, `POST /upload`, `/folders`, `/move`, `DELETE /object`) | 60 per minute per user, shared |
+| `POST /api/skills/rebuild` | 2 per minute per user |
+| `PUT /api/identity/me/password`, `POST /me/api-key` | 5 per hour per user, each |
+| `GET /api/ops/slo`, `failures`, `digest`, `ga-gate`, `ga-gate/report` | Cached 60 s, shared |
+| `GET /api/integrations`, `/{slug}` | Cached 60 s, shared |
+| `GET /api/skills`, `/{name}` | Cached 30 s, shared; dropped by `POST /api/skills/rebuild` |
+| `GET /api/costs/today`, `history`, `by-tool`, `by-model`; `GET /api/audit/stats` | Cached 30 s, shared |
+
+Outside the HTTP routes:
+
+- The messaging channels' per-user message and tool-call limits
+  (`PINCER_RATE_MESSAGES_PER_MIN`, `PINCER_RATE_TOOLS_PER_MIN`) use the same limiter
+  and backend, so with Redis they hold across `pincer run` and `pincer run tasks`.
+- The website's demo call (`POST /api/public/demo-call`) keeps its three caps (a
+  30-minute cooldown per number, 3 per client per day, 25 per day overall) on the same
+  backend. They fail closed: if the backend can't be read, the endpoint answers 503
+  instead of dialling.
 
 ## Sync and async
 
@@ -213,6 +246,10 @@ hishel (`BaseStorage` / `AsyncBaseStorage`) and httpx (`Client` / `AsyncClient`)
 | Cached outbound client | `pincer.core.cache.client.cached_client(...)` | `async_cached_client(...)` |
 | Key-value store | `pincer.core.cache.kv.MemoryKeyValueStore`, `RedisKeyValueStore` | `AsyncMemoryKeyValueStore`, `AsyncRedisKeyValueStore` |
 | Response cache | `ResponseCache.invalidate(...)`; sync endpoints | `ainvalidate(...)`; async endpoints |
+
+`check(identifier)` reports whether a request would be allowed without charging it;
+`hit` charges. A limiter built with `fail_open=False` refuses (`failed=True` on the
+result) instead of allowing when the backend can't be asked.
 
 Both modes use the same strategies, bucket names and prefix. A sync and an
 async limiter with the same scope on one Redis count the same requests.

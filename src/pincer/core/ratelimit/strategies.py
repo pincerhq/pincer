@@ -4,9 +4,10 @@ A strategy keeps a small state per bucket — a list of floats — and turns
 `(state, now, rate, cost)` into `(new_state, result)`. The Python `apply` is a
 pure function, so tests drive it with any clock. The Lua `script` does the same
 on Redis in one atomic call, using the server's `TIME` so several app servers
-agree on the clock. `KEYS[1]` is the bucket, `ARGV` = limit, period, cost; it
-returns `{allowed, remaining, reset_after_ms, retry_after_ms}` and sets a TTL
-on the bucket.
+agree on the clock. `KEYS[1]` is the bucket, `ARGV` = limit, period, cost,
+dry (`1`: report the outcome without changing the bucket); it returns
+`{allowed, remaining, reset_after_ms, retry_after_ms}` and sets a TTL on the
+bucket.
 """
 
 from __future__ import annotations
@@ -112,8 +113,10 @@ else
   local needed = 1 - (limit - current - cost) / previous
   retry_after = math.max(0, (needed - elapsed) * period)
 end
-redis.call('HSET', KEYS[1], 'w', window, 'c', current, 'p', previous)
-redis.call('PEXPIRE', KEYS[1], math.ceil(period * 2000))
+if ARGV[4] ~= '1' then
+  redis.call('HSET', KEYS[1], 'w', window, 'c', current, 'p', previous)
+  redis.call('PEXPIRE', KEYS[1], math.ceil(period * 2000))
+end
 return {allowed, remaining, math.ceil(reset_after * 1000), math.ceil(retry_after * 1000)}
 """
 
@@ -160,8 +163,10 @@ else
   retry_after = (cost - tokens) / refill
 end
 local reset_after = (limit - tokens) / refill
-redis.call('HSET', KEYS[1], 'tokens', tostring(tokens), 'ts', tostring(now))
-redis.call('PEXPIRE', KEYS[1], math.ceil(period * 2000))
+if ARGV[4] ~= '1' then
+  redis.call('HSET', KEYS[1], 'tokens', tostring(tokens), 'ts', tostring(now))
+  redis.call('PEXPIRE', KEYS[1], math.ceil(period * 2000))
+end
 local remaining = 0
 if allowed == 1 then remaining = math.floor(tokens) end
 return {allowed, remaining, math.ceil(reset_after * 1000), math.ceil(retry_after * 1000)}

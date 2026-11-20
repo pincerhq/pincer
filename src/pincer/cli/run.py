@@ -325,10 +325,16 @@ async def _build_core(settings: Settings) -> CoreComponents:
         audit_logger = await get_audit_logger(settings.db_path)
         console.print("[green]Audit logging enabled[/green]")
 
+    # Buckets on the cache backend (shared across processes with Redis), under the cache prefix.
+    from pincer.core.cache.keys import KeySpace
+    from pincer.core.ratelimit import create_async_storage
+
     rate_limiter = get_rate_limiter(
         messages_per_minute=settings.rate_messages_per_min,
         tool_calls_per_minute=settings.rate_tools_per_min,
         max_concurrent_llm=settings.max_concurrent_llm,
+        storage=create_async_storage(settings.cache_backend_url),
+        keys=KeySpace.for_cache(settings),
     )
 
     # Initialize memory system

@@ -46,6 +46,8 @@ class RateLimitResult:
         remaining: Requests still allowed right now (0 when denied).
         reset_after: Seconds until the limit is fully available again.
         retry_after: Seconds until a denied request would be allowed (0 when allowed).
+        failed: The backend could not be asked; the outcome is the limiter's
+            fail-open or fail-closed default, not a count.
     """
 
     allowed: bool
@@ -53,8 +55,14 @@ class RateLimitResult:
     remaining: int
     reset_after: float
     retry_after: float = 0.0
+    failed: bool = False
 
     @classmethod
     def unlimited(cls, limit: int) -> RateLimitResult:
         """The fail-open answer: allowed, with no information about the bucket."""
-        return cls(allowed=True, limit=limit, remaining=limit, reset_after=0.0)
+        return cls(allowed=True, limit=limit, remaining=limit, reset_after=0.0, failed=True)
+
+    @classmethod
+    def unavailable(cls, limit: int, retry_after: float = 60.0) -> RateLimitResult:
+        """The fail-closed answer: refused until the backend is back."""
+        return cls(allowed=False, limit=limit, remaining=0, reset_after=0.0, retry_after=retry_after, failed=True)

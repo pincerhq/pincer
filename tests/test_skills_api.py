@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -313,6 +314,24 @@ def queued_jobs():
         yield send
 
 
+def _request() -> SimpleNamespace:
+    """What `rebuild_skills` reads from its request when called directly: the app, for its response cache."""
+    from fastapi import FastAPI
+
+    from pincer.core.cache.decorators import ResponseCache
+
+    app = FastAPI()
+    app.state.response_cache = ResponseCache.from_settings(
+        SimpleNamespace(
+            cache_backend_url="memory://",
+            cache_prefix="{environment}:{service}",
+            environment="test",
+            cache_default_ttl=30,
+        )
+    )
+    return SimpleNamespace(app=app)
+
+
 def test_rebuild_endpoint_rebuilds_in_app_then_queues_the_job(api_settings, tmp_path: Path, queued_jobs) -> None:
     from pincer.api.skills import rebuild_skills
     from pincer.services.skills import get_skill_service
@@ -320,7 +339,7 @@ def test_rebuild_endpoint_rebuilds_in_app_then_queues_the_job(api_settings, tmp_
     assert _user_names() == []
     _add_user_skill(tmp_path, "late")
 
-    body = asyncio.run(rebuild_skills(keep_cache=False))
+    body = asyncio.run(rebuild_skills(_request(), keep_cache=False))
 
     # The app's own index is rebuilt before the job is queued.
     assert [s["name"] for s in body["skills"] if s["root"] == "user"] == ["late"]
@@ -340,7 +359,7 @@ def test_rebuild_endpoint_keep_cache(api_settings, queued_jobs) -> None:
     from pincer.api.skills import rebuild_skills
 
     with patch("pincer.services.skills.clear_remote_cache") as clear:
-        body = asyncio.run(rebuild_skills(keep_cache=True))
+        body = asyncio.run(rebuild_skills(_request(), keep_cache=True))
     clear.assert_not_called()
     assert body["cache_cleared"] is False
     assert queued_jobs.await_args.kwargs["payload"]["clear_cache"] is False
@@ -350,7 +369,7 @@ def test_rebuild_endpoint_reports_a_failed_enqueue_without_failing(api_settings,
     from pincer.api.skills import rebuild_skills
 
     queued_jobs.side_effect = ConnectionError("redis down")
-    body = asyncio.run(rebuild_skills(keep_cache=False))
+    body = asyncio.run(rebuild_skills(_request(), keep_cache=False))
 
     assert body["job"]["queued"] is False
     assert "redis down" in body["job"]["error"]
@@ -421,7 +440,7 @@ async def test_rebuild_job_round_trip_through_the_task_queue(api_settings, tmp_p
     connection = task_app.servers.default.connection()
     await connection.__aenter__()
     try:
-        body = await rebuild_skills(keep_cache=False)
+        body = await rebuild_skills(_request(), keep_cache=False)
         assert body["job"]["queued"] is True
         with patch("pincer.services.skills.get_skill_service", return_value=worker_service):
             await asyncio.wait_for(
@@ -494,3 +513,16 @@ def test_get_skill_returns_200_with_body(client: TestClient) -> None:
 def test_get_skill_unknown_is_404(client: TestClient) -> None:
     resp = client.get("/api/skills/does-not-exist")
     assert resp.status_code == 404
+
+
+def test_rebuild_drops_the_cached_skill_listing(api_settings, queued_jobs) -> None:
+    """`GET /api/skills` and `/api/skills/{name}` are cached for 30 s; a rebuild must not wait them out."""
+    from pincer.api.skills import rebuild_skills
+
+    request = _request()
+    cache = request.app.state.response_cache
+    for route in ("list_skills", "get_skill"):
+        cache.store.set(cache.prefix(route, "public") + "abc", b"{}", 30)
+    asyncio.run(rebuild_skills(request, keep_cache=True))
+    assert cache.invalidate("list_skills") == 0
+    assert cache.invalidate("get_skill") == 0

@@ -41,6 +41,9 @@ def _settings(url: str, **limits: int) -> SimpleNamespace:
     )
 
 
+DYNAMIC_RATE = {"per_minute": 1}
+
+
 class Out(BaseModel):
     name: str
 
@@ -95,6 +98,26 @@ def _build(settings: SimpleNamespace) -> tuple[FastAPI, dict[str, int]]:
     @rate_limit("1/minute", scope=tenant)
     async def by_tenant() -> dict[str, int]:
         return {"n": count("by_tenant")}
+
+    @app.get("/api/detail-text")
+    @rate_limit("1/minute", detail="Slow down, please.")
+    async def detail_text() -> dict[str, int]:
+        return {"n": count("detail_text")}
+
+    @app.get("/api/detail-fn")
+    @rate_limit("1/minute", detail=lambda result: f"Wait {result.retry_after:.0f}s.")
+    async def detail_fn() -> dict[str, int]:
+        return {"n": count("detail_fn")}
+
+    @app.get("/api/everyone")
+    @rate_limit("2/minute", scope="global")
+    async def everyone() -> dict[str, int]:
+        return {"n": count("everyone")}
+
+    @app.get("/api/dynamic")
+    @rate_limit(lambda: f"{DYNAMIC_RATE['per_minute']}/minute")
+    async def dynamic() -> dict[str, int]:
+        return {"n": count("dynamic")}
 
     # ── response cache ──
     @app.get("/api/cached")
@@ -266,6 +289,32 @@ def test_decorator_validation() -> None:
     assert Rate.parse("2/minute") == Rate(2, 60)
 
 
+def test_detail_replaces_the_refusal_message(make: Any) -> None:
+    client, _ = make()
+    client.get("/api/detail-text", headers=ALICE)
+    assert client.get("/api/detail-text", headers=ALICE).json() == {"detail": "Slow down, please."}
+    client.get("/api/detail-fn", headers=ALICE)
+    refused = client.get("/api/detail-fn", headers=ALICE)
+    assert refused.status_code == 429
+    assert refused.json()["detail"].startswith("Wait ") and refused.json()["detail"].endswith("s.")
+
+
+def test_global_scope_is_one_bucket_for_everyone(make: Any) -> None:
+    client, _ = make()
+    assert client.get("/api/everyone", headers=ALICE).status_code == 200
+    assert client.get("/api/everyone", headers=BOB).status_code == 200
+    assert client.get("/api/everyone").status_code == 429  # nobody else, whoever asks
+
+
+def test_a_rate_function_is_read_per_request(make: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = make()
+    monkeypatch.setitem(DYNAMIC_RATE, "per_minute", 1)
+    assert _codes(client, "/api/dynamic", 2) == [200, 429]
+    monkeypatch.setitem(DYNAMIC_RATE, "per_minute", 3)  # a new rate: a new bucket
+    assert _codes(client, "/api/dynamic", 4) == [200, 200, 200, 429]
+    assert client.get("/api/dynamic", headers=BOB).headers["x-ratelimit-limit"] == "3"
+
+
 # ── @cache_response ──────────────────────────────────────────────────────────
 
 
@@ -301,6 +350,13 @@ def test_public_scope_is_shared(make: Any) -> None:
     assert hit.headers["x-cache"] == "HIT"
     assert hit.headers["cache-control"] == "public, max-age=60"
     assert calls["public"] == 1
+
+
+def test_public_scope_stays_private_downstream_for_an_authenticated_request(make: Any) -> None:
+    """Shared inside pincer, but a proxy must never hand an authenticated answer to someone else."""
+    client, _ = make()
+    response = client.get("/api/public", headers={**ALICE, "Authorization": "Bearer pnc_x"})
+    assert response.headers["cache-control"] == "private, max-age=60"
 
 
 def test_response_model_applies_on_a_hit(make: Any) -> None:

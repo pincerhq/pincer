@@ -18,8 +18,8 @@ class RateLimitStorage(ABC):
     """Base class of the sync bucket stores: applies a strategy to one bucket atomically and keeps its state."""
 
     @abstractmethod
-    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
-        """Charge `cost` to the bucket `key` and return the outcome."""
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False) -> RateLimitResult:
+        """Charge `cost` to the bucket `key` and return the outcome (`dry_run`: the outcome only, nothing charged)."""
 
     @abstractmethod
     def reset(self, key: str) -> None:
@@ -30,8 +30,10 @@ class AsyncRateLimitStorage(ABC):
     """Base class of the async bucket stores; the async twin of `RateLimitStorage`."""
 
     @abstractmethod
-    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
-        """Charge `cost` to the bucket `key` and return the outcome."""
+    async def hit(
+        self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False
+    ) -> RateLimitResult:
+        """Charge `cost` to the bucket `key` and return the outcome (`dry_run`: the outcome only, nothing charged)."""
 
     @abstractmethod
     async def reset(self, key: str) -> None:

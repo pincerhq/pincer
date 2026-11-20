@@ -16,8 +16,10 @@ limit for that route:
     async def status(...): ...
 
 `scope` names who is counted: `"user"` (the caller's identity, else their IP
-as `anon`), `"ip"`, `"anon"`, or a function `request -> str | None` that
-returns the identifier itself (None: not limited). Each declared limit gets its
+as `anon`), `"ip"`, `"anon"`, `"global"` (one bucket for everyone), or a
+function `request -> str | None` that returns the identifier itself (None:
+not limited). `rate` may be a function (read per request, e.g. from settings)
+and `detail` replaces the 429 message. Each declared limit gets its
 own bucket (`<prefix>:kv:ratelimit:<scope>:<route>.<n>per<period>s[.<strategy>]:<id>`),
 so a tight route limit doesn't spend the general budget, stacked limits don't
 share state, and the reverse.
@@ -30,15 +32,22 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from pincer.core.ratelimit.strategies import STRATEGIES, SlidingWindowStrategy, Strategy
-from pincer.core.ratelimit.types import Rate
+from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 LIMITS_ATTR = "__pincer_rate_limits__"
-SCOPES = frozenset({"user", "ip", "anon"})
+SCOPES = frozenset({"user", "ip", "anon", "global"})
+DEFAULT_DETAIL = "Rate limit exceeded"
 
 ScopeFunc = Callable[[Any], "str | None"]
 """`request -> identifier` for a custom scope (None: the request is not limited)."""
+
+RateSource = str | Rate | Callable[[], "str | Rate"]
+"""A rate, or a function returning one, read on each request (e.g. from settings)."""
+
+Detail = str | Callable[[RateLimitResult], str]
+"""The 429 `detail`: a message, or a function of the refused result (e.g. to say how long to wait)."""
 
 
 @dataclass(frozen=True)
@@ -46,26 +55,38 @@ class RouteLimit:
     """One limit declared on a route.
 
     Attributes:
-        rate: Requests per period.
-        scope: `"user"`, `"ip"`, `"anon"`, or a function returning the identifier.
+        rate: Requests per period, or a function returning it (read on each request).
+        scope: `"user"`, `"ip"`, `"anon"`, `"global"`, or a function returning the identifier.
         strategy: The algorithm.
         cost: Units one request spends.
-        name: The bucket's route segment; defaults to the route's name.
+        name: The bucket's route segment; defaults to the route's name. Routes
+            sharing a `name` (and rate) share a budget.
+        detail: The 429 message, or a function of the refused result.
     """
 
-    rate: Rate
+    rate: Rate | Callable[[], str | Rate]
     scope: str | ScopeFunc = "user"
     strategy: Strategy = SlidingWindowStrategy()
     cost: int = 1
     name: str | None = None
+    detail: Detail = DEFAULT_DETAIL
 
-    def bucket_name(self, route: str) -> str:
+    def current_rate(self) -> Rate:
+        """The rate in force now (a function rate is called each time)."""
+        return self.rate if isinstance(self.rate, Rate) else Rate.parse(self.rate())
+
+    def message(self, result: RateLimitResult) -> str:
+        """The 429 `detail` for a refusal by this limit."""
+        return self.detail if isinstance(self.detail, str) else self.detail(result)
+
+    def bucket_name(self, route: str, rate: Rate | None = None) -> str:
         """The bucket's route segment: the route (or `name`), the rate and the strategy.
 
         Each declared limit gets a bucket of its own, so stacked limits on one
         route (and their different strategy states) never share a key.
         """
-        bucket = f"{self.name or route}.{self.rate.limit}per{self.rate.period:g}s"
+        rate = rate or self.current_rate()
+        bucket = f"{self.name or route}.{rate.limit}per{rate.period:g}s"
         if self.strategy.name != SlidingWindowStrategy.name:
             bucket += f".{self.strategy.name}"
         return bucket
@@ -90,19 +111,25 @@ def _strategy(value: str | Strategy | None) -> Strategy:
 
 
 def rate_limit(
-    rate: str | Rate,
+    rate: RateSource,
     *,
     scope: str | ScopeFunc = "user",
     strategy: str | Strategy | None = None,
     cost: int = 1,
     name: str | None = None,
+    detail: Detail = DEFAULT_DETAIL,
 ) -> Callable[[F], F]:
-    """Limit this route to `rate` (e.g. `"20/minute"`) per `scope`; stack it for several limits."""
+    """Limit this route to `rate` (e.g. `"20/minute"`) per `scope`; stack it for several limits.
+
+    `rate` may be a function returning the rate, read on each request, so a
+    limit can follow a setting. `detail` replaces the 429 message.
+    """
     if isinstance(scope, str) and scope not in SCOPES:
         raise ValueError(f"Unknown rate limit scope {scope!r}; use one of {sorted(SCOPES)} or a function")
     if cost < 1:
         raise ValueError(f"Rate limit cost must be at least 1, got {cost}")
-    limit = RouteLimit(Rate.parse(rate), scope, _strategy(strategy), cost, name)
+    parsed: Rate | Callable[[], str | Rate] = rate if callable(rate) else Rate.parse(rate)
+    limit = RouteLimit(parsed, scope, _strategy(strategy), cost, name, detail)
 
     def decorate(func: F) -> F:
         existing = getattr(func, LIMITS_ATTR, ())

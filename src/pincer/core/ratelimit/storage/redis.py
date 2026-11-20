@@ -32,6 +32,10 @@ def _parse(reply: Any, rate: Rate) -> RateLimitResult:
     )
 
 
+def _args(rate: Rate, cost: int, dry_run: bool) -> list[Any]:
+    return [rate.limit, rate.period, cost, 1 if dry_run else 0]
+
+
 class _Scripts:
     """One registered script per strategy, per client."""
 
@@ -54,8 +58,8 @@ class RedisStorage(RateLimitStorage):
         self._client = client
         self._script = _Scripts(client)
 
-    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
-        return _parse(self._script(strategy)(keys=[key], args=[rate.limit, rate.period, cost]), rate)
+    def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False) -> RateLimitResult:
+        return _parse(self._script(strategy)(keys=[key], args=_args(rate, cost, dry_run)), rate)
 
     def reset(self, key: str) -> None:
         self._client.delete(key)
@@ -68,8 +72,10 @@ class AsyncRedisStorage(AsyncRateLimitStorage):
         self._client = client
         self._script = _Scripts(client)
 
-    async def hit(self, key: str, strategy: Strategy, rate: Rate, cost: int = 1) -> RateLimitResult:
-        return _parse(await self._script(strategy)(keys=[key], args=[rate.limit, rate.period, cost]), rate)
+    async def hit(
+        self, key: str, strategy: Strategy, rate: Rate, cost: int = 1, *, dry_run: bool = False
+    ) -> RateLimitResult:
+        return _parse(await self._script(strategy)(keys=[key], args=_args(rate, cost, dry_run)), rate)
 
     async def reset(self, key: str) -> None:
         await self._client.delete(key)

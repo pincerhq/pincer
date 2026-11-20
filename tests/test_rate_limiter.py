@@ -1,32 +1,9 @@
 """Tests for the rate limiter."""
 
-import asyncio
-
 import pytest
 
 from pincer.exceptions import RateLimitExceeded
-from pincer.security.rate_limiter import RateLimiter, TokenBucket
-
-
-@pytest.mark.asyncio
-async def test_token_bucket_allows_within_limit():
-    bucket = TokenBucket(capacity=5, refill_rate=5 / 60)
-    for _ in range(5):
-        allowed, _ = await bucket.consume()
-        assert allowed is True
-    allowed, wait = await bucket.consume()
-    assert allowed is False
-    assert wait > 0
-
-
-@pytest.mark.asyncio
-async def test_token_bucket_refills():
-    bucket = TokenBucket(capacity=2, refill_rate=100)
-    await bucket.consume()
-    await bucket.consume()
-    await asyncio.sleep(0.05)
-    allowed, _ = await bucket.consume()
-    assert allowed is True
+from pincer.security.rate_limiter import RateLimiter
 
 
 @pytest.mark.asyncio
@@ -94,6 +71,6 @@ async def test_cleanup_user():
     await limiter.check_message("u1")
     with pytest.raises(RateLimitExceeded):
         await limiter.check_message("u1")
-    limiter.cleanup_user("u1")
+    await limiter.cleanup_user("u1")
     # After cleanup, user gets fresh bucket
     await limiter.check_message("u1")
