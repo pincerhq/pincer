@@ -5,7 +5,7 @@ a `tenacity` retry (bounded by `settings.task_max_retries`). `on_error="nack"`
 below is the second layer: once tenacity's retries are exhausted and the actor
 re-raises, repid nacks the message — this acks and discards it (the Redis
 broker additionally writes it once to the `<prefix>:stream:{channel}:dlq`
-stream, see `pincer.redis_keys`), it does *not* redeliver. repid's `reject()`
+stream, see `pincer.core.cache.keys`), it does *not* redeliver. repid's `reject()`
 is the requeue action; it's unused here.
 """
 
@@ -208,7 +208,7 @@ async def rebuild_skill_index(generation: str, clear_cache: bool = True, disk_id
     """Apply a skill index rebuild announced as `generation` in this process.
 
     Enqueued by POST /api/skills/rebuild after it has rebuilt the app's own index.
-    One consumer runs it — with `task_broker=redis` that can be any `pincer run
+    One consumer runs it — with a Redis task broker that can be any `pincer run
     tasks` worker or the main `pincer run` itself, where it is a no-op. Processes
     sharing the main process's data volume follow the generation stamp anyway;
     this job is what reaches a worker that doesn't. `disk_id` identifies the

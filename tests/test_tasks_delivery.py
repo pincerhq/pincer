@@ -111,16 +111,15 @@ class TestRedisDeliveryBackend:
 
 
 def test_create_delivery_backend_selects_by_broker() -> None:
-    memory_settings = SimpleNamespace(task_broker="memory", task_broker_url="")
+    memory_settings = SimpleNamespace(task_broker_url="memory://")
     assert isinstance(create_delivery_backend(memory_settings), InMemoryDeliveryBackend)
 
     with patch("redis.asyncio.Redis") as mock_redis_cls:
         mock_redis_cls.from_url.return_value = AsyncMock()
         redis_settings = SimpleNamespace(
-            task_broker="redis",
             task_broker_url="redis://localhost:6379/0",
             environment="development",
-            redis_prefix="{environment}:{service}",
+            task_prefix="{environment}:{service}",
         )
         assert isinstance(create_delivery_backend(redis_settings), RedisDeliveryBackend)
 
@@ -131,10 +130,9 @@ async def test_create_delivery_backend_uses_prefixed_channel_from_settings() -> 
         mock_client = AsyncMock()
         mock_redis_cls.from_url.return_value = mock_client
         settings = SimpleNamespace(
-            task_broker="redis",
             task_broker_url="redis://localhost:6379/0",
             environment="Production",
-            redis_prefix="{environment}:{service}:custom",
+            task_prefix="{environment}:{service}:custom",
         )
         backend = create_delivery_backend(settings)
         await backend.publish({"text": "hi"})

@@ -16,10 +16,9 @@ task_app_module = sys.modules["pincer.tasks.app"]
 
 def test_register_default_server_uses_redis_when_configured(monkeypatch):
     mock_settings = MagicMock()
-    mock_settings.task_broker = "redis"
     mock_settings.task_broker_url = "redis://localhost:6379/0"
     mock_settings.environment = "development"
-    mock_settings.redis_prefix = "{environment}:{service}"
+    mock_settings.task_prefix = "{environment}:{service}"
     monkeypatch.setattr(task_app_module, "get_settings", lambda: mock_settings)
 
     register_default_server()
@@ -30,7 +29,7 @@ def test_register_default_server_uses_redis_when_configured(monkeypatch):
 
 def test_register_default_server_defaults_to_memory(monkeypatch):
     mock_settings = MagicMock()
-    mock_settings.task_broker = "memory"
+    mock_settings.task_broker_url = "memory://"
     monkeypatch.setattr(task_app_module, "get_settings", lambda: mock_settings)
 
     register_default_server()
@@ -41,10 +40,9 @@ def test_register_default_server_defaults_to_memory(monkeypatch):
 
 def test_register_default_server_passes_prefixed_stream_strategies(monkeypatch):
     mock_settings = MagicMock()
-    mock_settings.task_broker = "redis"
     mock_settings.task_broker_url = "redis://localhost:6379/0"
     mock_settings.environment = "production"
-    mock_settings.redis_prefix = "{environment}:{service}:custom"
+    mock_settings.task_prefix = "{environment}:{service}:custom"
     monkeypatch.setattr(task_app_module, "get_settings", lambda: mock_settings)
     server_cls = MagicMock(spec=RedisServer)
     monkeypatch.setattr("repid.RedisServer", server_cls)

@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from pincer.config import LLMProvider, Settings, TaskSettings
+from pincer.config import CacheSettings, LLMProvider, Settings, TaskSettings
+from pincer.config.dsn import is_redis, redact_url
 
 
 def test_settings_load_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,31 +155,82 @@ def test_channel_settings_zero_fields() -> None:
     assert s.telegram_bot_token.get_secret_value() == ""
 
 
-# ── TaskSettings: redis broker requires a broker URL ──────────────────────────
+# ── Cache backend, task broker and key prefixes (issue #404) ──────────────────
 
 
-def test_task_broker_redis_requires_url() -> None:
-    with pytest.raises(ValidationError, match="task_broker_url is required"):
-        TaskSettings(task_broker="redis")
+def _settings(tmp_path: Path, **kwargs: object) -> Settings:
+    return Settings(anthropic_api_key="sk-test", data_dir=tmp_path, **kwargs)  # type: ignore[arg-type]
 
 
-def test_task_broker_memory_allows_empty_url() -> None:
-    s = TaskSettings(task_broker="memory")
-    assert s.task_broker_url == ""
+@pytest.mark.parametrize("value", ["memory://", "memory://localhost"])
+def test_memory_dsn_accepts_blank_or_localhost(value: str) -> None:
+    assert str(CacheSettings(cache_backend_url=value).cache_backend_url).startswith("memory://")  # type: ignore[arg-type]
 
 
-def test_task_broker_redis_with_url_is_valid() -> None:
-    s = TaskSettings(task_broker="redis", task_broker_url="redis://localhost:6379/0")
-    assert s.task_broker_url == "redis://localhost:6379/0"
+@pytest.mark.parametrize(
+    "value",
+    ["memory://foo", "memory:///x", "memory://localhost:1", "memory://u:p@localhost", "memory://?a=1", "http://x"],
+)
+def test_memory_dsn_rejects_anything_else(value: str) -> None:
+    with pytest.raises(ValidationError):
+        CacheSettings(cache_backend_url=value)  # type: ignore[arg-type]
 
 
-def test_redis_prefix_defaults_to_environment_service_template() -> None:
-    assert TaskSettings().redis_prefix == "{environment}:{service}"
+def test_cache_backend_accepts_redis() -> None:
+    url = CacheSettings(cache_backend_url="rediss://cache:6380/2").cache_backend_url  # type: ignore[arg-type]
+    assert is_redis(url)
+    assert str(url) == "rediss://cache:6380/2"
+
+
+def test_memory_is_the_default_everywhere(tmp_path: Path) -> None:
+    s = _settings(tmp_path)
+    assert str(s.cache_backend_url) == "memory://"
+    assert str(s.task_broker_url) == "memory://"
+    assert not is_redis(s.task_broker_url)
+    assert s.cache_default_ttl == 300
+
+
+def test_task_broker_defaults_to_cache_backend(tmp_path: Path) -> None:
+    s = _settings(tmp_path, cache_backend_url="redis://redis:6379/0")
+    assert str(s.task_broker_url) == "redis://redis:6379/0"
+
+
+def test_task_broker_url_overrides_cache_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_CACHE_BACKEND_URL", "redis://cache:6379/0")
+    monkeypatch.setenv("PINCER_TASK_BROKER_URL", "redis://broker:6379/1")
+    s = _settings(tmp_path)
+    assert str(s.cache_backend_url) == "redis://cache:6379/0"
+    assert str(s.task_broker_url) == "redis://broker:6379/1"
+
+
+def test_task_broker_can_stay_in_memory_with_a_redis_cache(tmp_path: Path) -> None:
+    s = _settings(tmp_path, cache_backend_url="redis://cache:6379/0", task_broker_url="memory://")
+    assert not is_redis(s.task_broker_url)
+
+
+def test_cache_prefix_defaults_to_environment_service_template(tmp_path: Path) -> None:
+    s = _settings(tmp_path)
+    assert s.cache_prefix == "{environment}:{service}"
+    assert s.task_prefix == "{environment}:{service}"
+
+
+def test_task_prefix_defaults_to_cache_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_CACHE_PREFIX", "{environment}:{service}:shared")
+    assert _settings(tmp_path).task_prefix == "{environment}:{service}:shared"
+
+
+def test_task_prefix_set_in_env_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_CACHE_PREFIX", "{environment}:{service}:shared")
+    monkeypatch.setenv("PINCER_TASK_PREFIX", "{environment}:{service}:tasks")
+    s = _settings(tmp_path)
+    assert s.cache_prefix == "{environment}:{service}:shared"
+    assert s.task_prefix == "{environment}:{service}:tasks"
 
 
 @pytest.mark.parametrize("value", ["{environment}:{service}:custom", "prod:pincer:custom", "{service}"])
-def test_redis_prefix_accepts_valid_templates(value: str) -> None:
-    assert TaskSettings(redis_prefix=value).redis_prefix == value
+def test_prefixes_accept_valid_templates(tmp_path: Path, value: str) -> None:
+    assert _settings(tmp_path, cache_prefix=value).cache_prefix == value
+    assert TaskSettings(task_prefix=value).task_prefix == value
 
 
 @pytest.mark.parametrize(
@@ -197,47 +249,61 @@ def test_redis_prefix_accepts_valid_templates(value: str) -> None:
         ("{environment", "not a valid template"),
     ],
 )
-def test_redis_prefix_rejects_invalid_templates(value: str, match: str) -> None:
+def test_prefixes_reject_invalid_templates(tmp_path: Path, value: str, match: str) -> None:
+    with pytest.raises(ValidationError, match=f"cache_prefix.*{match}|{match}"):
+        _settings(tmp_path, cache_prefix=value)
     with pytest.raises(ValidationError, match=match):
-        TaskSettings(redis_prefix=value)
+        TaskSettings(task_prefix=value)
 
 
 @pytest.mark.parametrize(
     ("environment", "match"),
     [("my env", "whitespace"), ("", "start or end with ':'"), ("a::b", "empty segments"), ("{x}", "braces")],
 )
-def test_redis_broker_rejects_environment_that_renders_a_bad_prefix(
-    tmp_path: Path, environment: str, match: str
+@pytest.mark.parametrize("backend", ["memory://", "redis://localhost:6379/0"])
+def test_prefix_is_rendered_with_the_real_environment(
+    tmp_path: Path, environment: str, match: str, backend: str
 ) -> None:
+    """Memory backends name keys like Redis does, so a bad environment fails at startup on both."""
     with pytest.raises(ValidationError, match=match):
-        Settings(
-            anthropic_api_key="sk-test",  # type: ignore[arg-type]
-            data_dir=tmp_path,
-            task_broker="redis",
-            task_broker_url="redis://localhost:6379/0",
-            environment=environment,
-        )
+        _settings(tmp_path, cache_backend_url=backend, environment=environment)
 
 
-def test_redis_broker_renders_prefix_from_real_environment(tmp_path: Path) -> None:
-    s = Settings(
-        anthropic_api_key="sk-test",  # type: ignore[arg-type]
-        data_dir=tmp_path,
-        task_broker="redis",
-        task_broker_url="redis://localhost:6379/0",
-        environment="Production",
-    )
+def test_prefix_renders_from_real_environment(tmp_path: Path) -> None:
+    s = _settings(tmp_path, cache_backend_url="redis://localhost:6379/0", environment="Production")
     assert s.environment == "Production"
 
 
-def test_memory_broker_does_not_render_redis_prefix(tmp_path: Path) -> None:
-    s = Settings(
-        anthropic_api_key="sk-test",  # type: ignore[arg-type]
-        data_dir=tmp_path,
-        task_broker="memory",
-        environment="my env",
-    )
-    assert s.environment == "my env"
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    [("PINCER_TASK_BROKER", "PINCER_CACHE_BACKEND_URL"), ("PINCER_REDIS_PREFIX", "PINCER_CACHE_PREFIX")],
+)
+def test_removed_backend_settings_are_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, replacement: str
+) -> None:
+    from pincer.config.cache import legacy_cache_settings
+
+    assert legacy_cache_settings(tmp_path) == []
+    monkeypatch.setenv(name, "redis")
+    (message,) = legacy_cache_settings(tmp_path)
+    assert f"{name} in the environment is no longer read" in message
+    assert replacement in message
+
+
+def test_removed_backend_settings_found_in_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pincer.config.cache import legacy_cache_settings
+
+    # The .env files Settings reads (the test suite turns them off by default).
+    monkeypatch.setitem(Settings.model_config, "env_file", ("../.env", ".env"))
+    (tmp_path / ".env").write_text("PINCER_REDIS_PREFIX=prod:pincer\nPINCER_TASK_BROKER_URL=redis://r:6379/0\n")
+    (message,) = legacy_cache_settings(tmp_path)
+    assert message.startswith(f"PINCER_REDIS_PREFIX in {tmp_path / '.env'}")
+
+
+def test_redact_url_hides_the_password() -> None:
+    assert redact_url("redis://:s3cret@redis:6379/0") == "redis://:***@redis:6379/0"
+    assert redact_url("redis://user:s3cret@redis:6379/0") == "redis://user:***@redis:6379/0"
+    assert redact_url("redis://redis:6379/0") == "redis://redis:6379/0"
 
 
 def test_tool_settings_zero_fields() -> None:

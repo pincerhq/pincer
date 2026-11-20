@@ -148,9 +148,10 @@ class SecurityDoctor:
         report.checks.append(self._check_discord_allowlist(settings))
         report.checks.append(self._check_dashboard_auth_token(settings))
         report.checks.append(self._check_stale_shared_tokens())
-        # Budget (3 checks)
+        # Budget (4 checks)
         report.checks.append(self._check_budget_limits(settings))
         report.checks.append(self._check_rate_limits(settings))
+        report.checks.append(self._check_api_rate_limits(settings))
         report.checks.append(self._check_tool_call_limits(settings))
         # Filesystem (5 checks)
         report.checks.append(self._check_data_dir_permissions())
@@ -1631,6 +1632,40 @@ class SecurityDoctor:
             CheckStatus.PASS,
             f"Message rate limit: {cfg.rate_messages_per_min}/min",
             category="budget",
+        )
+
+    def _check_api_rate_limits(self, cfg: Settings | None = None) -> CheckResult:
+        """#404: the HTTP API limits, their backend, and the removed task/prefix settings."""
+        from pincer.config.cache import legacy_cache_settings
+        from pincer.config.dsn import is_redis
+
+        cfg = self._cfg(cfg)
+        legacy = legacy_cache_settings(self.config_dir)
+        if legacy:
+            return CheckResult(
+                "api_rate_limits",
+                CheckStatus.CRITICAL,
+                "Removed backend settings are still set — `pincer run` refuses to start",
+                fix_hint="\n".join(legacy),
+                category="budget",
+            )
+        if cfg.rate_api_disabled and cfg.environment.strip().lower() == "production":
+            return CheckResult(
+                "api_rate_limits",
+                CheckStatus.WARNING,
+                "HTTP API rate limiting is disabled in production",
+                fix_hint="Unset PINCER_RATE_API_DISABLED",
+                category="budget",
+            )
+        backend = "redis" if is_redis(cfg.cache_backend_url) else "memory (per process)"
+        state = (
+            "disabled"
+            if cfg.rate_api_disabled
+            else f"IP ceiling {cfg.rate_api_ip_per_min}/min, user {cfg.rate_api_user_per_min}/min, "
+            f"anonymous {cfg.rate_api_anon_per_min}/min"
+        )
+        return CheckResult(
+            "api_rate_limits", CheckStatus.PASS, f"API rate limits: {state}; backend {backend}", category="budget"
         )
 
     def _check_tool_call_limits(self, cfg: Settings | None = None) -> CheckResult:

@@ -85,9 +85,7 @@ def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: 
 def test_a_signal_runs_the_tasks_workers_whole_graceful_shutdown(
     tmp_path: Path, redis_url: str, sig: signal.Signals
 ) -> None:
-    exit_code, output = _signal_after_banner(
-        tmp_path, ["run", "tasks"], {"PINCER_TASK_BROKER": "redis", "PINCER_TASK_BROKER_URL": redis_url}, sig
-    )
+    exit_code, output = _signal_after_banner(tmp_path, ["run", "tasks"], {"PINCER_TASK_BROKER_URL": redis_url}, sig)
 
     assert "Shutting down..." in output, output
     # The last line of its `finally`: the repid worker was cancelled and every store closed before it.

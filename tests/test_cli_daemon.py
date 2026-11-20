@@ -38,6 +38,7 @@ from daemon_support import (
     write_log,
     write_test_pricing,
 )
+from pydantic import RedisDsn
 from typer.testing import CliRunner, Result
 
 import pincer
@@ -1172,7 +1173,7 @@ def test_run_with_only_a_dead_daemons_record_starts_in_the_foreground(
 
 def test_run_tasks_never_attaches_to_the_agent_daemon(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
-    config.get_settings().task_broker = "redis"
+    config.get_settings().task_broker_url = RedisDsn("redis://localhost:6379/0")
     workers: list[object] = []
 
     async def _run_tasks_worker(settings):  # type: ignore[no-untyped-def]

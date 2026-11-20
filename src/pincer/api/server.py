@@ -30,12 +30,14 @@ from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.ops import router as ops_router
 from pincer.api.public_demo import router as public_demo_router
+from pincer.api.rate_limits import APIRateLimits
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
 from pincer.api.storage import router as storage_router
 from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
+from pincer.core.ratelimit import RateLimitMiddleware
 from pincer.services.auth import AuthError, auth_service_for
 
 if TYPE_CHECKING:
@@ -130,6 +132,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.getLogger(__name__).debug("Telephony telemetry shutdown failed", exc_info=True)
     await audit.shutdown()
 
+    # The rate limiter and a redis:// HTTP cache share these clients.
+    from pincer.core.cache.backend import aclose_all as close_backend_clients
+
+    await close_backend_clients()
+
     from pincer.db.engine import dispose_engines
 
     await dispose_engines()
@@ -179,6 +186,24 @@ def create_app() -> FastAPI:
         # Flat windows: this key can be aimed at someone else's account.
         escalate=False,
     )
+
+    # Middleware order, outermost first (Starlette builds the stack from the
+    # last-added middleware inwards, so these are registered inside-out):
+    #
+    #   CORS → IP ceiling → auth_middleware → user | anon limit → HTTP cache → routes
+    #
+    # The identity limiter must run after auth, which leaves the caller on
+    # `request.state.identity` (`scope["state"]`); the cache sits innermost so a
+    # hit still passes auth and both limits. See pincer.api.rate_limits.
+    from pincer.core.cache.middleware import HTTPCacheMiddleware
+    from pincer.core.cache.storage import create_http_cache_storage
+
+    app.state.http_cache_storage = create_http_cache_storage(settings)
+    app.add_middleware(HTTPCacheMiddleware, storage=app.state.http_cache_storage)
+    rate_limits = None if settings.rate_api_disabled else APIRateLimits.from_settings(settings)
+    app.state.rate_limits = rate_limits
+    if rate_limits is not None:
+        app.add_middleware(RateLimitMiddleware, identify=rate_limits.by_identity)
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -231,6 +256,11 @@ def create_app() -> FastAPI:
 
         auth_guard.record_success(ip)
         return await call_next(request)
+
+    if rate_limits is not None:
+        # Before auth: a host flooding the API is refused before any token
+        # lookup. No X-RateLimit-* headers here; the identity limit reports its own.
+        app.add_middleware(RateLimitMiddleware, identify=rate_limits.by_ip, expose_headers=False)
 
     # Registered last on purpose. Starlette's add_middleware() inserts at index 0
     # and the stack is built in reverse, so the last-added middleware is the

@@ -4,10 +4,11 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from pincer.config.api import APISettings
+from pincer.config.cache import CacheSettings
 from pincer.config.channels import ChannelSettings
 from pincer.config.core import CoreSettings
 from pincer.config.llm import LLMSettings
@@ -16,9 +17,9 @@ from pincer.config.observability import ObservabilitySettings
 from pincer.config.tasks import TaskSettings
 from pincer.config.telemetry import TelemetryTomlSource
 from pincer.config.tools import ToolSettings
+from pincer.core.cache.keys import DEFAULT_PREFIX_TEMPLATE, render_prefix, validate_prefix_template
 from pincer.core.log_once import LogOncePerKey
 from pincer.integrations.google.token_source import CREDENTIALS_FILE, TOKEN_FILES
-from pincer.redis_keys import render_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class Settings(
     CoreSettings,
     MCPSettings,
     TaskSettings,
+    CacheSettings,
     ObservabilitySettings,
 ):
     """Main configuration for Pincer agent."""
@@ -47,6 +49,20 @@ class Settings(
         case_sensitive=False,
         extra="ignore",
     )
+
+    # Shared by every backend user: rate limiting, the HTTP cache and (unless
+    # PINCER_TASK_PREFIX is set) the task broker. See `pincer.core.cache.keys`.
+    cache_prefix: str = Field(
+        default=DEFAULT_PREFIX_TEMPLATE,
+        description="Template for the prefix of every stored key, stream and channel. Placeholders: "
+        "{environment} (PINCER_ENVIRONMENT), {service} ('pincer'). "
+        "Custom segments may be appended, e.g. '{environment}:{service}:custom'.",
+    )
+
+    @field_validator("cache_prefix")
+    @classmethod
+    def _validate_cache_prefix(cls, value: str) -> str:
+        return validate_prefix_template(value, "cache_prefix")
 
     @classmethod
     def settings_customise_sources(
@@ -80,14 +96,21 @@ class Settings(
         return self
 
     @model_validator(mode="after")
-    def validate_rendered_redis_prefix(self) -> Settings:
-        """Render `redis_prefix` with the real `environment`, so a bad value fails at startup.
+    def resolve_task_backend(self) -> Settings:
+        """Default the task broker to the cache backend, then check the prefixes it will use.
 
-        `TaskSettings` can only check the template: `environment` lives in
-        `APISettings`. Skipped for the memory broker, which builds no Redis names.
+        `PINCER_TASK_BROKER_URL` / `PINCER_TASK_PREFIX` win when set; otherwise
+        tasks share `cache_backend_url` / `cache_prefix`. Both prefixes are
+        rendered with the real `environment` (which lives in `APISettings`) —
+        the memory backends name their keys the same way as Redis — so a bad
+        value fails at startup rather than on the first request or connection.
         """
-        if self.task_broker == "redis":
-            render_prefix(self.redis_prefix, self.environment)
+        if self.task_broker_url is None:
+            self.task_broker_url = self.cache_backend_url
+        if self.task_prefix is None:
+            self.task_prefix = self.cache_prefix
+        render_prefix(self.cache_prefix, self.environment, "cache_prefix")
+        render_prefix(self.task_prefix, self.environment, "task_prefix")
         return self
 
     @model_validator(mode="after")

@@ -31,6 +31,9 @@ os.environ["PINCER_DAILY_BUDGET_USD"] = "100.0"
 # The API is default-deny. Tests that exercise a route rather than its auth run
 # with it switched off; the ones about auth use the `authed_app` fixture.
 os.environ["PINCER_AUTH_DISABLED"] = "true"
+# HTTP API rate limiting likewise: tests about it build their limits explicitly
+# (tests/test_api_rate_limit.py), so no other test trips a 429 by sending many requests.
+os.environ["PINCER_RATE_API_DISABLED"] = "true"
 # Third-party packages load the developer's .env into os.environ when imported
 # (microsoft_teams.apps runs load_dotenv(find_dotenv(usecwd=True)) at import time),
 # leaking e.g. PINCER_ANTHROPIC_MODEL into every later test. python-dotenv honours

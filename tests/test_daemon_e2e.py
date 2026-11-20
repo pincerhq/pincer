@@ -137,7 +137,7 @@ def test_run_detach_status_logs_and_stop_against_real_pincer(scratch: _Scratch) 
 
 
 def test_a_tasks_worker_outlives_pincer_stop(scratch: _Scratch, redis_url: str, tmp_path: Path) -> None:
-    scratch.env |= {"PINCER_TASK_BROKER": "redis", "PINCER_TASK_BROKER_URL": redis_url}
+    scratch.env |= {"PINCER_TASK_BROKER_URL": redis_url}
     out_path = tmp_path / "worker.out"
     with out_path.open("wb") as out:
         # In a session of its own, like a worker started in another terminal.

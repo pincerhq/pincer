@@ -1,4 +1,5 @@
 from pincer.config.api import APISettings
+from pincer.config.cache import CacheSettings
 from pincer.config.channels import ChannelSettings
 from pincer.config.core import CoreSettings, LogLevel
 from pincer.config.llm import LLMProvider, LLMSettings
@@ -9,6 +10,7 @@ from pincer.config.tools import ToolSettings
 
 __all__ = [
     "APISettings",
+    "CacheSettings",
     "ChannelSettings",
     "CoreSettings",
     "LogLevel",

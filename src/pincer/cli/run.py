@@ -68,7 +68,8 @@ async def run(
         None,
         help=(
             "Run a single component standalone instead of the full agent. "
-            "'tasks': background task worker only (requires PINCER_TASK_BROKER=redis)."
+            "'tasks': background task worker only "
+            "(requires a redis:// PINCER_CACHE_BACKEND_URL or PINCER_TASK_BROKER_URL)."
         ),
     ),
     detach: bool = typer.Option(
@@ -89,6 +90,7 @@ async def run(
         raise typer.Exit(1) from e
 
     _refuse_legacy_identity_map()
+    _refuse_legacy_cache_settings()
     telemetry_provider = _telemetry_provider_or_exit(settings)
 
     if detach:
@@ -136,10 +138,12 @@ async def run(
             console.print(f"[yellow]Telemetry init failed (non-fatal): {_tel_err}[/yellow]")
 
     if component is RunComponent.TASKS:
-        if settings.task_broker != "redis":
+        from pincer.config.dsn import is_redis
+
+        if not is_redis(settings.task_broker_url):
             console.print(
-                "[red]pincer run tasks requires PINCER_TASK_BROKER=redis[/red] "
-                "(the in-memory broker cannot be shared across processes)."
+                "[red]pincer run tasks requires a Redis task broker[/red]: set PINCER_CACHE_BACKEND_URL "
+                "(or PINCER_TASK_BROKER_URL) to redis://… (the in-memory broker cannot be shared across processes)."
             )
             raise typer.Exit(1)
         await _run_tasks_worker(settings)
@@ -241,6 +245,24 @@ def _refuse_legacy_identity_map() -> None:
     # Text, not markup: the TOML in the message is full of `[identity.<name>]`,
     # which markup would swallow as style tags.
     console.print(Text("Configuration error:", style="red"), Text(legacy_identity_map_error(value)), soft_wrap=True)
+    raise typer.Exit(1)
+
+
+def _refuse_legacy_cache_settings() -> None:
+    """Stop when the removed PINCER_TASK_BROKER / PINCER_REDIS_PREFIX are still set.
+
+    Settings ignores unknown variables, so starting anyway would silently fall
+    back to the in-memory broker or the default prefix.
+    """
+    from pincer.config.cache import legacy_cache_settings
+
+    messages = legacy_cache_settings()
+    if not messages:
+        return
+    from rich.text import Text
+
+    for message in messages:
+        console.print(Text("Configuration error:", style="red"), Text(message), soft_wrap=True)
     raise typer.Exit(1)
 
 
@@ -1851,7 +1873,9 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     await result_relay.start()
     shutdown.on_stop("result relay", result_relay.stop)
 
-    console.print(f"[green]Task worker started (broker={settings.task_broker})[/green]")
+    from pincer.config.dsn import backend_name
+
+    console.print(f"[green]Task worker started (broker={backend_name(settings.task_broker_url)})[/green]")
 
     # Auto-create default morning briefing if configured
     if settings.default_user_id and settings.briefing_time:
@@ -2007,14 +2031,15 @@ async def _shut_down_agent(shutdown: _Shutdown, lease: DaemonLease | None) -> No
 async def _run_tasks_worker(settings: Settings) -> None:
     """Standalone background-task worker: consumes the repid queue, no channels/API/MCP export.
 
-    Requires `task_broker=redis` (checked by the caller) since the in-memory
+    Requires a redis:// `task_broker_url` (checked by the caller) since the in-memory
     broker can't be shared with whatever process is enqueuing work. Actors
     deliver results through the same `ResultEmitter`/`DeliveryBackend` path
     `_run_agent` uses — see `pincer.tasks.delivery` — so a `ResultRelay` in
     the main `pincer run` process picks them up and delivers via its own,
     already-started channels.
     """
-    from pincer.redis_keys import RedisKeys
+    from pincer.config.dsn import redact_url
+    from pincer.core.cache.keys import KeySpace
     from pincer.scheduler import EventTriggerManager, ProactiveAgent
     from pincer.tasks import TASK_CHANNEL, register_default_server
     from pincer.tasks import app as task_app
@@ -2054,12 +2079,12 @@ async def _run_tasks_worker(settings: Settings) -> None:
     )
 
     console.print(f"[bold green]{settings.agent_name} tasks worker starting...[/bold green]")
-    redis_keys = RedisKeys.from_settings(settings)
-    console.print(f"   Broker: redis ({settings.task_broker_url})")
-    console.print(f"   Redis prefix: {redis_keys.prefix}")
+    task_keys = KeySpace.for_tasks(settings)
+    console.print(f"   Broker: redis ({redact_url(settings.task_broker_url)})")
+    console.print(f"   Task prefix: {task_keys.prefix}")
     console.print(
-        f"[green]Task worker running (stream={redis_keys.stream(TASK_CHANNEL)}, "
-        f"results relayed via {redis_keys.pubsub(TASK_RESULTS_CHANNEL)})[/green]"
+        f"[green]Task worker running (stream={task_keys.stream(TASK_CHANNEL)}, "
+        f"results relayed via {task_keys.pubsub(TASK_RESULTS_CHANNEL)})[/green]"
     )
     console.print("\n[bold green]Tasks worker is running![/bold green] Press Ctrl+C to stop.\n")
 

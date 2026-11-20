@@ -19,6 +19,7 @@ nav:
     - Tools: core-components/tools.md
     - Voice calling: core-components/voice-calling.md
     - Background tasks: core-components/background-tasks.md
+    - Rate limiting and caching: core-components/rate-limiting-and-caching.md
     - Pincer MCP Server: core-components/pincer-mcp-server.md
     - CLI: core-components/cli.md
   - Reference:

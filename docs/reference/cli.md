@@ -20,7 +20,7 @@ Complete command reference across all sprints (1–13). For the full list of too
 | `pincer status` | Show whether the background agent is running or starting, with its pid, uptime, port, channels, version and working directory | — |
 | `pincer stop` | Stop the background agent gracefully and wait for it to exit (`--timeout`, default 90 s; `--force` kills) | — |
 | `pincer restart` | Stop the background agent, then start a new one from the current directory and environment | — |
-| `pincer run tasks` | Standalone background-task worker only — no channels/API/MCP export (requires `PINCER_TASK_BROKER=redis`) | 14 |
+| `pincer run tasks` | Standalone background-task worker only — no channels/API/MCP export (requires a `redis://` task broker) | 14 |
 | `pincer chat` | CLI chat interface (no messaging app needed) | 4 |
 | `pincer config` | Show current configuration (masked secrets) | 1 |
 | `pincer whatsapp setup` | Pair WhatsApp via QR code | 3 |
@@ -417,10 +417,11 @@ complete list. Key variables added in Sprint 5:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PINCER_TASK_BROKER` | `memory` | `memory` (single-process) or `redis` (required for `pincer run tasks`) |
-| `PINCER_TASK_BROKER_URL` | (empty) | Broker URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
+| `PINCER_CACHE_BACKEND_URL` | `memory://` | `memory://` (single-process) or `redis://localhost:6379/0` (required for `pincer run tasks`); also rate limiting and the HTTP cache |
+| `PINCER_CACHE_PREFIX` | `{environment}:{service}` | Template for the prefix of every stored key, stream, group and pub/sub channel ([layout](../core-components/background-tasks.md#redis-key-layout)) |
+| `PINCER_TASK_BROKER_URL` | `PINCER_CACHE_BACKEND_URL` | Task broker URL, when tasks need their own |
+| `PINCER_TASK_PREFIX` | `PINCER_CACHE_PREFIX` | Prefix template for task streams and channels, when tasks need their own |
 | `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up |
-| `PINCER_REDIS_PREFIX` | `{environment}:{service}` | Template for the prefix of every Redis stream, group, pub/sub channel and key ([layout](../core-components/background-tasks.md#redis-key-layout)) |
 | `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
 | `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
 | `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |

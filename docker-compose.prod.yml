@@ -25,8 +25,7 @@ x-pincer-prod: &pincer-prod
     - PINCER_DASHBOARD_HOST=0.0.0.0
     - PINCER_DASHBOARD_PORT=8080
     - PINCER_DASHBOARD_DIST=/app/dashboard/dist
-    - PINCER_TASK_BROKER=redis
-    - PINCER_TASK_BROKER_URL=redis://redis:6379/0
+    - PINCER_CACHE_BACKEND_URL=redis://redis:6379/0
   volumes:
     - pincer-prod-data:/app/data
     - ./pincer.toml:/app/data/pincer.toml:ro

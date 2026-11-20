@@ -19,10 +19,16 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from pincer.config import get_settings_relaxed
+from pincer.core.cache.middleware import cache_control
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ops", tags=["ops"])
+
+# Deployment-wide aggregates, the same for every caller and slow to compute, so
+# the shared HTTP cache (pincer.core.cache.middleware) may keep them a minute.
+# `/signals` and `/alerts` promise "right now" and stay uncached.
+_CACHED = cache_control(max_age=60, public=True)
 
 
 class SignalOut(BaseModel):
@@ -140,7 +146,7 @@ async def current_alerts() -> list[AlertOut]:
     ]
 
 
-@router.get("/slo", response_model=SLOReportOut)
+@router.get("/slo", response_model=SLOReportOut, dependencies=[_CACHED])
 async def slo_report() -> SLOReportOut:
     """Month-to-date SLO status and error-budget burn."""
     from pincer.observability.slo import collect
@@ -156,7 +162,7 @@ async def slo_report() -> SLOReportOut:
     )
 
 
-@router.get("/failures", response_model=FailureBreakdownOut)
+@router.get("/failures", response_model=FailureBreakdownOut, dependencies=[_CACHED])
 async def failure_breakdown(hours: float = Query(default=168.0, ge=1, le=8760)) -> FailureBreakdownOut:
     """Failure codes over a window, ranked, with their human descriptions."""
     from pincer.observability.failure_codes import describe
@@ -217,7 +223,7 @@ async def trigger_canary() -> CanaryTriggerOut:
     )
 
 
-@router.get("/digest")
+@router.get("/digest", dependencies=[_CACHED])
 async def weekly_digest() -> dict[str, str]:
     """The weekly digest text, rendered on demand (does not send it anywhere)."""
     from pincer.observability.digest import build_digest
@@ -246,7 +252,7 @@ class GAGateOut(BaseModel):
     criteria: list[GACriterionOut]
 
 
-@router.get("/ga-gate", response_model=GAGateOut)
+@router.get("/ga-gate", response_model=GAGateOut, dependencies=[_CACHED])
 async def ga_gate(days: int = Query(default=14, ge=1, le=365)) -> GAGateOut:
     """The GA exit criteria evaluated against real data.
 
@@ -268,7 +274,7 @@ async def ga_gate(days: int = Query(default=14, ge=1, le=365)) -> GAGateOut:
     )
 
 
-@router.get("/ga-gate/report")
+@router.get("/ga-gate/report", dependencies=[_CACHED])
 async def ga_gate_markdown(days: int = Query(default=14, ge=1, le=365)) -> dict[str, str]:
     """The sign-off document, rendered as markdown."""
     from pincer.observability.ga_gate import evaluate, render_markdown

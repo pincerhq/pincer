@@ -6,10 +6,22 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ## [0.9.0] — Upcoming
 
+### HTTP API rate limiting and response cache
+
+Every `/api/*` request is now rate limited: a high per-IP ceiling before auth,
+then a per-user limit (or a per-IP one for anonymous requests) after it.
+Endpoints can opt into a shared HTTP response cache. See
+[Rate limiting and caching](../core-components/rate-limiting-and-caching.md).
+
+> **Breaking config rename.** `PINCER_TASK_BROKER` and `PINCER_REDIS_PREFIX`
+> are removed. Set `PINCER_CACHE_BACKEND_URL=redis://…` (the task broker
+> follows it) and rename the prefix to `PINCER_CACHE_PREFIX`. `pincer run`
+> refuses to start while either old variable is set.
+
 ### Redis: one configurable prefix for every Redis name
 
 All Redis streams, consumer groups and pub/sub channels now start with
-`PINCER_REDIS_PREFIX` (default `{environment}:{service}`, e.g.
+`PINCER_CACHE_PREFIX` (formerly `PINCER_REDIS_PREFIX`; default `{environment}:{service}`, e.g.
 `production:pincer`). Two deployments sharing one Redis no longer receive each
 other's task results. See
 [Redis key layout](../core-components/background-tasks.md#redis-key-layout).

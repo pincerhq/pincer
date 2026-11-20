@@ -25,7 +25,7 @@ pincer --version
 pincer
 ├── init                    # Interactive setup wizard
 ├── run                     # Start the agent
-│   └── tasks               # Standalone background task worker (requires PINCER_TASK_BROKER=redis)
+│   └── tasks               # Standalone background task worker (requires a redis:// task broker)
 ├── chat                    # CLI chat interface
 ├── config                  # Show configuration
 ├── cost                    # Spending summary
@@ -145,7 +145,7 @@ API server's bind address/port are set via `PINCER_DASHBOARD_HOST`/`PINCER_DASHB
 # Start everything
 pincer run
 
-# Standalone background-task worker (requires PINCER_TASK_BROKER=redis)
+# Standalone background-task worker (requires a redis:// task broker)
 pincer run tasks
 ```
 
@@ -162,9 +162,9 @@ pincer run tasks
 ```
 
 **`pincer run tasks`** starts only the background task worker — no channels,
-no API/MCP export, no live email/calendar polling. Requires
-`PINCER_TASK_BROKER=redis` (the in-memory broker can't be shared across
-processes). Used to scale schedule/webhook execution independently of the
+no API/MCP export, no live email/calendar polling. Requires a `redis://`
+`PINCER_CACHE_BACKEND_URL` or `PINCER_TASK_BROKER_URL` (the in-memory broker
+can't be shared across processes). Used to scale schedule/webhook execution independently of the
 main agent process — see [Background Tasks](background-tasks.md).
 
 ```bash
@@ -755,10 +755,11 @@ See [Background Tasks](background-tasks.md) for the full architecture.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PINCER_TASK_BROKER` | `memory` | `memory` (single-process, zero infra) or `redis` (required for `pincer run tasks`) |
-| `PINCER_TASK_BROKER_URL` | | Broker URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
+| `PINCER_CACHE_BACKEND_URL` | `memory://` | `memory://` (single-process, zero infra) or `redis://localhost:6379/0` (required for `pincer run tasks`); also rate limiting and the HTTP cache |
+| `PINCER_CACHE_PREFIX` | `{environment}:{service}` | Template for the prefix of every stored key, stream, group and pub/sub channel ([layout](background-tasks.md#redis-key-layout)) |
+| `PINCER_TASK_BROKER_URL` | `PINCER_CACHE_BACKEND_URL` | Task broker URL, when tasks need their own |
+| `PINCER_TASK_PREFIX` | `PINCER_CACHE_PREFIX` | Prefix template for task streams and channels, when tasks need their own |
 | `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up |
-| `PINCER_REDIS_PREFIX` | `{environment}:{service}` | Template for the prefix of every Redis stream, group, pub/sub channel and key ([layout](background-tasks.md#redis-key-layout)) |
 | `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
 | `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
 | `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |

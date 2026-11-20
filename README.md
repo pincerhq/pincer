@@ -540,7 +540,7 @@ pincer logs [-f] [-n N]            # background agent's log (<data_dir>/logs/pin
 pincer status                      # running / starting / not running, with pid, uptime, port, channels
 pincer stop [--force]              # graceful stop; waits up to 90 s for calls to drain, never kills unless --force
 pincer restart                     # stop, then start again from here (apply .env / pincer.toml changes)
-pincer run tasks                   # standalone background-task worker (requires PINCER_TASK_BROKER=redis)
+pincer run tasks                   # standalone background-task worker (requires a redis:// PINCER_CACHE_BACKEND_URL)
 pincer chat                        # CLI chat for testing
 pincer doctor                      # security + config audit (40+ checks)
 pincer cost                        # spending summary

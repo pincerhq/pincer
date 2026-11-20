@@ -36,6 +36,22 @@ class APISettings(BaseModel):
     rate_messages_per_min: int = Field(default=30, ge=1, description="Per-user message rate limit")
     rate_tools_per_min: int = Field(default=20, ge=1, description="Per-user tool call rate limit")
     max_concurrent_llm: int = Field(default=5, ge=1, description="Max concurrent LLM requests")
+    # HTTP API request limits (`pincer.api.rate_limits`), stored in PINCER_CACHE_BACKEND_URL.
+    rate_api_disabled: bool = Field(default=False, description="Disable HTTP API rate limiting")
+    rate_api_ip_per_min: int = Field(
+        default=3000,
+        ge=1,
+        description="Per-IP ceiling on all API requests, checked before auth. A flood backstop, not a "
+        "per-user quota: keep it well above what every user behind one shared (NAT) IP sends together",
+    )
+    rate_api_user_per_min: int = Field(
+        default=300, ge=1, description="Per-user limit on authenticated API requests, checked after auth"
+    )
+    rate_api_anon_per_min: int = Field(
+        default=120,
+        ge=1,
+        description="Per-IP limit on API requests without an identity (public paths such as login), checked after auth",
+    )
     debug: bool = Field(default=False, description="Enable debug mode")
     environment: str = Field(
         default="development",
