@@ -14,10 +14,10 @@ from pincer.config.core import CoreSettings
 from pincer.config.llm import LLMSettings
 from pincer.config.mcp import MCPSettings
 from pincer.config.observability import ObservabilitySettings
+from pincer.config.prefix import DEFAULT_PREFIX_TEMPLATE, render_prefix, validate_prefix_template
 from pincer.config.tasks import TaskSettings
 from pincer.config.telemetry import TelemetryTomlSource
 from pincer.config.tools import ToolSettings
-from pincer.core.cache.keys import DEFAULT_PREFIX_TEMPLATE, render_prefix, validate_prefix_template
 from pincer.core.log_once import LogOncePerKey
 from pincer.integrations.google.token_source import CREDENTIALS_FILE, TOKEN_FILES
 

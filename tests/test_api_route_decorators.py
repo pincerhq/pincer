@@ -99,6 +99,17 @@ def _build(settings: SimpleNamespace) -> tuple[FastAPI, dict[str, int]]:
     async def by_tenant() -> dict[str, int]:
         return {"n": count("by_tenant")}
 
+    @app.get("/api/minute-and-day")
+    @rate_limit("1/minute")
+    @rate_limit("3/day", name="shared_day")
+    async def minute_and_day() -> dict[str, int]:
+        return {"n": count("minute_and_day")}
+
+    @app.get("/api/day-only")
+    @rate_limit("3/day", name="shared_day")
+    async def day_only() -> dict[str, int]:
+        return {"n": count("day_only")}
+
     @app.get("/api/detail-text")
     @rate_limit("1/minute", detail="Slow down, please.")
     async def detail_text() -> dict[str, int]:
@@ -208,6 +219,11 @@ ALICE = {"X-User": "alice"}
 BOB = {"X-User": "bob"}
 
 
+def _endpoint(client: TestClient, path: str) -> Any:
+    """The endpoint function serving *path*, e.g. to invalidate its cache."""
+    return next(route.endpoint for route in client.app.routes if getattr(route, "path", "") == path)
+
+
 def _codes(client: TestClient, path: str, n: int, headers: dict[str, str] | None = None) -> list[int]:
     return [client.get(path, headers=headers or ALICE).status_code for _ in range(n)]
 
@@ -234,6 +250,14 @@ def test_stacked_limits_all_apply(make: Any) -> None:
     first = client.get("/api/stacked", headers=ALICE)
     assert first.headers["x-ratelimit-limit"] == "2"  # the tighter one is reported
     assert _codes(client, "/api/stacked", 2) == [200, 429]
+
+
+def test_a_refused_stacked_limit_spends_nothing_on_the_others(make: Any) -> None:
+    """Every stacked limit is checked before any is charged (`acharge_all`)."""
+    client, _ = make()
+    # 1 allowed, then 3 refused by the minute limit: the day budget (shared by name) spent only once.
+    assert _codes(client, "/api/minute-and-day", 4) == [200, 429, 429, 429]
+    assert _codes(client, "/api/day-only", 3) == [200, 200, 429]
 
 
 def test_no_rate_limit_skips_the_default(make: Any) -> None:
@@ -380,7 +404,7 @@ def test_sync_endpoint_uses_the_sync_store(make: Any) -> None:
     assert client.get("/api/cached-sync", headers=ALICE).headers["x-cache"] == "HIT"
     assert calls["cached_sync"] == 1
     cache = response_cache(client.app)
-    key = cache.prefix("cached_sync", "alice")
+    key = cache.prefix(_endpoint(client, "/api/cached-sync"), "alice")
     assert cache.store.delete_prefix(key) == 1  # the sync store holds it (and shares it with the async one)
 
 
@@ -397,12 +421,38 @@ async def test_invalidation_by_route_and_user(make: Any) -> None:
     for who in (ALICE, BOB):
         client.get("/api/cached", headers=who)
     cache = response_cache(client.app)
-    assert cache.invalidate("cached", user="alice") == 1
+    cached = _endpoint(client, "/api/cached")
+    assert cache.invalidate(cached, user="alice") == 1
     assert client.get("/api/cached", headers=ALICE).headers["x-cache"] == "MISS"
     assert client.get("/api/cached", headers=BOB).headers["x-cache"] == "HIT"
-    assert cache.invalidate("cached") == 2
+    assert cache.invalidate(cached) == 2
     assert client.get("/api/cached", headers=BOB).headers["x-cache"] == "MISS"
     assert calls["cached"] == 4
+
+
+def test_same_function_names_never_share_entries() -> None:
+    from pincer.core.cache.decorators import cache_name, cache_rule
+
+    def make_a() -> Any:
+        async def listing() -> dict[str, str]:
+            return {}
+
+        return listing
+
+    def make_b() -> Any:
+        async def listing() -> dict[str, str]:
+            return {}
+
+        return listing
+
+    a = cache_response(scope="public")(make_a())
+    b = cache_response(scope="public")(make_b())
+    assert a.__name__ == b.__name__ == "listing"
+    assert cache_rule(a).name != cache_rule(b).name
+    assert cache_rule(a).name.startswith(f"{__name__}.")
+    assert cache_name(cache_response(name="custom")(make_a())) == "custom"
+    with pytest.raises(ValueError, match="no @cache_response"):
+        cache_name(make_a())
 
 
 def test_cache_decorator_validation() -> None:
@@ -440,9 +490,8 @@ def test_users_are_isolated_in_both(make: Any, path: str) -> None:
 @pytest.mark.parametrize("path", COMBOS)
 def test_invalidation_does_not_touch_the_limit(make: Any, path: str) -> None:
     client, _ = make()
-    route = path.replace("-", "_")
     _codes(client, f"/api/{path}", 2)
-    response_cache(client.app).invalidate(route, user="alice")
+    assert response_cache(client.app).invalidate(_endpoint(client, f"/api/{path}"), user="alice") == 1
     third = client.get(f"/api/{path}", headers=ALICE)
     assert (third.status_code, third.headers["x-cache"]) == (200, "MISS")
     assert client.get(f"/api/{path}", headers=ALICE).status_code == 429  # still the 4th request

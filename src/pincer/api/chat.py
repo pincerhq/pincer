@@ -59,9 +59,10 @@ def _message_rate() -> Rate:
 
 
 def _too_fast(result: RateLimitResult) -> str:
-    """The channels' wording (`pincer.security.rate_limiter`), so web chat refuses the same way."""
-    wait = max(1, round(result.retry_after))
-    return f"You're sending messages too fast! Please wait {wait}s before sending another message."
+    """The channels' wording, so web chat refuses the same way."""
+    from pincer.security.rate_limiter import too_fast_message
+
+    return too_fast_message(result.retry_after)
 
 
 # Each turn is an LLM call: web chat gets the channels' per-user message limit

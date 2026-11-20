@@ -117,8 +117,6 @@ telemetry = [
 # redis>=8.1 while repid pins redis<8, and hishel's AsyncRedisStorage only uses
 # commands redis-py 7 already has (tests/test_http_cache.py runs it on redis-py 7).
 redis = ["repid[redis]"]
-# Deprecated alias of `redis`.
-tasks-redis = ["pincer-agent[redis]"]
 all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,redis,postgres,remote-skills]"]
 dev = [
     "pytest>=8.3.0",

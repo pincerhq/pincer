@@ -29,25 +29,31 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, TypeVar
 
 from pincer.core.ratelimit.strategies import STRATEGIES, SlidingWindowStrategy, Strategy
-from pincer.core.ratelimit.types import Rate, RateLimitResult
+from pincer.core.ratelimit.types import DEFAULT_DETAIL, Detail, Rate, RateLimitResult, detail_text
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 LIMITS_ATTR = "__pincer_rate_limits__"
-SCOPES = frozenset({"user", "ip", "anon", "global"})
-DEFAULT_DETAIL = "Rate limit exceeded"
+
+
+class LimitScope(StrEnum):
+    """Who a route limit counts (`@rate_limit(scope=...)`); a function is the custom case."""
+
+    USER = "user"  # the caller's identity (their IP, as ANON, when there is none)
+    IP = "ip"  # everyone on one address together
+    ANON = "anon"  # by IP
+    GLOBAL = "global"  # one bucket for everyone
+
 
 ScopeFunc = Callable[[Any], "str | None"]
 """`request -> identifier` for a custom scope (None: the request is not limited)."""
 
 RateSource = str | Rate | Callable[[], "str | Rate"]
 """A rate, or a function returning one, read on each request (e.g. from settings)."""
-
-Detail = str | Callable[[RateLimitResult], str]
-"""The 429 `detail`: a message, or a function of the refused result (e.g. to say how long to wait)."""
 
 
 @dataclass(frozen=True)
@@ -56,7 +62,7 @@ class RouteLimit:
 
     Attributes:
         rate: Requests per period, or a function returning it (read on each request).
-        scope: `"user"`, `"ip"`, `"anon"`, `"global"`, or a function returning the identifier.
+        scope: A `LimitScope`, or a function returning the identifier.
         strategy: The algorithm.
         cost: Units one request spends.
         name: The bucket's route segment; defaults to the route's name. Routes
@@ -65,7 +71,7 @@ class RouteLimit:
     """
 
     rate: Rate | Callable[[], str | Rate]
-    scope: str | ScopeFunc = "user"
+    scope: LimitScope | ScopeFunc = LimitScope.USER
     strategy: Strategy = SlidingWindowStrategy()
     cost: int = 1
     name: str | None = None
@@ -77,7 +83,7 @@ class RouteLimit:
 
     def message(self, result: RateLimitResult) -> str:
         """The 429 `detail` for a refusal by this limit."""
-        return self.detail if isinstance(self.detail, str) else self.detail(result)
+        return detail_text(self.detail, result)
 
     def bucket_name(self, route: str, rate: Rate | None = None) -> str:
         """The bucket's route segment: the route (or `name`), the rate and the strategy.
@@ -93,9 +99,9 @@ class RouteLimit:
 
     @property
     def scope_name(self) -> str:
-        """The bucket scope segment: the scope itself, or the custom function's name."""
-        if isinstance(self.scope, str):
-            return self.scope
+        """The bucket scope segment: the scope's value, or the custom function's name."""
+        if isinstance(self.scope, LimitScope):
+            return self.scope.value
         return getattr(self.scope, "__name__", "custom")
 
 
@@ -113,7 +119,7 @@ def _strategy(value: str | Strategy | None) -> Strategy:
 def rate_limit(
     rate: RateSource,
     *,
-    scope: str | ScopeFunc = "user",
+    scope: LimitScope | str | ScopeFunc = LimitScope.USER,
     strategy: str | Strategy | None = None,
     cost: int = 1,
     name: str | None = None,
@@ -124,8 +130,12 @@ def rate_limit(
     `rate` may be a function returning the rate, read on each request, so a
     limit can follow a setting. `detail` replaces the 429 message.
     """
-    if isinstance(scope, str) and scope not in SCOPES:
-        raise ValueError(f"Unknown rate limit scope {scope!r}; use one of {sorted(SCOPES)} or a function")
+    if isinstance(scope, str):
+        try:
+            scope = LimitScope(scope)
+        except ValueError:
+            known = ", ".join(s.value for s in LimitScope)
+            raise ValueError(f"Unknown rate limit scope {scope!r}; use one of {known} or a function") from None
     if cost < 1:
         raise ValueError(f"Rate limit cost must be at least 1, got {cost}")
     parsed: Rate | Callable[[], str | Rate] = rate if callable(rate) else Rate.parse(rate)

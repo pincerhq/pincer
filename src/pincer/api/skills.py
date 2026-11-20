@@ -66,7 +66,6 @@ def _skill_detail(dir_name: str) -> dict[str, Any] | None:
 # Same for every caller. The skill index has its own rescan interval; this only
 # saves rebuilding the JSON. `POST /rebuild` drops both entries at once.
 _CACHED = cache_response(ttl=30, scope="public")
-_CACHED_ROUTES = ("list_skills", "get_skill")
 
 
 @router.get("")
@@ -133,8 +132,8 @@ async def rebuild_skills(
     generation = service.generation
     assert generation is not None  # rebuild() always records one
     cache = response_cache(request.app)
-    for route in _CACHED_ROUTES:
-        await cache.ainvalidate(route)
+    for cached in (list_skills, get_skill):
+        await cache.ainvalidate(cached)
     return {
         "generation": generation,
         "cache_cleared": clear_cache,

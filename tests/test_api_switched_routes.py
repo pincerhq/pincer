@@ -226,7 +226,7 @@ async def test_demo_limits_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
         async def reset(self, key: str) -> None:
             raise ConnectionError("redis down")
 
-    monkeypatch.setattr(public_demo, "create_async_storage", lambda url: Down())
+    monkeypatch.setattr("pincer.core.ratelimit.storage.create_async_storage", lambda url: Down())
     public_demo._limits = public_demo._DemoLimits.from_settings(_settings())
     with pytest.raises(HTTPException) as refused:
         await public_demo._charge_limits("+4930111222", "10.0.0.1")
@@ -236,16 +236,14 @@ async def test_demo_limits_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_channel_limiter_is_shared_across_processes(shared_redis: Any) -> None:
-    from pincer.core.cache.keys import KeySpace
-    from pincer.core.ratelimit import create_async_storage
+    from pincer.core.ratelimit import AsyncLimiterFactory
     from pincer.exceptions import RateLimitExceeded
     from pincer.security.rate_limiter import RateLimiter
 
     def process() -> RateLimiter:
         return RateLimiter(
             messages_per_minute=2,
-            storage=create_async_storage("redis://localhost:6379/0"),
-            keys=KeySpace.for_cache(_settings()),
+            limiters=AsyncLimiterFactory.from_settings(_settings()),
         )
 
     main, worker = process(), process()

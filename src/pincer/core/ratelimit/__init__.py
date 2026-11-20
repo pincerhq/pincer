@@ -15,8 +15,16 @@ reimplementation, not a copy. It differs where pincer needs it to:
 
 from __future__ import annotations
 
-from pincer.core.ratelimit.decorators import RouteLimit, no_rate_limit, rate_limit
-from pincer.core.ratelimit.limiter import AsyncLimiter, Limiter
+from pincer.core.ratelimit.decorators import LimitScope, RouteLimit, no_rate_limit, rate_limit
+from pincer.core.ratelimit.limiter import (
+    AsyncLimiter,
+    AsyncLimiterFactory,
+    Charge,
+    Limiter,
+    LimiterFactory,
+    acharge_all,
+    charge_all,
+)
 from pincer.core.ratelimit.middleware import RateLimitMiddleware
 from pincer.core.ratelimit.storage import (
     AsyncMemoryStorage,
@@ -33,10 +41,14 @@ from pincer.core.ratelimit.types import Rate, RateLimitResult
 
 __all__ = [
     "AsyncLimiter",
+    "AsyncLimiterFactory",
+    "Charge",
     "AsyncMemoryStorage",
     "AsyncRateLimitStorage",
     "AsyncRedisStorage",
+    "LimitScope",
     "Limiter",
+    "LimiterFactory",
     "MemoryStorage",
     "Rate",
     "RateLimitMiddleware",
@@ -47,6 +59,8 @@ __all__ = [
     "SlidingWindowStrategy",
     "Strategy",
     "TokenBucketStrategy",
+    "acharge_all",
+    "charge_all",
     "create_async_storage",
     "create_storage",
     "no_rate_limit",

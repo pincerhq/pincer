@@ -269,3 +269,28 @@ async def test_limiter_can_fail_closed(storage_cls: type[_Broken], limiter_cls: 
     opened = limiter_cls(storage_cls(), Rate(5, 60), KEYS, "demo")
     result = await _maybe(opened.hit("x"))
     assert result.allowed and result.failed
+
+
+def test_charge_all_charges_nothing_when_one_refuses() -> None:
+    from pincer.core.ratelimit import Charge, LimiterFactory, charge_all
+
+    factory = LimiterFactory(MemoryStorage(), KEYS)
+    minute, day = factory.limiter(Rate(1, 60), "minute"), factory.limiter(Rate(3, 86400), "day")
+    charges = [Charge(minute, "alice", detail="minute"), Charge(day, "alice", detail="day")]
+    charge, result = charge_all(charges)
+    assert result.allowed
+    for _ in range(3):
+        charge, result = charge_all(charges)
+        assert not result.allowed and charge.message(result) == "minute"
+    assert day.check("alice").remaining == 1  # 3 - 1 charged - 1 checked: the refusals spent nothing
+
+
+async def test_acharge_all_reports_the_tightest() -> None:
+    from pincer.core.ratelimit import AsyncLimiterFactory, Charge, acharge_all
+
+    factory = AsyncLimiterFactory(AsyncMemoryStorage(), KEYS)
+    wide, tight = factory.limiter(Rate(10, 60), "wide"), factory.limiter(Rate(2, 60), "tight")
+    charge, result = await acharge_all([Charge(wide, "a"), Charge(tight, "a")])
+    assert result.allowed and charge.limiter is tight and result.limit == 2
+    with pytest.raises(ValueError):
+        await acharge_all([])

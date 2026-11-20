@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 _UNITS = {"second": 1.0, "minute": 60.0, "hour": 3600.0, "day": 86400.0}
@@ -66,3 +67,14 @@ class RateLimitResult:
     def unavailable(cls, limit: int, retry_after: float = 60.0) -> RateLimitResult:
         """The fail-closed answer: refused until the backend is back."""
         return cls(allowed=False, limit=limit, remaining=0, reset_after=0.0, retry_after=retry_after, failed=True)
+
+
+DEFAULT_DETAIL = "Rate limit exceeded"
+
+Detail = str | Callable[[RateLimitResult], str]
+"""A refusal's message: a fixed text, or a function of the refused result (e.g. to say how long to wait)."""
+
+
+def detail_text(detail: Detail, result: RateLimitResult) -> str:
+    """The message `detail` gives for the refused `result`."""
+    return detail if isinstance(detail, str) else detail(result)

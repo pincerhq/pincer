@@ -17,16 +17,14 @@ import math
 from typing import Any
 
 from pincer.core.cache.keys import KeySpace
-from pincer.core.ratelimit import (
-    AsyncLimiter,
-    AsyncMemoryStorage,
-    AsyncRateLimitStorage,
-    Rate,
-    TokenBucketStrategy,
-)
+from pincer.core.ratelimit import AsyncLimiter, AsyncLimiterFactory, AsyncMemoryStorage, Rate, TokenBucketStrategy
 from pincer.exceptions import RateLimitExceeded
 
-_DEFAULT_KEYS = KeySpace("local:pincer")
+
+def too_fast_message(wait_seconds: float) -> str:
+    """The refusal for a user sending messages too fast; web chat (`pincer.api.chat`) says the same."""
+    wait = max(1, math.ceil(wait_seconds))
+    return f"You're sending messages too fast! Please wait {wait}s before sending another message."
 
 
 class RateLimiter:
@@ -36,8 +34,8 @@ class RateLimiter:
         messages_per_minute: Messages one user may send per minute (bursts up to it).
         tool_calls_per_minute: Tool calls one user may trigger per minute.
         max_concurrent_llm: LLM requests in flight at once, in this process.
-        storage: Where the buckets live; in-process memory when omitted.
-        keys: Names the buckets; `KeySpace.for_cache(settings)` in the app.
+        limiters: Where the buckets live and how they are named; in-process
+            memory when omitted, `AsyncLimiterFactory.from_settings(settings)` in the app.
     """
 
     def __init__(
@@ -46,28 +44,20 @@ class RateLimiter:
         tool_calls_per_minute: int = 20,
         max_concurrent_llm: int = 5,
         *,
-        storage: AsyncRateLimitStorage | None = None,
-        keys: KeySpace | None = None,
+        limiters: AsyncLimiterFactory | None = None,
     ) -> None:
-        storage = storage or AsyncMemoryStorage()
-        keys = keys or _DEFAULT_KEYS
-        self._messages = AsyncLimiter(
-            storage, Rate.per_minute(messages_per_minute), keys, "channel_message", TokenBucketStrategy()
+        limiters = limiters or AsyncLimiterFactory(AsyncMemoryStorage(), KeySpace("local:pincer"))
+        self._messages = limiters.limiter(
+            Rate.per_minute(messages_per_minute), "channel_message", TokenBucketStrategy()
         )
-        self._tools = AsyncLimiter(
-            storage, Rate.per_minute(tool_calls_per_minute), keys, "channel_tool", TokenBucketStrategy()
-        )
+        self._tools = limiters.limiter(Rate.per_minute(tool_calls_per_minute), "channel_tool", TokenBucketStrategy())
         self._llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
 
     async def check_message(self, user_id: str) -> None:
         """Raise RateLimitExceeded if user is sending messages too fast."""
         result = await self._messages.hit(user_id)
         if not result.allowed:
-            wait = result.retry_after
-            raise RateLimitExceeded(
-                f"You're sending messages too fast! Please wait {math.ceil(wait)}s before sending another message.",
-                wait_seconds=wait,
-            )
+            raise RateLimitExceeded(too_fast_message(result.retry_after), wait_seconds=result.retry_after)
 
     async def check_tool_call(self, user_id: str) -> None:
         """Raise RateLimitExceeded if user has too many tool calls."""

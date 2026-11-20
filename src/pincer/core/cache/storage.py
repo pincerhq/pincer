@@ -33,8 +33,7 @@ from hishel import (
     Response,
 )
 
-from pincer.config.dsn import is_redis
-from pincer.core.cache.backend import get_async_redis, get_redis
+from pincer.core.cache.backend import for_backend, get_async_redis, get_redis
 from pincer.core.cache.keys import KeySpace
 
 DEFAULT_MAX_ENTRIES = 1024
@@ -313,25 +312,25 @@ def create_http_cache_storage(settings: Any, prefix: str | None = None) -> BaseS
     """Sync storage for `settings.cache_backend_url`, under *prefix* (default `KeySpace.http_cache()`)."""
     prefix = prefix or KeySpace.for_cache(settings).http_cache()
     ttl = float(settings.cache_default_ttl)
-    if is_redis(settings.cache_backend_url):
-        return RedisStorage(
-            get_redis(settings.cache_backend_url),
-            default_ttl=ttl,
-            max_stream_size=DEFAULT_MAX_STREAM_SIZE,
-            key_prefix=prefix,
-        )
-    return MemoryStorage(prefix, default_ttl=ttl)
+    url = settings.cache_backend_url
+    return for_backend(
+        url,
+        memory=lambda: MemoryStorage(prefix, default_ttl=ttl),
+        redis=lambda: RedisStorage(
+            get_redis(url), default_ttl=ttl, max_stream_size=DEFAULT_MAX_STREAM_SIZE, key_prefix=prefix
+        ),
+    )
 
 
 def create_async_http_cache_storage(settings: Any, prefix: str | None = None) -> AsyncBaseStorage:
     """Async storage for `settings.cache_backend_url`, under *prefix* (default `KeySpace.http_cache()`)."""
     prefix = prefix or KeySpace.for_cache(settings).http_cache()
     ttl = float(settings.cache_default_ttl)
-    if is_redis(settings.cache_backend_url):
-        return AsyncRedisStorage(
-            get_async_redis(settings.cache_backend_url),
-            default_ttl=ttl,
-            max_stream_size=DEFAULT_MAX_STREAM_SIZE,
-            key_prefix=prefix,
-        )
-    return AsyncMemoryStorage(prefix, default_ttl=ttl)
+    url = settings.cache_backend_url
+    return for_backend(
+        url,
+        memory=lambda: AsyncMemoryStorage(prefix, default_ttl=ttl),
+        redis=lambda: AsyncRedisStorage(
+            get_async_redis(url), default_ttl=ttl, max_stream_size=DEFAULT_MAX_STREAM_SIZE, key_prefix=prefix
+        ),
+    )

@@ -191,15 +191,8 @@ def create_app() -> FastAPI:
         escalate=False,
     )
 
-    # Middleware order, outermost first (Starlette builds the stack from the
-    # last-added middleware inwards, so these are registered inside-out):
-    #
-    #   CORS → IP ceiling → auth_middleware → HTTP cache → routing
-    #        → enforce_rate_limits (app dependency) → @cache_response → endpoint
-    #
-    # The user/anon and per-route limits need the route, so they run as the
-    # app-level dependency `enforce_rate_limits`, after routing; auth has left
-    # the caller on `request.state.identity` by then. See pincer.api.rate_limits.
+    # Registered inside-out (the last-added middleware is outermost):
+    # CORS → IP ceiling → auth → HTTP cache → routing → enforce_rate_limits → endpoint.
     from pincer.core.cache.decorators import ResponseCache
     from pincer.core.cache.middleware import HTTPCacheMiddleware
     from pincer.core.cache.storage import create_async_http_cache_storage

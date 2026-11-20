@@ -517,12 +517,12 @@ def test_get_skill_unknown_is_404(client: TestClient) -> None:
 
 def test_rebuild_drops_the_cached_skill_listing(api_settings, queued_jobs) -> None:
     """`GET /api/skills` and `/api/skills/{name}` are cached for 30 s; a rebuild must not wait them out."""
-    from pincer.api.skills import rebuild_skills
+    from pincer.api.skills import get_skill, list_skills, rebuild_skills
 
     request = _request()
     cache = request.app.state.response_cache
-    for route in ("list_skills", "get_skill"):
+    for route in (list_skills, get_skill):
         cache.store.set(cache.prefix(route, "public") + "abc", b"{}", 30)
     asyncio.run(rebuild_skills(request, keep_cache=True))
-    assert cache.invalidate("list_skills") == 0
-    assert cache.invalidate("get_skill") == 0
+    assert cache.invalidate(list_skills) == 0
+    assert cache.invalidate(get_skill) == 0

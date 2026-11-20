@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hishel storages, cached outbound httpx clients). Both work in sync and async
   modes: `Limiter` / `AsyncLimiter`, `MemoryStorage` / `AsyncMemoryStorage`,
   `cached_client` / `async_cached_client`, and so on. The `redis` extra replaces
-  `tasks-redis`, which stays as an alias.
+  `tasks-redis`, which is removed: install `pincer-agent[redis]`.
 - The ElevenLabs voice lookups are cached for `PINCER_CACHE_DEFAULT_TTL`,
   per API key. Errors and missing voices are not cached.
 - Per-route decorators override the defaults. `@rate_limit("20/minute", scope=...)`
@@ -55,7 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `@cache_response(scope="public")` sends `Cache-Control: public` only
     without credentials.
   - `pincer.security.TokenBucket` is removed, and `RateLimiter.cleanup_user` is
-    now async.
+    now async. `RateLimiter` takes `limiters=AsyncLimiterFactory(...)`.
+  - Stacked route limits are all checked before any is charged, so a refused
+    request spends nothing. `LimiterFactory` / `AsyncLimiterFactory` and
+    `Charge` with `charge_all` / `acharge_all` are the shared building blocks.
+  - `@cache_response` entries are named after the endpoint's module-qualified
+    name, so endpoints with the same function name never share entries.
+    `invalidate()` takes the endpoint.
+  - `pincer doctor` gains a `cache_backend` check. It covers the removed
+    settings, and a `redis://` URL without the `redis` extra.
 - See [Rate limiting and caching](docs/core-components/rate-limiting-and-caching.md).
 
 #### `search_path=` in `PINCER_DATABASE_URL`

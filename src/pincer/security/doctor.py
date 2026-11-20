@@ -148,10 +148,11 @@ class SecurityDoctor:
         report.checks.append(self._check_discord_allowlist(settings))
         report.checks.append(self._check_dashboard_auth_token(settings))
         report.checks.append(self._check_stale_shared_tokens())
-        # Budget (4 checks)
+        # Budget (4 checks) + cache backend (1 check)
         report.checks.append(self._check_budget_limits(settings))
         report.checks.append(self._check_rate_limits(settings))
         report.checks.append(self._check_api_rate_limits(settings))
+        report.checks.append(self._check_cache_backend(settings))
         report.checks.append(self._check_tool_call_limits(settings))
         # Filesystem (5 checks)
         report.checks.append(self._check_data_dir_permissions())
@@ -1634,21 +1635,45 @@ class SecurityDoctor:
             category="budget",
         )
 
-    def _check_api_rate_limits(self, cfg: Settings | None = None) -> CheckResult:
-        """#404: the HTTP API limits, their backend, and the removed task/prefix settings."""
+    def _check_cache_backend(self, cfg: Settings | None = None) -> CheckResult:
+        """#404: the removed task/prefix settings, and a redis:// backend without the `redis` extra."""
+        import importlib.util
+
         from pincer.config.cache import legacy_cache_settings
-        from pincer.config.dsn import is_redis
+        from pincer.config.dsn import is_redis, redact_url
 
         cfg = self._cfg(cfg)
         legacy = legacy_cache_settings(self.config_dir)
         if legacy:
             return CheckResult(
-                "api_rate_limits",
+                "cache_backend",
                 CheckStatus.CRITICAL,
                 "Removed backend settings are still set — `pincer run` refuses to start",
                 fix_hint="\n".join(legacy),
-                category="budget",
+                category="runtime",
             )
+        urls = {"PINCER_CACHE_BACKEND_URL": cfg.cache_backend_url, "PINCER_TASK_BROKER_URL": cfg.task_broker_url}
+        redis_urls = [name for name, url in urls.items() if is_redis(url)]
+        if redis_urls and importlib.util.find_spec("redis") is None:
+            return CheckResult(
+                "cache_backend",
+                CheckStatus.CRITICAL,
+                f"{' and '.join(redis_urls)} point at Redis, but the redis package is not installed",
+                fix_hint="pip install 'pincer-agent[redis]', or set the URL to memory://",
+                category="runtime",
+            )
+        return CheckResult(
+            "cache_backend",
+            CheckStatus.PASS,
+            f"Cache backend {redact_url(cfg.cache_backend_url)}, task broker {redact_url(cfg.task_broker_url)}",
+            category="runtime",
+        )
+
+    def _check_api_rate_limits(self, cfg: Settings | None = None) -> CheckResult:
+        """#404: the HTTP API limits; switched off in production is a warning."""
+        from pincer.config.dsn import backend_name
+
+        cfg = self._cfg(cfg)
         if cfg.rate_api_disabled and cfg.environment.strip().lower() == "production":
             return CheckResult(
                 "api_rate_limits",
@@ -1657,7 +1682,6 @@ class SecurityDoctor:
                 fix_hint="Unset PINCER_RATE_API_DISABLED",
                 category="budget",
             )
-        backend = "redis" if is_redis(cfg.cache_backend_url) else "memory (per process)"
         state = (
             "disabled"
             if cfg.rate_api_disabled
@@ -1665,7 +1689,10 @@ class SecurityDoctor:
             f"anonymous {cfg.rate_api_anon_per_min}/min"
         )
         return CheckResult(
-            "api_rate_limits", CheckStatus.PASS, f"API rate limits: {state}; backend {backend}", category="budget"
+            "api_rate_limits",
+            CheckStatus.PASS,
+            f"API rate limits: {state}; backend {backend_name(cfg.cache_backend_url)}",
+            category="budget",
         )
 
     def _check_tool_call_limits(self, cfg: Settings | None = None) -> CheckResult:

@@ -1,15 +1,27 @@
-"""`Limiter` (sync) and `AsyncLimiter` (async): one rate limit for one scope, failing open."""
+"""`Limiter` (sync) and `AsyncLimiter` (async): one rate limit for one scope, failing open.
+
+Also what builds and combines them:
+
+- `LimiterFactory` / `AsyncLimiterFactory`: limiters on one storage and key
+  space, e.g. `AsyncLimiterFactory.from_settings(settings)` for the cache backend.
+- `Charge` + `charge_all` / `acharge_all`: several limits that must all allow a
+  request. They are checked first and charged only together, so a request one
+  limit refuses spends nothing on the others.
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from pincer.core.log_once import LogOnce
 from pincer.core.ratelimit.strategies import SlidingWindowStrategy, Strategy
-from pincer.core.ratelimit.types import Rate, RateLimitResult
+from pincer.core.ratelimit.types import DEFAULT_DETAIL, Detail, Rate, RateLimitResult, detail_text
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pincer.core.cache.keys import KeySpace
     from pincer.core.ratelimit.storage import AsyncRateLimitStorage, RateLimitStorage
 
@@ -137,3 +149,109 @@ class AsyncLimiter(_LimiterBase):
 
     async def reset(self, identifier: str) -> None:
         await self.storage.reset(self.key(identifier))
+
+
+@dataclass(frozen=True)
+class LimiterFactory:
+    """Sync limiters on one storage and key space."""
+
+    storage: RateLimitStorage
+    keys: KeySpace
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> LimiterFactory:
+        """On the cache backend (`cache_backend_url`) under the cache prefix."""
+        from pincer.core.cache.keys import KeySpace
+        from pincer.core.ratelimit.storage import create_storage
+
+        return cls(create_storage(settings.cache_backend_url), KeySpace.for_cache(settings))
+
+    def limiter(
+        self,
+        rate: Rate,
+        scope: str,
+        strategy: Strategy | None = None,
+        *,
+        route: str | None = None,
+        fail_open: bool = True,
+    ) -> Limiter:
+        return Limiter(self.storage, rate, self.keys, scope, strategy, route=route, fail_open=fail_open)
+
+
+@dataclass(frozen=True)
+class AsyncLimiterFactory:
+    """Async limiters on one storage and key space."""
+
+    storage: AsyncRateLimitStorage
+    keys: KeySpace
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> AsyncLimiterFactory:
+        """On the cache backend (`cache_backend_url`) under the cache prefix."""
+        from pincer.core.cache.keys import KeySpace
+        from pincer.core.ratelimit.storage import create_async_storage
+
+        return cls(create_async_storage(settings.cache_backend_url), KeySpace.for_cache(settings))
+
+    def limiter(
+        self,
+        rate: Rate,
+        scope: str,
+        strategy: Strategy | None = None,
+        *,
+        route: str | None = None,
+        fail_open: bool = True,
+    ) -> AsyncLimiter:
+        return AsyncLimiter(self.storage, rate, self.keys, scope, strategy, route=route, fail_open=fail_open)
+
+
+@dataclass(frozen=True)
+class Charge[L: (Limiter, AsyncLimiter)]:
+    """One limit a request must pass: the limiter, whose bucket, how much, and what to say on refusal."""
+
+    limiter: L
+    identifier: str
+    cost: int = 1
+    detail: Detail = DEFAULT_DETAIL
+
+    def message(self, result: RateLimitResult) -> str:
+        return detail_text(self.detail, result)
+
+
+def _reported(results: Sequence[RateLimitResult]) -> int:
+    """Which result to report: a refusal with the longest wait, else the one with the least room left."""
+    denied = [i for i, r in enumerate(results) if not r.allowed]
+    if denied:
+        return max(denied, key=lambda i: results[i].retry_after)
+    return min(range(len(results)), key=lambda i: (results[i].remaining / results[i].limit, results[i].remaining))
+
+
+def charge_all(charges: Sequence[Charge[Limiter]]) -> tuple[Charge[Limiter], RateLimitResult]:
+    """Check every charge, then spend them all, or none when one refuses.
+
+    Returns the charge to report with its result: the first refusal of the
+    check (nothing spent), else a refusal of the charge itself (two requests
+    raced past the check), else the one with the least room left.
+    """
+    if not charges:
+        raise ValueError("charge_all needs at least one charge")
+    for charge in charges:
+        checked = charge.limiter.check(charge.identifier, charge.cost)
+        if not checked.allowed:
+            return charge, checked
+    results = [charge.limiter.hit(charge.identifier, charge.cost) for charge in charges]
+    index = _reported(results)
+    return charges[index], results[index]
+
+
+async def acharge_all(charges: Sequence[Charge[AsyncLimiter]]) -> tuple[Charge[AsyncLimiter], RateLimitResult]:
+    """The async twin of `charge_all`."""
+    if not charges:
+        raise ValueError("acharge_all needs at least one charge")
+    for charge in charges:
+        checked = await charge.limiter.check(charge.identifier, charge.cost)
+        if not checked.allowed:
+            return charge, checked
+    results = [await charge.limiter.hit(charge.identifier, charge.cost) for charge in charges]
+    index = _reported(results)
+    return charges[index], results[index]

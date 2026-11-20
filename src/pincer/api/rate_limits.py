@@ -1,40 +1,15 @@
-"""The HTTP API rate limits, around `auth_middleware` in `pincer.api.server`.
+"""The HTTP API rate limits (configuration and behaviour: docs/core-components/rate-limiting-and-caching.md).
 
-    CORS → IP ceiling → auth_middleware → HTTP cache → routing → enforce_rate_limits → endpoint
-
-- **IP ceiling** (pre-auth middleware, `PINCER_RATE_API_IP_PER_MIN`, default
-  3000): every request, keyed by client IP. A flood backstop that keeps a
-  single host away from the auth lookups and from reading request bodies. It is
-  deliberately high: a whole office behind one NAT address shares it. Route
-  decorators never change it.
-- **`enforce_rate_limits`** (an app-level dependency, so after routing and auth):
-  - a route with `@rate_limit(...)` gets only its own limits, each in a bucket
-    of its own (`<prefix>:kv:ratelimit:<scope>:<route>.<n>per<period>s:<id>`);
-  - a route with `@no_rate_limit` gets none;
-  - any other route gets the default: the **user limit**
-    (`PINCER_RATE_API_USER_PER_MIN`, keyed by `pincer_user_id`, so colleagues
-    behind one IP each have their own budget), or for a request without an
-    identity the **anonymous limit** (`PINCER_RATE_API_ANON_PER_MIN`, by IP).
-
-Only FastAPI routes (`APIRoute`) run app-level dependencies: the built-in
-`/api/docs` and `/openapi.json` pages have the IP ceiling only.
-
-A request with a bad token is answered 401 by auth and never charged to a user;
-`AuthGuard` locks out an IP that keeps guessing. No limit applies to
-`/api/health`, non-`/api/` paths (dashboard assets) or the self-authenticated
-webhook prefixes, whose callers (Twilio, Teams) share platform IPs.
-
-FastAPI reads a request's body before it solves dependencies, so a request the
-dependency refuses has had its body read; the IP ceiling still refuses floods
-before that.
-
-`client_ip` trusts the first `X-Forwarded-For` entry without checking it, so
-the IP-keyed limits only hold behind a proxy that overwrites that header.
+- `APIRateLimits.by_ip`: the pre-auth IP ceiling, run by `RateLimitMiddleware`.
+- `enforce_rate_limits`: the app-level dependency, after routing and auth: a
+  route's `@rate_limit`s, nothing for `@no_rate_limit`, else the default user
+  (or, without an identity, anonymous) limit.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,9 +17,8 @@ from fastapi import HTTPException, Request, Response
 from starlette.requests import HTTPConnection
 
 from pincer.api.auth_guard import SELF_AUTHENTICATED_PREFIXES, client_ip
-from pincer.core.cache.keys import KeySpace
-from pincer.core.ratelimit import AsyncLimiter, AsyncRateLimitStorage, Rate, RateLimitResult, create_async_storage
-from pincer.core.ratelimit.decorators import DEFAULT_DETAIL, RouteLimit, route_limits
+from pincer.core.ratelimit import AsyncLimiter, AsyncLimiterFactory, Charge, Rate, acharge_all
+from pincer.core.ratelimit.decorators import LimitScope, RouteLimit, route_limits
 from pincer.core.ratelimit.middleware import Scope, rate_limit_headers
 
 EXEMPT_PATHS = frozenset({"/api/health"})
@@ -54,27 +28,45 @@ def is_exempt(path: str) -> bool:
     return path in EXEMPT_PATHS or not path.startswith("/api/") or path.startswith(SELF_AUTHENTICATED_PREFIXES)
 
 
+#: How each built-in scope names the caller (`LimitScope.USER` needs an identity: see `_identify`).
+_IDENTIFIERS: dict[LimitScope, Callable[[Request, Any], str]] = {
+    LimitScope.USER: lambda request, identity: str(identity.pincer_user_id),
+    LimitScope.IP: lambda request, identity: client_ip(request),
+    LimitScope.ANON: lambda request, identity: client_ip(request),
+    LimitScope.GLOBAL: lambda request, identity: "all",
+}
+
+
+def _identify(limit: RouteLimit, request: Request) -> tuple[str, str] | None:
+    """`(bucket scope, identifier)` for this request, or None when the limit doesn't apply to it."""
+    identity = getattr(request.state, "identity", None)
+    scope = limit.scope
+    if not isinstance(scope, LimitScope):
+        identifier = scope(request)
+        return None if identifier is None else (limit.scope_name, identifier)
+    if scope is LimitScope.USER and identity is None:
+        scope = LimitScope.ANON  # no identity to count: the caller's IP, like the default limit
+    return scope.value, _IDENTIFIERS[scope](request, identity)
+
+
 @dataclass
 class APIRateLimits:
-    """The default limiters and the per-route ones, sharing one storage on `cache_backend_url`."""
+    """The default limiters and the per-route ones, on one storage (`cache_backend_url`)."""
 
     ip: AsyncLimiter
     user: AsyncLimiter
     anon: AsyncLimiter
-    storage: AsyncRateLimitStorage
-    keys: KeySpace
+    factory: AsyncLimiterFactory
     _routes: dict[tuple[str, RouteLimit], AsyncLimiter] = field(default_factory=dict)
 
     @classmethod
     def from_settings(cls, settings: Any) -> APIRateLimits:
-        storage = create_async_storage(settings.cache_backend_url)
-        keys = KeySpace.for_cache(settings)
+        factory = AsyncLimiterFactory.from_settings(settings)
         return cls(
-            ip=AsyncLimiter(storage, Rate.per_minute(settings.rate_api_ip_per_min), keys, "ip"),
-            user=AsyncLimiter(storage, Rate.per_minute(settings.rate_api_user_per_min), keys, "user"),
-            anon=AsyncLimiter(storage, Rate.per_minute(settings.rate_api_anon_per_min), keys, "anon"),
-            storage=storage,
-            keys=keys,
+            ip=factory.limiter(Rate.per_minute(settings.rate_api_ip_per_min), "ip"),
+            user=factory.limiter(Rate.per_minute(settings.rate_api_user_per_min), "user"),
+            anon=factory.limiter(Rate.per_minute(settings.rate_api_anon_per_min), "anon"),
+            factory=factory,
         )
 
     def by_ip(self, scope: Scope) -> tuple[AsyncLimiter, str] | None:
@@ -83,51 +75,34 @@ class APIRateLimits:
             return None
         return self.ip, client_ip(HTTPConnection(scope))
 
-    def default_for(self, request: Request) -> tuple[AsyncLimiter, str]:
+    def default_charge(self, request: Request) -> Charge[AsyncLimiter]:
         """The default post-auth bucket: the caller's user, else the anonymous one by IP."""
         identity = getattr(request.state, "identity", None)
         if identity is not None:
-            return self.user, identity.pincer_user_id
-        return self.anon, client_ip(request)
+            return Charge(self.user, identity.pincer_user_id)
+        return Charge(self.anon, client_ip(request))
 
-    def for_route(self, route: str, limit: RouteLimit, request: Request) -> tuple[AsyncLimiter, str] | None:
-        """The bucket a `@rate_limit` declaration charges for this request (None: not limited)."""
-        scope = limit.scope
-        identity = getattr(request.state, "identity", None)
-        if scope == "user" and identity is None:
-            scope = "anon"  # no identity to count: the caller's IP, like the default limit
-        if scope == "user" and identity is not None:
-            identifier: str | None = identity.pincer_user_id
-        elif scope in ("ip", "anon"):
-            identifier = client_ip(request)
-        elif scope == "global":
-            identifier = "all"
-        else:
-            assert callable(scope)
-            identifier = scope(request)
-        if identifier is None:
+    def route_charge(self, route: str, limit: RouteLimit, request: Request) -> Charge[AsyncLimiter] | None:
+        """What a `@rate_limit` declaration charges for this request (None: not limited)."""
+        identified = _identify(limit, request)
+        if identified is None:
             return None
-        scope_name = scope if isinstance(scope, str) else limit.scope_name
+        scope_name, identifier = identified
         rate = limit.current_rate()
         bucket = limit.bucket_name(route, rate)
-        cache_key = (f"{scope_name}:{bucket}", limit)
-        limiter = self._routes.get(cache_key)
+        key = (f"{scope_name}:{bucket}", limit)
+        limiter = self._routes.get(key)
         if limiter is None:
-            limiter = AsyncLimiter(self.storage, rate, self.keys, scope_name, limit.strategy, route=bucket)
-            self._routes[cache_key] = limiter
-        return limiter, identifier
-
-
-def _tightest(results: list[RateLimitResult]) -> int:
-    """Which result to report: a refusal with the longest wait, else the one with the least room left."""
-    denied = [i for i, r in enumerate(results) if not r.allowed]
-    if denied:
-        return max(denied, key=lambda i: results[i].retry_after)
-    return min(range(len(results)), key=lambda i: (results[i].remaining / results[i].limit, results[i].remaining))
+            limiter = self.factory.limiter(rate, scope_name, limit.strategy, route=bucket)
+            self._routes[key] = limiter
+        return Charge(limiter, identifier, limit.cost, limit.detail)
 
 
 async def enforce_rate_limits(request: Request, response: Response) -> None:
-    """App-level dependency: the route's `@rate_limit`s, none for `@no_rate_limit`, else the default."""
+    """App-level dependency: the route's `@rate_limit`s, none for `@no_rate_limit`, else the default.
+
+    The limits are checked before any is charged (`acharge_all`).
+    """
     limits: APIRateLimits | None = getattr(request.app.state, "rate_limits", None)
     if limits is None or is_exempt(request.url.path):
         return
@@ -135,24 +110,17 @@ async def enforce_rate_limits(request: Request, response: Response) -> None:
     declared = route_limits(getattr(route, "endpoint", None))
     if declared is None:
         return
-    charges: list[tuple[AsyncLimiter, str, int, RouteLimit | None]] = []
     if declared:
         route_name = str(getattr(route, "name", "") or "route")
-        for limit in declared:
-            bucket = limits.for_route(route_name, limit, request)
-            if bucket is not None:
-                charges.append((*bucket, limit.cost, limit))
+        charges = [c for c in (limits.route_charge(route_name, limit, request) for limit in declared) if c]
     else:
-        charges.append((*limits.default_for(request), 1, None))
+        charges = [limits.default_charge(request)]
     if not charges:
         return
-    results = [await limiter.hit(identifier, cost) for limiter, identifier, cost, _ in charges]
-    index = _tightest(results)
-    reported, declared_by = results[index], charges[index][3]
-    headers = {name.decode(): value.decode() for name, value in rate_limit_headers(reported)}
-    if not reported.allowed:
-        headers["Retry-After"] = str(max(1, math.ceil(reported.retry_after or 1)))
-        detail = declared_by.message(reported) if declared_by is not None else DEFAULT_DETAIL
-        raise HTTPException(status_code=429, detail=detail, headers=headers)
-    if not reported.failed:  # a fail-open result knows nothing about the bucket
+    charge, result = await acharge_all(charges)
+    headers = {name.decode(): value.decode() for name, value in rate_limit_headers(result)}
+    if not result.allowed:
+        headers["Retry-After"] = str(max(1, math.ceil(result.retry_after or 1)))
+        raise HTTPException(status_code=429, detail=charge.message(result), headers=headers)
+    if not result.failed:  # a fail-open result knows nothing about the bucket
         response.headers.update(headers)

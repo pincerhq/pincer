@@ -29,14 +29,14 @@ from pydantic import BaseModel, Field
 
 from pincer.api.auth_guard import client_ip
 from pincer.config import get_settings_relaxed
-from pincer.core.cache.keys import KeySpace
 from pincer.core.ratelimit import (
     AsyncLimiter,
+    AsyncLimiterFactory,
+    Charge,
     Rate,
     RateLimitResult,
-    SlidingWindowStrategy,
     TokenBucketStrategy,
-    create_async_storage,
+    acharge_all,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ _GLOBAL_MESSAGE = "The demo line is busy today. Book a demo and we will call you
 
 @dataclass(frozen=True)
 class _DemoLimits:
-    """The three caps, under `<prefix>:kv:ratelimit:demo_*`."""
+    """The three caps, under `<prefix>:kv:ratelimit:demo_*`. They fail closed."""
 
     number: AsyncLimiter
     client: AsyncLimiter
@@ -84,27 +84,20 @@ class _DemoLimits:
 
     @classmethod
     def from_settings(cls, settings: Any) -> _DemoLimits:
-        storage = create_async_storage(settings.cache_backend_url)
-        keys = KeySpace.for_cache(settings)
+        factory = AsyncLimiterFactory.from_settings(settings)
         return cls(
             # A token bucket of one: exactly NUMBER_COOLDOWN_S between calls to a number.
-            number=AsyncLimiter(
-                storage, Rate(1, NUMBER_COOLDOWN_S), keys, "demo_number", TokenBucketStrategy(), fail_open=False
-            ),
-            client=AsyncLimiter(
-                storage, Rate(PER_CLIENT_DAILY, _DAY_S), keys, "demo_client", SlidingWindowStrategy(), fail_open=False
-            ),
-            everyone=AsyncLimiter(
-                storage, Rate(GLOBAL_DAILY, _DAY_S), keys, "demo_global", SlidingWindowStrategy(), fail_open=False
-            ),
+            number=factory.limiter(Rate(1, NUMBER_COOLDOWN_S), "demo_number", TokenBucketStrategy(), fail_open=False),
+            client=factory.limiter(Rate(PER_CLIENT_DAILY, _DAY_S), "demo_client", fail_open=False),
+            everyone=factory.limiter(Rate(GLOBAL_DAILY, _DAY_S), "demo_global", fail_open=False),
         )
 
-    def checks(self, number: str, client: str) -> list[tuple[AsyncLimiter, str, Any]]:
+    def charges(self, number: str, client: str) -> list[Charge[AsyncLimiter]]:
         """Each cap with its identifier and refusal message, in the order a refusal is reported."""
         return [
-            (self.number, number, _cooldown_message),
-            (self.client, client, _CLIENT_MESSAGE),
-            (self.everyone, "all", _GLOBAL_MESSAGE),
+            Charge(self.number, number, detail=_cooldown_message),
+            Charge(self.client, client, detail=_CLIENT_MESSAGE),
+            Charge(self.everyone, "all", detail=_GLOBAL_MESSAGE),
         ]
 
 
@@ -118,28 +111,18 @@ def _demo_limits() -> _DemoLimits:
     return _limits
 
 
-def _refusal(result: RateLimitResult, message: Any) -> HTTPException:
-    if result.failed:
-        return HTTPException(status_code=503, detail=_UNAVAILABLE)
-    return HTTPException(status_code=429, detail=message(result) if callable(message) else message)
-
-
 async def _charge_limits(number: str, client: str) -> None:
     """Raise 429 (or 503) unless all three caps allow a call; then count it against all three.
 
-    Checked first, charged only together: a request any cap refuses spends
-    nothing. Two requests racing can both pass the check; the charge itself
-    still refuses the one that went over.
+    `acharge_all` checks first and charges only together: a request any cap
+    refuses spends nothing on the others.
     """
-    checks = _demo_limits().checks(number, client)
-    for limiter, identifier, message in checks:
-        result = await limiter.check(identifier)
-        if not result.allowed:
-            raise _refusal(result, message)
-    for limiter, identifier, message in checks:
-        result = await limiter.hit(identifier)
-        if not result.allowed:
-            raise _refusal(result, message)
+    charge, result = await acharge_all(_demo_limits().charges(number, client))
+    if result.allowed:
+        return
+    if result.failed:
+        raise HTTPException(status_code=503, detail=_UNAVAILABLE)
+    raise HTTPException(status_code=429, detail=charge.message(result))
 
 
 def reset_limits() -> None:

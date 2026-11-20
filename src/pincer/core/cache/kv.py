@@ -202,11 +202,16 @@ class AsyncRedisKeyValueStore(AsyncKeyValueStore):
 
 def create_kv_stores(backend_url: Any) -> tuple[KeyValueStore, AsyncKeyValueStore]:
     """A sync and an async store on the same data: one Redis, or one shared in-memory table."""
-    from pincer.config.dsn import is_redis
+    from pincer.core.cache import backend
 
-    if is_redis(backend_url):
-        from pincer.core.cache.backend import get_async_redis, get_redis
+    def in_memory() -> tuple[KeyValueStore, AsyncKeyValueStore]:
+        memory = MemoryKeyValueStore()
+        return memory, AsyncMemoryKeyValueStore(memory)
 
-        return RedisKeyValueStore(get_redis(backend_url)), AsyncRedisKeyValueStore(get_async_redis(backend_url))
-    memory = MemoryKeyValueStore()
-    return memory, AsyncMemoryKeyValueStore(memory)
+    def in_redis() -> tuple[KeyValueStore, AsyncKeyValueStore]:
+        return (
+            RedisKeyValueStore(backend.get_redis(backend_url)),
+            AsyncRedisKeyValueStore(backend.get_async_redis(backend_url)),
+        )
+
+    return backend.for_backend(backend_url, memory=in_memory, redis=in_redis)

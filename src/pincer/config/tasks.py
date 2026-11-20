@@ -3,7 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator
 
 from pincer.config.dsn import BackendDsn  # noqa: TC001 (pydantic resolves it at runtime)
-from pincer.core.cache.keys import validate_prefix_template
+from pincer.config.prefix import validate_prefix_template
 
 
 class TaskSettings(BaseModel):

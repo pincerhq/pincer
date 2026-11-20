@@ -12,6 +12,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from redis import Redis
     from redis.asyncio import Redis as AsyncRedis
 
@@ -30,6 +32,17 @@ def _missing(exc: ImportError) -> RedisNotInstalledError:
         "A redis:// backend is configured but the redis package is missing: "
         "install pincer-agent[redis] (or set PINCER_CACHE_BACKEND_URL=memory://)"
     )
+
+
+def for_backend[T](url: Any, *, memory: Callable[[], T], redis: Callable[[], T]) -> T:
+    """Build what *url* selects: `redis()` for `redis://` / `rediss://`, else `memory()` (`memory://`).
+
+    The one place a backend URL picks between the two implementations, for
+    every factory in `pincer.core.cache` and `pincer.core.ratelimit`.
+    """
+    from pincer.config.dsn import is_redis
+
+    return redis() if is_redis(url) else memory()
 
 
 def get_redis(url: Any) -> Redis:

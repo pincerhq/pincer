@@ -591,3 +591,13 @@ def test_is_postgres_url(value: str, expected: bool) -> None:
     from pincer.config.channels import is_postgres_url
 
     assert is_postgres_url(value) is expected
+
+
+def test_config_does_not_import_the_cache_package() -> None:
+    """core depends on config, not the other way round: the prefix rules live in pincer.config.prefix."""
+    import subprocess
+    import sys
+
+    code = "import sys, pincer.config; print(any(m.startswith('pincer.core.cache') for m in sys.modules))"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"

@@ -3609,9 +3609,6 @@ slack = [
     { name = "slack-bolt" },
     { name = "slack-sdk" },
 ]
-tasks-redis = [
-    { name = "repid", extra = ["redis"] },
-]
 teams = [
     { name = "microsoft-teams-apps", extra = ["graph"] },
 ]
@@ -3665,7 +3662,6 @@ requires-dist = [
     { name = "oauthlib", specifier = ">=4.0.1" },
     { name = "openai", specifier = ">=1.60.0" },
     { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "redis", "postgres", "remote-skills"], marker = "extra == 'all'" },
-    { name = "pincer-agent", extras = ["redis"], marker = "extra == 'tasks-redis'" },
     { name = "pincer-mcps", marker = "extra == 'mcp'", editable = "src/pincer-mcps" },
     { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?tag=0.3.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49.0" },
@@ -3708,7 +3704,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12.0" },
     { name = "youtube-transcript-api", marker = "extra == 'skills'" },
 ]
-provides-extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "redis", "tasks-redis", "all", "dev", "postgres", "remote-skills"]
+provides-extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "redis", "all", "dev", "postgres", "remote-skills"]
 
 [[package]]
 name = "pincer-mcps"

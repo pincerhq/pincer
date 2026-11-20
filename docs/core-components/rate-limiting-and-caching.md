@@ -119,7 +119,7 @@ from pincer.core.ratelimit import no_rate_limit, rate_limit
 
 @router.post("/chat")
 @rate_limit("20/minute")  # scope="user": per caller
-@rate_limit("500/day", strategy="token_bucket")  # stacked: every limit must allow
+@rate_limit("500/day", strategy="token_bucket")  # stacked: every limit must allow; a refused request spends none
 async def chat(...): ...
 
 
@@ -148,7 +148,10 @@ async def status(...): ...
 - **Buckets:** each declared limit has its own:
   `<prefix>:kv:ratelimit:<scope>:<route>.<n>per<period>s[.<strategy>]:<id>`. A tight route limit
   doesn't spend the default budget, and stacked limits don't share state. The
-  route part is the route's name (the function name), or `name=`.
+  route part is the route's name (the function name), or `name=`; routes with the
+  same `name` and rate share a budget.
+- **Stacked limits** are all checked before any is charged, so a request one of them
+  refuses spends nothing on the others.
 - **Headers:** a refusal is the usual `429` with `Retry-After` and `X-RateLimit-*`. On success,
   `X-RateLimit-*` reports the tightest of the route's limits.
 - **Decorators only change the post-auth limits.** The IP ceiling is the same for every route.
@@ -173,12 +176,14 @@ def list_integrations(): ...  # sync endpoints work too
 
 
 # after a change, from the route that makes it:
-await response_cache(request.app).ainvalidate("get_today_costs", user=identity.pincer_user_id)
+await response_cache(request.app).ainvalidate(get_today_costs, user=identity.pincer_user_id)
 ```
 
 - **What is stored:** the return value, as JSON, under
-  `<prefix>:kv:apicache:<route>:<owner>:<hash>`. The hash covers method, path, the query
-  string (`vary_query=True`) and `vary_headers`.
+  `<prefix>:kv:apicache:<route>:<owner>:<hash>`. `<route>` is the endpoint's
+  module-qualified name (`pincer.api.costs.get_today_costs`), or `name=`, so two
+  endpoints with the same function name never share entries. The hash covers method,
+  path, the query string (`vary_query=True`) and `vary_headers`.
 - **On a hit,** the stored value goes back through FastAPI, so `response_model` filtering
   applies exactly as on a miss.
 - **Responses are never stored:** an endpoint that returns a `Response` (file, stream,
@@ -195,7 +200,7 @@ await response_cache(request.app).ainvalidate("get_today_costs", user=identity.p
   decorators are in. A refused request never reaches the cache.
 - **The decorator wins over `cache_control`:** a route with both is cached only by the
   decorator, never by the shared hishel cache.
-- **Invalidation:** `invalidate(route, user=None)` and `ainvalidate(...)` drop a route's
+- **Invalidation:** `invalidate(endpoint, user=None)` and `ainvalidate(...)` (the endpoint function or its cache name) drop a route's
   entries, for one owner or all. Keep TTLs short on user data: nothing else expires an
   entry when the data changes.
 - **Failures:** if the store fails, the route is served uncached and a warning is logged

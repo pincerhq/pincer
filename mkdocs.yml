@@ -6,6 +6,9 @@ extra:
   generator: false
 plugins:
   - search
+# Internal records (design notes, sprint specs): kept in the repo, never built.
+exclude_docs: |
+  specs/
 nav:
   - Getting started:
     - index.md

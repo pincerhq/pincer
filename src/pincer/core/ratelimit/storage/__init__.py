@@ -22,21 +22,17 @@ __all__ = [
 
 def create_storage(backend_url: Any) -> RateLimitStorage:
     """Sync storage: `RedisStorage` for a `redis://` URL, else `MemoryStorage` (`memory://`)."""
-    from pincer.config.dsn import is_redis
+    from pincer.core.cache import backend
 
-    if is_redis(backend_url):
-        from pincer.core.cache.backend import get_redis
-
-        return RedisStorage(get_redis(backend_url))
-    return MemoryStorage()
+    return backend.for_backend(
+        backend_url, memory=MemoryStorage, redis=lambda: RedisStorage(backend.get_redis(backend_url))
+    )
 
 
 def create_async_storage(backend_url: Any) -> AsyncRateLimitStorage:
     """Async storage: `AsyncRedisStorage` for a `redis://` URL, else `AsyncMemoryStorage` (`memory://`)."""
-    from pincer.config.dsn import is_redis
+    from pincer.core.cache import backend
 
-    if is_redis(backend_url):
-        from pincer.core.cache.backend import get_async_redis
-
-        return AsyncRedisStorage(get_async_redis(backend_url))
-    return AsyncMemoryStorage()
+    return backend.for_backend(
+        backend_url, memory=AsyncMemoryStorage, redis=lambda: AsyncRedisStorage(backend.get_async_redis(backend_url))
+    )

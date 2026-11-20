@@ -19,12 +19,16 @@ route, after auth and the rate limits, so it can cache per user:
   request without one is not cached), `"public"` (everyone shares it), or a
   function `request -> str | None` (None: not cached).
 - **The key** is `<prefix>:kv:apicache:<route>:<owner>:<hash>`, the hash covering
-  method, path, the query string (`vary_query`) and `vary_headers`.
+  method, path, the query string (`vary_query`) and `vary_headers`. `<route>`
+  is the endpoint's module-qualified name (`pincer.api.costs.get_today_costs`)
+  unless `name=` sets one, so endpoints with the same function name in two
+  routers never share entries.
 - **Headers:** `X-Cache: HIT | MISS | BYPASS`, and `Cache-Control: private,
   max-age=<ttl>`; `public` only for `scope="public"` on a request without an
   `Authorization` header, so a proxy never shares an authenticated answer.
-- **Invalidation:** `response_cache(app).invalidate("route_name", user=...)` (or
-  `ainvalidate`) from the routes that change the data.
+- **Invalidation:** `response_cache(app).invalidate(endpoint, user=...)` (or
+  `ainvalidate`) from the routes that change the data; the endpoint function
+  or its cache name.
 - A store failure is logged once and the route is served uncached.
 - A route with both `@cache_response` and `cache_control(...)` is cached by the
   decorator only: `HTTPCacheMiddleware` skips it.
@@ -105,19 +109,20 @@ class ResponseCache:
         return cls(KeySpace.for_cache(settings), store, astore, float(settings.cache_default_ttl))
 
     def key(self, rule: CacheRule, owner: str, request: Request) -> str:
-        return self.keys.api_cache(rule.name, owner, rule.digest(request))
+        return self.keys.api_cache(key_part(rule.name), owner, rule.digest(request))
 
-    def prefix(self, route: str, user: str | None = None) -> str:
+    def prefix(self, route: Route, user: str | None = None) -> str:
         """Every entry of `route`, or of one owner (`user`, or `"public"`) on it."""
+        name = key_part(cache_name(route))
         if user is None:
-            return self.keys.kv("apicache", key_part(route)) + ":"
-        return self.keys.kv("apicache", key_part(route), key_part(user)) + ":"
+            return self.keys.kv("apicache", name) + ":"
+        return self.keys.kv("apicache", name, key_part(user)) + ":"
 
-    def invalidate(self, route: str, *, user: str | None = None) -> int:
+    def invalidate(self, route: Route, *, user: str | None = None) -> int:
         """Drop the cached results of `route` (for one `user`, or all); the number dropped."""
         return self.store.delete_prefix(self.prefix(route, user))
 
-    async def ainvalidate(self, route: str, *, user: str | None = None) -> int:
+    async def ainvalidate(self, route: Route, *, user: str | None = None) -> int:
         return await self.astore.delete_prefix(self.prefix(route, user))
 
 
@@ -185,7 +190,13 @@ def cache_response(
         raise ValueError(f"Cache ttl must be positive, got {ttl}")
 
     def decorate(func: F) -> F:
-        rule = CacheRule(name or func.__name__, ttl, scope, vary_query, tuple(h.lower() for h in vary_headers))
+        rule = CacheRule(
+            name or f"{func.__module__}.{func.__qualname__}",
+            ttl,
+            scope,
+            vary_query,
+            tuple(h.lower() for h in vary_headers),
+        )
         signature = _with_injected(_signature(func))
 
         if inspect.iscoroutinefunction(func):
@@ -267,3 +278,17 @@ def cache_response(
 def cache_rule(endpoint: Any) -> CacheRule | None:
     """The `@cache_response` rule on *endpoint* (the outermost one), if any."""
     return getattr(endpoint, CACHE_ATTR, None)
+
+
+Route = str | Callable[..., Any]
+"""A cached endpoint, or its cache name (`CacheRule.name`)."""
+
+
+def cache_name(route: Route) -> str:
+    """The cache name of a `@cache_response` endpoint, or *route* itself when it is already a name."""
+    if isinstance(route, str):
+        return route
+    rule = cache_rule(route)
+    if rule is None:
+        raise ValueError(f"{getattr(route, '__qualname__', route)!r} has no @cache_response")
+    return rule.name

@@ -1,7 +1,8 @@
 # Cache and rate limiting rework (internal)
 
-Internal record, not part of the published docs: it is deliberately not in
-`mkdocs.yml`'s nav. Issue #404, branch `ratelimiter`, November 2026.
+Internal record, not part of the published docs: `mkdocs.yml` excludes
+`docs/specs/` (`exclude_docs`), so it is neither listed nor built. Issue #404,
+branch `ratelimiter`, November 2026.
 
 It records which parts of pincer moved onto the new subsystems
 (`pincer.core.ratelimit`, `pincer.core.cache`), which did not and why, and what
@@ -42,6 +43,11 @@ The subsystems needed a few things the switched components rely on.
 | `@rate_limit(rate=fn)`: rate read per request | same | Chat (follows `PINCER_RATE_MESSAGES_PER_MIN`) |
 | `@cache_response(scope="public")` sends `Cache-Control: public` only without `Authorization`, `private` otherwise | `core/cache/decorators.py` | Costs, audit stats, ops, integrations, skills: authenticated deployment-wide data must not be shared by a proxy or CDN |
 | Middleware and dependency read `result.failed` instead of guessing from `reset_after` | `core/ratelimit/middleware.py`, `api/rate_limits.py` | Fail-open results carry no `X-RateLimit-*` |
+| `LimiterFactory` / `AsyncLimiterFactory` (`from_settings`) | `core/ratelimit/limiter.py` | One way to build limiters on the cache backend: the API limits, the demo caps, the channel limiter |
+| `Charge` + `charge_all` / `acharge_all`: check every limit, charge only if all allow | same | Stacked `@rate_limit`s and the demo call's three caps: a refused request spends nothing |
+| `LimitScope` enum (`user`, `ip`, `anon`, `global`) | `core/ratelimit/decorators.py` | Replaces bare scope strings; one identifier table in `api/rate_limits.py` |
+| `for_backend(url, memory=…, redis=…)` | `core/cache/backend.py` | The one place a backend URL picks memory or Redis, for every factory |
+| `@cache_response` names entries by module-qualified endpoint name; `invalidate()` takes the endpoint | `core/cache/decorators.py` | Two endpoints with the same function name can't share entries |
 
 ## Rate limiting: what moved
 
@@ -57,6 +63,16 @@ The subsystems needed a few things the switched components rely on.
 | **Skills rebuild** `POST /api/skills/rebuild` | none | `@rate_limit("2/minute")` | per user |
 | **Credentials** `PUT /api/identity/me/password`, `POST /me/api-key` | none | `@rate_limit("5/hour")` each | per user |
 
+## Outbound HTTP: what moved
+
+| Component | Before | After | Keys |
+|---|---|---|---|
+| **ElevenLabs voice lookups** `voice/voices.py` `list_voices`, `get_voice` | A plain `httpx.Client` per call | `cached_client(settings, "elevenlabs", key_headers=("xi-api-key",))`. 2xx GETs are cached for `PINCER_CACHE_DEFAULT_TTL`, per API key (hashed); errors and missing voices are not cached. `synthesize_sample` / `probe_voice` (POST) stay uncached. | `…:kv:httpclient:elevenlabs:…` |
+
+`pincer voice list`, the doctor voice checks and startup validation ask
+ElevenLabs the same questions; the cache keeps them to one request per TTL,
+shared across processes with Redis.
+
 ## Caching: what moved
 
 | Route | Before | After | Invalidated by |
@@ -70,7 +86,25 @@ The subsystems needed a few things the switched components rely on.
 `HTTPCacheMiddleware` (hishel) now covers no route. It stays wired as the
 mechanism for a future truly public, header-driven cache.
 `tests/test_api_switched_routes.py::test_the_hishel_cache_has_no_routes_left`
-pins this.
+pins this. Issue #404 originally said "endpoints opt in with `Cache-Control:
+public`" to hishel; the issue text was updated to describe `@cache_response`
+as the opt-in.
+
+## Dependencies
+
+- `hishel[async,fastapi]>=2.0` is a core dependency. The server cache, the
+  outbound cached clients and the HTTP-entry storages are built on it.
+- The `redis` extra (`repid[redis]`) installs redis-py for every Redis user:
+  the task broker, rate limiting and both caches. It is not `hishel[redis]`:
+  that pins redis>=8.1 while repid pins redis<8, and hishel's Redis storages
+  only use commands redis-py 7 already has (tested against redis-py 7 and
+  Valkey 9).
+- The old `tasks-redis` extra is removed, matching the removed
+  `PINCER_TASK_BROKER` / `PINCER_REDIS_PREFIX`. Install `pincer-agent[redis]`.
+- `pincer doctor`'s `cache_backend` check flags a `redis://` URL when the
+  `redis` package is missing.
+- `fakeredis[lua]` (dev) runs the Lua scripts and Redis storages in tests
+  without a server.
 
 ## Deliberately not switched
 
