@@ -164,7 +164,10 @@ and the deletion of the ones dropped.
   message's millisecond, so the order is kept.
 - A stored list that does not parse is skipped. So is a message with no known
   role. Both are logged.
-- A NUL character in text becomes U+FFFD, because Postgres text takes none.
+- A NUL character is stripped from text, because Postgres text takes none, and
+  a lone surrogate (half an emoji) becomes `?`, in text and JSON alike, because
+  UTF-8 cannot encode it. New messages get the same treatment in memory when
+  they are saved, so a reloaded history rebuilds the same request.
 - `pincer_sessions.messages` is left as it was and no longer written; a later
   revision drops it. The downgrade writes it again from the rows, for every
   session: one cleared since the upgrade goes back empty, not to its old

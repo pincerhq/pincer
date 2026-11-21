@@ -2863,7 +2863,8 @@ _HISTORY_0035 = [
         "wire": "anthropic:claude-x",
     },
     {"role": "tool_result", "content": "ok", "tool_call_id": "t1", "is_error": True},
-    {"role": "assistant", "content": "done"},
+    # A lone surrogate (half an emoji) cannot be encoded as UTF-8: Postgres would refuse it in text and json
+    {"role": "assistant", "content": "done \ud83d", "raw": [{"type": "text", "text": "x \ude00"}], "wire": "w"},
 ]
 
 
@@ -2919,7 +2920,7 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         assert json.dumps(call["raw"]) == json.dumps(_HISTORY_0035[2]["raw"])  # key order kept, not sorted
         assert json.dumps(call["tool_calls"]) == json.dumps(_HISTORY_0035[2]["tool_calls"])
         assert (user["content"], user["context"], user["images"]) == (
-            "hi�there",  # Postgres takes no NUL in text
+            "hithere",  # Postgres takes no NUL in text
             "[memories]",
             [{"sha256": "aa", "media_type": "image/jpeg"}],
         )
@@ -2929,7 +2930,12 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
             None,
             None,
         )
-        assert (reply["content"], reply["raw"], reply["wire"], reply["context"]) == ("done", None, None, None)
+        assert (reply["content"], reply["raw"], reply["wire"], reply["context"]) == (
+            "done ?",
+            [{"type": "text", "text": "x ?"}],
+            "w",
+            None,
+        )
         assert all(r["channel_message_id"] is None and r["updated_at"] is None for r in alice)
 
         (only,) = rows("guest")
@@ -2967,7 +2973,8 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         back = {r["session_id"]: r for r in conn.execute(sa.select(sessions_at_0034)).mappings()}
     restored = json.loads(back["unified:alice"]["messages"])
     expected = [dict(m) for m in _HISTORY_0035]
-    expected[1]["content"] = "hi�there"
+    expected[1]["content"] = "hithere"
+    expected[4] = {"role": "assistant", "content": "done ?", "raw": [{"type": "text", "text": "x ?"}], "wire": "w"}
     assert restored == expected
     assert [list(m) for m in restored] == [list(m) for m in expected]  # the keys in `to_dict`'s order
     # Every session's history is its rows: a cleared one does not get back what it had before the upgrade,

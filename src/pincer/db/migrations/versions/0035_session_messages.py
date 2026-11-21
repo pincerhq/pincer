@@ -221,14 +221,14 @@ def _as_row(session_ref: str, message: dict[str, Any], ms: int, row_id: str) -> 
             logger.warning("Session %s: dropping %s from a %s message", session_ref, name, role)
             role_fields[name] = None
         else:
-            role_fields[name] = message[name] if name in ("tool_calls", "raw") else _text(message[name])
+            role_fields[name] = _json(message[name]) if name in ("tool_calls", "raw") else _text(message[name])
     return {
         "id": row_id,
         "session_id": session_ref,
         "role": role,
         "content": _text(message.get("content")) or "",
         "is_error": bool(message.get("is_error", False)),
-        "images": message.get("images") or None,
+        "images": _json(message.get("images")) or None,
         **role_fields,
         "created_at": _at(ms),
     }
@@ -240,11 +240,33 @@ def _at(ms: int) -> datetime:
 
 
 def _text(value: Any) -> str | None:
-    """A text field as a TEXT column takes it: NULL when empty, and no NUL, which Postgres refuses
-    (the JSON list escaped it as `\\u0000`)."""
+    """A text field as a TEXT column takes it, NULL when empty: no NUL (stripped; Postgres text takes
+    none) and no lone surrogate (`?`; UTF-8 cannot encode one). The JSON list escaped both. A frozen copy
+    of `services.sessions.storable_text`."""
     if not value:
         return None
-    return str(value).replace("\x00", "\ufffd")
+    text = _utf8(str(value).replace("\x00", ""))
+    return text or None
+
+
+def _utf8(text: str) -> str:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+    return text
+
+
+def _json(value: Any) -> Any:
+    """A JSON value with no lone surrogate in any string (`?`): Postgres refuses one in `json` and
+    `jsonb`, and would fail the whole upgrade on it. A frozen copy of `services.sessions.storable_json`."""
+    if isinstance(value, str):
+        return _utf8(value)
+    if isinstance(value, list):
+        return [_json(item) for item in value]
+    if isinstance(value, dict):
+        return {_utf8(key): _json(item) for key, item in value.items()}
+    return value
 
 
 def _as_dict(row: Any) -> dict[str, Any]:

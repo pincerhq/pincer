@@ -20,7 +20,7 @@ import json
 import logging
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +30,15 @@ from pincer.llm.base import ImageContent, LLMMessage, MessageRole, StoredRow
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.repositories.sessions import rekeyed_session_id
 from pincer.services.onboarding import OnboardingService
-from pincer.services.sessions import ImageSet, MessageChanges, SessionService, StoredImage, register_cache
+from pincer.services.sessions import (
+    ImageSet,
+    MessageChanges,
+    SessionService,
+    StoredImage,
+    register_cache,
+    storable_json,
+    storable_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Collection
@@ -98,6 +106,9 @@ class Session:
     # all: the next one writes those rows again (upserted by id) rather than new ones, and deletes the ones
     # no message holds any more, as it does saved rows
     _pending_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    # Held by each save, from its plan to its bookkeeping: a slower save finishing after a later one (an
+    # eviction outside the turn lock) would otherwise leave rows the later one gave unowned, and saved again
+    _save_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
     # The metadata as last saved or loaded (a new session's, as created), serialized
     _saved_metadata: str | None = field(default=None, init=False, repr=False, compare=False)
     # Set once an eviction's save has failed and been warned about, so a
@@ -598,31 +609,56 @@ class SessionManager:
         more are deleted, whichever code removed those messages. ``force_images`` also deletes
         what an earlier session of this process left behind (a clear).
         """
-        plan = session._save_plan(_now())
-        metadata = json.dumps(session.metadata)
-        if only_if_changed and not plan.changes and metadata == session._saved_metadata:
-            return
-        session._place(plan)
-        session._photo_bytes = session.photo_bytes()
-        images = _image_set(session, force=force_images)
-        await self._store.save(
-            session_id=session.session_id,
-            user_id=session.user_id,
-            channel=session.channel,
-            metadata=metadata,
-            created_at=session.created_at,
-            updated_at=session.updated_at,
-            messages=plan.changes,
-            images=images,
-        )
-        session._saved(plan)
-        session._saved_metadata = metadata
-        if images is not None:
-            session._synced_images = images.keep
+        async with session._save_lock:
+            # New messages get their text as their rows will hold it, so the history in memory and the one
+            # read back after a reload send the same request
+            for message in session.messages:
+                if message.stored is None or message.stored.id not in session._saved_rows:
+                    _make_storable(message)
+            plan = session._save_plan(_now())
+            metadata = json.dumps(session.metadata)
+            if only_if_changed and not plan.changes and metadata == session._saved_metadata:
+                return
+            session._place(plan)
+            session._photo_bytes = session.photo_bytes()
+            images = _image_set(session, force=force_images)
+            await self._store.save(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                channel=session.channel,
+                metadata=metadata,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                messages=plan.changes,
+                images=images,
+            )
+            session._saved(plan)
+            session._saved_metadata = metadata
+            if images is not None:
+                session._synced_images = images.keep
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _make_storable(message: LLMMessage) -> None:
+    """Bring a message's text to what its row holds (`storable_text`, `storable_json`), in place: no
+    NUL in its text, no lone surrogate anywhere. Anything already storable is left as it is."""
+    message.content = storable_text(message.content)
+    message.context = storable_text(message.context)
+    if message.raw and (raw := storable_json(message.raw)) is not message.raw:
+        message.raw = raw
+        message.raw_hash = None
+    if message.tool_calls:
+        calls = [
+            call
+            if (arguments := storable_json(call.arguments)) is call.arguments
+            else replace(call, arguments=arguments)
+            for call in message.tool_calls
+        ]
+        if any(a is not b for a, b in zip(calls, message.tool_calls, strict=True)):
+            message.tool_calls = calls
 
 
 def _fingerprint(message: LLMMessage) -> int:

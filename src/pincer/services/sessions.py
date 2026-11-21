@@ -219,7 +219,7 @@ def _message_row(message: dict[str, Any]) -> dict[str, Any]:
         if value and role not in ROLE_FIELDS[name]:
             logger.warning("Not storing %s on a %s message", name, role)
             value = None
-        role_fields[name] = (value or None) if name in _JSON_FIELDS else _text(value)
+        role_fields[name] = (storable_json(value) if value else None) if name in _JSON_FIELDS else _text(value)
     return {
         "id": message["id"],
         "role": role,
@@ -231,12 +231,43 @@ def _message_row(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def storable_text(value: str) -> str:
+    """`value` as a TEXT column holds it on both dialects alike. A NUL character is stripped: Postgres
+    text takes none. A lone surrogate (half of an emoji a messenger cut) becomes `?`: UTF-8 cannot encode
+    it, and the insert would fail on every save of the session. The JSON list escaped both."""
+    if "\x00" in value:
+        value = value.replace("\x00", "")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        value = value.encode("utf-8", "replace").decode("utf-8")
+    return value
+
+
+def storable_json(value: Any) -> Any:
+    """`value` with every string a JSON column can hold: a lone surrogate becomes `?` (Postgres refuses
+    one in `json`, which keeps a NUL escaped). The same object when nothing needed it, else a copy."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "replace").decode("utf-8")
+        return value
+    if isinstance(value, list):
+        items = [storable_json(item) for item in value]
+        return value if all(a is b for a, b in zip(items, value, strict=True)) else items
+    if isinstance(value, dict):
+        pairs = {storable_json(key): storable_json(item) for key, item in value.items()}
+        same = all(a is b for a, b in zip(pairs.values(), value.values(), strict=True)) and list(pairs) == list(value)
+        return value if same else pairs
+    return value
+
+
 def _text(value: Any) -> str | None:
-    """A text field as a TEXT column holds it: NULL when empty, and no NUL character, which Postgres
-    refuses in text (U+FFFD takes its place, on both dialects alike)."""
+    """A text field as its TEXT column holds it (`storable_text`), NULL when empty."""
     if not value:
         return None
-    return str(value).replace("\x00", "\ufffd")
+    return storable_text(str(value)) or None
 
 
 def _message_dict(row: SessionMessage) -> dict[str, Any]:

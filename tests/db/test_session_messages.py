@@ -8,6 +8,7 @@ changed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -188,7 +189,9 @@ async def test_raw_output_and_tool_calls_come_back_with_their_keys_in_the_order_
     assert [json.dumps(m.to_dict()) for m in again.messages] == before
 
 
-async def test_a_nul_character_is_stored_as_a_replacement_character_in_text_and_kept_in_json(url):
+async def test_a_nul_character_is_stripped_from_text_in_memory_as_in_the_row_and_kept_in_json(url):
+    """Postgres text takes no NUL. The message in memory loses it when it is saved, as its row does, so
+    the request sent before an eviction and the one rebuilt after it are the same."""
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "web")
     await manager.add_message(session, user("a\x00b"))
@@ -198,8 +201,59 @@ async def test_a_nul_character_is_stored_as_a_replacement_character_in_text_and_
 
     again = await reload(url)
 
-    assert again.messages[0].content == "a�b"
+    assert session.messages[0].content == again.messages[0].content == "ab"
     assert again.messages[1].raw[1]["text"] == "c\x00d"  # escaped as \u0000 in the JSON, which `json` keeps
+    assert [m.to_dict() for m in again.messages] == [m.to_dict() for m in session.messages]
+
+
+async def test_a_lone_surrogate_is_saved_as_a_question_mark_and_does_not_wedge_the_session(url):
+    """Half an emoji (a messenger cut the pair) cannot be encoded as UTF-8: the insert would fail on every
+    save while the session stays cached. It becomes `?`, in memory as in the row, text and JSON alike."""
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    await manager.add_message(session, user("cut \ud83d"))
+    call = ToolCall(id="t1", name="note", arguments={"text": "half \ude00"})
+    reply = thinking_reply(1, tool=call)
+    reply.raw[0]["thinking"] = "hm \ud83d"
+    await manager.add_message(session, reply)
+    await manager.add_message(session, user("next"))  # the session still saves
+
+    again = await reload(url)
+
+    assert [m.content for m in again.messages] == ["cut ?", "", "next"]
+    assert again.messages[1].raw[0]["thinking"] == "hm ?"
+    assert again.messages[1].tool_calls[0].arguments == {"text": "half ?"}
+    assert [m.to_dict() for m in again.messages] == [m.to_dict() for m in session.messages]
+
+
+async def test_a_slower_save_finishing_after_a_later_one_does_not_duplicate_rows(url):
+    """An eviction saves outside the turn lock. Saves of one session run one after the other, so the
+    later one plans from what the earlier one stored."""
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    await manager.add_message(session, user("u0"))
+    real = manager._store.save
+    gate = asyncio.Event()
+    calls: list[None] = []
+
+    async def first_is_slow(**kwargs: Any) -> None:
+        calls.append(None)
+        if len(calls) == 1:
+            await gate.wait()
+        await real(**kwargs)
+
+    manager._store.save = first_is_slow  # type: ignore[method-assign]
+    session.messages.append(thinking_reply(0))
+    slow = asyncio.create_task(manager.save(session))
+    await asyncio.sleep(0)
+    session.messages.extend([user("u1"), thinking_reply(1)])
+    later = asyncio.create_task(manager.save(session))
+    await asyncio.sleep(0)
+    gate.set()
+    await asyncio.gather(slow, later)
+    await manager.add_message(session, user("u2"))  # the next save plans from the rows the session owns
+
+    assert [r.content for r in await rows_of(url, "web:alice")] == ["u0", "answer 0", "u1", "answer 1", "u2"]
 
 
 @pytest.mark.parametrize(
@@ -526,12 +580,12 @@ async def test_an_edit_through_the_manager_rewrites_the_message_and_the_next_tur
         )
     session.metadata["seen"] = "true"  # an unsaved change of the cached copy
 
-    assert await manager.edit_message("web:alice", "tg-42", "hel\x00lo") is True
+    assert await manager.edit_message("web:alice", "tg-42", "hel\x00lo \ud83d") is True
     assert await manager.edit_message("web:alice", "tg-43", "nope") is False
 
     again = await manager.get_or_create("alice", "web")
     assert again is not session  # the stale copy is gone
-    assert (again.messages[0].content, again.metadata) == ("hel\ufffdlo", {"seen": "true"})
+    assert (again.messages[0].content, again.metadata) == ("hello ?", {"seen": "true"})
     (row,) = await rows_of(url, "web:alice")
     assert row.updated_at is not None
 
