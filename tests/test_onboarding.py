@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -111,9 +112,9 @@ async def _record(tmp_path: Path, user_id: str, channel: str) -> OnboardingRecor
     return await OnboardingService(get_database_url(tmp_path / "test.db")).get(user_id, channel)
 
 
-def _long_ago() -> float:
+def _long_ago() -> datetime:
     """A session creation time past the answer window: no turn still asking wrote it."""
-    return time.time() - _ONBOARDING_ANSWER_WINDOW_S - 3600
+    return datetime.now(UTC) - timedelta(seconds=_ONBOARDING_ANSWER_WINDOW_S + 3600)
 
 
 async def _store_history(
@@ -123,7 +124,7 @@ async def _store_history(
     *,
     session_key: str | None = None,
     reply: str = "earlier reply",
-    created_at: float | None = None,
+    created_at: datetime | None = None,
     **metadata,
 ):
     session = await session_manager.get_or_create(user_id, channel, session_key=session_key)

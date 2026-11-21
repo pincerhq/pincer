@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from anthropic_sse import ScriptedAnthropic, text
 from PIL import Image
+from support import stored_history
 
 from pincer.cli._attachments import describe_image_attachments
 from pincer.core.agent import Agent
@@ -87,9 +88,9 @@ async def test_a_photo_is_stored_once_as_a_ref_and_survives_a_reload(
 
         row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
         assert row is not None
-        stored = json.loads(row["messages"])
+        stored = stored_history(row)
         assert stored[0].get("images") == [{"sha256": digest, "media_type": "image/jpeg"}]
-        assert base64.b64encode(photo).decode() not in row["messages"]  # the bytes live in their own table
+        assert base64.b64encode(photo).decode() not in json.dumps(stored)  # the bytes live in their own table
         assert [(i.sha256, i.media_type, i.data) for i in row["images"]] == [(digest, "image/jpeg", photo)]
 
         reloaded = SessionManager(tmp_path / "test.db")
@@ -183,7 +184,7 @@ async def test_a_photo_the_model_cannot_read_is_left_out_of_the_session_and_the_
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
     assert row["images"] == []
-    assert "images" not in json.loads(row["messages"])[0]
+    assert "images" not in stored_history(row)[0]
     assert [r.getMessage() for r in caplog.records if "could not be read" in r.getMessage()] == [
         f"A photo could not be read and was left out ({len(_NOT_AN_IMAGE)} bytes, claimed as image/heic)"
     ]

@@ -1,7 +1,8 @@
-"""Conversation sessions: `sessions`.
+"""Conversation sessions: `sessions`, and their messages and photos.
 
-`created_at` / `updated_at` are epoch seconds. The model maps the table's
-`metadata` column to `session_metadata`, since SQLAlchemy reserves the name.
+`created_at` / `updated_at` are aware UTC datetimes, to the millisecond
+(`db.types.UtcDateTime`). The model maps the table's `metadata` column to
+`session_metadata`, since SQLAlchemy reserves the name.
 """
 
 from __future__ import annotations
@@ -11,16 +12,18 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import bindparam, case, func, or_, tuple_, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, json_text_field, upsert
+from pincer.db.types import UtcDateTime, Uuid7
 from pincer.models.identity import profile_id_of
-from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage
+from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession, SessionImage, SessionMessage
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
+    from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +57,20 @@ def _is_conversation_id(segment: str) -> bool:
 
 
 def _merged_session(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-    """One row's content from two that collide on a key during an identity merge.
+    """The session row's content from two that collide on a key during an identity merge.
 
-    `source` and `target` hold `messages`, `session_metadata`, `created_at`
-    and `updated_at` as stored. Messages carry no timestamps, so the
-    conversations are joined whole: the one created first goes first (the
-    target on a tie). A list saved mid-turn may end on a tool call with no
-    result; the agent's tool-pair repair drops it on the next turn wherever it
-    now sits. Metadata is combined with the more recently updated row's keys
-    winning (the target's on a tie), so a `memory_free` flag on either side
-    stays: the joined conversation holds what was said off the record. The
-    times span both rows. A side whose stored text is not a JSON list (or
-    object, for metadata) contributes nothing, rather than failing the rename.
+    `source` and `target` hold `session_metadata`, `created_at` and
+    `updated_at` as stored. Their messages are not here: they are rows of their
+    own, moved to the target (`SessionMessageRepository.move`), where the two
+    conversations interleave by time. Metadata is combined with the more
+    recently updated row's keys winning (the target's on a tie), so a
+    `memory_free` flag on either side stays: the joined conversation holds what
+    was said off the record. The times span both rows. A side whose stored
+    metadata is not a JSON object contributes nothing, rather than failing the
+    rename.
     """
-    first, second = (source, target) if source["created_at"] < target["created_at"] else (target, source)
     older, newer = (target, source) if source["updated_at"] > target["updated_at"] else (source, target)
-    # The stored format, as `core.session._serialized` writes it: plain `json.dumps`.
     return {
-        "messages": json.dumps(_parsed(first["messages"], list) + _parsed(second["messages"], list)),
         "session_metadata": json.dumps(
             {**_parsed(older["session_metadata"], dict), **_parsed(newer["session_metadata"], dict)}
         ),
@@ -112,7 +111,7 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         stmt = stmt.order_by(col(ChatSession.updated_at).desc()).limit(1)
         return (await self.session.exec(stmt)).first()
 
-    async def exists_for(self, user_id: str, channel: str, *, created_before: float | None = None) -> bool:
+    async def exists_for(self, user_id: str, channel: str, *, created_before: datetime | None = None) -> bool:
         """True when the channel user has any stored session, conversations included.
 
         With `created_before`, only a session created before that time counts.
@@ -138,8 +137,9 @@ class SessionRepository(BaseRepository[ChatSession, str]):
     async def save(self, values: dict[str, Any]) -> str:
         """Insert the session, or update the parts that change. Returns its `id`.
 
-        `created_at` deliberately keeps its stored value: only the messages,
-        the metadata and `updated_at` move.
+        `created_at` deliberately keeps its stored value: only the metadata
+        and `updated_at` move. The messages are rows of their own
+        (`SessionMessageRepository`).
         """
         stmt = upsert(
             dialect_of(self.session),
@@ -147,7 +147,6 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             values,
             index_elements=["session_id"],
             set_=lambda excluded: {
-                "messages": excluded.messages,
                 "metadata": excluded.metadata,
                 "updated_at": excluded.updated_at,
             },
@@ -218,21 +217,23 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         }
         collisions = {old: new for old, new in moves.items() if new in rows}
         if collisions:
-            # Only colliding rows' histories are read; a plain move needs none.
-            content = select(ChatSession.session_id, ChatSession.messages, ChatSession.session_metadata).where(
+            # Only colliding rows' metadata is read; a plain move needs none.
+            content = select(ChatSession.session_id, ChatSession.session_metadata).where(
                 col(ChatSession.session_id).in_([*collisions, *collisions.values()])
             )
-            for key, messages, metadata in (await self.session.exec(content)).all():
-                rows[key] |= {"messages": messages, "session_metadata": metadata}
+            for key, metadata in (await self.session.exec(content)).all():
+                rows[key] |= {"session_metadata": metadata}
         images = SessionImageRepository(self.session)
+        messages = SessionMessageRepository(self.session)
         changed = 0
         for old_key, new_key in moves.items():
             if old_key in collisions:
                 merged = _merged_session(rows[old_key], rows[new_key])
                 target = update(ChatSession).where(col(ChatSession.session_id) == new_key).values(**merged)
                 changed += int((await self.session.exec(target)).rowcount)
-                # The joined messages refer to both sides' photos. Before the old row goes: on Postgres
-                # deleting it cascades to its photos
+                # The joined messages refer to both sides' photos. Both move before the old row goes: on
+                # Postgres deleting it cascades to its messages and photos
+                await messages.move(old_key, new_key)
                 await images.merge(old_key, new_key)
                 changed += await self.delete_where(col(ChatSession.session_id) == old_key)
                 continue
@@ -294,3 +295,125 @@ class SessionImageRepository(BaseRepository[SessionImage, str]):
         moved = int((await self.session.exec(move.values(session_ref=target))).rowcount)
         await self.delete_where(col(SessionImage.session_ref) == _session_ref(old_session_id))
         return moved
+
+
+#: The columns of a message an API shows people: never `context` (Pincer's own per-turn context) or `raw`
+#: (the provider's output, replayed to it), which are most of a history's bytes.
+DISPLAY_COLUMNS = ("id", "role", "content", "tool_calls", "images", "created_at", "updated_at")
+
+#: Rows per INSERT: a first save of a long history (one taken over from an older key) stays under
+#: SQLite's limit on bound parameters.
+_INSERT_BATCH = 500
+
+#: The columns a save writes to a message row; `channel_message_id` and `updated_at` belong to `edit`.
+_WRITTEN = ("role", "content", "tool_call_id", "is_error", "tool_calls", "images", "context", "raw", "wire")
+
+
+class SessionMessageRepository(BaseRepository[SessionMessage, str]):
+    """The messages of sessions, in the order (`created_at`, `id`)."""
+
+    model = SessionMessage
+
+    async def for_session(self, session_ref: str) -> Sequence[SessionMessage]:
+        """Every message of the session whose `id` is `session_ref`, in order."""
+        return await self.list(
+            col(SessionMessage.session_id) == session_ref,
+            order_by=[col(SessionMessage.created_at), col(SessionMessage.id)],
+        )
+
+    async def page(
+        self, session_ref: str, *, limit: int, before: tuple[datetime, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """The latest `limit` messages of the session before the (`created_at`, `id`) cursor `before`
+        (the newest, without one), oldest first, as `DISPLAY_COLUMNS` only."""
+        columns = [getattr(SessionMessage, name) for name in DISPLAY_COLUMNS]
+        stmt = select(*columns).where(col(SessionMessage.session_id) == session_ref)
+        if before is not None:
+            cursor = tuple_(
+                bindparam("before_at", before[0], type_=UtcDateTime()), bindparam("before_id", before[1], type_=Uuid7())
+            )
+            stmt = stmt.where(tuple_(col(SessionMessage.created_at), col(SessionMessage.id)) < cursor)
+        stmt = stmt.order_by(col(SessionMessage.created_at).desc(), col(SessionMessage.id).desc()).limit(limit)
+        rows = (await self.session.exec(stmt)).all()
+        return [dict(zip(DISPLAY_COLUMNS, row, strict=True)) for row in reversed(rows)]
+
+    async def apply(
+        self,
+        session_ref: str,
+        *,
+        insert_rows: Sequence[dict[str, Any]] = (),
+        update_rows: Sequence[dict[str, Any]] = (),
+        delete_ids: Collection[str] = (),
+    ) -> None:
+        """Bring the session's rows up to date: delete `delete_ids`, rewrite the written columns of
+        `update_rows` (by `id`), and insert `insert_rows`. Only rows of this session are touched, so a
+        stale id can never reach another session's history."""
+        if delete_ids:
+            await self.delete_where(
+                col(SessionMessage.session_id) == session_ref, col(SessionMessage.id).in_(list(delete_ids))
+            )
+        # Core statements on the table, one executemany each: not the ORM's bulk modes
+        table = SessionMessage.__table__  # type: ignore[attr-defined]
+        conn = await self.session.connection()
+        if update_rows:
+            stmt = (
+                table.update()
+                .where(table.c.session_id == session_ref, table.c.id == bindparam("row_id"))
+                .values(
+                    {name: bindparam(f"new_{name}") for name in _WRITTEN}
+                    # A row that stops being a user message (a summary taking the place of the first message it
+                    # summarizes) drops what only a user message has
+                    | {
+                        name: case((bindparam("new_role") == "user", table.c[name]), else_=None)
+                        for name in ("channel_message_id", "updated_at")
+                    }
+                )
+            )
+            params = [{"row_id": row["id"]} | {f"new_{name}": row[name] for name in _WRITTEN} for row in update_rows]
+            await conn.execute(stmt, params)
+        # Upserted by id: a save retried after a commit whose answer was lost (its rows are in) rewrites
+        # them instead of failing or adding them twice. Only a row of this session is ever rewritten.
+        for start in range(0, len(insert_rows), _INSERT_BATCH):
+            batch = [row | {"session_id": session_ref} for row in insert_rows[start : start + _INSERT_BATCH]]
+            await conn.execute(
+                upsert(
+                    dialect_of(self.session),
+                    table,
+                    batch,
+                    index_elements=["id"],
+                    set_=lambda excluded: {name: excluded[name] for name in (*_WRITTEN, "created_at")},
+                    where=table.c.session_id == session_ref,
+                )
+            )
+
+    async def move(self, old_session_id: str, new_session_id: str) -> int:
+        """Move every message of `old_session_id` to `new_session_id`, two sessions joined into one: the
+        conversations interleave by time. A messenger id both hold names one message, kept on the
+        target's copy. Returns the messages moved."""
+        source, target = _session_ref(old_session_id), _session_ref(new_session_id)
+        held = select(SessionMessage.channel_message_id).where(
+            col(SessionMessage.session_id) == target, col(SessionMessage.channel_message_id).is_not(None)
+        )
+        await self.session.exec(
+            update(SessionMessage)
+            .where(col(SessionMessage.session_id) == source, col(SessionMessage.channel_message_id).in_(held))
+            .values(channel_message_id=None)
+        )
+        moved = await self.session.exec(
+            update(SessionMessage).where(col(SessionMessage.session_id) == source).values(session_id=target)
+        )
+        return int(moved.rowcount)
+
+    async def edit(self, session_ref: str, channel_message_id: str, content: str, *, at: datetime) -> bool:
+        """Rewrite the text of the user message the messenger calls `channel_message_id`, edited `at`.
+        False when the session has no such message."""
+        stmt = (
+            update(SessionMessage)
+            .where(
+                col(SessionMessage.session_id) == session_ref,
+                col(SessionMessage.channel_message_id) == channel_message_id,
+                col(SessionMessage.role) == "user",
+            )
+            .values(content=content, updated_at=at)
+        )
+        return int((await self.session.exec(stmt)).rowcount) > 0

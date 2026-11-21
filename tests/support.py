@@ -10,6 +10,8 @@ where a uuid would be unreadable.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pincer.db.ids import Uuid7Sequence
 
 _MINTED: dict[str, str] = {}
@@ -81,3 +83,16 @@ def identity_entries(*people: str, **profiles: dict[str, object]) -> dict[str, o
             fields["phones"] = list(fields["phones"])  # type: ignore[call-overload]
         entries[name] = IdentityTomlEntry(pincer_user_id=name, channels=channels, **fields)  # type: ignore[arg-type]
     return entries
+
+
+def stored_history(row: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """A loaded session row's messages as `LLMMessage.to_dict` writes them, without their row's `id` and
+    `created_at` (`SessionService.load` returns those too)."""
+    assert row is not None
+    return [{k: v for k, v in m.items() if k not in ("id", "created_at")} for m in row["messages"]]
+
+
+def saved_count(kwargs: dict[str, Any]) -> int:
+    """How many messages a `SessionService.save` call wrote (inserted or rewrote), for a spy on it."""
+    changes = kwargs.get("messages")
+    return len(changes.insert) + len(changes.update) if changes else 0

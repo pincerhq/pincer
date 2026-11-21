@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import REAL, BigInteger, DateTime, Dialect, Integer, Text
-from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, UUID
+from sqlalchemy import JSON, REAL, BigInteger, DateTime, Dialect, Integer, Text
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB, TIMESTAMP, UUID
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 
@@ -76,6 +76,86 @@ class JSONText(TypeDecorator[Any]):
         if not value:
             return None
         return json.loads(value)
+
+
+def to_millis(value: datetime) -> datetime:
+    """`value` in UTC, cut to whole milliseconds: the precision `UtcDateTime` stores."""
+    if value.tzinfo is None:
+        raise ValueError(f"a naive datetime has no zone to store: {value!r}")
+    return value.astimezone(UTC).replace(microsecond=value.microsecond // 1000 * 1000)
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_ONE_MS = timedelta(milliseconds=1)
+
+
+def epoch_ms(value: datetime) -> int:
+    """Epoch milliseconds of an aware datetime (cut, not rounded), as a UUIDv7 carries them."""
+    return (to_millis(value) - _EPOCH) // _ONE_MS
+
+
+def from_epoch_ms(ms: int) -> datetime:
+    """The aware UTC datetime of epoch milliseconds `ms`."""
+    return _EPOCH + ms * _ONE_MS
+
+
+def from_epoch_seconds(seconds: float) -> datetime:
+    """The aware UTC datetime of float epoch seconds, cut to the millisecond (how a `Real` timestamp
+    becomes a `UtcDateTime` one, in the migration and anywhere else).
+
+    Rounded to the microsecond before the cut, so float noise (`100.123` is `100.12299999…`) does not
+    take a millisecond off; migration 0035 does the same in SQL on Postgres."""
+    return from_epoch_ms(round(seconds * 1_000_000) // 1000)
+
+
+class UtcDateTime(TypeDecorator[datetime]):
+    """An instant to the millisecond: `TIMESTAMP(3) WITH TIME ZONE` on Postgres, fixed-width text on SQLite.
+
+    Python only ever sees an aware UTC `datetime`, and a naive one is refused on bind: a zone guessed
+    here would be wrong somewhere. Every value is cut to whole milliseconds before it is stored, on both
+    dialects, so what is read back is exactly what the other dialect would return, and equal to the value
+    as written (cut). SQLite stores `YYYY-MM-DDTHH:MM:SS.mmm+00:00`, always 29 characters in UTC, so
+    ordering and comparing the text is ordering and comparing the instants.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(TIMESTAMP(timezone=True, precision=3))
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, datetime):
+            raise TypeError(f"UtcDateTime takes a datetime, not {type(value).__name__}")
+        cut = to_millis(value)
+        return cut if dialect.name == "postgresql" else utc_text(cut)
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return to_millis(parsed)
+
+
+def utc_text(value: datetime) -> str:
+    """How `UtcDateTime` stores an instant on SQLite: `YYYY-MM-DDTHH:MM:SS.mmm+00:00`."""
+    return to_millis(value).isoformat(timespec="milliseconds")
+
+
+#: A JSON document that comes back exactly as written: `json` on Postgres, which keeps the text (key
+#: order included), JSON text on SQLite. For what is sent to an LLM again (a message's provider output
+#: and tool calls): `jsonb` would sort the keys, so the request rebuilt after a reload would differ from
+#: the one sent before it, and a prompt cache keyed on that prefix would miss.
+JsonDocument = JSON(none_as_null=True)
+
+#: A JSON document stored for querying, not replay: `jsonb` on Postgres, JSON text on SQLite.
+JsonbDocument = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
 
 
 class Uuid7(TypeDecorator[str]):

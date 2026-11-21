@@ -31,6 +31,7 @@ from openai_wire import (
 )
 from pydantic import SecretStr
 from sqlmodel import select
+from support import stored_history
 from test_photos_stay import jpeg
 
 from pincer.core.agent import Agent, StreamEventType
@@ -106,7 +107,7 @@ async def _stored(session_manager, user_id: str, channel: str) -> list[dict[str,
         f"{channel}:{user_id}", user_id=user_id, channel=channel, legacy_fallback=False
     )
     assert row is not None
-    return json.loads(row["messages"])
+    return stored_history(row)
 
 
 async def _until_requests(llm: ScriptedOpenAI, count: int) -> None:

@@ -21,6 +21,7 @@ from pincer.config.pricing import TokenUsage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+    from datetime import datetime
 
     from pincer.config.llm import ReasoningEffort, ThinkingMode
 
@@ -168,6 +169,12 @@ class LLMMessage:
     # block before the user's words, saved with the session and replayed as it was; never shown
     # to people as history (the user's words are `content`).
     context: str = ""
+    # Where the message is stored (a `pincer_session_messages` row): the row's id and when it was created,
+    # set by the session store when the message is saved or loaded; None before. Not in `to_dict`, not
+    # compared. A message built to replace another in a history (a tool-pair repair) takes them over, so
+    # it keeps that message's place instead of moving to the end.
+    row_id: str | None = field(default=None, repr=False, compare=False)
+    created_at: datetime | None = field(default=None, repr=False, compare=False)
     # `core.compaction`'s count of the characters `raw` adds to a request, kept after the first time it is
     # worked out: a stored message does not change, and the history is sized after every request. Not saved,
     # not compared; assumes `raw` is not edited once the message is in a history.

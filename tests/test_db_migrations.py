@@ -2792,3 +2792,170 @@ def test_0033_upgrade_logs_the_identity_rows_it_drops(migration_url, tmp_path, c
         command.upgrade(cfg, "0033")
 
     assert any("pincer_identity_channels" in line and "ghost" in line for line in caplog.messages)
+
+
+# ── 0035: session messages as rows, session times as millisecond datetimes ──
+
+
+def _0035_tables():
+    from pincer.db.types import JsonbDocument, JsonDocument, UtcDateTime, Uuid7
+
+    sessions_at_0034 = sa.table(
+        "pincer_sessions",
+        sa.column("id", Uuid7()),
+        sa.column("session_id", sa.Text()),
+        sa.column("user_id", sa.Text()),
+        sa.column("channel", sa.Text()),
+        sa.column("messages", sa.Text()),
+        sa.column("created_at", sa.Float()),
+        sa.column("updated_at", sa.Float()),
+    )
+    sessions = sa.table(
+        "pincer_sessions",
+        sa.column("id", Uuid7()),
+        sa.column("session_id", sa.Text()),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
+    )
+    messages = sa.table(
+        "pincer_session_messages",
+        sa.column("id", Uuid7()),
+        sa.column("session_id", Uuid7()),
+        sa.column("role", sa.Text()),
+        sa.column("content", sa.Text()),
+        sa.column("tool_call_id", sa.Text()),
+        sa.column("is_error", sa.Boolean()),
+        sa.column("tool_calls", JsonDocument),
+        sa.column("images", JsonbDocument),
+        sa.column("context", sa.Text()),
+        sa.column("raw", JsonDocument),
+        sa.column("wire", sa.Text()),
+        sa.column("channel_message_id", sa.Text()),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
+    )
+    return sessions_at_0034, sessions, messages
+
+
+#: A history with every field a stored message can have, keys deliberately out of alphabetical order:
+#: the provider output and tool arguments must come back as they were written (they are sent again).
+_HISTORY_0035 = [
+    {
+        "role": "system",
+        "content": "[compacted]",
+        "raw": [{"type": "compaction", "id": "cmp_1", "encrypted_content": "ENC"}],
+        "wire": "openai:gpt-x",
+    },
+    {
+        "role": "user",
+        "content": "hi\x00there",
+        "images": [{"sha256": "aa", "media_type": "image/jpeg"}],
+        "context": "[memories]",
+    },
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "t1", "name": "lookup", "arguments": {"zone": "eu", "after": 2}}],
+        "raw": [
+            {"type": "thinking", "thinking": "hm", "signature": "SIG"},
+            {"type": "tool_use", "id": "t1", "name": "lookup", "input": {"zone": "eu", "after": 2}},
+        ],
+        "wire": "anthropic:claude-x",
+    },
+    {"role": "tool_result", "content": "ok", "tool_call_id": "t1", "is_error": True},
+    {"role": "assistant", "content": "done"},
+]
+
+
+def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migration_url, tmp_path):
+    from pincer.db.ids import new_id, uuid7_ms
+    from pincer.db.types import epoch_ms, from_epoch_seconds
+
+    sessions_at_0034, sessions, messages = _0035_tables()
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0034")
+    ids = {key: new_id() for key in ("alice", "guest", "broken", "odd")}
+    seed = [
+        ("alice", "unified:alice", json.dumps(_HISTORY_0035), 100.0, 100.4),
+        ("guest", "web:guest", json.dumps([{"role": "user", "content": "only"}]), 50.123, 50.123),
+        ("broken", "web:broken", "not json", 1.0, 2.0),
+        ("odd", "web:odd", json.dumps([{"role": "tool", "content": "?"}, {"role": "user", "content": "kept"}]), 10, 11),
+    ]
+    with _connect(migration_url) as conn:
+        conn.execute(
+            sessions_at_0034.insert(),
+            [
+                {
+                    "id": ids[n],
+                    "session_id": k,
+                    "user_id": n,
+                    "channel": "web",
+                    "messages": m,
+                    "created_at": c,
+                    "updated_at": u,
+                }
+                for n, k, m, c, u in seed
+            ],
+        )
+
+    command.upgrade(cfg, "0035")
+    with _connect(migration_url) as conn:
+
+        def rows(name: str) -> list[Any]:
+            stmt = sa.select(messages).where(messages.c.session_id == ids[name])
+            return conn.execute(stmt.order_by(messages.c.created_at, messages.c.id)).mappings().all()
+
+        alice = rows("alice")
+        assert [r["role"] for r in alice] == [m["role"] for m in _HISTORY_0035]
+        # Spread evenly from the session's creation to its last save, each id carrying its own millisecond
+        assert [epoch_ms(r["created_at"]) for r in alice] == [100_000, 100_100, 100_200, 100_300, 100_400]
+        assert [uuid7_ms(r["id"]) for r in alice] == [epoch_ms(r["created_at"]) for r in alice]
+        window, user, call, result, reply = alice
+        assert (window["raw"], window["wire"], window["content"]) == (
+            _HISTORY_0035[0]["raw"],
+            "openai:gpt-x",
+            "[compacted]",
+        )
+        assert json.dumps(call["raw"]) == json.dumps(_HISTORY_0035[2]["raw"])  # key order kept, not sorted
+        assert json.dumps(call["tool_calls"]) == json.dumps(_HISTORY_0035[2]["tool_calls"])
+        assert (user["content"], user["context"], user["images"]) == (
+            "hi�there",  # Postgres takes no NUL in text
+            "[memories]",
+            [{"sha256": "aa", "media_type": "image/jpeg"}],
+        )
+        assert (result["tool_call_id"], result["is_error"], result["tool_calls"], result["raw"]) == (
+            "t1",
+            True,
+            None,
+            None,
+        )
+        assert (reply["content"], reply["raw"], reply["wire"], reply["context"]) == ("done", None, None, None)
+        assert all(r["channel_message_id"] is None and r["updated_at"] is None for r in alice)
+
+        (only,) = rows("guest")
+        assert only["created_at"] == from_epoch_seconds(50.123)
+        assert rows("broken") == []  # not a list: nothing to move, and the upgrade goes on
+        assert [r["content"] for r in rows("odd")] == ["kept"]  # a role no code writes is dropped
+
+        times = dict(
+            (r["session_id"], (r["created_at"], r["updated_at"])) for r in conn.execute(sa.select(sessions)).mappings()
+        )
+        assert times["unified:alice"] == (from_epoch_seconds(100.0), from_epoch_seconds(100.4))
+        assert times["web:guest"] == (from_epoch_seconds(50.123),) * 2
+        assert times["web:guest"][0].microsecond == 123_000  # milliseconds kept, nothing finer
+
+    command.downgrade(cfg, "0034")
+    with _connect(migration_url) as conn:
+        assert "pincer_session_messages" not in sa.inspect(conn).get_table_names()
+        back = {r["session_id"]: r for r in conn.execute(sa.select(sessions_at_0034)).mappings()}
+    restored = json.loads(back["unified:alice"]["messages"])
+    expected = [dict(m) for m in _HISTORY_0035]
+    expected[1]["content"] = "hi�there"
+    assert restored == expected
+    assert [list(m) for m in restored] == [list(m) for m in expected]  # the keys in `to_dict`'s order
+    assert back["web:broken"]["messages"] == "not json"  # left as it was
+    assert json.loads(back["web:odd"]["messages"]) == [{"role": "user", "content": "kept"}]
+    assert (back["unified:alice"]["created_at"], back["unified:alice"]["updated_at"]) == pytest.approx((100.0, 100.4))
+    assert back["web:guest"]["created_at"] == pytest.approx(50.123)
+
+    command.upgrade(cfg, "0035")  # and up again

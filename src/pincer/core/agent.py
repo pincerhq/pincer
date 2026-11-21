@@ -19,6 +19,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -741,10 +742,12 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
         if orphan_ids:
             logger.warning("Stripping orphaned tool_use(s): %s", orphan_ids)
             changed = True
+            # The rebuilt message keeps the stored one's row and time: it takes its place in the history
+            stored = {"row_id": msg.row_id, "created_at": msg.created_at}
             if surviving:
-                clean.append(LLMMessage(role=msg.role, content=msg.content, tool_calls=surviving))
+                clean.append(LLMMessage(role=msg.role, content=msg.content, tool_calls=surviving, **stored))
             elif msg.content:
-                clean.append(LLMMessage(role=msg.role, content=msg.content))
+                clean.append(LLMMessage(role=msg.role, content=msg.content, **stored))
         else:
             clean.append(msg)
 
@@ -2569,7 +2572,7 @@ class Agent:
         older than that was never written by a turn still asking. A user whose
         history is all newer keeps one read per turn until it is older.
         """
-        cutoff = time.time() - _ONBOARDING_ANSWER_WINDOW_S
+        cutoff = datetime.now(UTC) - timedelta(seconds=_ONBOARDING_ANSWER_WINDOW_S)
         return await self._sessions.has_stored_sessions(user_id, channel, created_before=cutoff)
 
     async def _close_known_onboarding(self, user_id: str, channel: str, reason: Literal["legacy", "existing"]) -> None:

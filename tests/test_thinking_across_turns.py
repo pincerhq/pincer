@@ -8,11 +8,15 @@ from typing import Any
 
 import pytest
 from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
+from support import stored_history
 
 from pincer.core.agent import Agent
 from pincer.core.onboarding import ONBOARDING_QUESTION_EN
 from pincer.core.session import SessionManager
+from pincer.db.ids import new_id
+from pincer.db.types import from_epoch_seconds
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
+from pincer.services.sessions import MessageChanges
 from pincer.tools.registry import ToolRegistry
 
 _THOUGHT = "SECRET-THOUGHT-7f3a"
@@ -174,10 +178,10 @@ async def test_a_session_saved_before_raw_existed_loads_and_replays_as_before(
         session_id="test:user1",
         user_id="user1",
         channel="test",
-        messages=json.dumps(legacy),
+        messages=MessageChanges(insert=[m | {"id": new_id(), "created_at": from_epoch_seconds(1.0)} for m in legacy]),
         metadata="{}",
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=from_epoch_seconds(1.0),
+        updated_at=from_epoch_seconds(1.0),
     )
     async with ScriptedAnthropic(settings, [([text("You're welcome.")], "end_turn")]) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry)
@@ -485,4 +489,4 @@ async def test_a_budget_refused_turn_leaves_the_saved_history_and_its_thinking_u
     assert mock_llm.complete.await_count == 0
     assert [m.to_dict() for m in session.messages] == before
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
-    assert row is not None and json.loads(row["messages"]) == before
+    assert row is not None and stored_history(row) == before

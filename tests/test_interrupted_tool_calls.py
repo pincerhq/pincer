@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 from typing import Any
 
 import pytest
 from anthropic_sse import ScriptedAnthropic, text, thinking, tool_use
+from support import saved_count, stored_history
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.core.session import SessionManager
@@ -191,7 +191,7 @@ async def test_the_error_results_are_saved_with_their_flag_and_plain_results_sta
 
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    saved = [m for m in json.loads(row["messages"]) if m["role"] == "tool_result"]
+    saved = [m for m in stored_history(row) if m["role"] == "tool_result"]
     assert saved == [
         {"role": "tool_result", "content": "created", "tool_call_id": "toolu_b"},
         {"role": "tool_result", "content": _INTERRUPTED, "tool_call_id": "toolu_a", "is_error": True},
@@ -225,7 +225,7 @@ async def test_the_error_results_of_five_open_calls_and_the_users_message_are_sa
     real_save = session_manager._store.save
 
     async def spy(**kwargs: Any) -> Any:
-        saved_sizes.append(len(json.loads(kwargs["messages"])))
+        saved_sizes.append(saved_count(kwargs))
         return await real_save(**kwargs)
 
     session_manager._store.save = spy  # type: ignore[method-assign]
@@ -238,8 +238,8 @@ async def test_the_error_results_of_five_open_calls_and_the_users_message_are_sa
         else:
             _ = [c async for c in agent.stream_voice_turn("user1", "voice", "Never mind", session_key=key)]
 
-    # The five results and the user's message in one write (2 + 5 + 1 messages), then the reply
-    assert saved_sizes == [8, 9]
+    # The five results and the user's message in one write (5 + 1 new messages), then the reply
+    assert saved_sizes == [6, 1]
     results = [m for m in session.messages if m.role == MessageRole.TOOL_RESULT]
     assert [(m.tool_call_id, m.content, m.is_error) for m in results] == [(i, _INTERRUPTED, True) for i in ids]
 
@@ -252,7 +252,7 @@ async def test_a_turn_with_no_open_calls_saves_nothing_for_them(
     real_save = session_manager._store.save
 
     async def spy(**kwargs: Any) -> Any:
-        saved_sizes.append(len(json.loads(kwargs["messages"])))
+        saved_sizes.append(saved_count(kwargs))
         return await real_save(**kwargs)
 
     session_manager._store.save = spy  # type: ignore[method-assign]
@@ -260,7 +260,7 @@ async def test_a_turn_with_no_open_calls_saves_nothing_for_them(
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, registry_plain)
         await agent.handle_message("user1", "test", "Hello", memory=False)
 
-    assert saved_sizes == [1, 2]  # the user's message, then the reply: no write for the calls there were none of
+    assert saved_sizes == [1, 1]  # the user's message, then the reply: no write for the calls there were none of
     assert len(session.messages) == 2
 
 
@@ -303,4 +303,4 @@ async def test_a_budget_refused_turn_leaves_an_unanswered_tail_as_it_was(
     assert refused  # precondition: the turn was refused
     assert [m.to_dict() for m in session.messages] == before
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
-    assert row is not None and json.loads(row["messages"]) == before
+    assert row is not None and stored_history(row) == before

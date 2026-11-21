@@ -85,6 +85,31 @@ class Uuid7Sequence:
         return uuid7_at(self._ms, self._counter)
 
 
+def uuid7_ms(value: str) -> int:
+    """The millisecond a UUIDv7 carries."""
+    return uuid.UUID(value).int >> 80
+
+
+def uuid7_after(ms: int, previous: str | None) -> str:
+    """A UUIDv7 carrying `ms` that sorts after `previous` (any id, or None for no bound).
+
+    For rows ordered by (time, id) whose id must carry the row's own time: two rows in one millisecond
+    are told apart by the counter, one past the previous id's. `ms` before `previous`'s millisecond
+    cannot sort after it with its own time, so the id takes `previous`'s millisecond instead; a full
+    counter moves on to the next millisecond, as `Uuid7Sequence` does.
+    """
+    if previous is None:
+        return uuid7_at(ms)
+    value = uuid.UUID(previous).int
+    previous_ms = value >> 80
+    if ms > previous_ms:
+        return uuid7_at(ms)
+    counter = ((value >> 64 & 0x0FFF) << 30 | (value >> 32 & 0x3FFF_FFFF)) + 1
+    if counter > _MAX_COUNTER:
+        return uuid7_at(previous_ms + 1)
+    return uuid7_at(previous_ms, counter)
+
+
 def is_id(value: object) -> bool:
     """True when `value` could be a row id this module minted.
 

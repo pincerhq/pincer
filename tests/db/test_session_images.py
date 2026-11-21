@@ -6,7 +6,6 @@ They share a module with the identity tables because a merge moves photos with t
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -17,15 +16,17 @@ from sqlmodel import col, select
 
 from pincer.core.session import Session, SessionManager
 from pincer.db.engine import get_engine
+from pincer.db.ids import new_id
 from pincer.db.session import session_scope
+from pincer.db.types import from_epoch_seconds
 from pincer.llm.base import ImageContent, LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, IdentityChannel, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
-from pincer.models.sessions import ChatSession, SessionImage
+from pincer.models.sessions import ChatSession, SessionImage, SessionMessage
 from pincer.repositories.identity import profile_owned
 from pincer.repositories.sessions import SessionImageRepository, SessionRepository
 from pincer.services.identity import IdentityService
-from pincer.services.sessions import ImageSet, SessionService, StoredImage
+from pincer.services.sessions import ImageSet, MessageChanges, SessionService, StoredImage
 
 _TABLES = [
     IdentityProfile.__table__,
@@ -34,6 +35,7 @@ _TABLES = [
     IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
+    SessionMessage.__table__,
     SessionImage.__table__,
     Onboarding.__table__,
     *(table for table, _column in profile_owned()),
@@ -85,7 +87,12 @@ async def photo_rows(url: str) -> dict[str, set[str]]:
 async def stored_refs(url: str, session_id: str) -> list[list[str]]:
     row = await SessionService(url).load(session_id, user_id="", channel="", legacy_fallback=False)
     assert row is not None
-    return [[ref["sha256"] for ref in m.get("images", [])] for m in json.loads(row["messages"])]
+    return [[ref["sha256"] for ref in m.get("images", [])] for m in row["messages"]]
+
+
+def as_rows(messages: list[dict], *, at: float) -> MessageChanges:
+    """Stored messages (`LLMMessage.to_dict`'s format) as new rows, all said `at`, in order."""
+    return MessageChanges(insert=[m | {"id": new_id(), "created_at": from_epoch_seconds(at)} for m in messages])
 
 
 # ── storing ──────────────────────────────────────────────────────────
@@ -111,10 +118,9 @@ async def test_a_stored_photo_is_never_overwritten(url):
         session_id="telegram:alice",
         user_id="alice",
         channel="telegram",
-        messages="[]",
         metadata="{}",
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=from_epoch_seconds(1.0),
+        updated_at=from_epoch_seconds(1.0),
     )
     first = StoredImage("a" * 64, "image/jpeg", b"first bytes")
     for data in (b"first bytes", b"other bytes"):
@@ -122,10 +128,9 @@ async def test_a_stored_photo_is_never_overwritten(url):
             session_id="telegram:alice",
             user_id="alice",
             channel="telegram",
-            messages="[]",
             metadata="{}",
-            created_at=1.0,
-            updated_at=1.0,
+            created_at=from_epoch_seconds(1.0),
+            updated_at=from_epoch_seconds(1.0),
             images=ImageSet(frozenset({first.sha256}), (StoredImage(first.sha256, "image/jpeg", data),)),
         )
 
@@ -243,10 +248,10 @@ async def store(
         session_id=session_id,
         user_id=user_id,
         channel=channel,
-        messages=json.dumps([*messages, *([reply_of(user_id)] if reply else [])]),
+        messages=as_rows([*messages, *([reply_of(user_id)] if reply else [])], at=at),
         metadata="{}",
-        created_at=at,
-        updated_at=at,
+        created_at=from_epoch_seconds(at),
+        updated_at=from_epoch_seconds(at),
         images=ImageSet(
             frozenset(p.sha256 for p in photos),
             tuple(StoredImage(p.sha256, p.media_type, base64.b64decode(p.data)) for p in photos),
@@ -279,8 +284,8 @@ async def test_a_merge_moves_the_photos_with_the_session(url):
 
 @pytest.mark.parametrize(
     ("old_at", "target_at", "order"),
-    [(1.0, 2.0, ["usr_hash", "alice"]), (2.0, 1.0, ["alice", "usr_hash"]), (1.0, 1.0, ["alice", "usr_hash"])],
-    ids=["old session created first", "target created first", "tie: target first"],
+    [(1.0, 2.0, ["usr_hash", "alice"]), (2.0, 1.0, ["alice", "usr_hash"]), (1.0, 1.0, ["usr_hash", "alice"])],
+    ids=["old session created first", "target created first", "tie: saved first"],
 )
 async def test_a_merge_collision_joins_the_photos_and_the_raw_output_of_both_sessions(url, old_at, target_at, order):
     """Dev's #377 joins two colliding conversations instead of deleting one: the photos their messages show
@@ -298,7 +303,7 @@ async def test_a_merge_collision_joins_the_photos_and_the_raw_output_of_both_ses
     assert await stored_refs(url, "whatsapp:alice") == [refs[order[0]], [], refs[order[1]], []]
     row = await SessionService(url).load("whatsapp:alice", user_id="alice", channel="whatsapp", legacy_fallback=False)
     assert row is not None
-    joined = json.loads(row["messages"])
+    joined = [{k: v for k, v in m.items() if k not in ("id", "created_at")} for m in row["messages"]]
     assert [m for m in joined if m["role"] == "assistant"] == [reply_of(user) for user in order]  # raw and wire intact
     async with session_scope(url) as session:
         alice = await SessionRepository(session).get_by(session_id="whatsapp:alice")
@@ -431,16 +436,16 @@ async def test_a_ref_without_a_stored_photo_loads_without_it_and_is_logged(url, 
     await store(url, "whatsapp:alice", user_id="alice", at=1.0, photos=[kept])
     row = await SessionService(url).load("whatsapp:alice", user_id="alice", channel="whatsapp", legacy_fallback=False)
     assert row is not None
-    messages = json.loads(row["messages"])
-    messages[0]["images"].append(lost.to_ref())  # a ref whose row is gone
+    (message,) = row["messages"]
+    message["images"].append(lost.to_ref())  # a ref whose row is gone
     await SessionService(url).save(
         session_id="whatsapp:alice",
         user_id="alice",
         channel="whatsapp",
-        messages=json.dumps(messages),
+        messages=MessageChanges(update=[message]),
         metadata="{}",
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=from_epoch_seconds(1.0),
+        updated_at=from_epoch_seconds(1.0),
     )
 
     with caplog.at_level(logging.WARNING, logger="pincer.core.session"):
@@ -452,15 +457,15 @@ async def test_a_ref_without_a_stored_photo_loads_without_it_and_is_logged(url, 
 
 
 async def test_a_session_saved_before_photos_were_kept_loads_as_it_was(url):
-    old = '[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]'
+    old = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
     await SessionService(url).save(
         session_id="whatsapp:alice",
         user_id="alice",
         channel="whatsapp",
-        messages=old,
+        messages=as_rows(old, at=1.0),
         metadata="{}",
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=from_epoch_seconds(1.0),
+        updated_at=from_epoch_seconds(1.0),
     )
 
     session = await manager_on(url).get_or_create("alice", "whatsapp")

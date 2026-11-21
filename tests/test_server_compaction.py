@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from anthropic_sse import ScriptedAnthropic, compaction, text
 from sqlmodel import select
+from support import stored_history
 from test_photos_stay import jpeg
 
 from pincer.core.agent import Agent, StreamEventType
@@ -197,7 +198,7 @@ async def test_after_the_swap_the_next_request_starts_with_the_block_then_the_ke
     ]
     stored = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert stored is not None
-    assert json.loads(stored["messages"])[0] == {
+    assert stored_history(stored)[0] == {
         "role": "system",
         "content": f"[Previous conversation summary]\n{_SUMMARY}",
         "raw": [{"type": "compaction", "content": _SUMMARY, "signature": _SIGNATURE}],
@@ -320,7 +321,7 @@ async def test_the_swap_deletes_the_photos_only_the_summarized_messages_showed(
 
     stored = await _stored(session_manager, "user1", "test")
     assert stored["photos"] == [hashlib.sha256(new_photo).hexdigest()]
-    assert json.loads(stored["messages"])[2]["images"] == [
+    assert stored_history(stored)[2]["images"] == [
         {"sha256": hashlib.sha256(new_photo).hexdigest(), "media_type": "image/jpeg"}
     ]
 

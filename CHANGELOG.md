@@ -119,6 +119,51 @@ Always on, without setting anything:
   `PINCER_CACHE_PREFIX`. Stream and channel names do not change.
 - `pincer run tasks` no longer prints the broker password.
 
+#### Session messages are rows; session times are millisecond datetimes (#406, migration 0035)
+
+A conversation's history was one JSON list in `pincer_sessions.messages`,
+rewritten whole on every save. Each message is now a row of
+`pincer_session_messages`, ordered by `created_at` and then its UUIDv7 `id`.
+A save writes only what changed: the new messages, the ones rewritten in place,
+and the deletion of the ones dropped.
+
+- `role` and `content` are always set. The fields only some roles have are NULL
+  elsewhere, and CHECKs keep them to their roles:
+  - `tool_call_id` and `is_error`: tool results;
+  - `tool_calls`: assistant messages;
+  - `raw` / `wire`: assistant messages and compaction windows;
+  - `context` and `images`.
+- `raw` and `tool_calls` are `json`, not `jsonb`, on Postgres. They come back
+  with their keys as written, so a history reloaded after an eviction or a
+  restart rebuilds the same request, and the prompt cache still hits.
+  Replaying each assistant message's `raw` on its own wire, and sending only
+  the latest compaction window, work as before: the rows keep the list's order.
+  `images` is `jsonb`.
+- A message rebuilt in place keeps its row and time: the tool-pair repair's, and
+  a compaction summary, which takes the place of the first message it replaces.
+- New `channel_message_id` and `updated_at` columns, user messages only, make
+  room for edits made in a messenger. Routing those edits is a follow-up.
+- `SessionService.history()` returns a page of the history as people see it,
+  without `context` or `raw`, keyed on (`created_at`, `id`).
+- `pincer_sessions.created_at` / `updated_at`, and every message's times, are
+  `TIMESTAMP(3) WITH TIME ZONE` on Postgres and fixed-width UTC text on SQLite
+  (`db.types.UtcDateTime`). Python sees aware UTC datetimes, cut to the
+  millisecond. They replace the float epoch seconds.
+
+**Upgrading**
+
+- **Back up first** (`scripts/backup-db.sh`).
+- `0035` converts the session times; the stored floats keep their
+  milliseconds.
+- It then moves every stored message to a row. A session's messages are dated
+  evenly between its `created_at` and its `updated_at`, and each id carries its
+  message's millisecond, so the order is kept.
+- A stored list that does not parse is skipped. So is a message with no known
+  role. Both are logged.
+- A NUL character in text becomes U+FFFD, because Postgres text takes none.
+- `pincer_sessions.messages` is left as it was and no longer written; a later
+  revision drops it. The downgrade writes it again from the rows.
+
 #### UUIDv7 ids for every table (migrations 0031–0034)
 
 Every table's primary key is now a UUIDv7 `id`, minted by the writer and

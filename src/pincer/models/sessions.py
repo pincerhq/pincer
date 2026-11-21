@@ -1,11 +1,14 @@
 """Agent conversation sessions, one row per user and channel."""
 
+from datetime import datetime
+from typing import Any
+
 import sqlalchemy as sa
-from sqlalchemy import Column, ForeignKey, Index, LargeBinary, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, ForeignKey, Index, LargeBinary, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
-from pincer.db.types import Real, Uuid7
+from pincer.db.types import JsonbDocument, JsonDocument, Real, UtcDateTime, Uuid7
 from pincer.models.identity import profile_ref
 
 #: Session metadata marking a conversation that leaves long-term memory alone
@@ -30,12 +33,81 @@ class ChatSession(SQLModel, table=True):
     # Moved on a rename by its own repository (`move_user`, `reassign_user`), not `follow_profile`.
     profile_id: str | None = profile_ref("user_id", follows=False)
     channel: str = Field(sa_column=Column(Text(), nullable=False))
+    # Legacy: the history as one JSON list, read only by migration 0035, which moved it to
+    # `pincer_session_messages`. Nothing writes it any more; a later migration drops it.
     messages: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'[]'")))
     session_metadata: str | None = Field(
         default=None, sa_column=Column("metadata", Text(), nullable=False, server_default=sa.text("'{}'"))
     )
-    created_at: float = Field(sa_column=Column(Real(), nullable=False))
-    updated_at: float = Field(sa_column=Column(Real(), nullable=False))
+    created_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
+    updated_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
+
+
+#: The roles a stored message can have (`llm.base.MessageRole`).
+MESSAGE_ROLES = ("system", "user", "assistant", "tool_result")
+
+
+class SessionMessage(SQLModel, table=True):
+    """One message of a conversation, in the order (`created_at`, `id`).
+
+    `role` and `content` are always there; every other field belongs to some roles and is NULL
+    elsewhere (never `''` or `[]`). The CHECKs hold only what the code guarantees: a constraint the
+    agent could break would fail a turn's save, not the bug.
+
+    - `tool_call_id`: tool results only. `is_error`: an interrupted turn's result.
+    - `tool_calls`: assistant only, `[{id, name, arguments}]`.
+    - `raw` / `wire`: the provider's output verbatim and the "<provider>:<model>" that produced it,
+      replayed while a request goes to the same wire (`llm.replay`). An assistant message's, or a
+      compaction window's (a system message). `raw` and `tool_calls` are `json`, not `jsonb`, on
+      Postgres: they come back with their keys in the order they were written, so a request rebuilt
+      after a reload is the one sent before it.
+    - `images`: `[{sha256, media_type}]`, the bytes in `pincer_session_images`.
+    - `context`: the per-turn context of a user message (recalled memories, the time).
+    - `channel_message_id`, `updated_at`: the messenger's id of a user message, and when it was
+      edited there. User messages only.
+
+    `id` is a UUIDv7 carrying `created_at`'s millisecond; within one millisecond it orders the rows.
+    """
+
+    __tablename__ = "pincer_session_messages"
+    __table_args__ = (
+        CheckConstraint(f"role IN ({', '.join(repr(r) for r in MESSAGE_ROLES)})", name="ck_session_messages_role"),
+        CheckConstraint("role = 'tool_result' OR tool_call_id IS NULL", name="ck_session_messages_tool_call_id"),
+        CheckConstraint("role = 'assistant' OR tool_calls IS NULL", name="ck_session_messages_tool_calls"),
+        CheckConstraint(
+            "role IN ('assistant', 'system') OR (raw IS NULL AND wire IS NULL)", name="ck_session_messages_raw"
+        ),
+        CheckConstraint(
+            "role = 'user' OR (channel_message_id IS NULL AND updated_at IS NULL)", name="ck_session_messages_user_edit"
+        ),
+        Index("idx_session_messages_session_created", "session_id", "created_at", "id"),
+        Index(
+            "uq_session_messages_channel_message",
+            "session_id",
+            "channel_message_id",
+            unique=True,
+            postgresql_where=sa.text("channel_message_id IS NOT NULL"),
+            sqlite_where=sa.text("channel_message_id IS NOT NULL"),
+        ),
+    )
+
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    session_id: str = Field(
+        default=None,
+        sa_column=Column(Uuid7(), ForeignKey("pincer_sessions.id", ondelete="CASCADE"), nullable=False),
+    )
+    role: str = Field(sa_column=Column(Text(), nullable=False))
+    content: str = Field(default="", sa_column=Column(Text(), nullable=False, server_default=sa.text("''")))
+    tool_call_id: str | None = Field(default=None, sa_column=Column(Text()))
+    is_error: bool = Field(default=False, sa_column=Column(Boolean(), nullable=False, server_default=sa.false()))
+    tool_calls: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JsonDocument))
+    images: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JsonbDocument))
+    context: str | None = Field(default=None, sa_column=Column(Text()))
+    raw: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JsonDocument))
+    wire: str | None = Field(default=None, sa_column=Column(Text()))
+    channel_message_id: str | None = Field(default=None, sa_column=Column(Text()))
+    created_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
+    updated_at: datetime | None = Field(default=None, sa_column=Column(UtcDateTime()))
 
 
 class SessionImage(SQLModel, table=True):
