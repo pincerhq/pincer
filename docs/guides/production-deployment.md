@@ -15,8 +15,8 @@ Internet ──443──▶ Caddy (TLS, Let's Encrypt, WSS passthrough)
                   volume: pincer-prod-data (SQLite, WAL mode)
 ```
 
-`pincer` and `pincer-tasks` share Redis through names under
-`PINCER_REDIS_PREFIX` (default `{environment}:{service}`, so
+`pincer` and `pincer-tasks` share Redis (`PINCER_CACHE_BACKEND_URL`) through
+names under `PINCER_CACHE_PREFIX` (default `{environment}:{service}`, so
 `production:pincer:…` with `PINCER_ENVIRONMENT=production`). Both containers
 must use the same value. If several deployments share one Redis, give each a
 distinct prefix. See

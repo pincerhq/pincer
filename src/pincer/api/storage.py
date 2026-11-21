@@ -30,6 +30,7 @@ from starlette.responses import Response
 
 from pincer.api.auth import InteractiveIdentity
 from pincer.config import get_settings_relaxed
+from pincer.core.ratelimit import rate_limit
 from pincer.storage.browser import Download, StorageBrowser, get_storage_browser
 from pincer.storage.clients import STORAGE_HINTS
 from pincer.storage.errors import KeyNotFound, StorageError, describe
@@ -262,7 +263,14 @@ async def read_text(browser: StorageBrowserDep, key: str = Query(..., min_length
     return await _run(browser, lambda b: b.read_text(key))
 
 
+# Writes to the storage root (disk or bucket) share one per-user budget. An
+# upload's body is read before this check runs; the pre-auth IP ceiling is what
+# stops a flood of uploads (pincer.api.rate_limits).
+_WRITE_LIMIT = rate_limit("60/minute", name="storage_write")
+
+
 @router.put("/text", response_model=TextSavedOut)
+@_WRITE_LIMIT
 async def save_text(body: TextIn, identity: InteractiveIdentity, browser: StorageBrowserDep) -> dict[str, object]:
     """Save a text file. With `etag`, 409 if it changed on the server since it was read."""
     result = await _run(browser, lambda b: b.write_text(body.key, body.content, body.etag))
@@ -271,6 +279,7 @@ async def save_text(body: TextIn, identity: InteractiveIdentity, browser: Storag
 
 
 @router.post("/upload", response_model=UploadOut)
+@_WRITE_LIMIT
 async def upload(
     identity: InteractiveIdentity,
     browser: StorageBrowserDep,
@@ -287,6 +296,7 @@ async def upload(
 
 
 @router.post("/folders", response_model=FolderOut, status_code=201)
+@_WRITE_LIMIT
 async def create_folder(body: FolderIn, identity: InteractiveIdentity, browser: StorageBrowserDep) -> dict[str, object]:
     """Create a folder (an empty `.keep` marker on object stores)."""
     result = await _run(browser, lambda b: b.mkdir(body.prefix))
@@ -295,6 +305,7 @@ async def create_folder(body: FolderIn, identity: InteractiveIdentity, browser: 
 
 
 @router.post("/move", response_model=MoveOut, response_model_by_alias=True)
+@_WRITE_LIMIT
 async def move(body: MoveIn, identity: InteractiveIdentity, browser: StorageBrowserDep) -> dict[str, object]:
     """Move or rename a file or folder. 409 if the target exists and `overwrite` is false, or if the
     target contains the source. A source or target in a protected prefix is refused (403)."""
@@ -304,6 +315,7 @@ async def move(body: MoveIn, identity: InteractiveIdentity, browser: StorageBrow
 
 
 @router.delete("/object", response_model=DeletedOut)
+@_WRITE_LIMIT
 async def delete(
     identity: InteractiveIdentity,
     browser: StorageBrowserDep,

@@ -8,6 +8,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from pincer.core.cache.decorators import cache_response
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -142,7 +144,13 @@ def _mcp_skill_entries() -> list[dict[str, Any]]:
     return entries
 
 
+# The catalogue is the same for every caller and costs a tool-registry walk;
+# a minute of staleness after an integration or MCP change is acceptable.
+_CACHED = cache_response(ttl=60, scope="public")
+
+
 @router.get("")
+@_CACHED
 async def list_integrations() -> dict[str, list[dict[str, Any]]]:
     """List built-in tools, configured integrations (Google Workspace, Slack), and MCP servers."""
     integrations: list[dict[str, Any]] = []
@@ -273,6 +281,7 @@ async def _tool_usage(prefix: str) -> dict[str, int]:
 
 
 @router.get("/{slug}")
+@_CACHED
 async def get_integration(slug: str) -> dict[str, Any]:
     if slug not in _CATALOG:
         raise HTTPException(status_code=404, detail=f"Unknown integration: {slug}")

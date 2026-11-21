@@ -68,6 +68,7 @@ dependencies = [
     "argon2-cffi>=23.1.0",
     "PyJWT>=2.8.0",
     "tzdata>=2026.4",
+    "hishel[async,fastapi]>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -111,8 +112,12 @@ telemetry = [
     # references are rejected by PyPI). Source installs resolve it from git via uv.
     "pincer-telemetry",
 ]
-tasks-redis = ["repid[redis]"]
-all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres,remote-skills]"]
+# Redis backend for PINCER_CACHE_BACKEND_URL / PINCER_TASK_BROKER_URL: task broker,
+# API rate limiting and the HTTP response cache. Not `hishel[redis]`: it pins
+# redis>=8.1 while repid pins redis<8, and hishel's AsyncRedisStorage only uses
+# commands redis-py 7 already has (tests/test_http_cache.py runs it on redis-py 7).
+redis = ["repid[redis]"]
+all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,redis,postgres,remote-skills]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -125,6 +130,7 @@ dev = [
     "types-PyYAML>=6.0.0",
     "httpx>=0.27.0",
     "pytest-xdist>=3.6.0",
+    "fakeredis[lua]>=2.26",
 ]
 # Postgres runtime (asyncpg) and Alembic migrations (psycopg, sync).
 postgres = [

@@ -5,6 +5,12 @@ Backs `pincer voice list` / `pincer voice test`, the doctor voice checks, and
 the startup validation that makes a bad voice ID fail loudly before the first
 call instead of mid-call. Synchronous httpx on purpose: every caller (typer
 CLI, doctor, startup wiring) is sync or can afford the one-off blocking call.
+
+The two lookups (`list_voices`, `get_voice`) go through the sync cached client
+(`pincer.core.cache.client`): a 200 is reused for `PINCER_CACHE_DEFAULT_TTL`
+seconds, keyed per API key, so `pincer voice list`, the doctor checks and the
+startup validation don't ask ElevenLabs the same thing over and over. Errors
+and missing voices are never cached; synthesis (POST) never is.
 """
 
 from __future__ import annotations
@@ -42,6 +48,16 @@ def _headers(api_key: str) -> dict[str, str]:
     return {"xi-api-key": api_key}
 
 
+def _lookup_client(timeout: float) -> Any:
+    """An httpx client for the GET lookups, cached per API key (see the module docstring)."""
+    from pincer.config import get_settings_relaxed
+    from pincer.core.cache.client import cached_client
+
+    return cached_client(
+        get_settings_relaxed(), "elevenlabs", key_headers=("xi-api-key",), base_url=API_BASE, timeout=timeout
+    )
+
+
 def _parse_voice(data: dict[str, Any]) -> VoiceInfo:
     languages = [
         str(entry.get("language", "")) for entry in data.get("verified_languages") or [] if entry.get("language")
@@ -66,7 +82,7 @@ def list_voices(api_key: str) -> list[VoiceInfo]:
     voices: list[VoiceInfo] = []
     params: dict[str, Any] = {"page_size": 100}
     try:
-        with httpx.Client(base_url=API_BASE, timeout=REQUEST_TIMEOUT_S) as client:
+        with _lookup_client(REQUEST_TIMEOUT_S) as client:
             while True:
                 resp = client.get("/v2/voices", headers=_headers(api_key), params=params)
                 resp.raise_for_status()
@@ -89,7 +105,7 @@ def get_voice(api_key: str, voice_id: str) -> VoiceInfo | None:
     import httpx
 
     try:
-        with httpx.Client(base_url=API_BASE, timeout=REQUEST_TIMEOUT_S) as client:
+        with _lookup_client(REQUEST_TIMEOUT_S) as client:
             resp = client.get(f"/v1/voices/{voice_id}", headers=_headers(api_key))
     except httpx.HTTPError as e:
         raise VoiceLookupError(f"ElevenLabs unreachable: {e}") from e

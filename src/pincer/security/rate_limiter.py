@@ -1,104 +1,71 @@
 """
-Pincer Rate Limiter — Token-bucket per-user + global rate limiting.
+Pincer Rate Limiter — per-user message and tool-call limits for the channels, plus the LLM semaphore.
 
-- Per-user: messages/min, tool calls/min (token bucket)
-- Global: concurrent LLM calls (semaphore)
-- Spend and the daily budget live in the cost service (pincer.services.costs)
-- All async-safe, zero external dependencies
+- Per-user: messages/min, tool calls/min — token buckets on `pincer.core.ratelimit`,
+  stored in the cache backend (`PINCER_CACHE_BACKEND_URL`) under
+  `<prefix>:kv:ratelimit:channel_message|channel_tool:<user>`. With Redis the
+  budget holds across `pincer run` / `pincer run tasks` processes and restarts.
+- Global: concurrent LLM calls (an in-process semaphore).
+- Spend and the daily budget live in the cost service (pincer.services.costs).
+- Fails open: a broken backend never stops the agent from answering.
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
-from dataclasses import dataclass, field
+import math
 from typing import Any
 
+from pincer.core.cache.keys import KeySpace
+from pincer.core.ratelimit import AsyncLimiter, AsyncLimiterFactory, AsyncMemoryStorage, Rate, TokenBucketStrategy
 from pincer.exceptions import RateLimitExceeded
 
 
-@dataclass
-class TokenBucket:
-    """Async-safe token bucket rate limiter."""
-
-    capacity: float
-    refill_rate: float  # tokens per second
-    tokens: float = field(init=False)
-    last_refill: float = field(init=False)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-
-    def __post_init__(self) -> None:
-        self.tokens = self.capacity
-        self.last_refill = time.monotonic()
-
-    async def consume(self, amount: float = 1.0) -> tuple[bool, float]:
-        """Try to consume tokens. Returns (allowed, wait_seconds)."""
-        async with self._lock:
-            self._refill()
-            if self.tokens >= amount:
-                self.tokens -= amount
-                return True, 0.0
-            deficit = amount - self.tokens
-            wait_time = deficit / self.refill_rate
-            return False, wait_time
-
-    def _refill(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self.last_refill
-        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
-        self.last_refill = now
+def too_fast_message(wait_seconds: float) -> str:
+    """The refusal for a user sending messages too fast; web chat (`pincer.api.chat`) says the same."""
+    wait = max(1, math.ceil(wait_seconds))
+    return f"You're sending messages too fast! Please wait {wait}s before sending another message."
 
 
 class RateLimiter:
-    """Per-user + global rate limiter for the Pincer agent."""
+    """Per-user + global rate limiter for the Pincer agent.
+
+    Args:
+        messages_per_minute: Messages one user may send per minute (bursts up to it).
+        tool_calls_per_minute: Tool calls one user may trigger per minute.
+        max_concurrent_llm: LLM requests in flight at once, in this process.
+        limiters: Where the buckets live and how they are named; in-process
+            memory when omitted, `AsyncLimiterFactory.from_settings(settings)` in the app.
+    """
 
     def __init__(
         self,
         messages_per_minute: int = 30,
         tool_calls_per_minute: int = 20,
         max_concurrent_llm: int = 5,
+        *,
+        limiters: AsyncLimiterFactory | None = None,
     ) -> None:
-        self._messages_per_minute = messages_per_minute
-        self._tool_calls_per_minute = tool_calls_per_minute
-        self._user_message_buckets: dict[str, TokenBucket] = {}
-        self._user_tool_buckets: dict[str, TokenBucket] = {}
+        limiters = limiters or AsyncLimiterFactory(AsyncMemoryStorage(), KeySpace("local:pincer"))
+        self._messages = limiters.limiter(
+            Rate.per_minute(messages_per_minute), "channel_message", TokenBucketStrategy()
+        )
+        self._tools = limiters.limiter(Rate.per_minute(tool_calls_per_minute), "channel_tool", TokenBucketStrategy())
         self._llm_semaphore = asyncio.Semaphore(max_concurrent_llm)
-
-    def _get_message_bucket(self, user_id: str) -> TokenBucket:
-        if user_id not in self._user_message_buckets:
-            rpm = self._messages_per_minute
-            self._user_message_buckets[user_id] = TokenBucket(
-                capacity=float(rpm),
-                refill_rate=rpm / 60.0,
-            )
-        return self._user_message_buckets[user_id]
-
-    def _get_tool_bucket(self, user_id: str) -> TokenBucket:
-        if user_id not in self._user_tool_buckets:
-            tpm = self._tool_calls_per_minute
-            self._user_tool_buckets[user_id] = TokenBucket(
-                capacity=float(tpm),
-                refill_rate=tpm / 60.0,
-            )
-        return self._user_tool_buckets[user_id]
 
     async def check_message(self, user_id: str) -> None:
         """Raise RateLimitExceeded if user is sending messages too fast."""
-        bucket = self._get_message_bucket(user_id)
-        allowed, wait = await bucket.consume()
-        if not allowed:
-            raise RateLimitExceeded(
-                f"You're sending messages too fast! Please wait {wait:.0f}s before sending another message.",
-                wait_seconds=wait,
-            )
+        result = await self._messages.hit(user_id)
+        if not result.allowed:
+            raise RateLimitExceeded(too_fast_message(result.retry_after), wait_seconds=result.retry_after)
 
     async def check_tool_call(self, user_id: str) -> None:
         """Raise RateLimitExceeded if user has too many tool calls."""
-        bucket = self._get_tool_bucket(user_id)
-        allowed, wait = await bucket.consume()
-        if not allowed:
+        result = await self._tools.hit(user_id)
+        if not result.allowed:
+            wait = result.retry_after
             raise RateLimitExceeded(
-                f"Too many tool calls! Please wait {wait:.0f}s before running another tool.",
+                f"Too many tool calls! Please wait {math.ceil(wait)}s before running another tool.",
                 wait_seconds=wait,
             )
 
@@ -106,19 +73,27 @@ class RateLimiter:
         return self._llm_semaphore
 
     async def get_status(self, user_id: str) -> dict[str, Any]:
-        msg_bucket = self._get_message_bucket(user_id)
-        tool_bucket = self._get_tool_bucket(user_id)
+        """What the user has left, read without spending anything."""
+
+        async def remaining(limiter: AsyncLimiter) -> int:
+            result = await limiter.check(user_id)
+            if result.failed:  # backend unreachable: nothing is known, report the full limit
+                return result.limit if result.allowed else 0
+            # `check` reports what would be left after one more; add it back.
+            return result.remaining + 1 if result.allowed else 0
+
         return {
-            "messages_remaining": int(msg_bucket.tokens),
-            "messages_limit": self._messages_per_minute,
-            "tool_calls_remaining": int(tool_bucket.tokens),
-            "tool_calls_limit": self._tool_calls_per_minute,
+            "messages_remaining": await remaining(self._messages),
+            "messages_limit": self._messages.rate.limit,
+            "tool_calls_remaining": await remaining(self._tools),
+            "tool_calls_limit": self._tools.rate.limit,
             "concurrent_llm_available": self._llm_semaphore._value,
         }
 
-    def cleanup_user(self, user_id: str) -> None:
-        self._user_message_buckets.pop(user_id, None)
-        self._user_tool_buckets.pop(user_id, None)
+    async def cleanup_user(self, user_id: str) -> None:
+        """Forget the user's buckets (a fresh budget)."""
+        await self._messages.reset(user_id)
+        await self._tools.reset(user_id)
 
 
 _rate_limiter: RateLimiter | None = None

@@ -1,32 +1,9 @@
 """Tests for the rate limiter."""
 
-import asyncio
-
 import pytest
 
 from pincer.exceptions import RateLimitExceeded
-from pincer.security.rate_limiter import RateLimiter, TokenBucket
-
-
-@pytest.mark.asyncio
-async def test_token_bucket_allows_within_limit():
-    bucket = TokenBucket(capacity=5, refill_rate=5 / 60)
-    for _ in range(5):
-        allowed, _ = await bucket.consume()
-        assert allowed is True
-    allowed, wait = await bucket.consume()
-    assert allowed is False
-    assert wait > 0
-
-
-@pytest.mark.asyncio
-async def test_token_bucket_refills():
-    bucket = TokenBucket(capacity=2, refill_rate=100)
-    await bucket.consume()
-    await bucket.consume()
-    await asyncio.sleep(0.05)
-    allowed, _ = await bucket.consume()
-    assert allowed is True
+from pincer.security.rate_limiter import RateLimiter
 
 
 @pytest.mark.asyncio
@@ -77,6 +54,25 @@ async def test_user_status_reports_rates_but_no_spend():
 
 
 @pytest.mark.asyncio
+async def test_user_status_with_the_backend_down_never_exceeds_the_limit():
+    """A fail-open result carries no count: report the limit, not limit + 1."""
+    from pincer.core.cache.keys import KeySpace
+    from pincer.core.ratelimit import AsyncLimiterFactory, AsyncRateLimitStorage
+
+    class _Down(AsyncRateLimitStorage):
+        async def hit(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+        async def reset(self, key):
+            return None
+
+    limiter = RateLimiter(30, 20, limiters=AsyncLimiterFactory(_Down(), KeySpace("t:pincer")))
+    status = await limiter.get_status("u1")
+    assert status["messages_remaining"] == status["messages_limit"] == 30
+    assert status["tool_calls_remaining"] == status["tool_calls_limit"] == 20
+
+
+@pytest.mark.asyncio
 async def test_per_user_isolation():
     limiter = RateLimiter(messages_per_minute=2)
     await limiter.check_message("alice")
@@ -94,6 +90,6 @@ async def test_cleanup_user():
     await limiter.check_message("u1")
     with pytest.raises(RateLimitExceeded):
         await limiter.check_message("u1")
-    limiter.cleanup_user("u1")
+    await limiter.cleanup_user("u1")
     # After cleanup, user gets fresh bucket
     await limiter.check_message("u1")

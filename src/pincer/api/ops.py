@@ -19,10 +19,18 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from pincer.config import get_settings_relaxed
+from pincer.core.cache.decorators import cache_response
+from pincer.core.ratelimit import rate_limit
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ops", tags=["ops"])
+
+# Deployment-wide aggregates, the same for every caller and slow to compute,
+# kept a minute in one shared entry (`@cache_response(scope="public")`). Unlike
+# the hishel `cache_control` cache, a hit still counts against the rate limits.
+# `/signals` and `/alerts` promise "right now" and stay uncached.
+_CACHED = cache_response(ttl=60, scope="public")
 
 
 class SignalOut(BaseModel):
@@ -141,6 +149,7 @@ async def current_alerts() -> list[AlertOut]:
 
 
 @router.get("/slo", response_model=SLOReportOut)
+@_CACHED
 async def slo_report() -> SLOReportOut:
     """Month-to-date SLO status and error-budget burn."""
     from pincer.observability.slo import collect
@@ -157,6 +166,7 @@ async def slo_report() -> SLOReportOut:
 
 
 @router.get("/failures", response_model=FailureBreakdownOut)
+@_CACHED
 async def failure_breakdown(hours: float = Query(default=168.0, ge=1, le=8760)) -> FailureBreakdownOut:
     """Failure codes over a window, ranked, with their human descriptions."""
     from pincer.observability.failure_codes import describe
@@ -191,6 +201,8 @@ async def canary_history(limit: int = Query(default=20, ge=1, le=200)) -> list[C
 
 
 @router.post("/canary", response_model=CanaryTriggerOut, status_code=202)
+# Each run places a real call to the one configured number: a deployment-wide cap.
+@rate_limit("6/hour", scope="global", detail="The canary has run 6 times this hour; wait before running it again.")
 async def trigger_canary() -> CanaryTriggerOut:
     """Run the synthetic canary now.
 
@@ -218,6 +230,7 @@ async def trigger_canary() -> CanaryTriggerOut:
 
 
 @router.get("/digest")
+@_CACHED
 async def weekly_digest() -> dict[str, str]:
     """The weekly digest text, rendered on demand (does not send it anywhere)."""
     from pincer.observability.digest import build_digest
@@ -247,6 +260,7 @@ class GAGateOut(BaseModel):
 
 
 @router.get("/ga-gate", response_model=GAGateOut)
+@_CACHED
 async def ga_gate(days: int = Query(default=14, ge=1, le=365)) -> GAGateOut:
     """The GA exit criteria evaluated against real data.
 
@@ -269,6 +283,7 @@ async def ga_gate(days: int = Query(default=14, ge=1, le=365)) -> GAGateOut:
 
 
 @router.get("/ga-gate/report")
+@_CACHED
 async def ga_gate_markdown(days: int = Query(default=14, ge=1, le=365)) -> dict[str, str]:
     """The sign-off document, rendered as markdown."""
     from pincer.observability.ga_gate import evaluate, render_markdown

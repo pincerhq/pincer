@@ -6,6 +6,9 @@ extra:
   generator: false
 plugins:
   - search
+# Internal records (design notes, sprint specs): kept in the repo, never built.
+exclude_docs: |
+  specs/
 nav:
   - Getting started:
     - index.md
@@ -19,6 +22,7 @@ nav:
     - Tools: core-components/tools.md
     - Voice calling: core-components/voice-calling.md
     - Background tasks: core-components/background-tasks.md
+    - Rate limiting and caching: core-components/rate-limiting-and-caching.md
     - Pincer MCP Server: core-components/pincer-mcp-server.md
     - CLI: core-components/cli.md
   - Reference:

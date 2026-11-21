@@ -11,7 +11,7 @@ results and hands them to the real router.
 
 The transport (`DeliveryBackend`) is selected the same way as the repid
 broker itself (`register_default_server` in `pincer.tasks.app`) — in-process
-for `task_broker=memory`, Redis pub/sub for `task_broker=redis` — so the
+for a `memory://` task broker, Redis pub/sub for a `redis://` one — so the
 actor code path is identical regardless of deployment topology. This is a
 deliberate simplification: even in the single-process default case, results
 now take one extra async hop through the backend instead of a direct call.
@@ -29,7 +29,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pincer.channels.base import ChannelType
-from pincer.redis_keys import RedisKeys
+from pincer.config.dsn import is_redis
+from pincer.core.cache.keys import KeySpace
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Logical name; the real pub/sub channel is `RedisKeys.pubsub(TASK_RESULTS_CHANNEL)`,
+# Logical name; the real pub/sub channel is `KeySpace.pubsub(TASK_RESULTS_CHANNEL)`,
 # e.g. `production:pincer:pubsub:task_results`. Pub/sub ignores the DB index, so
 # the prefix is what keeps deployments sharing one Redis apart.
 TASK_RESULTS_CHANNEL = "task_results"
@@ -99,7 +100,7 @@ class RedisDeliveryBackend:
 
     def __init__(self, redis_url: str, channel: str) -> None:
         # Imported here so the default in-memory broker works without the
-        # `tasks-redis` extra installed.
+        # `redis` extra installed.
         from redis.asyncio import Redis
 
         self._redis: Redis = Redis.from_url(redis_url)
@@ -129,10 +130,10 @@ class RedisDeliveryBackend:
 
 
 def create_delivery_backend(settings: Any) -> DeliveryBackend:
-    """Select the delivery backend matching `settings.task_broker`, mirroring `register_default_server`."""
-    if settings.task_broker == "redis":
-        channel = RedisKeys.from_settings(settings).pubsub(TASK_RESULTS_CHANNEL)
-        return RedisDeliveryBackend(settings.task_broker_url, channel)
+    """Select the delivery backend matching `settings.task_broker_url`, mirroring `register_default_server`."""
+    if is_redis(settings.task_broker_url):
+        channel = KeySpace.for_tasks(settings).pubsub(TASK_RESULTS_CHANNEL)
+        return RedisDeliveryBackend(str(settings.task_broker_url), channel)
     return InMemoryDeliveryBackend()
 
 

@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### HTTP API rate limiting and an opt-in response cache (#404)
+
+- Every `/api/*` request is rate limited. A per-IP ceiling runs before auth
+  (`PINCER_RATE_API_IP_PER_MIN`, 3000/min) to stop floods. After auth, each
+  user has their own limit (`PINCER_RATE_API_USER_PER_MIN`, 300/min), so many
+  users behind one company IP don't share a budget. Requests without an
+  identity are limited per IP (`PINCER_RATE_API_ANON_PER_MIN`, 120/min).
+  Refusals are `429` with `Retry-After` and `X-RateLimit-*`. A broken backend
+  lets requests through. `PINCER_RATE_API_DISABLED` switches it off.
+- Routes marked with `cache_control(..., public=True)` are served through
+  hishel's RFC 9111 cache, inside auth and the rate limits. The
+  `/api/ops/slo`, `failures`, `digest` and `ga-gate` aggregates are cached
+  for 60 s.
+- New packages `pincer.core.ratelimit` (limiters, memory and Redis storage,
+  ASGI middleware) and `pincer.core.cache` (`KeySpace`, shared Redis clients,
+  hishel storages, cached outbound httpx clients). Both work in sync and async
+  modes: `Limiter` / `AsyncLimiter`, `MemoryStorage` / `AsyncMemoryStorage`,
+  `cached_client` / `async_cached_client`, and so on. The `redis` extra replaces
+  `tasks-redis`, which is removed: install `pincer-agent[redis]`.
+- The ElevenLabs voice lookups are cached for `PINCER_CACHE_DEFAULT_TTL`,
+  per API key. Errors and missing voices are not cached.
+- Per-route decorators override the defaults. `@rate_limit("20/minute", scope=...)`
+  (stackable) and `@no_rate_limit` replace the user/anon limit on a route, each
+  limit with a bucket of its own. `@cache_response(ttl=..., scope="user" | "public")`
+  caches an endpoint's return value per user, applies `response_model` on a hit,
+  and takes precedence over `cache_control`. Invalidate with
+  `response_cache(app).invalidate(route, user=...)`.
+- The user/anon limit now runs after routing, as an app-level dependency, so the
+  decorators can be read. As a result, `/api/docs` and `/openapi.json` have the IP
+  ceiling only, and a hit in the shared `cache_control` cache no longer counts
+  against the user limit.
+- The limits and caches now cover pincer's own routes:
+  - Web chat (`/api/chat/message`, `/stream`) gets the channels' per-user
+    message limit and its "sending messages too fast" 429.
+  - Outbound calls (10/h), the canary (6/h), listen-in tickets, storage writes,
+    skills rebuild and credential changes (5/h) have route limits.
+  - The ops reports, integrations, skills, costs and audit stats are cached for
+    30–60 s, shared. A skills rebuild drops its cache.
+  - The channels' message and tool limits and the demo call's caps use the cache
+    backend, so with Redis they hold across processes. The demo call fails closed
+    (503) when the backend is down.
+  - `@rate_limit` gained `detail=`, `scope="global"` and rate functions.
+    Limiters gained `check()` and `fail_open=False`.
+  - `@cache_response(scope="public")` sends `Cache-Control: public` only
+    without credentials.
+  - `pincer.security.TokenBucket` is removed, and `RateLimiter.cleanup_user` is
+    now async. `RateLimiter` takes `limiters=AsyncLimiterFactory(...)`.
+  - Stacked route limits are all checked before any is charged, so a refused
+    request spends nothing. `LimiterFactory` / `AsyncLimiterFactory` and
+    `Charge` with `charge_all` / `acharge_all` are the shared building blocks.
+  - `@cache_response` entries are named after the endpoint's module-qualified
+    name, so endpoints with the same function name never share entries.
+    `invalidate()` takes the endpoint.
+  - `pincer doctor` gains a `cache_backend` check. It covers the removed
+    settings, and a `redis://` URL without the `redis` extra.
+- See [Rate limiting and caching](docs/core-components/rate-limiting-and-caching.md).
+
 #### `search_path=` in `PINCER_DATABASE_URL`
 
 - `PINCER_DATABASE_URL` takes `?search_path=<schema>`, the same form as
@@ -43,6 +100,24 @@ Always on, without setting anything:
   session resumes without re-pairing.
 
 ### Changed
+
+#### BREAKING: one cache backend and prefix; `PINCER_TASK_BROKER` and `PINCER_REDIS_PREFIX` are removed (#404)
+
+- `PINCER_CACHE_BACKEND_URL` (`memory://` by default, or `redis://…`) is the
+  backend for rate limiting, the HTTP cache and the task broker. The URL
+  scheme picks the engine, so `PINCER_TASK_BROKER=memory|redis` is gone.
+  `PINCER_TASK_BROKER_URL` now defaults to the cache URL and only needs setting
+  to give tasks their own Redis.
+- `PINCER_CACHE_PREFIX` replaces `PINCER_REDIS_PREFIX`. The template rules are
+  the same, and the memory backends use the prefix too, so it is always
+  rendered at startup. `PINCER_TASK_PREFIX` overrides it for the task streams
+  and result channel.
+- While `PINCER_TASK_BROKER` or `PINCER_REDIS_PREFIX` is still set, `pincer
+  run` refuses to start, and `pincer doctor` reports it CRITICAL.
+- Migrating: replace `PINCER_TASK_BROKER=redis` + `PINCER_TASK_BROKER_URL=<url>`
+  with `PINCER_CACHE_BACKEND_URL=<url>`, and rename `PINCER_REDIS_PREFIX` to
+  `PINCER_CACHE_PREFIX`. Stream and channel names do not change.
+- `pincer run tasks` no longer prints the broker password.
 
 #### UUIDv7 ids for every table (migrations 0031–0034)
 

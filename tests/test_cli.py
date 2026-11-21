@@ -173,30 +173,30 @@ def test_run_telemetry_init_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch,
     assert "telemetry boom" in result.output
 
 
-def _mock_settings_for_run(monkeypatch: pytest.MonkeyPatch, *, task_broker: str) -> None:
+def _mock_settings_for_run(monkeypatch: pytest.MonkeyPatch, *, task_broker_url: str) -> None:
     from unittest.mock import MagicMock
 
     mock_settings = MagicMock()
     mock_settings.log_level.value = "WARNING"
     mock_settings.telemetry_uptrace_dsn = None
     mock_settings.telemetry_posthog_dsn = None
-    mock_settings.task_broker = task_broker
+    mock_settings.task_broker_url = task_broker_url
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
 
 
 def test_run_tasks_requires_redis_broker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`pincer run tasks` exits 1 with a clear message when task_broker isn't redis."""
-    _mock_settings_for_run(monkeypatch, task_broker="memory")
+    """`pincer run tasks` exits 1 with a clear message when the task broker isn't Redis."""
+    _mock_settings_for_run(monkeypatch, task_broker_url="memory://")
 
     result = runner.invoke(app, ["run", "tasks"])
 
     assert result.exit_code == 1
-    assert "PINCER_TASK_BROKER=redis" in result.output
+    assert "requires a Redis task broker" in result.output
 
 
 def test_run_tasks_dispatches_to_run_tasks_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """`pincer run tasks` calls _run_tasks_worker (not _run_agent) once the broker is redis."""
-    _mock_settings_for_run(monkeypatch, task_broker="redis")
+    _mock_settings_for_run(monkeypatch, task_broker_url="redis://localhost:6379/0")
 
     called: list[object] = []
 
@@ -406,6 +406,9 @@ def _mock_settings_for_build_core(tmp_path: Path):
     settings.rate_messages_per_min = 20
     settings.rate_tools_per_min = 20
     settings.max_concurrent_llm = 2
+    settings.cache_backend_url = "memory://"
+    settings.cache_prefix = "{environment}:{service}"
+    settings.environment = "test"
     settings.memory_enabled = False
     settings.skills_dir = tmp_path / "skills"
     settings.skills_max_loaded_per_root = 50

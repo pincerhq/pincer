@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -30,12 +30,14 @@ from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.ops import router as ops_router
 from pincer.api.public_demo import router as public_demo_router
+from pincer.api.rate_limits import APIRateLimits, enforce_rate_limits
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
 from pincer.api.storage import router as storage_router
 from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
+from pincer.core.ratelimit import RateLimitMiddleware
 from pincer.services.auth import AuthError, auth_service_for
 
 if TYPE_CHECKING:
@@ -130,6 +132,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.getLogger(__name__).debug("Telephony telemetry shutdown failed", exc_info=True)
     await audit.shutdown()
 
+    # The rate limiter and a redis:// HTTP cache share these clients; sync
+    # callers in this process (cached outbound clients) use the sync registry.
+    from pincer.core.cache.backend import aclose_all, close_all
+
+    await aclose_all()
+    close_all()
+
     from pincer.db.engine import dispose_engines
 
     await dispose_engines()
@@ -143,6 +152,8 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",  # if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
+        # After routing and auth: the route's @rate_limit settings, else the default user/anon limit.
+        dependencies=[Depends(enforce_rate_limits)],
     )
 
     # Add Bearer token security scheme so the Swagger UI shows an Authorize button.
@@ -179,6 +190,18 @@ def create_app() -> FastAPI:
         # Flat windows: this key can be aimed at someone else's account.
         escalate=False,
     )
+
+    # Registered inside-out (the last-added middleware is outermost):
+    # CORS → IP ceiling → auth → HTTP cache → routing → enforce_rate_limits → endpoint.
+    from pincer.core.cache.decorators import ResponseCache
+    from pincer.core.cache.middleware import HTTPCacheMiddleware
+    from pincer.core.cache.storage import create_async_http_cache_storage
+
+    app.state.http_cache_storage = create_async_http_cache_storage(settings)
+    app.add_middleware(HTTPCacheMiddleware, storage=app.state.http_cache_storage)
+    app.state.response_cache = ResponseCache.from_settings(settings)
+    rate_limits = None if settings.rate_api_disabled else APIRateLimits.from_settings(settings)
+    app.state.rate_limits = rate_limits
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -231,6 +254,11 @@ def create_app() -> FastAPI:
 
         auth_guard.record_success(ip)
         return await call_next(request)
+
+    if rate_limits is not None:
+        # Before auth: a host flooding the API is refused before any token
+        # lookup. No X-RateLimit-* headers here; the identity limit reports its own.
+        app.add_middleware(RateLimitMiddleware, identify=rate_limits.by_ip, expose_headers=False)
 
     # Registered last on purpose. Starlette's add_middleware() inserts at index 0
     # and the stack is built in reverse, so the last-added middleware is the

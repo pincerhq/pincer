@@ -36,6 +36,7 @@ from pincer.api.approvals import (
 )
 from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
+from pincer.core.ratelimit import Rate, RateLimitResult, rate_limit
 from pincer.core.session import channel_session_key, conversation_key
 from pincer.exceptions import BudgetCheckFailedError, LLMError
 from pincer.services.voice import CallsServiceDep
@@ -48,6 +49,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+def _message_rate() -> Rate:
+    """The channels' per-user message rate (`PINCER_RATE_MESSAGES_PER_MIN`), read per request."""
+    from pincer.config import get_settings_relaxed
+
+    return Rate.per_minute(get_settings_relaxed().rate_messages_per_min)
+
+
+def _too_fast(result: RateLimitResult) -> str:
+    """The channels' wording, so web chat refuses the same way."""
+    from pincer.security.rate_limiter import too_fast_message
+
+    return too_fast_message(result.retry_after)
+
+
+# Each turn is an LLM call: web chat gets the channels' per-user message limit
+# (a token bucket, as there). `name="chat"` gives /message and /stream one budget.
+_CHAT_LIMIT = rate_limit(_message_rate, name="chat", strategy="token_bucket", detail=_too_fast)
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -147,6 +167,7 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 @router.post("/message")
+@_CHAT_LIMIT
 async def post_message(
     body: ChatIn,
     request: Request,
@@ -185,6 +206,7 @@ async def post_message(
 
 
 @router.post("/stream")
+@_CHAT_LIMIT
 async def post_stream(
     body: ChatIn,
     request: Request,

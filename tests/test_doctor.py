@@ -36,8 +36,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 identity management (issue #348) + 4 LLM effort and thinking (issue #345)
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
     # + 1 WhatsApp session store + 1 telemetry config
-    # + 1 LLM endpoints + 1 LLM features switched off (issue #358)
-    assert len(report.checks) == 75
+    # + 1 LLM endpoints + 1 LLM features switched off (issue #358) + 1 API rate limits + 1 cache backend (issue #404)
+    assert len(report.checks) == 77
 
     assert 0 <= report.score <= 100
 
@@ -2671,3 +2671,59 @@ def test_whatsapp_session_store_run_as_root_other_owner_passes_with_note(tmp_pat
     assert result.status == CheckStatus.PASS
     assert "euid=0" in result.message
     assert "checked as root" in result.message
+
+
+# ── Cache backend and API rate limits (issue #404) ──────────────────────────
+
+
+def _backend_cfg(url: str = "memory://", broker: str | None = None, **extra: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        cache_backend_url=url,
+        task_broker_url=broker or url,
+        rate_api_disabled=False,
+        rate_api_ip_per_min=3000,
+        rate_api_user_per_min=300,
+        rate_api_anon_per_min=120,
+        environment="development",
+        **extra,
+    )
+
+
+def test_cache_backend_passes_and_hides_the_password(tmp_path):
+    result = SecurityDoctor(config_dir=tmp_path)._check_cache_backend(_backend_cfg("redis://:s3cret@redis:6379/0"))
+    assert result.status == CheckStatus.PASS
+    assert "s3cret" not in result.message
+    assert "redis://:***@redis:6379/0" in result.message
+
+
+@pytest.mark.parametrize("name", ["PINCER_TASK_BROKER", "PINCER_REDIS_PREFIX"])
+def test_cache_backend_flags_removed_settings(tmp_path, monkeypatch, name):
+    monkeypatch.setenv(name, "redis")
+    result = SecurityDoctor(config_dir=tmp_path)._check_cache_backend(_backend_cfg())
+    assert result.status == CheckStatus.CRITICAL
+    assert name in result.fix_hint
+
+
+def test_cache_backend_flags_redis_without_the_extra(tmp_path, monkeypatch):
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "redis" else real(name, *a))
+    result = SecurityDoctor(config_dir=tmp_path)._check_cache_backend(
+        _backend_cfg("memory://", broker="redis://redis:6379/0")
+    )
+    assert result.status == CheckStatus.CRITICAL
+    assert "PINCER_TASK_BROKER_URL" in result.message
+    assert "pincer-agent[redis]" in result.fix_hint
+
+
+def test_api_rate_limits_reports_the_backend(tmp_path):
+    result = SecurityDoctor(config_dir=tmp_path)._check_api_rate_limits(_backend_cfg("redis://redis:6379/0"))
+    assert result.status == CheckStatus.PASS
+    assert result.message.endswith("backend redis")
+
+
+def test_api_rate_limits_warns_when_off_in_production(tmp_path):
+    cfg = _backend_cfg()
+    cfg.rate_api_disabled, cfg.environment = True, "Production"
+    assert SecurityDoctor(config_dir=tmp_path)._check_api_rate_limits(cfg).status == CheckStatus.WARNING

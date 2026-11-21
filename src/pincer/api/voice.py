@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from pincer.api.auth import OptionalIdentity, require_interactive
 from pincer.config import get_settings_relaxed
+from pincer.core.ratelimit import rate_limit
 from pincer.services.auth import WS_TICKET_TTL_SECONDS, AuthServiceDep, UnknownIdentityError
 from pincer.voice.engine import ENDED_BY_DASHBOARD, ENDED_BY_KEY
 from pincer.voice.pii_guard import mask_pii
@@ -52,6 +53,13 @@ from pincer.services.voice import CallsServiceDep, ContactsServiceDep, MessagesS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
+
+# A cheap guard in front of the outbound safety gates (voice/safety_gates.py,
+# which own per-target cooldowns, quiet hours and do-not-call): each request
+# can place a real, billed call. One shared budget for "call now" and "call later".
+_CALL_LIMIT = rate_limit(
+    "10/hour", name="outbound_calls", detail="Too many calls placed this hour; wait before placing another."
+)
 
 #: A thread id is a canonical uuid (36) since 0018; it was `thr_` + hex
 #: (16) before that, and both still have to be accepted — an id that is
@@ -500,6 +508,7 @@ class ListenTicketOut(BaseModel):
 
 
 @router.post("/listen/{call_sid}/ticket", response_model=ListenTicketOut)
+@rate_limit("30/minute")
 async def create_listen_ticket(
     call_sid: str,
     response: Response,
@@ -876,6 +885,7 @@ async def list_scheduled_calls() -> list[ScheduledCallOut]:
 
 
 @router.post("/calls/scheduled", response_model=ScheduledCallOut, status_code=201)
+@_CALL_LIMIT
 async def schedule_call(body: ScheduledCallIn) -> ScheduledCallOut:
     """Place this call later. The briefing is validated now, not at fire time."""
     from pincer.scheduler.cron import CronScheduler
@@ -1442,6 +1452,7 @@ _ERROR_STATUS: list[tuple[str, int]] = [
 
 
 @router.post("/calls", response_model=InitiateCallOut, status_code=201)
+@_CALL_LIMIT
 async def initiate_call(body: InitiateCallIn) -> InitiateCallOut:
     from pincer.voice.briefing import SOURCE_DASHBOARD, BriefingError, validate_task
     from pincer.voice.outbound import make_phone_call, placed_call_sid

@@ -260,6 +260,8 @@ pincer/
 │   │
 │   ├── core/                       # Agent brain
 │   │   ├── agent.py                # ReAct loop, streaming, tool execution, sanitization
+│   │   ├── cache/                  # KeySpace (prefixed key names), shared Redis clients, HTTP cache (hishel)
+│   │   ├── ratelimit/              # Async rate limiter: strategies, memory/Redis storage, ASGI middleware
 │   │   ├── compaction.py           # History compaction by prompt tokens (summary, pair-safe)
 │   │   ├── events.py               # Event system (stub)
 │   │   ├── identity.py             # Cross-channel identity resolver + config seeding
@@ -376,6 +378,8 @@ pincer/
 | `core/session.py` | SQLite-backed session persistence with trim-safe message history |
 | `core/compaction.py` | History compaction by prompt tokens: the oldest messages become one summary (pair-safe) |
 | `core/identity.py` | Cross-channel identity resolver with config-driven seeding |
+| `core/cache/` | `KeySpace` (every stored name under `PINCER_CACHE_PREFIX`), shared Redis clients, the opt-in HTTP response cache |
+| `core/ratelimit/` | Async rate limiter behind the API's IP, user and anonymous limits |
 | `config.py` | Pydantic Settings with env vars, validation, API key auto-detection |
 | `cli/main.py` | Typer CLI entry point — registers `run`, `config`, `cost`, `google`, `signal`, `slack`, `whatsapp`, `audit`, `memory`, `schedule`, `db`, `mcp` |
 | `channels/base.py` | Abstract channel interface (`BaseChannel`, `IncomingMessage`, `ChannelType`) |

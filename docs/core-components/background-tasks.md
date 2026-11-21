@@ -98,8 +98,8 @@ channels (channels can't safely be started twice). So actors never call a
 
 - Every actor publishes its result through a `Deliverer` (the `ResultEmitter`
   implementation), which hands the result to a `DeliveryBackend` — in-process
-  `asyncio.Queue` for `task_broker=memory`, Redis pub/sub for
-  `task_broker=redis`.
+  `asyncio.Queue` for a `memory://` task broker, Redis pub/sub for a
+  `redis://` one.
 - A `ResultRelay` running in the main `pincer run` process consumes results
   from that backend and hands them to the real `ChannelRouter`.
 
@@ -115,7 +115,7 @@ best-effort.
 
 ### Single-process (default)
 
-`task_broker=memory` (the default, zero extra infrastructure). One
+A `memory://` task broker (the default, zero extra infrastructure). One
 `pincer run` process owns everything: channels, the `ScheduleDispatcher`
 poll loop, the repid worker consuming the task queue, and the `ResultRelay`.
 Actors and channels share the same event loop; the `Deliverer` hop is
@@ -123,15 +123,16 @@ in-memory only.
 
 ### Split — horizontal scaling
 
-Set `task_broker=redis` and `PINCER_TASK_BROKER_URL` to point every process
-at the same Redis instance. `pincer run` still owns channels, the dispatcher,
+Set `PINCER_CACHE_BACKEND_URL=redis://…` to point every process at the same
+Redis instance; the task broker uses it unless `PINCER_TASK_BROKER_URL` gives
+tasks a Redis of their own. `pincer run` still owns channels, the dispatcher,
 and the `ResultRelay`; one or more standalone worker processes run:
 
 ```bash
 pincer run tasks
 ```
 
-`pincer run tasks` requires `task_broker=redis` — the in-memory broker can't
+`pincer run tasks` requires a `redis://` task broker — the in-memory broker can't
 be shared across processes, and the command refuses to start otherwise. The
 standalone worker builds the same LLM/tools/agent core as the main process
 (`_build_core` in `cli/run.py`) but **does not** start channels, the MCP server
@@ -156,26 +157,34 @@ docker compose --profile http up -d
 
 ## Config reference
 
-All variables use the `PINCER_` prefix (source: `config/tasks.py`,
-`config/tools.py`).
+All variables use the `PINCER_` prefix (source: `config/cache.py`,
+`config/tasks.py`, `config/tools.py`).
 
 | Variable | Default | Description |
 |---|---|---|
-| `PINCER_TASK_BROKER` | `memory` | Broker for background task execution: in-process `memory` (zero infra) or `redis` |
-| `PINCER_TASK_BROKER_URL` | (empty) | Broker connection URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
+| `PINCER_CACHE_BACKEND_URL` | `memory://` | Shared backend: `memory://` (in-process, zero infra) or `redis://host:6379/0`. The task broker, [API rate limiting and the HTTP cache](rate-limiting-and-caching.md) use it |
+| `PINCER_CACHE_PREFIX` | `{environment}:{service}` | Template for the prefix of every stored name; see [Key layout](#redis-key-layout) |
+| `PINCER_TASK_BROKER_URL` | `PINCER_CACHE_BACKEND_URL` | Broker for background task execution, when tasks need their own (`memory://` or `redis://…`) |
+| `PINCER_TASK_PREFIX` | `PINCER_CACHE_PREFIX` | Prefix template for task streams and result channels, when tasks need their own |
 | `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up (repid has no built-in retry) |
-| `PINCER_REDIS_PREFIX` | `{environment}:{service}` | Template for the prefix of every Redis name; see [Redis key layout](#redis-key-layout) |
 | `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
 | `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
 | `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |
 | `PINCER_MIN_SCHEDULE_INTERVAL_MINUTES` | `15` | Reject schedules that would fire more often than this |
 
+`PINCER_TASK_BROKER` (`memory` / `redis`) and `PINCER_REDIS_PREFIX` were
+removed: the URL scheme now picks the engine, and the prefix is shared. While
+either is still set, `pincer run` refuses to start and `pincer doctor` reports
+it CRITICAL.
+
 ## Redis key layout
 
-With `task_broker=redis`, every Redis name pincer uses is built by
-`pincer.redis_keys.RedisKeys` under one prefix, `PINCER_REDIS_PREFIX`. Several
-deployments can then share one Redis without reading each other's tasks or
-results. This matters most for pub/sub, which ignores the DB index in the URL.
+Every name pincer stores is built by `pincer.core.cache.keys.KeySpace` under
+one prefix: `PINCER_CACHE_PREFIX`, or `PINCER_TASK_PREFIX` for the task
+streams and result channel when that is set. Several deployments can then
+share one Redis without reading each other's tasks, results, rate-limit
+buckets or cached responses. This matters most for pub/sub, which ignores the
+DB index in the URL. The in-memory backends use the same names.
 
 The prefix is a template with two placeholders:
 
@@ -186,10 +195,10 @@ The default is `{environment}:{service}`. You can append custom segments
 (`{environment}:{service}:custom`) or set a fully literal prefix
 (`prod:pincer:custom`). Startup fails with a validation error on an unknown
 placeholder, a positional `{}`, a conversion or format spec, whitespace, an
-empty segment, a leading/trailing `:`, or any literal brace. With
-`task_broker=redis` the template is also rendered with the real
-`PINCER_ENVIRONMENT`, so a value such as `my env` or an empty string fails at
-startup too, not later when the broker connects. Braces are
+empty segment, a leading/trailing `:`, or any literal brace. The template is
+also rendered with the real `PINCER_ENVIRONMENT`, so a value such as `my env`
+or an empty string fails at startup too, not later when the broker connects.
+Braces are
 rejected because Redis Cluster (Azure Managed Redis `EnterpriseCluster`)
 treats `{...}` as a hash tag.
 
@@ -201,7 +210,8 @@ Names with the default prefix and `PINCER_ENVIRONMENT=production`:
 | Consumer group | `production:pincer:stream:tasks:group` |
 | DLQ stream | `production:pincer:stream:tasks:dlq` |
 | Result pub/sub | `production:pincer:pubsub:task_results` |
-| Key-value (future use) | `production:pincer:kv:<namespace>:<id>` |
+| API rate-limit bucket | `production:pincer:kv:ratelimit:<ip\|user\|anon>:<id>` (IPv6 `:` become `-`) |
+| HTTP cache entries | `production:pincer:kv:httpcache:<entry\|stream\|stream_done\|idx>:<id>` |
 
 The type segment (`stream` / `pubsub` / `kv`) keeps scans and ACLs simple:
 `SCAN MATCH production:pincer:kv:*`, or an ACL user limited to

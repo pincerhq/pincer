@@ -1,21 +1,27 @@
 from __future__ import annotations
 
-from typing import Literal, Self
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-
-from pincer.redis_keys import DEFAULT_PREFIX_TEMPLATE, validate_prefix_template
+from pincer.config.dsn import BackendDsn  # noqa: TC001 (pydantic resolves it at runtime)
+from pincer.config.prefix import validate_prefix_template
 
 
 class TaskSettings(BaseModel):
+    # A URL that fails validation may carry a password: keep it out of the error.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     # ── Background task execution (repid) ─────────────────
-    task_broker: Literal["memory", "redis"] = Field(
-        default="memory",
-        description="Broker for background task execution: in-process 'memory' (default, zero infra) or 'redis'",
+    # Both default to the cache settings (`Settings.resolve_task_backend`); set
+    # PINCER_TASK_BROKER_URL / PINCER_TASK_PREFIX only to give tasks their own.
+    task_broker_url: BackendDsn | None = Field(
+        default=None,
+        description="Broker for background task execution: memory:// (in-process) or redis://host:6379/0. "
+        "Defaults to PINCER_CACHE_BACKEND_URL.",
     )
-    task_broker_url: str = Field(
-        default="",
-        description="Broker connection URL, e.g. redis://localhost:6379/0 (required when task_broker=redis)",
+    task_prefix: str | None = Field(
+        default=None,
+        description="Template for the prefix of the task streams, consumer groups and pub/sub channels. "
+        "Defaults to PINCER_CACHE_PREFIX.",
     )
     task_max_retries: int = Field(
         default=3,
@@ -28,20 +34,7 @@ class TaskSettings(BaseModel):
         description="Seconds between checks for due cron schedules (repid has no native scheduler)",
     )
 
-    redis_prefix: str = Field(
-        default=DEFAULT_PREFIX_TEMPLATE,
-        description="Template for the Redis key/stream/channel prefix. Placeholders: "
-        "{environment} (PINCER_ENVIRONMENT), {service} ('pincer'). "
-        "Custom segments may be appended, e.g. '{environment}:{service}:custom'.",
-    )
-
-    @field_validator("redis_prefix")
+    @field_validator("task_prefix")
     @classmethod
-    def _validate_redis_prefix(cls, value: str) -> str:
-        return validate_prefix_template(value)
-
-    @model_validator(mode="after")
-    def _validate_redis_url(self) -> Self:
-        if self.task_broker == "redis" and not self.task_broker_url:
-            raise ValueError("task_broker_url is required when task_broker='redis'")
-        return self
+    def _validate_task_prefix(cls, value: str | None) -> str | None:
+        return None if value is None else validate_prefix_template(value, "task_prefix")
