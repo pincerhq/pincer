@@ -83,7 +83,7 @@ async def test_start_connects_to_target_port() -> None:
     with _pyngrok_patch(fake):
         t = NgrokTunnel(authtoken="tok", domain="", target_port=9000)
         await t.start()
-    fake.connect.assert_called_once_with(9000, proto="http")
+    fake.connect.assert_called_once_with("9000", proto="http")
 
 
 @pytest.mark.asyncio
@@ -92,7 +92,7 @@ async def test_start_passes_domain_kwarg_when_set() -> None:
     with _pyngrok_patch(fake):
         t = NgrokTunnel(authtoken="tok", domain="my-bot.ngrok-free.app", target_port=8080)
         await t.start()
-    fake.connect.assert_called_once_with(8080, proto="http", domain="my-bot.ngrok-free.app")
+    fake.connect.assert_called_once_with("8080", proto="http", url="https://my-bot.ngrok-free.app")
 
 
 @pytest.mark.asyncio
@@ -103,6 +103,7 @@ async def test_start_omits_domain_kwarg_when_empty() -> None:
         await t.start()
     _, kwargs = fake.connect.call_args
     assert "domain" not in kwargs
+    assert "url" not in kwargs
 
 
 @pytest.mark.asyncio

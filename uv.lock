@@ -3673,7 +3673,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.8.0" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'mcp'", specifier = ">=2.8.0" },
     { name = "pymupdf", marker = "extra == 'pdf'", specifier = ">=1.24.0" },
-    { name = "pyngrok", marker = "extra == 'local'", specifier = ">=7.0" },
+    { name = "pyngrok", marker = "extra == 'local'", specifier = ">=9.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
@@ -4335,14 +4335,14 @@ wheels = [
 
 [[package]]
 name = "pyngrok"
-version = "8.1.2"
+version = "9.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/ae/6664934258773db4666e65730c43b4b06730f78d49861a9a04ebcf4742ff/pyngrok-8.1.2.tar.gz", hash = "sha256:3b5383ec7dc4646ac0d046435eb58c6cd1cbc9acad70e6dee012b05dc25b070a", size = 45078, upload-time = "2026-04-29T15:16:53.969Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/9b/24053434d736f04b2e28904629a190919417f9594bdf0425545d1d7dcb43/pyngrok-9.1.4.tar.gz", hash = "sha256:1be456cd6118fe5a8bbce9a237bc17a81d8f20cfa7734a5b1db63a1dc4b7f2ab", size = 48642, upload-time = "2026-11-10T01:52:24.344Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/5c/7733776a6a9704bffee19d203f9be80f25f78a5011a9863971be60fe2763/pyngrok-8.1.2-py3-none-any.whl", hash = "sha256:849e9f55706288b00eb28f4ae8ea16b05e52c609f80ef4a88ca23b385f2f9178", size = 25935, upload-time = "2026-04-29T15:16:52.088Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/62/f44573594f86ced3cdc652e4e494e9f52b5e0ae4b9b4b6130c34208a6426/pyngrok-9.1.4-py3-none-any.whl", hash = "sha256:511a756a5f3feed60fa84af774bf9d75e2d3d31cb5738abe255e3fdca93bd2c1", size = 27974, upload-time = "2026-11-10T01:52:23.069Z" },
 ]
 
 [[package]]
