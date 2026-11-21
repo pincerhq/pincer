@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 from pincer.db.ids import Uuid7Sequence
 from pincer.db.migration_helpers import drop_stale_batch_table, hold_transaction, in_range
@@ -56,6 +57,9 @@ ROLES = ("system", "user", "assistant", "tool_result")
 TIMES = ("created_at", "updated_at")
 #: Rows per INSERT of the backfill.
 BATCH = 1000
+#: `UtcDateTime`'s DDL, spelled out: `op.create_table` renders the type decorator as a plain
+#: `TIMESTAMP WITH TIME ZONE` (precision 6), not the `TIMESTAMP(3)` it declares.
+_MILLISECONDS = sa.Text().with_variant(postgresql.TIMESTAMP(timezone=True, precision=3), "postgresql")
 #: The latest millisecond a `datetime` can hold (9999-12-31T23:59:59.999).
 _MAX_MS = 253_402_300_799_999
 
@@ -135,8 +139,8 @@ def _create_messages_table() -> None:
         sa.Column("raw", JsonDocument),
         sa.Column("wire", sa.Text()),
         sa.Column("channel_message_id", sa.Text()),
-        sa.Column("created_at", UtcDateTime(), nullable=False),
-        sa.Column("updated_at", UtcDateTime()),
+        sa.Column("created_at", _MILLISECONDS, nullable=False),
+        sa.Column("updated_at", _MILLISECONDS),
         sa.CheckConstraint(f"role IN ({', '.join(repr(r) for r in ROLES)})", name="ck_session_messages_role"),
         sa.CheckConstraint("role = 'tool_result' OR tool_call_id IS NULL", name="ck_session_messages_tool_call_id"),
         sa.CheckConstraint("role = 'assistant' OR tool_calls IS NULL", name="ck_session_messages_tool_calls"),

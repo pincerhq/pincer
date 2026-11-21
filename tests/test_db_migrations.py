@@ -2943,6 +2943,20 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         assert times["unified:alice"] == (from_epoch_seconds(100.0), from_epoch_seconds(100.4))
         assert times["web:guest"] == (from_epoch_seconds(50.123),) * 2
         assert times["web:guest"][0].microsecond == 123_000  # milliseconds kept, nothing finer
+        if not migration_url.startswith("sqlite"):
+            precision = conn.execute(
+                sa.text(
+                    "SELECT table_name, column_name, datetime_precision FROM information_schema.columns "
+                    "WHERE table_name IN ('pincer_sessions', 'pincer_session_messages') "
+                    "AND data_type LIKE 'timestamp%' ORDER BY 1, 2"
+                )
+            ).all()
+            assert [tuple(row) for row in precision] == [
+                ("pincer_session_messages", "created_at", 3),
+                ("pincer_session_messages", "updated_at", 3),
+                ("pincer_sessions", "created_at", 3),
+                ("pincer_sessions", "updated_at", 3),
+            ]
 
     command.downgrade(cfg, "0034")
     with _connect(migration_url) as conn:
