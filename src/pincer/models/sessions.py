@@ -43,16 +43,45 @@ class ChatSession(SQLModel, table=True):
     updated_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
 
 
-#: The roles a stored message can have (`llm.base.MessageRole`).
+#: The roles a stored message can have (`llm.base.MessageRole`, which this layer does not import).
 MESSAGE_ROLES = ("system", "user", "assistant", "tool_result")
+
+#: The fields only some roles have, and those roles: NULL on every other role, which the table CHECKs
+#: (`role_checks`) and a save holds to (`services.sessions`). One place, so the two cannot drift apart.
+ROLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "tool_call_id": ("tool_result",),
+    "tool_calls": ("assistant",),
+    # A compaction window is a system message with the provider's output
+    "raw": ("assistant", "system"),
+    "wire": ("assistant", "system"),
+    "context": ("user",),
+    "channel_message_id": ("user",),
+    "updated_at": ("user",),
+}
+
+
+def _quoted(values: tuple[str, ...]) -> str:
+    return ", ".join(f"'{value}'" for value in values)
+
+
+def role_checks(role_fields: dict[str, tuple[str, ...]] = ROLE_FIELDS) -> list[CheckConstraint]:
+    """The CHECKs of `pincer_session_messages`: a known role, and each field of `role_fields` NULL
+    outside its roles. Migration 0035 builds the same from its own frozen copy of the map."""
+    return [
+        CheckConstraint(f"role IN ({_quoted(MESSAGE_ROLES)})", name="ck_session_messages_role"),
+        *(
+            CheckConstraint(f"role IN ({_quoted(roles)}) OR {name} IS NULL", name=f"ck_session_messages_{name}")
+            for name, roles in role_fields.items()
+        ),
+    ]
 
 
 class SessionMessage(SQLModel, table=True):
     """One message of a conversation, in the order (`created_at`, `id`).
 
     `role` and `content` are always there; every other field belongs to some roles and is NULL
-    elsewhere (never `''` or `[]`). The CHECKs hold only what the code guarantees: a constraint the
-    agent could break would fail a turn's save, not the bug.
+    elsewhere (never `''` or `[]`), as `ROLE_FIELDS` says. The CHECKs hold only what the code
+    guarantees: a constraint the agent could break would fail a turn's save, not the bug.
 
     - `tool_call_id`: tool results only. `is_error`: an interrupted turn's result.
     - `tool_calls`: assistant only, `[{id, name, arguments}]`.
@@ -71,15 +100,7 @@ class SessionMessage(SQLModel, table=True):
 
     __tablename__ = "pincer_session_messages"
     __table_args__ = (
-        CheckConstraint(f"role IN ({', '.join(repr(r) for r in MESSAGE_ROLES)})", name="ck_session_messages_role"),
-        CheckConstraint("role = 'tool_result' OR tool_call_id IS NULL", name="ck_session_messages_tool_call_id"),
-        CheckConstraint("role = 'assistant' OR tool_calls IS NULL", name="ck_session_messages_tool_calls"),
-        CheckConstraint(
-            "role IN ('assistant', 'system') OR (raw IS NULL AND wire IS NULL)", name="ck_session_messages_raw"
-        ),
-        CheckConstraint(
-            "role = 'user' OR (channel_message_id IS NULL AND updated_at IS NULL)", name="ck_session_messages_user_edit"
-        ),
+        *role_checks(),
         Index("idx_session_messages_session_created", "session_id", "created_at", "id"),
         Index(
             "uq_session_messages_channel_message",

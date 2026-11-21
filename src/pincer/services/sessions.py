@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pincer.db.session import session_scope
-from pincer.models.sessions import SessionImage, SessionMessage
+from pincer.models.sessions import ROLE_FIELDS, SessionImage, SessionMessage
 from pincer.repositories.sessions import SessionImageRepository, SessionMessageRepository, SessionRepository
 from pincer.services.base import DatabaseService
 
@@ -125,6 +125,16 @@ class SessionService(DatabaseService):
                 return []
             return await SessionMessageRepository(session).page(row.id, limit=limit, before=before)
 
+    async def edit(self, session_id: str, channel_message_id: str, content: str, *, at: datetime) -> bool:
+        """Rewrite the text of the user message the messenger calls `channel_message_id`, edited there
+        `at`. False when the session or the message is not there. Go through `SessionManager.edit_message`,
+        which keeps its cached copy of the session from writing the old text back."""
+        async with session_scope(self._url) as session:
+            row = await SessionRepository(session).get_by(session_id=session_id)
+            if row is None:
+                return False
+            return await SessionMessageRepository(session).edit(row.id, channel_message_id, _text(content) or "", at=at)
+
     async def has_any(self, user_id: str, channel: str, *, created_before: datetime | None = None) -> bool:
         """True when the channel user has any stored session, conversations included
         (memory-free ones aside); with `created_before`, one created before then."""
@@ -158,7 +168,7 @@ class SessionService(DatabaseService):
                 }
             )
             if messages:
-                await SessionMessageRepository(session).apply(
+                await SessionMessageRepository(session).write_changes(
                     session_ref,
                     insert_rows=[_message_row(m) for m in messages.insert],
                     update_rows=[_message_row(m) for m in messages.update],
@@ -193,35 +203,31 @@ def _as_row(image: StoredImage, *, created_at: float) -> SessionImage:
     )
 
 
-#: The fields each role may have beyond `role` and `content`, as the table's CHECKs hold them.
-_ROLE_FIELDS = {
-    "tool_call_id": ("tool_result",),
-    "tool_calls": ("assistant",),
-    "raw": ("assistant", "system"),
-    "wire": ("assistant", "system"),
-}
+#: The fields of `ROLE_FIELDS` a save writes (`channel_message_id` and `updated_at` belong to an edit)
+_SAVED_ROLE_FIELDS = ("tool_call_id", "tool_calls", "raw", "wire", "context")
+#: Of those, the ones that are JSON rather than text
+_JSON_FIELDS = frozenset({"tool_calls", "raw"})
 
 
-def _message_row(d: dict[str, Any]) -> dict[str, Any]:
-    """A message dict as the columns of its row. A field its role cannot have is dropped with a warning
-    (no code writes one): a CHECK failing would lose the whole save, and the turn with it."""
-    role = d["role"]
-    for name, roles in _ROLE_FIELDS.items():
-        if d.get(name) and role not in roles:
+def _message_row(message: dict[str, Any]) -> dict[str, Any]:
+    """A message dict as the columns of its row. A field its role cannot have (`ROLE_FIELDS`) is dropped
+    with a warning (no code writes one): a CHECK failing would lose the whole save, and the turn with it."""
+    role = message["role"]
+    role_fields: dict[str, Any] = {}
+    for name in _SAVED_ROLE_FIELDS:
+        value = message.get(name)
+        if value and role not in ROLE_FIELDS[name]:
             logger.warning("Not storing %s on a %s message", name, role)
-    allowed = {name: role in roles for name, roles in _ROLE_FIELDS.items()}
+            value = None
+        role_fields[name] = (value or None) if name in _JSON_FIELDS else _text(value)
     return {
-        "id": d["id"],
+        "id": message["id"],
         "role": role,
-        "content": _text(d.get("content")) or "",
-        "tool_call_id": _text(d.get("tool_call_id")) if allowed["tool_call_id"] else None,
-        "is_error": bool(d.get("is_error", False)),
-        "tool_calls": (d.get("tool_calls") or None) if allowed["tool_calls"] else None,
-        "images": d.get("images") or None,
-        "context": _text(d.get("context")),
-        "raw": (d.get("raw") or None) if allowed["raw"] else None,
-        "wire": _text(d.get("wire")) if allowed["wire"] else None,
-        "created_at": d["created_at"],
+        "content": _text(message.get("content")) or "",
+        "is_error": bool(message.get("is_error", False)),
+        "images": message.get("images") or None,
+        **role_fields,
+        "created_at": message["created_at"],
     }
 
 
@@ -236,19 +242,12 @@ def _text(value: Any) -> str | None:
 def _message_dict(row: SessionMessage) -> dict[str, Any]:
     """A row as `LLMMessage.to_dict` writes a message (only the fields that are set, in its order),
     with the row's `id` and `created_at`."""
-    d: dict[str, Any] = {"role": row.role, "content": row.content}
+    message: dict[str, Any] = {"role": row.role, "content": row.content}
     if row.tool_call_id:
-        d["tool_call_id"] = row.tool_call_id
+        message["tool_call_id"] = row.tool_call_id
     if row.is_error:
-        d["is_error"] = True
-    if row.tool_calls:
-        d["tool_calls"] = row.tool_calls
-    if row.images:
-        d["images"] = row.images
-    if row.context:
-        d["context"] = row.context
-    if row.raw:
-        d["raw"] = row.raw
-    if row.wire:
-        d["wire"] = row.wire
-    return d | {"id": row.id, "created_at": row.created_at}
+        message["is_error"] = True
+    for name in ("tool_calls", "images", "context", "raw", "wire"):
+        if value := getattr(row, name):
+            message[name] = value
+    return message | {"id": row.id, "created_at": row.created_at}

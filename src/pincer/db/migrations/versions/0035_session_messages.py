@@ -39,7 +39,7 @@ from sqlalchemy.dialects import postgresql
 
 from pincer.db.ids import Uuid7Sequence
 from pincer.db.migration_helpers import drop_stale_batch_table, hold_transaction, in_range
-from pincer.db.types import JsonbDocument, JsonDocument, UtcDateTime, Uuid7, from_epoch_ms, utc_text
+from pincer.db.types import JsonbDocument, JsonDocument, Real, UtcDateTime, Uuid7, from_epoch_ms, utc_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -54,6 +54,19 @@ logger = logging.getLogger("alembic.runtime.migration")
 SESSIONS = "pincer_sessions"
 MESSAGES = "pincer_session_messages"
 ROLES = ("system", "user", "assistant", "tool_result")
+#: The fields only some roles have, and those roles: NULL on every other role. A frozen copy of
+#: `models.sessions.ROLE_FIELDS` as this revision created the table (a test holds the two equal).
+ROLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "tool_call_id": ("tool_result",),
+    "tool_calls": ("assistant",),
+    "raw": ("assistant", "system"),
+    "wire": ("assistant", "system"),
+    "context": ("user",),
+    "channel_message_id": ("user",),
+    "updated_at": ("user",),
+}
+#: What a save writes of `ROLE_FIELDS` (the last two belong to an edit in a messenger).
+_SAVED_ROLE_FIELDS = ("tool_call_id", "tool_calls", "raw", "wire", "context")
 TIMES = ("created_at", "updated_at")
 #: Rows per INSERT of the backfill.
 BATCH = 1000
@@ -109,7 +122,9 @@ def downgrade() -> None:
         if (history := histories.get(str(row["session_id"]))) is not None:
             history.append(_as_dict(row))
     update = sa.text(f"UPDATE {SESSIONS} SET messages = :messages WHERE id = :id")  # noqa: S608
-    params = [{"id": ref, "messages": json.dumps(history)} for ref, history in histories.items() if history]
+    # Every session, those left with no rows too: the legacy column was not written since the upgrade, so
+    # a session cleared since then would otherwise get back the history it had before it
+    params = [{"id": ref, "messages": json.dumps(history)} for ref, history in histories.items()]
     if params:
         bind.execute(update.bindparams(sa.bindparam("id", type_=Uuid7())), params)
     op.drop_table(MESSAGES)
@@ -141,15 +156,7 @@ def _create_messages_table() -> None:
         sa.Column("channel_message_id", sa.Text()),
         sa.Column("created_at", _MILLISECONDS, nullable=False),
         sa.Column("updated_at", _MILLISECONDS),
-        sa.CheckConstraint(f"role IN ({', '.join(repr(r) for r in ROLES)})", name="ck_session_messages_role"),
-        sa.CheckConstraint("role = 'tool_result' OR tool_call_id IS NULL", name="ck_session_messages_tool_call_id"),
-        sa.CheckConstraint("role = 'assistant' OR tool_calls IS NULL", name="ck_session_messages_tool_calls"),
-        sa.CheckConstraint(
-            "role IN ('assistant', 'system') OR (raw IS NULL AND wire IS NULL)", name="ck_session_messages_raw"
-        ),
-        sa.CheckConstraint(
-            "role = 'user' OR (channel_message_id IS NULL AND updated_at IS NULL)", name="ck_session_messages_user_edit"
-        ),
+        *_role_checks(),
     )
     op.create_index("idx_session_messages_session_created", MESSAGES, ["session_id", "created_at", "id"])
     op.create_index(
@@ -160,6 +167,19 @@ def _create_messages_table() -> None:
         postgresql_where=sa.text("channel_message_id IS NOT NULL"),
         sqlite_where=sa.text("channel_message_id IS NOT NULL"),
     )
+
+
+def _role_checks() -> list[sa.CheckConstraint]:
+    def quoted(values: tuple[str, ...]) -> str:
+        return ", ".join(f"'{value}'" for value in values)
+
+    return [
+        sa.CheckConstraint(f"role IN ({quoted(ROLES)})", name="ck_session_messages_role"),
+        *(
+            sa.CheckConstraint(f"role IN ({quoted(roles)}) OR {name} IS NULL", name=f"ck_session_messages_{name}")
+            for name, roles in ROLE_FIELDS.items()
+        ),
+    ]
 
 
 def _rows_of(session_ref: str, stored: str | None, created: int, updated: int) -> Iterator[dict[str, Any]]:
@@ -189,33 +209,34 @@ def _is_message(session_ref: str, message: Any) -> bool:
     return False
 
 
-def _as_row(session_ref: str, d: dict[str, Any], ms: int, row_id: str) -> dict[str, Any]:
+def _as_row(session_ref: str, message: dict[str, Any], ms: int, row_id: str) -> dict[str, Any]:
     """A stored message (`LLMMessage.to_dict`'s format) as a row. A field its role cannot have, which no
     code writes, is dropped with a warning rather than failing the upgrade on a CHECK."""
-    role = d["role"]
-    allowed = {
-        "tool_call_id": role == "tool_result",
-        "tool_calls": role == "assistant",
-        "raw": role in ("assistant", "system"),
-        "wire": role in ("assistant", "system"),
-    }
-    for name, ok in allowed.items():
-        if d.get(name) and not ok:
+    role = message["role"]
+    role_fields: dict[str, Any] = {}
+    for name in _SAVED_ROLE_FIELDS:
+        if not message.get(name):
+            role_fields[name] = None
+        elif role not in ROLE_FIELDS[name]:
             logger.warning("Session %s: dropping %s from a %s message", session_ref, name, role)
+            role_fields[name] = None
+        else:
+            role_fields[name] = message[name] if name in ("tool_calls", "raw") else _text(message[name])
     return {
         "id": row_id,
         "session_id": session_ref,
         "role": role,
-        "content": _text(d.get("content")) or "",
-        "tool_call_id": _text(d.get("tool_call_id")) if allowed["tool_call_id"] else None,
-        "is_error": bool(d.get("is_error", False)),
-        "tool_calls": (d.get("tool_calls") or None) if allowed["tool_calls"] else None,
-        "images": d.get("images") or None,
-        "context": _text(d.get("context")),
-        "raw": (d.get("raw") or None) if allowed["raw"] else None,
-        "wire": _text(d.get("wire")) if allowed["wire"] else None,
-        "created_at": from_epoch_ms(min(max(ms, 0), _MAX_MS)),
+        "content": _text(message.get("content")) or "",
+        "is_error": bool(message.get("is_error", False)),
+        "images": message.get("images") or None,
+        **role_fields,
+        "created_at": _at(ms),
     }
+
+
+def _at(ms: int) -> datetime:
+    """Epoch milliseconds as a datetime, held to what a `datetime` can carry."""
+    return from_epoch_ms(min(max(ms, 0), _MAX_MS))
 
 
 def _text(value: Any) -> str | None:
@@ -223,20 +244,20 @@ def _text(value: Any) -> str | None:
     (the JSON list escaped it as `\\u0000`)."""
     if not value:
         return None
-    return str(value).replace("\x00", "�")
+    return str(value).replace("\x00", "\ufffd")
 
 
 def _as_dict(row: Any) -> dict[str, Any]:
     """A row as `LLMMessage.to_dict` writes a message: only the fields that are set, in its order."""
-    d: dict[str, Any] = {"role": row["role"], "content": row["content"]}
+    message: dict[str, Any] = {"role": row["role"], "content": row["content"]}
     if row["tool_call_id"]:
-        d["tool_call_id"] = row["tool_call_id"]
+        message["tool_call_id"] = row["tool_call_id"]
     if row["is_error"]:
-        d["is_error"] = True
+        message["is_error"] = True
     for name in ("tool_calls", "images", "context", "raw", "wire"):
         if row[name]:
-            d[name] = row[name]
-    return d
+            message[name] = row[name]
+    return message
 
 
 # ── session times ────────────────────────────────────────────────────
@@ -266,8 +287,8 @@ def _times_to_datetimes(bind: sa.Connection) -> None:
     params = [
         {
             "id": row_id,
-            "created_at": utc_text(from_epoch_ms(min(max(_ms(created), 0), _MAX_MS))),
-            "updated_at": utc_text(from_epoch_ms(min(max(_ms(updated), 0), _MAX_MS))),
+            "created_at": utc_text(_at(_ms(created))),
+            "updated_at": utc_text(_at(_ms(updated))),
         }
         for row_id, created, updated in stamps
     ]
@@ -283,7 +304,7 @@ def _times_to_floats(bind: sa.Connection) -> None:
             )
         return
     stamps = bind.execute(sa.text(f"SELECT id, created_at, updated_at FROM {SESSIONS}")).all()  # noqa: S608
-    _retype_sqlite(sa.REAL())
+    _retype_sqlite(Real())
     update = sa.text(f"UPDATE {SESSIONS} SET created_at = :created_at, updated_at = :updated_at WHERE id = :id")  # noqa: S608
     params = [
         {"id": row_id, "created_at": _seconds(created), "updated_at": _seconds(updated)}

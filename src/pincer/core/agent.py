@@ -742,12 +742,11 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
         if orphan_ids:
             logger.warning("Stripping orphaned tool_use(s): %s", orphan_ids)
             changed = True
-            # The rebuilt message keeps the stored one's row and time: it takes its place in the history
-            stored = {"row_id": msg.row_id, "created_at": msg.created_at}
+            # The rebuilt message keeps the stored one's row: it takes its place in the history
             if surviving:
-                clean.append(LLMMessage(role=msg.role, content=msg.content, tool_calls=surviving, **stored))
+                clean.append(LLMMessage(role=msg.role, content=msg.content, tool_calls=surviving, stored=msg.stored))
             elif msg.content:
-                clean.append(LLMMessage(role=msg.role, content=msg.content, **stored))
+                clean.append(LLMMessage(role=msg.role, content=msg.content, stored=msg.stored))
         else:
             clean.append(msg)
 

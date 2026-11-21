@@ -306,7 +306,7 @@ DISPLAY_COLUMNS = ("id", "role", "content", "tool_calls", "images", "created_at"
 _INSERT_BATCH = 500
 
 #: The columns a save writes to a message row; `channel_message_id` and `updated_at` belong to `edit`.
-_WRITTEN = ("role", "content", "tool_call_id", "is_error", "tool_calls", "images", "context", "raw", "wire")
+_SAVED_COLUMNS = ("role", "content", "tool_call_id", "is_error", "tool_calls", "images", "context", "raw", "wire")
 
 
 class SessionMessageRepository(BaseRepository[SessionMessage, str]):
@@ -337,7 +337,7 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
         rows = (await self.session.exec(stmt)).all()
         return [dict(zip(DISPLAY_COLUMNS, row, strict=True)) for row in reversed(rows)]
 
-    async def apply(
+    async def write_changes(
         self,
         session_ref: str,
         *,
@@ -360,7 +360,7 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
                 table.update()
                 .where(table.c.session_id == session_ref, table.c.id == bindparam("row_id"))
                 .values(
-                    {name: bindparam(f"new_{name}") for name in _WRITTEN}
+                    {name: bindparam(f"new_{name}") for name in _SAVED_COLUMNS}
                     # A row that stops being a user message (a summary taking the place of the first message it
                     # summarizes) drops what only a user message has
                     | {
@@ -369,7 +369,9 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
                     }
                 )
             )
-            params = [{"row_id": row["id"]} | {f"new_{name}": row[name] for name in _WRITTEN} for row in update_rows]
+            params = [
+                {"row_id": row["id"]} | {f"new_{name}": row[name] for name in _SAVED_COLUMNS} for row in update_rows
+            ]
             await conn.execute(stmt, params)
         # Upserted by id: a save retried after a commit whose answer was lost (its rows are in) rewrites
         # them instead of failing or adding them twice. Only a row of this session is ever rewritten.
@@ -381,7 +383,7 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
                     table,
                     batch,
                     index_elements=["id"],
-                    set_=lambda excluded: {name: excluded[name] for name in (*_WRITTEN, "created_at")},
+                    set_=lambda excluded: {name: excluded[name] for name in (*_SAVED_COLUMNS, "created_at")},
                     where=table.c.session_id == session_ref,
                 )
             )
@@ -405,8 +407,9 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
         return int(moved.rowcount)
 
     async def edit(self, session_ref: str, channel_message_id: str, content: str, *, at: datetime) -> bool:
-        """Rewrite the text of the user message the messenger calls `channel_message_id`, edited `at`.
-        False when the session has no such message."""
+        """Rewrite the text of the user message the messenger calls `channel_message_id`, edited `at`
+        (`content` as a TEXT column takes it: `SessionService.edit` prepares it). False when the session
+        has no such message."""
         stmt = (
             update(SessionMessage)
             .where(

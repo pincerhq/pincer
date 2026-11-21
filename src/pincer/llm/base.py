@@ -146,6 +146,18 @@ class ThinkingDrop:
     reason: str  # e.g. "prefix_binding_mismatch"
 
 
+@dataclass(frozen=True, slots=True)
+class StoredRow:
+    """Where a message of a history is stored: its `pincer_session_messages` row's id and creation time,
+    to the millisecond. The id is a UUIDv7 carrying that millisecond; a history is ordered by both.
+
+    No id for a message read from a session under an older key: it keeps its time, and its next save
+    gives it a row of this session's."""
+
+    id: str | None
+    created_at: datetime
+
+
 @dataclass(slots=True)
 class LLMMessage:
     """Unified message format for all providers."""
@@ -169,12 +181,14 @@ class LLMMessage:
     # block before the user's words, saved with the session and replayed as it was; never shown
     # to people as history (the user's words are `content`).
     context: str = ""
-    # Where the message is stored (a `pincer_session_messages` row): the row's id and when it was created,
-    # set by the session store when the message is saved or loaded; None before. Not in `to_dict`, not
-    # compared. A message built to replace another in a history (a tool-pair repair) takes them over, so
-    # it keeps that message's place instead of moving to the end.
-    row_id: str | None = field(default=None, repr=False, compare=False)
-    created_at: datetime | None = field(default=None, repr=False, compare=False)
+    # The row the message is stored as, set by the session store when the message is saved or loaded;
+    # None before. Not in `to_dict`, not compared. A message built to replace another in a history (a
+    # tool-pair repair) takes it over, so it keeps that message's place instead of moving to the end.
+    stored: StoredRow | None = field(default=None, repr=False, compare=False)
+    # A hash of `raw` as saved, kept after the first time a save works it out (`core.session`): a
+    # history's raw output is most of its size, and every save compares each message with its row. Not
+    # saved, not compared; assumes `raw` is not edited once the message is in a history, as `raw_chars`.
+    raw_hash: int | None = field(default=None, init=False, repr=False, compare=False)
     # `core.compaction`'s count of the characters `raw` adds to a request, kept after the first time it is
     # worked out: a stored message does not change, and the history is sized after every request. Not saved,
     # not compared; assumes `raw` is not edited once the message is in a history.

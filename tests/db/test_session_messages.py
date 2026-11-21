@@ -210,6 +210,7 @@ async def test_a_nul_character_is_stored_as_a_replacement_character_in_text_and_
         ("tool_result", "raw", [{"type": "text", "text": "x"}]),
         ("assistant", "updated_at", from_epoch_ms(1)),
         ("system", "channel_message_id", "m1"),
+        ("assistant", "context", "[memories]"),
         ("bot", None, None),
     ],
 )
@@ -250,7 +251,7 @@ async def test_the_history_comes_back_in_order_with_messages_saved_in_one_millis
     again = await reload(url)
 
     assert [m.to_dict() for m in again.messages] == [m.to_dict() for m in session.messages]
-    times = [m.created_at for m in again.messages]
+    times = [m.stored.created_at for m in again.messages]
     assert times == sorted(times)
 
 
@@ -355,7 +356,7 @@ async def test_a_pair_repair_rewrites_the_message_it_rebuilt_in_place(url):
     await manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="calling", tool_calls=calls))
     await manager.add_message(session, LLMMessage(role=MessageRole.TOOL_RESULT, content="a done", tool_call_id="ta"))
     await manager.add_message(session, user("and?"))
-    rebuilt_row = session.messages[1].row_id
+    rebuilt_row = session.messages[1].stored.id
     saves = spy_saves(manager)
 
     session.messages = _sanitize_tool_pairs(session.messages)  # `tb` was never answered
@@ -379,7 +380,7 @@ async def test_a_compaction_summary_takes_the_row_of_the_first_message_it_replac
     for message in (user("one"), thinking_reply(1), user("two"), thinking_reply(2), user("three")):
         await manager.add_message(session, message)
     prefix = session.messages[:4]
-    first_row, first_at = prefix[0].row_id, prefix[0].created_at
+    first_row, first_at = prefix[0].stored.id, prefix[0].stored.created_at
     saves = spy_saves(manager)
 
     summary = LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\nearlier")
@@ -387,13 +388,13 @@ async def test_a_compaction_summary_takes_the_row_of_the_first_message_it_replac
 
     ((changes),) = saves
     assert [r["id"] for r in changes.update] == [first_row]
-    assert (changes.insert, sorted(changes.delete)) == ([], sorted(m.row_id for m in prefix[1:]))
+    assert (changes.insert, sorted(changes.delete)) == ([], sorted(m.stored.id for m in prefix[1:]))
     again = await reload(url)
     assert [(m.role, m.content) for m in again.messages] == [
         (MessageRole.SYSTEM, summary.content),
         (MessageRole.USER, "three"),
     ]
-    assert again.messages[0].created_at == first_at
+    assert again.messages[0].stored.created_at == first_at
 
 
 async def test_a_message_put_before_stored_ones_moves_them_after_it(url):
@@ -408,6 +409,144 @@ async def test_a_message_put_before_stored_ones_moves_them_after_it(url):
 
     again = await reload(url)
     assert [m.content for m in again.messages] == ["one", "two", "three"]
+
+
+async def test_a_message_put_at_the_head_goes_a_millisecond_before_the_first_and_moves_nothing(url):
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    await manager.add_message(session, user("one"))
+    first = session.messages[0].stored
+    saves = spy_saves(manager)
+
+    session.messages.insert(0, user("zero"))
+    await manager.save(session)
+
+    ((changes),) = saves
+    assert (len(changes.insert), changes.update, changes.delete) == (1, [], [])
+    assert changes.insert[0]["created_at"] == first.created_at - timedelta(milliseconds=1)
+    again = await reload(url)
+    assert [m.content for m in again.messages] == ["zero", "one"]
+
+
+async def test_a_stored_message_that_has_to_move_keeps_its_own_time(url):
+    """Room cannot always be made: here a message goes between two stored in the same millisecond, and
+    the second has to move after it. It keeps its millisecond rather than jumping to now."""
+    at = from_epoch_ms(1_000_000)
+    # Same millisecond, same counter: they differ only in their random tail
+    first, second = sorted({uuid7_at(1_000_000, 5) for _ in range(2)} | {uuid7_at(1_000_000, 5)})[:2]
+    await save(
+        url,
+        [
+            {"role": "user", "content": "one", "id": first, "created_at": at},
+            {"role": "user", "content": "three", "id": second, "created_at": at},
+        ],
+    )
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+
+    session.messages.insert(1, user("two"))  # its id gets counter 6: after both
+    await manager.save(session)
+
+    rows = await rows_of(url, "web:alice")
+    assert [(r.content, r.created_at) for r in rows] == [("one", at), ("two", at), ("three", at)]
+
+
+async def test_an_emergency_cut_deletes_only_the_rows_it_drops_and_keeps_the_summaries(url):
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    summary = LLMMessage(role=MessageRole.SYSTEM, content="[Previous conversation summary]\nolder")
+    for message in (summary, user("one"), thinking_reply(1), user("two"), thinking_reply(2)):
+        await manager.add_message(session, message)
+    prefix = session.messages[:3]
+    saves = spy_saves(manager)
+
+    assert await manager.cut(session, prefix, keep=[summary])
+
+    ((changes),) = saves
+    assert (changes.insert, changes.update) == ([], [])
+    assert sorted(changes.delete) == sorted(m.stored.id for m in prefix[1:])
+    again = await reload(url)
+    assert [m.content for m in again.messages] == [summary.content, "two", "answer 2"]
+    assert again.messages[0].stored == summary.stored  # the summary kept its row
+
+
+async def test_a_message_dropped_after_a_save_that_landed_but_failed_is_deleted(url):
+    """The failed save's rows went in; the history then lost those messages (a clear). The next save
+    deletes them too, rather than leaving rows nothing holds that would come back on a reload."""
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    await manager.add_message(session, user("kept"))
+    real = manager._store.save
+    failures: list[None] = []
+
+    async def lands_then_fails(**kwargs: Any) -> None:
+        await real(**kwargs)
+        if not failures:
+            failures.append(None)
+            raise OSError("connection lost after the commit")
+
+    manager._store.save = lands_then_fails  # type: ignore[method-assign]
+    with pytest.raises(OSError):
+        await manager.add_message(session, user("dropped"))
+    session.messages = session.messages[:1]
+    await manager.save(session)
+
+    assert [r.content for r in await rows_of(url, "web:alice")] == ["kept"]
+
+
+async def test_a_raw_output_is_hashed_once_not_on_every_save(url, monkeypatch):
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    reply = thinking_reply(1)
+    await manager.add_message(session, reply)
+    assert reply.raw_hash is not None
+    dumped: list[Any] = []
+    real_dumps = json.dumps
+
+    def counting(value: Any, *args: Any, **kwargs: Any) -> str:
+        if value is reply.raw:
+            dumped.append(value)
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr("pincer.core.session.json.dumps", counting)
+    await manager.add_message(session, user("next"))
+
+    assert dumped == []
+
+
+async def test_an_edit_through_the_manager_rewrites_the_message_and_the_next_turn_reads_it(url):
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    await manager.add_message(session, user("helo"))
+    async with session_scope(url) as db:
+        await db.exec(
+            sa.update(SessionMessage)
+            .where(SessionMessage.id == session.messages[0].stored.id)
+            .values(channel_message_id="tg-42")
+        )
+    session.metadata["seen"] = "true"  # an unsaved change of the cached copy
+
+    assert await manager.edit_message("web:alice", "tg-42", "hel\x00lo") is True
+    assert await manager.edit_message("web:alice", "tg-43", "nope") is False
+
+    again = await manager.get_or_create("alice", "web")
+    assert again is not session  # the stale copy is gone
+    assert (again.messages[0].content, again.metadata) == ("hel\ufffdlo", {"seen": "true"})
+    (row,) = await rows_of(url, "web:alice")
+    assert row.updated_at is not None
+
+
+async def test_the_migration_holds_the_same_role_fields_as_the_model():
+    import importlib.util
+
+    from pincer.models.sessions import ROLE_FIELDS
+
+    path = Path(__file__).resolve().parents[2] / "src/pincer/db/migrations/versions/0035_session_messages.py"
+    spec = importlib.util.spec_from_file_location("migration_0035", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.ROLE_FIELDS == ROLE_FIELDS
 
 
 async def test_clearing_deletes_every_message_row(url):
@@ -425,7 +564,7 @@ async def test_a_session_read_from_its_old_key_stores_its_messages_anew_at_their
     old = manager_on(url)
     legacy = await old.get_or_create("alice", "telegram")
     await old.add_message(legacy, user("before identities"))
-    said_at = legacy.messages[0].created_at
+    said_at = legacy.messages[0].stored.created_at
 
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram", pincer_user_id="usr_a")

@@ -2958,6 +2958,9 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
                 ("pincer_sessions", "updated_at", 3),
             ]
 
+    with _connect(migration_url) as conn:  # the guest clears their conversation after the upgrade
+        conn.execute(sa.delete(messages).where(messages.c.session_id == ids["guest"]))
+
     command.downgrade(cfg, "0034")
     with _connect(migration_url) as conn:
         assert "pincer_session_messages" not in sa.inspect(conn).get_table_names()
@@ -2967,7 +2970,10 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
     expected[1]["content"] = "hi�there"
     assert restored == expected
     assert [list(m) for m in restored] == [list(m) for m in expected]  # the keys in `to_dict`'s order
-    assert back["web:broken"]["messages"] == "not json"  # left as it was
+    # Every session's history is its rows: a cleared one does not get back what it had before the upgrade,
+    # nor does one whose stored text never was a history
+    assert back["web:guest"]["messages"] == "[]"
+    assert back["web:broken"]["messages"] == "[]"
     assert json.loads(back["web:odd"]["messages"]) == [{"role": "user", "content": "kept"}]
     assert (back["unified:alice"]["created_at"], back["unified:alice"]["updated_at"]) == pytest.approx((100.0, 100.4))
     assert back["web:guest"]["created_at"] == pytest.approx(50.123)

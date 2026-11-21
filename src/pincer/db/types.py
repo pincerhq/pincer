@@ -100,11 +100,12 @@ def from_epoch_ms(ms: int) -> datetime:
 
 
 def from_epoch_seconds(seconds: float) -> datetime:
-    """The aware UTC datetime of float epoch seconds, cut to the millisecond (how a `Real` timestamp
-    becomes a `UtcDateTime` one, in the migration and anywhere else).
+    """The aware UTC datetime of float epoch seconds, cut to the millisecond: how a `Real` timestamp
+    becomes a `UtcDateTime` one.
 
     Rounded to the microsecond before the cut, so float noise (`100.123` is `100.12299999…`) does not
-    take a millisecond off; migration 0035 does the same in SQL on Postgres."""
+    take a millisecond off. Migration 0035 keeps its own copy of the same rule (a revision does not
+    change with the code), in Python on SQLite and in SQL on Postgres."""
     return from_epoch_ms(round(seconds * 1_000_000) // 1000)
 
 
