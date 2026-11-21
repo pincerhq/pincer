@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db.ids import uuid7_after, uuid7_ms
 from pincer.db.types import epoch_ms, from_epoch_ms
-from pincer.llm.base import ImageContent, LLMMessage, MessageRole, StoredRow
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole, StoredRow, ToolCall
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.repositories.sessions import rekeyed_session_id
 from pincer.services.onboarding import OnboardingService
@@ -174,6 +174,12 @@ class Session:
         rows: dict[str, int] = {}
         for index, message in enumerate(self.messages):
             fingerprint = _fingerprint(message)
+            saved_id = message.stored.id if message.stored is not None else None
+            if (saved_id is None or self._saved_rows.get(saved_id) != fingerprint) and _make_storable(message):
+                # A message about to be written (new, or rewritten under a saved row: a compaction summary,
+                # a repaired tool pair) gets its text as its row will hold it, so the history in memory
+                # and the one read back after a reload send the same request
+                fingerprint = _fingerprint(message)
             row = message.stored
             if (
                 row is not None
@@ -610,11 +616,6 @@ class SessionManager:
         what an earlier session of this process left behind (a clear).
         """
         async with session._save_lock:
-            # New messages get their text as their rows will hold it, so the history in memory and the one
-            # read back after a reload send the same request
-            for message in session.messages:
-                if message.stored is None or message.stored.id not in session._saved_rows:
-                    _make_storable(message)
             plan = session._save_plan(_now())
             metadata = json.dumps(session.metadata)
             if only_if_changed and not plan.changes and metadata == session._saved_metadata:
@@ -642,23 +643,32 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _make_storable(message: LLMMessage) -> None:
+def _make_storable(message: LLMMessage) -> bool:
     """Bring a message's text to what its row holds (`storable_text`, `storable_json`), in place: no
-    NUL in its text, no lone surrogate anywhere. Anything already storable is left as it is."""
+    NUL in its text (a tool call's id and name included, so it still pairs with its result), no lone
+    surrogate anywhere. Anything already storable is left as it is. True when something changed."""
+    before = (message.content, message.context, message.tool_call_id, message.wire, message.raw, message.tool_calls)
     message.content = storable_text(message.content)
     message.context = storable_text(message.context)
+    if message.tool_call_id:
+        message.tool_call_id = storable_text(message.tool_call_id)
+    message.wire = storable_text(message.wire)
     if message.raw and (raw := storable_json(message.raw)) is not message.raw:
         message.raw = raw
         message.raw_hash = None
     if message.tool_calls:
-        calls = [
-            call
-            if (arguments := storable_json(call.arguments)) is call.arguments
-            else replace(call, arguments=arguments)
-            for call in message.tool_calls
-        ]
+        calls = [_storable_call(call) for call in message.tool_calls]
         if any(a is not b for a, b in zip(calls, message.tool_calls, strict=True)):
             message.tool_calls = calls
+    after = (message.content, message.context, message.tool_call_id, message.wire, message.raw, message.tool_calls)
+    return any(a is not b for a, b in zip(before, after, strict=True))
+
+
+def _storable_call(call: ToolCall) -> ToolCall:
+    call_id, name, arguments = storable_text(call.id), storable_text(call.name), storable_json(call.arguments)
+    if call_id == call.id and name == call.name and arguments is call.arguments:
+        return call
+    return replace(call, id=call_id, name=name, arguments=arguments)
 
 
 def _fingerprint(message: LLMMessage) -> int:

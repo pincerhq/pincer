@@ -19,7 +19,8 @@ message's millisecond by a per-session `Uuid7Sequence`, strictly increasing, so 
 the list's order even where messages share a millisecond.
 
 The legacy `messages` column is left as it was, and no longer written; a later revision drops it. The
-downgrade writes it again from the rows, then drops the table and turns the times back into floats.
+downgrade writes it again from the rows (except where it never held a JSON list: nothing moved, so it
+keeps that text), then drops the table and turns the times back into floats.
 
 Revision ID: 0035
 Revises: 0034
@@ -113,18 +114,24 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     hold_transaction(bind)
-    histories: dict[str, list[dict[str, Any]]] = {
-        str(session_ref): []
-        for (session_ref,) in bind.execute(sa.text(f"SELECT id FROM {SESSIONS}")).all()  # noqa: S608
+    legacy = {
+        str(session_ref): stored
+        for session_ref, stored in bind.execute(sa.text(f"SELECT id, messages FROM {SESSIONS}")).all()  # noqa: S608
     }
+    histories: dict[str, list[dict[str, Any]]] = {ref: [] for ref in legacy}
     ordered = sa.select(_messages).order_by(_messages.c.session_id, _messages.c.created_at, _messages.c.id)
     for row in bind.execute(ordered).mappings():
         if (history := histories.get(str(row["session_id"]))) is not None:
             history.append(_as_dict(row))
     update = sa.text(f"UPDATE {SESSIONS} SET messages = :messages WHERE id = :id")  # noqa: S608
-    # Every session, those left with no rows too: the legacy column was not written since the upgrade, so
-    # a session cleared since then would otherwise get back the history it had before it
-    params = [{"id": ref, "messages": json.dumps(history)} for ref, history in histories.items()]
+    # Sessions left with no rows too: the legacy column was not written since the upgrade, so a session
+    # cleared since then would otherwise get back the history it had before it. Except one whose legacy
+    # value the upgrade could not read (not a JSON list): it moved nothing, so that value is the only copy
+    params = [
+        {"id": ref, "messages": json.dumps(history)}
+        for ref, history in histories.items()
+        if history or _legacy_list(legacy[ref]) is not None
+    ]
     if params:
         bind.execute(update.bindparams(sa.bindparam("id", type_=Uuid7())), params)
     op.drop_table(MESSAGES)
@@ -184,11 +191,8 @@ def _role_checks() -> list[sa.CheckConstraint]:
 
 def _rows_of(session_ref: str, stored: str | None, created: int, updated: int) -> Iterator[dict[str, Any]]:
     """The rows of one session's stored list, dated evenly from `created` to `updated` (epoch ms)."""
-    try:
-        history = json.loads(stored) if stored else []
-    except ValueError:
-        history = None
-    if not isinstance(history, list):
+    history = _legacy_list(stored)
+    if history is None:
         logger.warning(
             "Session %s: its stored messages are not a JSON list; none are moved: %.80r", session_ref, stored
         )
@@ -200,6 +204,15 @@ def _rows_of(session_ref: str, stored: str | None, created: int, updated: int) -
     for index, message in enumerate(messages):
         ms = created + (index * span // last if last else 0)
         yield _as_row(session_ref, message, ms, ids.next(in_range(ms)))
+
+
+def _legacy_list(stored: str | None) -> list[Any] | None:
+    """A session's legacy `messages` value as the list it holds, None when it is not a JSON list."""
+    try:
+        history = json.loads(stored) if stored else []
+    except ValueError:
+        return None
+    return history if isinstance(history, list) else None
 
 
 def _is_message(session_ref: str, message: Any) -> bool:
@@ -221,7 +234,13 @@ def _as_row(session_ref: str, message: dict[str, Any], ms: int, row_id: str) -> 
             logger.warning("Session %s: dropping %s from a %s message", session_ref, name, role)
             role_fields[name] = None
         else:
-            role_fields[name] = _json(message[name]) if name in ("tool_calls", "raw") else _text(message[name])
+            role_fields[name] = (
+                _calls(message[name])
+                if name == "tool_calls"
+                else _json(message[name])
+                if name == "raw"
+                else _text(message[name])
+            )
     return {
         "id": row_id,
         "session_id": session_ref,
@@ -267,6 +286,23 @@ def _json(value: Any) -> Any:
     if isinstance(value, dict):
         return {_utf8(key): _json(item) for key, item in value.items()}
     return value
+
+
+def _calls(value: Any) -> Any:
+    """Tool calls as `_json` holds them, each call's id and name with no NUL either: a result's
+    `tool_call_id` is TEXT, which strips it (`_text`), and the two must still match to pair."""
+    calls = _json(value)
+    if not isinstance(calls, list):
+        return calls
+    return [
+        {
+            key: (item.replace("\x00", "") if key in ("id", "name") and isinstance(item, str) else item)
+            for key, item in call.items()
+        }
+        if isinstance(call, dict)
+        else call
+        for call in calls
+    ]
 
 
 def _as_dict(row: Any) -> dict[str, Any]:

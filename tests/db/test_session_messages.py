@@ -226,6 +226,47 @@ async def test_a_lone_surrogate_is_saved_as_a_question_mark_and_does_not_wedge_t
     assert [m.to_dict() for m in again.messages] == [m.to_dict() for m in session.messages]
 
 
+async def test_a_compaction_summary_rewritten_under_a_saved_row_is_cleaned_in_memory_too(url):
+    """A summary takes a saved row's id (the first message it replaces), so it is an update, not a new
+    message: it is still brought to what its row holds before it is written."""
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    for message in (user("one"), thinking_reply(1), user("two")):
+        await manager.add_message(session, message)
+    summary = LLMMessage(
+        role=MessageRole.SYSTEM,
+        content="SUM\x00 \ud83d",
+        raw=[{"type": "compaction", "id": "cmp_1", "encrypted_content": "s\ud83d"}],
+        wire=_OPENAI,
+    )
+    assert await manager.compact(session, session.messages[:2], summary)
+
+    again = await reload(url)
+
+    assert (session.messages[0].content, session.messages[0].raw[0]["encrypted_content"]) == ("SUM ?", "s?")
+    assert [m.to_dict() for m in again.messages] == [m.to_dict() for m in session.messages]
+
+
+async def test_tool_call_ids_names_and_the_wire_are_cleaned_in_memory_so_the_pair_survives_a_reload(url):
+    """`tool_call_id` and `wire` are TEXT (no NUL), the call's id and name sit in JSON: all are cleaned
+    alike, in memory as in the rows, so the call and its result still pair after a reload."""
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    await manager.add_message(session, user("go"))
+    call = ToolCall(id="id\x00", name="no\x00te\ud83d", arguments={})
+    reply = thinking_reply(1, tool=call)
+    reply.wire = "w\x00\ud83d"
+    await manager.add_message(session, reply)
+    await manager.add_message(session, LLMMessage(role=MessageRole.TOOL_RESULT, content="ok", tool_call_id="id\x00"))
+
+    again = await reload(url)
+
+    assert (again.messages[1].tool_calls[0].id, again.messages[2].tool_call_id) == ("id", "id")
+    assert (again.messages[1].tool_calls[0].name, again.messages[1].wire) == ("note?", "w?")
+    assert [m.to_dict() for m in again.messages] == [m.to_dict() for m in session.messages]
+    assert _sanitize_tool_pairs(list(again.messages)) == list(again.messages)
+
+
 async def test_a_slower_save_finishing_after_a_later_one_does_not_duplicate_rows(url):
     """An eviction saves outside the turn lock. Saves of one session run one after the other, so the
     later one plans from what the earlier one stored."""

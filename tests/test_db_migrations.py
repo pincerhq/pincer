@@ -2875,12 +2875,17 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
     sessions_at_0034, sessions, messages = _0035_tables()
     cfg = _config(migration_url, tmp_path)
     command.upgrade(cfg, "0034")
-    ids = {key: new_id() for key in ("alice", "guest", "broken", "odd")}
+    ids = {key: new_id() for key in ("alice", "guest", "broken", "odd", "pair")}
+    pair = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t\x002", "name": "no\x00te", "arguments": {}}]},
+        {"role": "tool_result", "content": "ok", "tool_call_id": "t\x002"},
+    ]
     seed = [
         ("alice", "unified:alice", json.dumps(_HISTORY_0035), 100.0, 100.4),
         ("guest", "web:guest", json.dumps([{"role": "user", "content": "only"}]), 50.123, 50.123),
         ("broken", "web:broken", "not json", 1.0, 2.0),
         ("odd", "web:odd", json.dumps([{"role": "tool", "content": "?"}, {"role": "user", "content": "kept"}]), 10, 11),
+        ("pair", "web:pair", json.dumps(pair), 20, 21),
     ]
     with _connect(migration_url) as conn:
         conn.execute(
@@ -2942,6 +2947,9 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         assert only["created_at"] == from_epoch_seconds(50.123)
         assert rows("broken") == []  # not a list: nothing to move, and the upgrade goes on
         assert [r["content"] for r in rows("odd")] == ["kept"]  # a role no code writes is dropped
+        # A call's id loses its NUL as its result's TEXT `tool_call_id` does, so the two still pair
+        call, result = rows("pair")
+        assert (call["tool_calls"], result["tool_call_id"]) == ([{"id": "t2", "name": "note", "arguments": {}}], "t2")
 
         times = dict(
             (r["session_id"], (r["created_at"], r["updated_at"])) for r in conn.execute(sa.select(sessions)).mappings()
@@ -2977,10 +2985,10 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
     expected[4] = {"role": "assistant", "content": "done ?", "raw": [{"type": "text", "text": "x ?"}], "wire": "w"}
     assert restored == expected
     assert [list(m) for m in restored] == [list(m) for m in expected]  # the keys in `to_dict`'s order
-    # Every session's history is its rows: a cleared one does not get back what it had before the upgrade,
-    # nor does one whose stored text never was a history
+    # Every session's history is its rows: a cleared one does not get back what it had before the upgrade.
+    # One whose stored text never was a history moved nothing, so it keeps that text, the only copy
     assert back["web:guest"]["messages"] == "[]"
-    assert back["web:broken"]["messages"] == "[]"
+    assert back["web:broken"]["messages"] == "not json"
     assert json.loads(back["web:odd"]["messages"]) == [{"role": "user", "content": "kept"}]
     assert (back["unified:alice"]["created_at"], back["unified:alice"]["updated_at"]) == pytest.approx((100.0, 100.4))
     assert back["web:guest"]["created_at"] == pytest.approx(50.123)
