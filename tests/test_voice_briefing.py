@@ -511,6 +511,187 @@ async def test_a_dial_cancelled_mid_request_leaves_nothing_pending(voice, dial_o
     assert recorded == [TARGET]
 
 
+@pytest.fixture
+def cooldowns(monkeypatch):
+    """The call SID each cooldown write named ("" for an unknown outcome)."""
+    from pincer.voice import safety_gates
+
+    recorded: list[str] = []
+
+    async def _record(settings: Any, number: str, **kwargs: Any) -> None:
+        recorded.append(str(kwargs.get("call_sid", "")))
+
+    monkeypatch.setattr(safety_gates, "record_outbound_call", _record)
+    return recorded
+
+
+@pytest.fixture
+def threaded(monkeypatch):
+    """Call SIDs put in a thread."""
+    seen: list[str] = []
+
+    async def _attach(settings: Any, call_sid: str, **kwargs: Any) -> None:
+        seen.append(call_sid)
+
+    monkeypatch.setattr(outbound, "_attach_thread", _attach)
+    return seen
+
+
+async def _started(dial: asyncio.Task, until: Any) -> None:
+    async with asyncio.timeout(2):
+        while not until():
+            await asyncio.sleep(0)
+    assert not dial.done()
+
+
+async def test_a_cancelled_dial_the_relay_claimed_is_still_bound(voice, cooldowns, threaded, dial_outcomes):
+    """The callee answers during a slow POST and the setup claims the dial;
+    then the turn that issued the tool is cancelled. The call is live and
+    briefed, so it gets everything a placed call gets: its report routing,
+    its thread, and a cooldown that names its SID."""
+    released = asyncio.Event()
+
+    class SlowCalls:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await released.wait()
+            return types.SimpleNamespace(sid="CA_claim")
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=SlowCalls())
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    await _started(dial, lambda: voice.engine._pending_outbound)
+    await voice.server._resolve_setup_state("CA_claim", "+1000", "outbound-api", to=TARGET, verified=True)
+    dial.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dial
+
+    assert status_notify.get_call_info("CA_claim") is not None, "the post-call report has nowhere to go"
+    assert threaded == ["CA_claim"]
+    assert cooldowns == ["CA_claim"]
+    assert dial_outcomes == {"rejected": [], "unknown": []}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_a_dial_cancelled_during_the_lookup_is_cleaned_up(voice, cooldowns, dial_outcomes):
+    """The POST times out, and the turn is cancelled while the lookup is in
+    flight. The outcome is unknown, so it is counted and cooled down, and the
+    pending entry goes, or a later setup could claim its stale briefing."""
+    looking = asyncio.Event()
+
+    class TimedOutThenStuckLookup(_TimedOutCalls):
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            looking.set()
+            await asyncio.Event().wait()
+            return []
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=TimedOutThenStuckLookup([]))
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    await _started(dial, looking.is_set)
+    dial.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dial
+
+    assert voice.engine._pending_outbound == {}
+    assert cooldowns == [""]
+    assert dial_outcomes == {"rejected": [], "unknown": ["CancelledError: dial outcome unknown"]}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_a_second_cancel_does_not_skip_the_cooldown(voice, cooldowns, monkeypatch):
+    """Cancelled mid-POST, then cancelled again while the unknown outcome is
+    being written. The cooldown write still happens: without it a retry can
+    ring the same person again."""
+    from pincer.voice.telemetry import hooks
+
+    writing = asyncio.Event()
+
+    async def slow_unknown(temp_id: str, *, error: str) -> None:
+        writing.set()
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(hooks, "dial_unknown", slow_unknown)
+
+    class StuckCalls:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await asyncio.Event().wait()
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=StuckCalls())
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    await _started(dial, lambda: voice.engine._pending_outbound)
+    dial.cancel()
+    async with asyncio.timeout(2):
+        while not (writing.is_set() or cooldowns):
+            await asyncio.sleep(0)
+    dial.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dial
+    await asyncio.sleep(0.1)  # the shielded write finishes on its own
+
+    assert cooldowns == [""]
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+def _claimed_during_lookup(voice: Any, sid: str, listed: list[Any]) -> Any:
+    class TimedOutThenClaimedDuringLookup(_TimedOutCalls):
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            await voice.server._resolve_setup_state(sid, "+1000", "outbound-api", to=TARGET, verified=True)
+            return listed
+
+    voice.server._engine = voice.engine
+    return types.SimpleNamespace(calls=TimedOutThenClaimedDuringLookup([]))
+
+
+async def test_a_claim_during_a_lookup_that_finds_nothing_wins(voice, cooldowns, dial_outcomes):
+    """The POST times out; the callee answers and the setup claims the dial
+    while the lookup runs, but Twilio's call list lags and finds nothing. The
+    call is live and briefed: it is a placed call, not "did not confirm"."""
+    voice.engine._rest._client = _claimed_during_lookup(voice, "CA_late", [])
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+
+    assert "Call SID: CA_late" in result, result
+    assert status_notify.get_call_info("CA_late") is not None
+    assert cooldowns == ["CA_late"]
+    assert dial_outcomes == {"rejected": [], "unknown": []}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_a_claim_during_a_lookup_that_finds_it_ended_wins(voice, cooldowns, monkeypatch):
+    """Same, but by the time the lookup returns the call is over. It
+    happened, so it is a placed call whose report follows — not "already
+    ended", and not a failed call in telemetry."""
+    from datetime import UTC, datetime
+
+    from pincer.voice.telemetry import hooks
+
+    ended: list[str] = []
+
+    async def _call_ended(call_sid: str, **kwargs: Any) -> None:
+        ended.append(str(kwargs.get("termination_reason", "")))
+
+    monkeypatch.setattr(hooks, "call_ended", _call_ended)
+    done = types.SimpleNamespace(sid="CA_done", status="completed", date_created=datetime.now(UTC))
+    calls = _claimed_during_lookup(voice, "CA_done", [done])
+
+    class EndsDuringLookup(type(calls.calls)):
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            listed = await super().list_async(**kwargs)
+            await voice.engine.end_call("CA_done")
+            return listed
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=EndsDuringLookup([]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+
+    assert result.startswith("Call placed and already finished.\nCall SID: CA_done\n"), result
+    assert "ended_before_confirmed" not in ended, "a claimed call happened"
+    assert cooldowns == ["CA_done"]
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
 async def test_the_call_log_names_the_pincer_identity_not_the_channel_id(voice, dial_outcomes, monkeypatch):
     """`user_id` in the tool context is the channel's own id (Telegram `12345`),
     which names no profile: logged, the row would get no `profile_id` and stay

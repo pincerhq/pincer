@@ -255,11 +255,15 @@ async def _recover_unconfirmed_dial(
     *,
     trace_key: str,
     error: str,
+    claimed: Callable[[], str] = lambda: "",
 ) -> str:
     """The CallSid of an unconfirmed dial that is still live, or "" when unknown.
 
     Looks the call up at Twilio. Raises _DialEnded when the call was placed
-    but is already over.
+    but is already over. A relay setup can claim the dial while the lookup
+    is in flight, so ``claimed`` is read again once it is back: a claim wins
+    over whatever the lookup saw. Twilio's call list lags, and a claimed call
+    that has already ended still happened.
     """
     from pincer.observability.failure_codes import NOT_CONNECTED_STATUS, FailureCode
     from pincer.voice.telemetry import hooks as telemetry
@@ -270,6 +274,12 @@ async def _recover_unconfirmed_dial(
         call = await dialer.find_call(to=to_number, from_=settings.twilio_phone_number, since=dialed_at)
     except Exception:
         logger.exception("Lookup of an unconfirmed dial to %s failed", to_number)
+    claimed_sid = claimed()
+    if claimed_sid:
+        # Checked before any telemetry: the claim already re-keyed the trace,
+        # and "unknown" or "ended before confirmed" would be wrong for it.
+        logger.warning("Outbound dial to %s unconfirmed (%s); the relay bound it as %s", to_number, error, claimed_sid)
+        return claimed_sid
     if call is None:
         await telemetry.dial_unknown(trace_key, error=error)
         logger.warning("Outbound dial to %s unconfirmed (%s) with no call found; outcome unknown", to_number, error)
@@ -567,133 +577,148 @@ async def make_phone_call(
 
             dialer = TwilioRest(settings)
         dialed_at = datetime.now(UTC)
+        channel = ctx.get("channel", "")
+
+        from pincer.voice.status_notify import notify_dialing, track_outbound_call
+
+        def _claimed() -> str:
+            # Set by engine.claim_pending_outbound when the relay setup beat
+            # the REST response: the call is live and briefed under this SID.
+            return str(pre_state.metadata.get(CLAIMED_SID_KEY) or "") if pre_state is not None else ""
+
+        def _drop_pending() -> None:
+            # Nothing can bind to the temporary key any more, and a later
+            # setup to this number must not claim its stale briefing.
+            if engine is not None and pre_state is not None:
+                engine.discard_pending(pre_state)
+
+        async def _record_unknown_dial(error: str) -> None:
+            # One coroutine, shielded as one: two shields in a row let a
+            # second cancel skip the second write. The cooldown goes first,
+            # so a retry cannot ring the same person again.
+            await record_outbound_call(settings, validated, user_id=logged_user, channel=channel)
+            await telemetry.dial_unknown(trace_key, error=error)
+
+        async def _bind_placed_call(call_sid: str) -> bool:
+            """The bookkeeping every placed call gets: binding, limit and
+            cooldown, thread, report routing. Shielded by its callers: it also
+            runs when the turn that dialed is being cancelled, and a call left
+            half-bound has no report and no thread. True when the call is
+            already over (the relay claimed it and it ended in the request
+            window)."""
+            telemetry.dial_accepted(trace_key, call_sid)
+            if engine is not None and pre_state is not None:
+                await engine.promote_pending(pre_state, call_sid)
+            # A dial the relay claimed can be over before the REST call returns:
+            # answered, talked and hung up inside the request window. It happened,
+            # so it is recorded and threaded, but nobody is told it is ringing.
+            finished = engine is not None and engine.get_call_state(call_sid) is None
+            log_briefing_bound(call_sid, briefing)
+
+            _increment_daily_count(user_id)
+            await record_outbound_call(settings, validated, user_id=logged_user, channel=channel, call_sid=call_sid)
+
+            # Sprint 13: the call joins (or starts) the thread for this matter
+            # before any status update, so the thread id is already on the call row
+            # when the engine builds the first turn's THREAD CONTEXT block.
+            await _attach_thread(
+                settings,
+                call_sid,
+                thread_id=thread_id,
+                kind=attach_kind,
+                subject=str(thread_subject or "").strip() or truncate(purpose, 120),
+                number=validated,
+                contact_name=str(target_name or "").strip(),
+                language=call_language,
+            )
+
+            # T1.5: live status updates back to the initiating user (max 3/call)
+            # Issue #303: the chat session it was asked in gets the final report,
+            # and the origin row keeps that routing across a restart.
+            await track_outbound_call(
+                call_sid,
+                user_id=user_id,
+                channel=channel,
+                purpose=purpose,
+                target_number=validated,
+                language=call_language,
+                target_name=str(target_name or "").strip(),
+                instructions=str(instructions or "").strip(),
+                pincer_user_id=str(ctx.get("pincer_user_id") or ""),
+                session_key=str(ctx.get("session_key") or ""),
+                tool_grants=tool_grants,
+            )
+            return finished
+
         call_sid = ""
         try:
             try:
                 call = await dialer.create_call(**call_kwargs)
                 call_sid = str(call.sid)
-            except asyncio.CancelledError:
-                # The turn that called the tool was cancelled mid-POST. Twilio
-                # may still place the call: an unknown outcome, counted like
-                # one. The pending entry goes, or a later setup to this number
-                # could claim its stale briefing. Shielded: a second cancel
-                # must not skip the cooldown write.
-                if engine is not None and pre_state is not None:
-                    engine.discard_pending(pre_state)
-                _increment_daily_count(user_id)
-                await asyncio.shield(telemetry.dial_unknown(trace_key, error="CancelledError: dial outcome unknown"))
-                await asyncio.shield(
-                    record_outbound_call(settings, validated, user_id=logged_user, channel=ctx.get("channel", ""))
-                )
-                raise
             except DialOutcomeUnknown as unknown:
                 # A timeout or a connection dropped mid-response is not a
                 # rejection: Twilio may have accepted the POST and the phone
                 # may already be ringing — or answered, in which case the
                 # relay setup has claimed the pending state by callee number
                 # (engine.claim_pending_outbound) and the SID is known here.
-                claimed = str(pre_state.metadata.get(CLAIMED_SID_KEY) or "") if pre_state is not None else ""
-                if claimed:
-                    # Claimed, so placed — even if the call is already over,
-                    # which a live lookup would mistake for "never bound".
-                    call_sid = claimed
-                    logger.warning(
-                        "Outbound dial to %s unconfirmed (%s); the relay bound it as %s", validated, unknown, call_sid
-                    )
-                else:
-                    call_sid = await _recover_unconfirmed_dial(
-                        dialer,
-                        settings,
-                        validated,
-                        dialed_at,
-                        trace_key=trace_key,
-                        error=str(unknown),
-                    )
-                if not call_sid:
-                    # Outcome unknown, or the call already ended. It still
-                    # counts toward the daily limit and the target cooldown,
-                    # so a retry cannot ring the same person twice or slip
-                    # past the cap. The pre-registration goes: nothing can
-                    # bind to its temporary key, and a relay setup for an
-                    # unbriefed outbound call is hung up.
-                    if engine is not None and pre_state is not None:
-                        engine.discard_pending(pre_state)
-                    _increment_daily_count(user_id)
-                    await record_outbound_call(settings, validated, user_id=logged_user, channel=ctx.get("channel", ""))
-                    return (
-                        f"Error: Twilio did not confirm the call to {validated}, and it may still "
-                        "be ringing. Do not call again right away; check the call log first."
-                    )
+                # Claimed, so placed — even if the call is already over,
+                # which a live lookup would mistake for "never bound".
+                call_sid = _claimed() or await _recover_unconfirmed_dial(
+                    dialer,
+                    settings,
+                    validated,
+                    dialed_at,
+                    trace_key=trace_key,
+                    error=str(unknown),
+                    claimed=_claimed,
+                )
             finally:
                 if engine is None:
                     await dialer.aclose()
+        except asyncio.CancelledError:
+            # The turn that called the tool was cancelled before the dial was
+            # bound: mid-POST, or during the lookup after a timeout. A call
+            # the relay already claimed is live and briefed, so it is bound
+            # like any placed call. Otherwise Twilio may still place it: an
+            # unknown outcome, counted like one. Shielded: a second cancel
+            # must not skip the writes.
+            placed = call_sid or _claimed()
+            if placed:
+                await asyncio.shield(_bind_placed_call(placed))
+            else:
+                _drop_pending()
+                _increment_daily_count(user_id)
+                await asyncio.shield(_record_unknown_dial("CancelledError: dial outcome unknown"))
+            raise
         except _DialEnded as ended:
             # Placed, but over before Twilio confirmed it (busy, declined,
             # failed...): a real attempt for the limit and the cooldown, but
             # no live call to brief, notify about, or thread.
-            if engine is not None and pre_state is not None:
-                engine.discard_pending(pre_state)
+            _drop_pending()
             _increment_daily_count(user_id)
-            await record_outbound_call(
-                settings, validated, user_id=logged_user, channel=ctx.get("channel", ""), call_sid=ended.call_sid
+            await asyncio.shield(
+                record_outbound_call(settings, validated, user_id=logged_user, channel=channel, call_sid=ended.call_sid)
             )
             return f"Error: the call to {validated} was placed ({ended.call_sid}) but already ended: {ended.status}."
         except Exception as e:
             await telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
-            if engine is not None and pre_state is not None:
-                engine.discard_pending(pre_state)
+            _drop_pending()
             raise
 
-        telemetry.dial_accepted(trace_key, call_sid)
-        if engine is not None and pre_state is not None:
-            await engine.promote_pending(pre_state, call_sid)
-        # A dial the relay claimed can be over before the REST call returns:
-        # answered, talked and hung up inside the request window. It happened,
-        # so it is recorded and threaded, but nobody is told it is ringing.
-        finished = engine is not None and engine.get_call_state(call_sid) is None
-        log_briefing_bound(call_sid, briefing)
+        if not call_sid:
+            # Outcome unknown (the lookup found nothing and recorded it). It
+            # still counts toward the daily limit and the target cooldown, so
+            # a retry cannot ring the same person twice or slip past the cap.
+            # A relay setup for an unbriefed outbound call is hung up.
+            _drop_pending()
+            _increment_daily_count(user_id)
+            await asyncio.shield(record_outbound_call(settings, validated, user_id=logged_user, channel=channel))
+            return (
+                f"Error: Twilio did not confirm the call to {validated}, and it may still "
+                "be ringing. Do not call again right away; check the call log first."
+            )
 
-        _increment_daily_count(user_id)
-        await record_outbound_call(
-            settings,
-            validated,
-            user_id=logged_user,
-            channel=ctx.get("channel", ""),
-            call_sid=call_sid,
-        )
-
-        # Sprint 13: the call joins (or starts) the thread for this matter
-        # before any status update, so the thread id is already on the call row
-        # when the engine builds the first turn's THREAD CONTEXT block.
-        await _attach_thread(
-            settings,
-            call_sid,
-            thread_id=thread_id,
-            kind=attach_kind,
-            subject=str(thread_subject or "").strip() or truncate(purpose, 120),
-            number=validated,
-            contact_name=str(target_name or "").strip(),
-            language=call_language,
-        )
-
-        # T1.5: live status updates back to the initiating user (max 3/call)
-        # Issue #303: the chat session it was asked in gets the final report,
-        # and the origin row keeps that routing across a restart.
-        from pincer.voice.status_notify import notify_dialing, track_outbound_call
-
-        await track_outbound_call(
-            call_sid,
-            user_id=user_id,
-            channel=ctx.get("channel", ""),
-            purpose=purpose,
-            target_number=validated,
-            language=call_language,
-            target_name=str(target_name or "").strip(),
-            instructions=str(instructions or "").strip(),
-            pincer_user_id=str(ctx.get("pincer_user_id") or ""),
-            session_key=str(ctx.get("session_key") or ""),
-            tool_grants=tool_grants,
-        )
+        finished = await asyncio.shield(_bind_placed_call(call_sid))
         if finished:
             logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)
             return (
