@@ -83,7 +83,7 @@ async def test_a_turn_over_the_limit_compacts_the_oldest_messages_into_a_summary
     assert [m.content for m in session.messages[-4:]] == ["turn 1", "Reply 1", "turn 2", "Reply 2"]
     stored = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert stored is not None
-    assert stored["messages"].count('"role"') == 9
+    assert len(stored["messages"]) == 9
 
 
 async def _compacted_session(settings, session_manager, cost_tracker, agent_llm, summary_llm) -> Agent:
@@ -310,7 +310,7 @@ async def test_a_failed_summary_keeps_the_history_and_saves_nothing(settings, se
     assert session.messages[0].content == _earlier(0)
     stored = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert stored is not None
-    assert stored["messages"].count('"role"') == 14
+    assert len(stored["messages"]) == 14
     assert any(
         "no summary, history kept; compaction will be retried after a later turn" in r.getMessage()
         for r in caplog.records

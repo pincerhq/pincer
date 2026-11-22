@@ -38,7 +38,8 @@ The SQLModel tables in [`src/pincer/models/`](../../src/pincer/models/) are
 the source of truth for the schema, and Alembic's `target_metadata` points at
 them. `0001`–`0013` predate the models and stay hand-written SQL, as do the
 Postgres-only type widenings (`0013`, `0016`), the FTS revisions, and the
-UUIDv7 key conversions (`0017`, `0018`, `0032`–`0034`), which move data rather than DDL.
+UUIDv7 key conversions (`0017`, `0018`, `0032`–`0034`) and the move of session messages to rows
+(`0035`), which move data rather than DDL.
 `tests/test_schema_drift.py` checks that the models and those revisions
 describe the same schema, on SQLite and (in CI) on Postgres.
 
@@ -50,7 +51,16 @@ To change the schema:
    `BigInt` for anything that can outgrow 2³¹, such as a nanosecond clock,
    since Postgres' `INTEGER` is 4 bytes too; `Uuid7` for a row id Pincer
    mints, which is a native `uuid` on Postgres and the canonical 36-character
-   string on SQLite; JSON stays in `TEXT`).
+   string on SQLite; JSON stays in `TEXT`). Those are what existing columns
+   are; changing one is a data migration of its own, not part of a model edit.
+   For an instant to the millisecond, use `UtcDateTime`: `TIMESTAMP(3) WITH
+   TIME ZONE` on Postgres, fixed-width UTC text on SQLite, an aware `datetime`
+   in Python. New tables use it, and `0035` moved `pincer_sessions`' float
+   times to it, converting the values. `op.create_table` renders it without
+   its precision, so a revision spells the Postgres type out (as `0035` does).
+   For JSON, use `JsonDocument` or `JsonbDocument`. `JsonDocument` is `json`
+   on Postgres and keeps the text as written: use it for what is sent
+   somewhere again. `JsonbDocument` is `jsonb`.
 2. Autogenerate the revision against a database at head:
    `uv run alembic -c src/pincer/db/alembic.ini revision --autogenerate --rev-id NNNN -m "..."`
    (revisions are numbered, not hashed: `NNNN` is the next free number after the
@@ -74,7 +84,12 @@ not worth rebuilding a table for: primary keys that reflect as nullable, and
 ## Row identifiers
 
 Every id Pincer mints for a row of its own is a UUIDv7, from
-[`pincer.db.ids`](../../src/pincer/db/ids.py) — `new_id()` and nothing else.
+[`pincer.db.ids`](../../src/pincer/db/ids.py) — `new_id()` and nothing else
+outside it. Two exceptions, both in that module:
+
+- a backfill dates existing rows with `Uuid7Sequence` / `uuid7_at`;
+- a session's messages take ids from `uuid7_after`. Each id must carry its
+  message's `created_at` millisecond and sort after the message before it.
 The column type is `Uuid7`: a native `uuid` on Postgres, the canonical
 36-character string on SQLite. A new table's key should look like every other
 one:

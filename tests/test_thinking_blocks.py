@@ -6,7 +6,6 @@ The slice-2 sites (pair repair and tool re-selection still strip thinking) are t
 from __future__ import annotations
 
 import io
-import json
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from anthropic_sse import ScriptedAnthropic, redacted, text, thinking, tool_use
 from PIL import Image
+from support import stored_history
 
 from pincer.core.agent import Agent, StreamEventType, _sanitize_tool_pairs
 from pincer.core.session import SessionManager
@@ -389,7 +389,7 @@ async def test_saved_session_holds_the_models_raw_output_and_a_reload_restores_i
 
     row = await session_manager._store.load("test:with", user_id="with", channel="test", legacy_fallback=False)
     assert row is not None
-    saved = json.loads(row["messages"])
+    saved = stored_history(row)
     assert [(m.get("raw"), m.get("wire")) for m in saved] == [(None, None), (_THINKING, _WIRE), (None, None)]
 
     reloaded = SessionManager(tmp_path / "test.db")
@@ -451,7 +451,7 @@ def _assert_extends(earlier: dict[str, Any], later: dict[str, Any]) -> None:
 async def _stored_length(session_manager, key: str, user_id: str, channel: str) -> int:
     row = await session_manager._store.load(key, user_id=user_id, channel=channel, legacy_fallback=False)
     assert row is not None
-    return len(json.loads(row["messages"]))
+    return len(stored_history(row))
 
 
 _TOOL_THEN_TEXT = [

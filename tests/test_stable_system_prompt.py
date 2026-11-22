@@ -20,8 +20,11 @@ from pincer.core.agent import MEMORY_BLOCK_HEADER, Agent
 from pincer.core.clock import current_time_block
 from pincer.core.compaction import Compactor, LastRequest, choose_cut
 from pincer.core.session import SessionManager
+from pincer.db.ids import new_id
+from pincer.db.types import from_epoch_seconds
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.llm.openai_common import OpenAICompatibleProvider
+from pincer.services.sessions import MessageChanges
 from pincer.tools.registry import ToolRegistry
 
 _TIME_HEADER = "[Current date and time]"
@@ -149,10 +152,10 @@ async def test_an_old_session_without_context_loads_and_replays_as_before(
         session_id="test:user1",
         user_id="user1",
         channel="test",
-        messages=json.dumps(old),
+        messages=MessageChanges(insert=[m | {"id": new_id(), "created_at": from_epoch_seconds(1.0)} for m in old]),
         metadata="{}",
-        created_at=1.0,
-        updated_at=1.0,
+        created_at=from_epoch_seconds(1.0),
+        updated_at=from_epoch_seconds(1.0),
     )
     async with ScriptedAnthropic(settings, [([text("Reply")], "end_turn")]) as llm:
         agent = Agent(settings, llm.provider, session_manager, cost_tracker, ToolRegistry())

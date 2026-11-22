@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 
 import pytest
 from anthropic_sse import ScriptedAnthropic, text
+from support import stored_history
 
 from pincer.core.agent import Agent
 from pincer.core.compaction import CompactionOutcome, Compactor, LastRequest, SentRequest, ServerCompaction
@@ -35,7 +35,7 @@ async def test_a_session_of_200_messages_is_never_trimmed_and_every_request_carr
         assert len(llm.requests[0]["messages"]) == 201  # all 200 earlier messages and the new one
         row = await sessions._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
         assert row is not None
-        assert len(json.loads(row["messages"])) == 202
+        assert len(stored_history(row)) == 202
     finally:
         await sessions.close()
 
@@ -535,7 +535,7 @@ async def test_the_emergency_cut_keeps_the_summary_of_the_conversation_before_it
     assert [m.content[:9] for m in session.messages[1:]] == ["message 8", "message 9", "turn 1", "Reply 1"]
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    stored = json.loads(row["messages"])
+    stored = stored_history(row)
     assert [m["role"] for m in stored][:2] == ["system", "user"]
     assert stored[0]["content"] == summary.content
     assert stored[0].get("raw", []) == summary.raw
@@ -687,10 +687,8 @@ async def test_the_emergency_cut_keeps_both_summaries_of_a_joined_history(
     assert session.messages[0] is first
     assert session.messages[1] is second
     assert session.messages[2].role is MessageRole.USER
-    stored = json.loads(
-        (await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False))[
-            "messages"
-        ]
+    stored = stored_history(
+        await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     )
     assert [m["role"] for m in stored][:3] == ["system", "system", "user"]
 

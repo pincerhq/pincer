@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from anthropic_sse import Reject, ScriptedAnthropic, text
+from support import stored_history
 from test_photos_stay import jpeg
 
 from pincer.core.agent import Agent, StreamEventType
@@ -81,7 +81,7 @@ async def test_a_chat_turn_on_a_history_the_endpoint_rejects_cuts_the_oldest_hal
     assert before * 0.4 < kept < before * 0.6
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    assert len(json.loads(row["messages"])) == len(session.messages)  # saved
+    assert len(stored_history(row)) == len(session.messages)  # saved
     dropped = before + 1 - (len(session.messages) - 1)
     assert [r.getMessage() for r in caplog.records if "too long" in r.getMessage()] == [
         f"Session test:user1: the endpoint rejected the history as too long; dropped the oldest {dropped} messages"
@@ -161,7 +161,7 @@ async def test_it_gives_up_after_four_cuts_and_raises_the_endpoints_error_with_t
     assert [m.content for m in session.messages[len(before) :]] == ["hello"]  # ...only the question was added
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    assert len(json.loads(row["messages"])) == len(session.messages)
+    assert len(stored_history(row)) == len(session.messages)
 
 
 async def test_one_giant_turn_cannot_be_cut_and_the_error_is_raised(settings, session_manager, cost_tracker, registry):
@@ -412,7 +412,7 @@ async def test_a_completion_budget_no_history_can_make_room_for_cuts_nothing_and
     assert session.messages[: len(before)] == before
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    assert len(json.loads(row["messages"])) == len(before) + 1
+    assert len(stored_history(row)) == len(before) + 1
 
 
 _CLAUDE_HISTORY_PLUS_MAX_TOKENS = (
@@ -496,7 +496,7 @@ async def test_a_cut_that_let_a_request_through_stays_when_a_later_request_of_th
     assert [m.role for m in session.messages[-3:]] == [MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL_RESULT]
     row = await session_manager._store.load("test:user1", user_id="user1", channel="test", legacy_fallback=False)
     assert row is not None
-    assert len(json.loads(row["messages"])) == len(session.messages)
+    assert len(stored_history(row)) == len(session.messages)
 
 
 async def test_a_turn_that_gives_up_on_the_cuts_for_another_error_puts_the_history_back(
@@ -557,7 +557,7 @@ async def test_messages_that_fit_on_their_own_but_not_with_the_completion_are_cu
 async def _stored_messages(sessions: SessionManager, key: str = "test:user1", channel: str = "test") -> int:
     row = await sessions._store.load(key, user_id="user1", channel=channel, legacy_fallback=False)
     assert row is not None
-    return len(json.loads(row["messages"]))
+    return len(stored_history(row))
 
 
 async def test_a_cut_is_not_saved_by_the_pair_repair_or_by_a_turn_that_ends_in_an_exception(

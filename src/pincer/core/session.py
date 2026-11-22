@@ -4,6 +4,12 @@ Session management, stored through `pincer.services.sessions`.
 A session = one conversation thread for one user on one channel.
 Stores message history and provides context for the agent. A session is never cut by message
 count: it is compacted by prompt tokens (`pincer.core.compaction`).
+
+Each message is a row of its own (`pincer_session_messages`), ordered by (`created_at`, `id`). A
+save writes only what changed since the last one: the messages added, the ones edited in place, and
+the deletion of the ones dropped (`_plan`). The history in memory is the list as the agent left it;
+the rows follow its order, so the provider output each assistant message replays (`raw`, see
+`llm.replay`) and the latest compaction window come back where they were.
 """
 
 from __future__ import annotations
@@ -12,20 +18,30 @@ import asyncio
 import base64
 import json
 import logging
-import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
-from pincer.llm.base import ImageContent, LLMMessage, MessageRole
+from pincer.db.ids import uuid7_after, uuid7_ms
+from pincer.db.types import epoch_ms, from_epoch_ms
+from pincer.llm.base import ImageContent, LLMMessage, MessageRole, StoredRow, ToolCall
 from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.repositories.sessions import rekeyed_session_id
 from pincer.services.onboarding import OnboardingService
-from pincer.services.sessions import ImageSet, SessionService, StoredImage, register_cache
+from pincer.services.sessions import (
+    ImageSet,
+    MessageChanges,
+    SessionService,
+    StoredImage,
+    register_cache,
+    storable_json,
+    storable_text,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Collection
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -80,12 +96,21 @@ class Session:
     channel: str
     messages: list[LLMMessage] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
+    created_at: datetime = field(default_factory=lambda: _now())
+    updated_at: datetime = field(default_factory=lambda: _now())
     pincer_user_id: str = ""
-    # Hash of the messages and metadata as last saved (or loaded), so an
-    # eviction can skip a session that has not changed.
-    _saved_hash: int | None = field(default=None, init=False, repr=False, compare=False)
+    # The message rows as last saved (or loaded): each row's id and a fingerprint of its content, so a
+    # save writes only the messages that changed, and an eviction skips a session where none did
+    _saved_rows: dict[str, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    # The rows a save gave new messages before it went through. A save that failed may have landed after
+    # all: the next one writes those rows again (upserted by id) rather than new ones, and deletes the ones
+    # no message holds any more, as it does saved rows
+    _pending_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    # Held by each save, from its plan to its bookkeeping: a slower save finishing after a later one (an
+    # eviction outside the turn lock) would otherwise leave rows the later one gave unowned, and saved again
+    _save_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
+    # The metadata as last saved or loaded (a new session's, as created), serialized
+    _saved_metadata: str | None = field(default=None, init=False, repr=False, compare=False)
     # Set once an eviction's save has failed and been warned about, so a
     # session that keeps failing is not logged with a traceback every request.
     _eviction_failed: bool = field(default=False, init=False, repr=False, compare=False)
@@ -118,6 +143,90 @@ class Session:
     def mark_memory_free(self) -> None:
         """Flag the session memory-free; saved with its next message."""
         self.metadata[MEMORY_FREE_KEY] = "true"
+
+    def _save_plan(self, now: datetime) -> _SavePlan:
+        """The rows a save writes, for the history as it is now, in one walk of it.
+
+        A message whose row this session holds (saved, or given by a save that failed) keeps it while it
+        sorts after the message before it: rewritten if its content changed, inserted again if only a
+        failed save gave it. Any other message gets a new row: at its own time if it has one (a history
+        taken over from an older key, or a stored message that has to move), else now when nothing stored
+        comes after it, else just after the message before it (or, at the head, a millisecond before the
+        first stored message). Its id carries that millisecond and sorts
+        after the previous message's id, so (`created_at`, `id`) is the list's order. A stored message
+        that would sort before the one in front of it (something new was put ahead of it with no room)
+        moves to a new row the same way. Rows no message holds any more are deleted.
+        """
+        owned = self._saved_rows.keys() | self._pending_rows
+        # The millisecond of the first row this session holds after each message, if any
+        stored_after: list[int | None] = [None] * len(self.messages)
+        later: int | None = None
+        for index in range(len(self.messages) - 1, -1, -1):
+            stored_after[index] = later
+            message = self.messages[index]
+            if message.stored is not None and _holds_row(message, owned):
+                later = epoch_ms(message.stored.created_at)
+        now_ms = epoch_ms(now)
+        previous: StoredRow | None = None
+        inserts: list[dict[str, Any]] = []
+        updates: list[dict[str, Any]] = []
+        placed: list[tuple[LLMMessage, str, StoredRow]] = []
+        rows: dict[str, int] = {}
+        for index, message in enumerate(self.messages):
+            fingerprint = _fingerprint(message)
+            saved_id = message.stored.id if message.stored is not None else None
+            if (saved_id is None or self._saved_rows.get(saved_id) != fingerprint) and _make_storable(message):
+                # A message about to be written (new, or rewritten under a saved row: a compaction summary,
+                # a repaired tool pair) gets its text as its row will hold it, so the history in memory
+                # and the one read back after a reload send the same request
+                fingerprint = _fingerprint(message)
+            row = message.stored
+            if (
+                row is not None
+                and row.id is not None
+                and row.id in owned
+                and row.id not in rows
+                and _sorts_after(row, previous)
+            ):
+                if row.id not in self._saved_rows:
+                    inserts.append(_as_stored(message, row))
+                elif self._saved_rows[row.id] != fingerprint:
+                    updates.append(_as_stored(message, row))
+                rows[row.id] = fingerprint
+                previous = row
+                continue
+            if row is not None:
+                target_ms = epoch_ms(row.created_at)
+            elif stored_after[index] is not None:
+                # Before a stored message: at the previous message's millisecond, or, at the head, the
+                # millisecond before the first stored one's, which sorts ahead of it whatever its id
+                head_ms = max((stored_after[index] or 0) - 1, 0)
+                target_ms = epoch_ms(previous.created_at) if previous is not None else head_ms
+            else:
+                target_ms = now_ms
+            row_id = _id_after(target_ms, previous)
+            new_row = StoredRow(row_id, from_epoch_ms(uuid7_ms(row_id)))
+            inserts.append(_as_stored(message, new_row))
+            placed.append((message, row_id, new_row))
+            rows[row_id] = fingerprint
+            previous = new_row
+        deletes = [row_id for row_id in owned if row_id not in rows]
+        return _SavePlan(MessageChanges(insert=inserts, update=updates, delete=deletes), placed, rows)
+
+    def _place(self, plan: _SavePlan) -> None:
+        """Before a save: the new messages take their rows, which a retry reuses."""
+        for message, row_id, row in plan.placed:
+            message.stored = row
+            self._pending_rows.add(row_id)
+
+    def _saved(self, plan: _SavePlan) -> None:
+        """Once a save went through: its rows are the session's."""
+        self._saved_rows = plan.rows
+        self._pending_rows.clear()
+
+    def _has_changes(self) -> bool:
+        """True when a save would write something: a message or the metadata changed since the last one."""
+        return bool(self._save_plan(_now()).changes) or json.dumps(self.metadata) != self._saved_metadata
 
     def photo_bytes(self) -> int:
         """What the session's photos take in memory, in base64 characters; a photo shown by several
@@ -184,6 +293,9 @@ class SessionManager:
         same message objects), so a turn, repair, clear or cut since it was chosen wins; and
         only if `kept_ok` accepts the messages that would follow the replacement, judged under
         the turn lock, when no turn can add to them. True if the history changed.
+
+        The replacement takes the row (and time) of the first message it replaces, so it is
+        stored where that one was, before every message kept.
         """
         return await self._replace_prefix(session, prefix, [replacement], kept_ok)
 
@@ -208,8 +320,9 @@ class SessionManager:
                 return False
             if kept_ok is not None and not kept_ok(session.messages[len(prefix) :]):
                 return False
+            _take_place(replacement, prefix)
             session.messages = [*replacement, *session.messages[len(prefix) :]]
-            session.updated_at = time.time()
+            session.updated_at = _now()
             await self._persist(session)
             return True
 
@@ -245,7 +358,7 @@ class SessionManager:
             raise RuntimeError("SessionManager not initialized")
         return self._onboarding
 
-    async def has_stored_sessions(self, user_id: str, channel: str, *, created_before: float | None = None) -> bool:
+    async def has_stored_sessions(self, user_id: str, channel: str, *, created_before: datetime | None = None) -> bool:
         """True when the user has any session stored on the channel, conversations included
         (memory-free ones aside, see `Session.is_memory_free`); with `created_before`,
         only one created before that time."""
@@ -281,11 +394,11 @@ class SessionManager:
                 )
                 for photo in row["images"]
             }
-            stored = json.loads(row["messages"])
+            stored = row["messages"]
             missing = {ref["sha256"] for m in stored for ref in m.get("images", [])} - photos.keys()
             if missing:
                 logger.warning("Session %s refers to %d photo(s) its image store lacks; left out", key, len(missing))
-            messages = [LLMMessage.from_dict(m, photos) for m in stored]
+            messages = [_loaded(m, photos, own=row["session_id"] == key) for m in stored]
             session = Session(
                 session_id=key,
                 user_id=user_id,
@@ -304,10 +417,16 @@ class SessionManager:
                 pincer_user_id=pincer_user_id,
             )
 
-        session._saved_hash = hash(_serialized(session))
+        # As loaded, or the empty session's: a session nobody changed is never written
+        session._saved_metadata = json.dumps(session.metadata)
         session._photo_bytes = session.photo_bytes()
-        if row and row["session_id"] == key:  # a session left under the old key stores its photos anew
+        if row and row["session_id"] == key:
+            session._saved_rows = {
+                m.stored.id: _fingerprint(m) for m in session.messages if m.stored is not None and m.stored.id
+            }
             session._synced_images = frozenset(photo.sha256 for photo in row["images"])
+        # A session left under the old key stores its messages anew (their rows stay the old session's: the
+        # save gives them new ones at their own times) and its photos anew
         self._cache[key] = session
         await self._evict_overflow(keep=key)
         return session
@@ -315,7 +434,7 @@ class SessionManager:
     async def add_message(self, session: Session, message: LLMMessage) -> None:
         """Add a message to the session and save it."""
         session.messages.append(message)
-        session.updated_at = time.time()
+        session.updated_at = _now()
         await self._persist(session)
 
     async def add_messages(self, session: Session, messages: list[LLMMessage]) -> None:
@@ -324,7 +443,7 @@ class SessionManager:
         if not messages:
             return
         session.messages.extend(messages)
-        session.updated_at = time.time()
+        session.updated_at = _now()
         await self._persist(session)
 
     async def append_note(self, session_key: str, user_id: str, channel: str, text: str) -> None:
@@ -344,8 +463,25 @@ class SessionManager:
     async def clear(self, session: Session) -> None:
         """Clear all messages from a session."""
         session.messages.clear()
-        session.updated_at = time.time()
+        session.updated_at = _now()
         await self._persist(session, force_images=True)
+
+    async def edit_message(
+        self, session_key: str, channel_message_id: str, content: str, *, at: datetime | None = None
+    ) -> bool:
+        """Rewrite a user message its messenger reports edited (`channel_message_id`), between turns.
+
+        The cached copy of the session is saved first and dropped after, so the next turn reads the
+        edit instead of writing the old text back. False when the session has no such message.
+        """
+        async with self._locked(session_key):
+            cached = self._cache.get(session_key)
+            if cached is not None:
+                await self._persist(cached, only_if_changed=True)
+            edited = await self._store.edit(session_key, channel_message_id, content, at=at or _now())
+            if edited and cached is not None and self._cache.get(session_key) is cached:
+                del self._cache[session_key]
+            return edited
 
     def forget_identity(self, url: str | None, old_user_id: str, new_user_id: str) -> None:
         """Drop, unsaved, the cached sessions of both ids of a rename on `url`'s database.
@@ -466,43 +602,139 @@ class SessionManager:
                 key not in self._turn_locks
                 and next(iter(self._cache), None) == key
                 and self._cache[key] is session
-                and not _changed(session)
+                and not session._has_changes()
             ):
                 del self._cache[key]
                 photos -= sizes.pop(key, 0)
 
     async def _persist(self, session: Session, *, only_if_changed: bool = False, force_images: bool = False) -> None:
-        """Write the session out (with ``only_if_changed``, only when its
-        messages or metadata differ from what was last saved or loaded).
+        """Write the session out: its row, and the messages that changed since the last save (with
+        ``only_if_changed``, nothing at all when neither they nor the metadata did).
 
         Its photos follow its messages: new ones are stored, and the ones no message holds any
         more are deleted, whichever code removed those messages. ``force_images`` also deletes
         what an earlier session of this process left behind (a clear).
         """
-        state = _serialized(session)
-        if only_if_changed and hash(state) == session._saved_hash:
+        async with session._save_lock:
+            plan = session._save_plan(_now())
+            metadata = json.dumps(session.metadata)
+            if only_if_changed and not plan.changes and metadata == session._saved_metadata:
+                return
+            session._place(plan)
+            session._photo_bytes = session.photo_bytes()
+            images = _image_set(session, force=force_images)
+            await self._store.save(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                channel=session.channel,
+                metadata=metadata,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                messages=plan.changes,
+                images=images,
+            )
+            session._saved(plan)
+            session._saved_metadata = metadata
+            if images is not None:
+                session._synced_images = images.keep
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _make_storable(message: LLMMessage) -> bool:
+    """Bring a message's text to what its row holds (`storable_text`, `storable_json`), in place: no
+    NUL in its text (a tool call's id and name included, so it still pairs with its result), no lone
+    surrogate anywhere. Anything already storable is left as it is. True when something changed."""
+    before = (message.content, message.context, message.tool_call_id, message.wire, message.raw, message.tool_calls)
+    message.content = storable_text(message.content)
+    message.context = storable_text(message.context)
+    if message.tool_call_id:
+        message.tool_call_id = storable_text(message.tool_call_id)
+    message.wire = storable_text(message.wire)
+    if message.raw and (raw := storable_json(message.raw)) is not message.raw:
+        message.raw = raw
+        message.raw_hash = None
+    if message.tool_calls:
+        calls = [_storable_call(call) for call in message.tool_calls]
+        if any(a is not b for a, b in zip(calls, message.tool_calls, strict=True)):
+            message.tool_calls = calls
+    after = (message.content, message.context, message.tool_call_id, message.wire, message.raw, message.tool_calls)
+    return any(a is not b for a, b in zip(before, after, strict=True))
+
+
+def _storable_call(call: ToolCall) -> ToolCall:
+    call_id, name, arguments = storable_text(call.id), storable_text(call.name), storable_json(call.arguments)
+    if call_id == call.id and name == call.name and arguments is call.arguments:
+        return call
+    return replace(call, id=call_id, name=name, arguments=arguments)
+
+
+def _fingerprint(message: LLMMessage) -> int:
+    """What a message's row holds, as a hash: a stored message whose fingerprint changed is rewritten.
+
+    Its raw output, most of a history's size, is hashed once (`LLMMessage.raw_hash`), not on every save."""
+    fields = message.to_dict()
+    raw = fields.pop("raw", None)
+    if raw is not None and message.raw_hash is None:
+        message.raw_hash = hash(json.dumps(raw))
+    return hash((json.dumps(fields), message.raw_hash if raw is not None else None))
+
+
+def _loaded(stored: dict[str, Any], photos: dict[str, ImageContent], *, own: bool) -> LLMMessage:
+    """A stored message (a dict from `SessionService.load`). With `own`, it keeps its row; one read from
+    a session under an older key keeps only its time (`Session._save_plan` gives it a row of its own)."""
+    message = LLMMessage.from_dict(stored, photos)
+    message.stored = StoredRow(stored["id"] if own else None, stored["created_at"])
+    return message
+
+
+def _take_place(replacement: list[LLMMessage], prefix: list[LLMMessage]) -> None:
+    """Give the first new message of `replacement` the row of the first message of `prefix`, which it
+    replaces (a compaction summary takes the place of what it summarizes). Messages the replacement
+    keeps from the prefix (a cut keeps its summaries) keep their own."""
+    first = prefix[0] if prefix else None
+    if first is None or first.stored is None or any(message is first for message in replacement):
+        return
+    for message in replacement:
+        if message.stored is None:
+            message.stored = first.stored
             return
-        messages, metadata = state
-        session._photo_bytes = session.photo_bytes()
-        images = _image_set(session, force=force_images)
-        await self._store.save(
-            session_id=session.session_id,
-            user_id=session.user_id,
-            channel=session.channel,
-            messages=messages,
-            metadata=metadata,
-            created_at=session.created_at,
-            updated_at=session.updated_at,
-            images=images,
-        )
-        session._saved_hash = hash(state)
-        if images is not None:
-            session._synced_images = images.keep
 
 
-def _serialized(session: Session) -> tuple[str, str]:
-    """The session's messages and metadata as they are stored."""
-    return json.dumps([m.to_dict() for m in session.messages]), json.dumps(session.metadata)
+@dataclass
+class _SavePlan:
+    """What a save does to the rows (`changes`), the row it gives each new message (`placed`, with its id), and the
+    fingerprints of the session's rows once it went through (`rows`)."""
+
+    changes: MessageChanges
+    placed: list[tuple[LLMMessage, str, StoredRow]]
+    rows: dict[str, int]
+
+
+def _holds_row(message: LLMMessage, owned: Collection[str]) -> bool:
+    return message.stored is not None and message.stored.id in owned
+
+
+def _sorts_after(row: StoredRow, previous: StoredRow | None) -> bool:
+    """True when `row` sorts after `previous` in (`created_at`, `id`) order. Both have ids: they are rows
+    this session holds or was just given."""
+    if previous is None:
+        return True
+    return (epoch_ms(row.created_at), row.id or "") > (epoch_ms(previous.created_at), previous.id or "")
+
+
+def _id_after(target_ms: int, previous: StoredRow | None) -> str:
+    """A new row's id at `target_ms` (or the previous row's millisecond, if that is later), sorting after
+    the previous row's; the row's `created_at` is the millisecond it carries."""
+    if previous is not None:
+        target_ms = max(target_ms, epoch_ms(previous.created_at))
+    return uuid7_after(target_ms, previous.id if previous else None)
+
+
+def _as_stored(message: LLMMessage, row: StoredRow) -> dict[str, Any]:
+    return message.to_dict() | {"id": row.id, "created_at": row.created_at}
 
 
 def _image_set(session: Session, *, force: bool) -> ImageSet | None:
@@ -526,7 +758,3 @@ def _image_set(session: Session, *, force: bool) -> ImageSet | None:
 def _belongs_to(key: str, user_id: str) -> bool:
     """True when `key` is one of `user_id`'s sessions, as a rename sees it (`rekeyed_session_id`)."""
     return rekeyed_session_id(key, user_id, user_id) is not None
-
-
-def _changed(session: Session) -> bool:
-    return hash(_serialized(session)) != session._saved_hash

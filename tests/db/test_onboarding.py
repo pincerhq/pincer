@@ -6,6 +6,7 @@ import pytest
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
+from pincer.db.types import from_epoch_seconds
 from pincer.models.identity import AuthSession, IdentityChannel, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
@@ -48,10 +49,9 @@ async def _store_session(
         session_id=session_id,
         user_id=user_id,
         channel=channel,
-        messages="[]",
         metadata=metadata,
-        created_at=created_at,
-        updated_at=created_at,
+        created_at=from_epoch_seconds(created_at),
+        updated_at=from_epoch_seconds(created_at),
     )
 
 
@@ -305,10 +305,12 @@ async def test_stored_sessions_created_before_count_only_older_ones(url):
 
     async with session_scope(url) as session:
         repo = SessionRepository(session)
-        assert await repo.exists_for("u", "web", created_before=10.5) is True
-        assert await repo.exists_for("u", "web", created_before=10.0) is False
+        assert await repo.exists_for("u", "web", created_before=from_epoch_seconds(10.5)) is True
+        assert await repo.exists_for("u", "web", created_before=from_epoch_seconds(10.0)) is False
         assert await repo.exists_for("u", "web", created_before=None) is True
-        assert await repo.exists_for("v", "web", created_before=10.0) is False  # memory-free, however old
+        assert (
+            await repo.exists_for("v", "web", created_before=from_epoch_seconds(10.0)) is False
+        )  # memory-free, however old
 
 
 async def test_renaming_moves_onboarding_and_its_asking_session(url):
