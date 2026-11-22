@@ -671,6 +671,76 @@ async def test_a_cancel_while_the_unknown_outcome_is_written_records_it_once(voi
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
 
 
+async def test_a_failed_write_does_not_swallow_the_cancellation(voice, monkeypatch):
+    """The relay claimed the dial and the turn is cancelled, but the cooldown
+    write fails (a DB error). The turn must still end cancelled: returning
+    "Error placing call" would let it carry on after a barge-in."""
+    from pincer.voice import safety_gates
+
+    async def _broken(settings: Any, number: str, **kwargs: Any) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(safety_gates, "record_outbound_call", _broken)
+
+    class SlowCalls:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await asyncio.Event().wait()
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=SlowCalls())
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    await _started(dial, lambda: voice.engine._pending_outbound)
+    await voice.server._resolve_setup_state("CA_claim", "+1000", "outbound-api", to=TARGET, verified=True)
+    dial.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dial
+
+
+async def test_a_failed_cooldown_write_still_closes_the_trace(voice, dial_outcomes, monkeypatch):
+    """The cooldown is written first; if it fails, the unknown outcome is
+    still recorded, or the pre-dial trace stays open as a stuck dial."""
+    from pincer.voice import safety_gates
+
+    async def _broken(settings: Any, number: str, **kwargs: Any) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(safety_gates, "record_outbound_call", _broken)
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([]))
+
+    await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+
+    assert dial_outcomes == {"rejected": [], "unknown": ["TimeoutError: dial outcome unknown"]}
+
+
+async def test_a_shielded_write_that_fails_after_the_cancel_is_logged(caplog):
+    """Once the awaiting turn is cancelled, nobody awaits the shielded task:
+    its failure has to be logged by the task itself."""
+    release = asyncio.Event()
+
+    async def _write() -> None:
+        await release.wait()
+        raise RuntimeError("thread attach exploded")
+
+    async def _turn() -> None:
+        await outbound._shielded(_write())
+
+    turn = asyncio.create_task(_turn())
+    await asyncio.sleep(0)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    with caplog.at_level("ERROR", logger="pincer.voice.outbound"):
+        release.set()
+        async with asyncio.timeout(2):
+            while outbound._SHIELDED_TASKS:
+                await asyncio.sleep(0)
+
+    failures = [r for r in caplog.records if r.message == "Shielded outbound bookkeeping failed"]
+    assert len(failures) == 1
+    assert "thread attach exploded" in str(failures[0].exc_info[1])
+
+
 def _claimed_during_lookup(voice: Any, sid: str, listed: list[Any]) -> Any:
     class TimedOutThenClaimedDuringLookup(_TimedOutCalls):
         async def list_async(self, **kwargs: Any) -> list[Any]:

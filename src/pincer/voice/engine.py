@@ -1993,8 +1993,8 @@ class MediaStreamEngine(VoiceEngine):
         # A weak reference: a finished task (and its result or traceback)
         # is not kept alive until the next send just to be compared.
         task = asyncio.current_task()
-        last = state.metadata.get(REPLY_TASK_KEY)
-        if task is None or last is None or last() is not task:
+        reply_task_ref = state.metadata.get(REPLY_TASK_KEY)
+        if task is None or reply_task_ref is None or reply_task_ref() is not task:
             state.metadata[REPLY_TASK_KEY] = weakref.ref(task) if task is not None else None
             state.metadata[REPLY_SEQ_KEY] = int(state.metadata.get(REPLY_SEQ_KEY, 0)) + 1
         progress = _SpeechProgress(
