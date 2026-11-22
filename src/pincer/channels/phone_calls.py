@@ -2021,6 +2021,11 @@ class VoiceChannel(BaseChannel):
         errors = counts.get(call_sid, 0) + 1
         counts[call_sid] = errors
         language, formality = self._call_language(call_sid)
+        if self._engine:
+            # The apology is a new reply, though the failed turn's task sends
+            # it: an onset from the lines spoken before the failure must not
+            # cut it off.
+            self._engine.begin_reply(call_sid)
 
         if errors >= limit:
             apology = get_prompt("BRAIN_ERROR_FINAL", language, formality)

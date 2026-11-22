@@ -601,15 +601,17 @@ async def test_a_dial_cancelled_during_the_lookup_is_cleaned_up(voice, cooldowns
 
 async def test_a_second_cancel_does_not_skip_the_cooldown(voice, cooldowns, monkeypatch):
     """Cancelled mid-POST, then cancelled again while the unknown outcome is
-    being written. The cooldown write still happens: without it a retry can
-    ring the same person again."""
+    being written. Both writes still finish: without the cooldown a retry can
+    ring the same person again, and without dial_unknown the trace stays open."""
     from pincer.voice.telemetry import hooks
 
-    writing = asyncio.Event()
+    writing, release = asyncio.Event(), asyncio.Event()
+    closed: list[str] = []
 
     async def slow_unknown(temp_id: str, *, error: str) -> None:
         writing.set()
-        await asyncio.sleep(0.05)
+        await release.wait()
+        closed.append(error)
 
     monkeypatch.setattr(hooks, "dial_unknown", slow_unknown)
 
@@ -622,14 +624,49 @@ async def test_a_second_cancel_does_not_skip_the_cooldown(voice, cooldowns, monk
     dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
     await _started(dial, lambda: voice.engine._pending_outbound)
     dial.cancel()
+    await asyncio.wait_for(writing.wait(), timeout=2)
+    dial.cancel()  # lands while dial_unknown is still being written
+    with pytest.raises(asyncio.CancelledError):
+        await dial
+    release.set()
     async with asyncio.timeout(2):
-        while not (writing.is_set() or cooldowns):
+        while not closed:
             await asyncio.sleep(0)
+
+    assert closed == ["CancelledError: dial outcome unknown"]
+    assert cooldowns == [""]
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_a_cancel_while_the_unknown_outcome_is_written_records_it_once(voice, cooldowns, monkeypatch):
+    """The POST times out and the lookup finds nothing; the turn is cancelled
+    while dial_unknown is being written. The outcome is closed once, with
+    the timeout as its cause, and counted and cooled down once."""
+    from pincer.voice.telemetry import hooks
+
+    writing, release = asyncio.Event(), asyncio.Event()
+    closed: list[str] = []
+
+    async def slow_unknown(temp_id: str, *, error: str) -> None:
+        writing.set()
+        await release.wait()
+        closed.append(error)
+
+    monkeypatch.setattr(hooks, "dial_unknown", slow_unknown)
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([]))
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    await asyncio.wait_for(writing.wait(), timeout=2)
     dial.cancel()
     with pytest.raises(asyncio.CancelledError):
         await dial
-    await asyncio.sleep(0.1)  # the shielded write finishes on its own
+    release.set()
+    async with asyncio.timeout(2):
+        while not closed:
+            await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
+    assert closed == ["TimeoutError: dial outcome unknown"]
     assert cooldowns == [""]
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
 

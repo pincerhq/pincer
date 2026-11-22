@@ -569,6 +569,48 @@ class TestFillerOnToolStart:
         await channel.stop()
 
 
+def _spy_begin_reply(engine, call_sid: str) -> list[int]:
+    """How many lines had been spoken each time the channel began a new reply."""
+    marks: list[int] = []
+    engine.begin_reply = lambda sid: marks.append(len(engine.spoken.get(sid, [])))
+    return marks
+
+
+class TestReplyBoundaries:
+    """Issue #282 D: the channel tells the engine where a new reply starts
+    when the same turn task speaks it, so a VAD onset from the earlier lines
+    cannot cut it off."""
+
+    async def test_the_follow_up_after_a_tool_result_begins_a_new_reply(self):
+        script = [
+            StreamChunk(StreamEventType.TEXT, "Einen kleinen Moment bitte, ich schaue nach. "),
+            StreamChunk(StreamEventType.TOOL_START, "calendar_today"),
+            StreamChunk(StreamEventType.TOOL_DONE, "calendar_today"),
+            StreamChunk(StreamEventType.TEXT, "Morgen sind zwei Termine im Kalender. "),
+            StreamChunk(StreamEventType.DONE, "..."),
+        ]
+        channel, engine, agent, state = await _start([script])
+        marks = _spy_begin_reply(engine, "CA_stream")
+
+        await engine.on_speech_input("CA_stream", "Was steht morgen an?")
+
+        assert len(engine.spoken["CA_stream"]) == 2
+        assert marks == [1], "after the line before the tool, before the follow-up"
+        await channel.stop()
+
+    async def test_the_apology_after_a_failed_turn_begins_a_new_reply(self):
+        channel, engine, agent, state = await _start([text_chunks("Der erste Satz ist schon gesprochen. ", "Rest")])
+        agent.fail_after = 1
+        marks = _spy_begin_reply(engine, "CA_stream")
+
+        await engine.on_speech_input("CA_stream", "Hallo?")
+
+        spoken = engine.spoken["CA_stream"]
+        assert len(spoken) == 2, spoken
+        assert marks == [1], "after the spoken line, before the apology"
+        await channel.stop()
+
+
 class TestLatencyInstrumentation:
     async def test_turn_latency_jsonl_written(self, tmp_path):
         from voice_harness.fake_engine import FakeVoiceEngine

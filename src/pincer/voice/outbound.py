@@ -238,58 +238,41 @@ async def _attach_thread(
 LIVE_CALL_STATUSES = frozenset({"queued", "initiated", "ringing", "in-progress"})
 
 
-class _DialEnded(Exception):
-    """A timed-out dial that Twilio placed, but which ended before it was confirmed."""
-
-    def __init__(self, call_sid: str, status: str) -> None:
-        super().__init__(f"{call_sid} ended: {status}")
-        self.call_sid = call_sid
-        self.status = status
+# Shielded bookkeeping tasks still running. `asyncio.shield` keeps no strong
+# reference to the task it runs, and the event loop holds tasks only weakly:
+# once the turn that awaited it is cancelled, nothing else would keep a
+# half-written cooldown or binding from being garbage-collected mid-write.
+_SHIELDED_TASKS: set[asyncio.Task[Any]] = set()
 
 
-async def _recover_unconfirmed_dial(
-    dialer: Any,
-    settings: Any,
-    to_number: str,
-    dialed_at: datetime,
-    *,
-    trace_key: str,
-    error: str,
-    claimed: Callable[[], str] = lambda: "",
-) -> str:
-    """The CallSid of an unconfirmed dial that is still live, or "" when unknown.
+def _shielded[T](coro: Awaitable[T]) -> asyncio.Future[T]:
+    """`asyncio.shield` over a task that is kept alive until it finishes."""
+    task = asyncio.ensure_future(coro)
+    _SHIELDED_TASKS.add(task)
+    task.add_done_callback(_SHIELDED_TASKS.discard)
+    return asyncio.shield(task)
 
-    Looks the call up at Twilio. Raises _DialEnded when the call was placed
-    but is already over. A relay setup can claim the dial while the lookup
-    is in flight, so ``claimed`` is read again once it is back: a claim wins
-    over whatever the lookup saw. Twilio's call list lags, and a claimed call
-    that has already ended still happened.
+
+async def _find_unconfirmed_dial(dialer: Any, settings: Any, to_number: str, dialed_at: datetime) -> Any | None:
+    """The call Twilio placed for an unconfirmed dial, or None when none is found.
+
+    Only the lookup: what the result means (live, ended, unknown) and what
+    gets recorded for it is decided by the caller, after it has read the
+    relay claim again. A lookup that fails is the same as finding nothing.
     """
+    try:
+        return await dialer.find_call(to=to_number, from_=settings.twilio_phone_number, since=dialed_at)
+    except Exception:
+        logger.exception("Lookup of an unconfirmed dial to %s failed", to_number)
+        return None
+
+
+async def _record_ended_unconfirmed(trace_key: str, call_sid: str, status: str) -> None:
+    """Telemetry for a timed-out dial Twilio placed but which is already over."""
     from pincer.observability.failure_codes import NOT_CONNECTED_STATUS, FailureCode
     from pincer.voice.telemetry import hooks as telemetry
     from pincer.voice.telemetry.outcomes import STATUS_FAILED
 
-    call = None
-    try:
-        call = await dialer.find_call(to=to_number, from_=settings.twilio_phone_number, since=dialed_at)
-    except Exception:
-        logger.exception("Lookup of an unconfirmed dial to %s failed", to_number)
-    claimed_sid = claimed()
-    if claimed_sid:
-        # Checked before any telemetry: the claim already re-keyed the trace,
-        # and "unknown" or "ended before confirmed" would be wrong for it.
-        logger.warning("Outbound dial to %s unconfirmed (%s); the relay bound it as %s", to_number, error, claimed_sid)
-        return claimed_sid
-    if call is None:
-        await telemetry.dial_unknown(trace_key, error=error)
-        logger.warning("Outbound dial to %s unconfirmed (%s) with no call found; outcome unknown", to_number, error)
-        return ""
-    call_sid = str(call.sid)
-    status = str(getattr(call, "status", "") or "").lower()
-    if status in LIVE_CALL_STATUSES:
-        logger.warning("Outbound dial to %s unconfirmed but Twilio placed it as %s (%s)", to_number, call_sid, status)
-        return call_sid
-    logger.warning("Outbound dial to %s unconfirmed; placed as %s but already ended (%s)", to_number, call_sid, status)
     telemetry.dial_accepted(trace_key, call_sid)
     # Twilio's status is not ours: `completed` here means a call nobody was
     # briefed for, never a success. busy / no-answer / failed / canceled have
@@ -300,7 +283,6 @@ async def _recover_unconfirmed_dial(
         failure_code=str(NOT_CONNECTED_STATUS.get(status, FailureCode.UNKNOWN)),
         termination_reason="ended_before_confirmed",
     )
-    raise _DialEnded(call_sid, status or "unknown")
 
 
 async def make_phone_call(
@@ -592,12 +574,28 @@ async def make_phone_call(
             if engine is not None and pre_state is not None:
                 engine.discard_pending(pre_state)
 
-        async def _record_unknown_dial(error: str) -> None:
-            # One coroutine, shielded as one: two shields in a row let a
-            # second cancel skip the second write. The cooldown goes first,
-            # so a retry cannot ring the same person again.
-            await record_outbound_call(settings, validated, user_id=logged_user, channel=channel)
-            await telemetry.dial_unknown(trace_key, error=error)
+        def _record(call_sid: str = "") -> Awaitable[None]:
+            return record_outbound_call(settings, validated, user_id=logged_user, channel=channel, call_sid=call_sid)
+
+        async def _settle_unbound(*, unknown_error: str = "", ended_sid: str = "", ended_status: str = "") -> None:
+            """Close a dial that will never be bound: its outcome is unknown,
+            or Twilio placed it but it was over before it was confirmed. It
+            still counts toward the daily limit and the target cooldown, so a
+            retry cannot ring the same person twice or slip past the cap.
+
+            Every write runs in one shielded task, cooldown first: two
+            shields in a row let a second cancel skip the second write."""
+            _drop_pending()
+            _increment_daily_count(user_id)
+
+            async def _write() -> None:
+                await _record(ended_sid)
+                if ended_sid:
+                    await _record_ended_unconfirmed(trace_key, ended_sid, ended_status)
+                else:
+                    await telemetry.dial_unknown(trace_key, error=unknown_error)
+
+            await _shielded(_write())
 
         async def _bind_placed_call(call_sid: str) -> bool:
             """The bookkeeping every placed call gets: binding, limit and
@@ -651,6 +649,8 @@ async def make_phone_call(
             return finished
 
         call_sid = ""
+        dial_error = ""
+        found: Any = None
         try:
             try:
                 call = await dialer.create_call(**call_kwargs)
@@ -663,62 +663,74 @@ async def make_phone_call(
                 # (engine.claim_pending_outbound) and the SID is known here.
                 # Claimed, so placed — even if the call is already over,
                 # which a live lookup would mistake for "never bound".
-                call_sid = _claimed() or await _recover_unconfirmed_dial(
-                    dialer,
-                    settings,
-                    validated,
-                    dialed_at,
-                    trace_key=trace_key,
-                    error=str(unknown),
-                    claimed=_claimed,
-                )
+                dial_error = str(unknown)
+                call_sid = _claimed()
+                if not call_sid:
+                    found = await _find_unconfirmed_dial(dialer, settings, validated, dialed_at)
+                    # The setup can claim the dial while the lookup is in
+                    # flight. A claim wins over whatever the lookup saw:
+                    # Twilio's call list lags, and a claimed call that has
+                    # already ended still happened.
+                    call_sid = _claimed()
+                    if call_sid:
+                        logger.warning(
+                            "Outbound dial to %s unconfirmed (%s); the relay bound it as %s",
+                            validated,
+                            dial_error,
+                            call_sid,
+                        )
             finally:
                 if engine is None:
                     await dialer.aclose()
         except asyncio.CancelledError:
             # The turn that called the tool was cancelled before the dial was
-            # bound: mid-POST, or during the lookup after a timeout. A call
-            # the relay already claimed is live and briefed, so it is bound
-            # like any placed call. Otherwise Twilio may still place it: an
-            # unknown outcome, counted like one. Shielded: a second cancel
-            # must not skip the writes.
+            # bound: mid-POST, or during the lookup after a timeout. Nothing
+            # has been recorded for it yet. A call the relay already claimed
+            # is live and briefed, so it is bound like any placed call.
+            # Otherwise Twilio may still place it: an unknown outcome.
             placed = call_sid or _claimed()
             if placed:
-                await asyncio.shield(_bind_placed_call(placed))
+                await _shielded(_bind_placed_call(placed))
             else:
-                _drop_pending()
-                _increment_daily_count(user_id)
-                await asyncio.shield(_record_unknown_dial("CancelledError: dial outcome unknown"))
+                await _settle_unbound(unknown_error="CancelledError: dial outcome unknown")
             raise
-        except _DialEnded as ended:
-            # Placed, but over before Twilio confirmed it (busy, declined,
-            # failed...): a real attempt for the limit and the cooldown, but
-            # no live call to brief, notify about, or thread.
-            _drop_pending()
-            _increment_daily_count(user_id)
-            await asyncio.shield(
-                record_outbound_call(settings, validated, user_id=logged_user, channel=channel, call_sid=ended.call_sid)
-            )
-            return f"Error: the call to {validated} was placed ({ended.call_sid}) but already ended: {ended.status}."
         except Exception as e:
             await telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
             _drop_pending()
             raise
 
+        if not call_sid and found is not None:
+            found_sid = str(found.sid)
+            status = str(getattr(found, "status", "") or "").lower()
+            if status in LIVE_CALL_STATUSES:
+                logger.warning(
+                    "Outbound dial to %s unconfirmed but Twilio placed it as %s (%s)", validated, found_sid, status
+                )
+                call_sid = found_sid
+            else:
+                # Placed, but over before Twilio confirmed it (busy, declined,
+                # failed...): a real attempt for the limit and the cooldown,
+                # but no live call to brief, notify about, or thread.
+                logger.warning(
+                    "Outbound dial to %s unconfirmed; placed as %s but already ended (%s)", validated, found_sid, status
+                )
+                await _settle_unbound(ended_sid=found_sid, ended_status=status)
+                return (
+                    f"Error: the call to {validated} was placed ({found_sid}) but already ended: {status or 'unknown'}."
+                )
+
         if not call_sid:
-            # Outcome unknown (the lookup found nothing and recorded it). It
-            # still counts toward the daily limit and the target cooldown, so
-            # a retry cannot ring the same person twice or slip past the cap.
+            logger.warning(
+                "Outbound dial to %s unconfirmed (%s) with no call found; outcome unknown", validated, dial_error
+            )
             # A relay setup for an unbriefed outbound call is hung up.
-            _drop_pending()
-            _increment_daily_count(user_id)
-            await asyncio.shield(record_outbound_call(settings, validated, user_id=logged_user, channel=channel))
+            await _settle_unbound(unknown_error=dial_error)
             return (
                 f"Error: Twilio did not confirm the call to {validated}, and it may still "
                 "be ringing. Do not call again right away; check the call log first."
             )
 
-        finished = await asyncio.shield(_bind_placed_call(call_sid))
+        finished = await _shielded(_bind_placed_call(call_sid))
         if finished:
             logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)
             return (

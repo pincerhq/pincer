@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -111,7 +112,10 @@ SPEECH_SEQ_KEY = "speech_seq"
 #: A reply is everything one task sends (a channel turn, a watchdog prompt, a
 #: re-ask), split again by `begin_reply` after a tool result. A VAD onset is
 #: tagged with the reply that was audible when it was taken, and confirms a
-#: barge-in only in that reply.
+#: barge-in only in that reply. This relies on a turn speaking all of its
+#: lines from its own task: speaking one through `create_task` or `gather`
+#: would split the reply, and an onset from its first line would no longer
+#: confirm the caller's "Stop" in the next one.
 REPLY_SEQ_KEY = "reply_seq"
 REPLY_TASK_KEY = "reply_task"
 AUDIBLE_REPLY_KEY = "audible_reply"
@@ -1673,10 +1677,12 @@ class MediaStreamEngine(VoiceEngine):
                 "vad_onset_reply"
             ) != state.metadata.get(AUDIBLE_REPLY_KEY, 0):
                 state.metadata.pop("vad_onset_ns", None)
+                state.metadata.pop("vad_onset_reply", None)
                 return False
             if _echo_of_our_onset(transcript):
                 return False
             state.metadata.pop("vad_onset_ns", None)
+            state.metadata.pop("vad_onset_reply", None)
             return True
 
         async def _cancel_reask() -> None:
@@ -1984,9 +1990,12 @@ class MediaStreamEngine(VoiceEngine):
         _playout_id.set(playout_id)
         # One task's sends are one reply; a send from another task (the next
         # turn, a watchdog prompt, a re-ask) starts the next one.
+        # A weak reference: a finished task (and its result or traceback)
+        # is not kept alive until the next send just to be compared.
         task = asyncio.current_task()
-        if state.metadata.get(REPLY_TASK_KEY) is not task:
-            state.metadata[REPLY_TASK_KEY] = task
+        last = state.metadata.get(REPLY_TASK_KEY)
+        if task is None or last is None or last() is not task:
+            state.metadata[REPLY_TASK_KEY] = weakref.ref(task) if task is not None else None
             state.metadata[REPLY_SEQ_KEY] = int(state.metadata.get(REPLY_SEQ_KEY, 0)) + 1
         progress = _SpeechProgress(
             epoch=int(state.metadata.get("speech_epoch", 0)),
