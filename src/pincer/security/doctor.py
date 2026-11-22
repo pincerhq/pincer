@@ -735,6 +735,9 @@ class SecurityDoctor:
 
             dial_src = inspect.getsource(outbound.make_phone_call)
             gate_src = inspect.getsource(check_outbound_allowed)
+            # make_phone_call records placed and unconfirmed dials through
+            # _OutboundDial.record, which calls record_outbound_call.
+            record_src = inspect.getsource(outbound._OutboundDial.record)
         except Exception as e:  # pragma: no cover — source unavailable (frozen build)
             return CheckResult(
                 name="voice_do_not_call",
@@ -748,7 +751,7 @@ class SecurityDoctor:
             problems.append("make_phone_call does not call check_outbound_allowed")
         if "is_do_not_call" not in gate_src:
             problems.append("check_outbound_allowed does not consult the do-not-call list")
-        if "record_outbound_call" not in dial_src:
+        if "_OutboundDial(" not in dial_src or "record_outbound_call" not in record_src:
             problems.append("placed calls are not recorded (daily cap and cooldown would never trigger)")
         if problems:
             return CheckResult(

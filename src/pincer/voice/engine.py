@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -107,6 +108,17 @@ MEDIA_CLOSED_KEY = "media_closed"
 #: `send_speech` takes the next id, `s<n>`, which is also the name of the
 #: Twilio `mark` sent after the utterance's last audio.
 SPEECH_SEQ_KEY = "speech_seq"
+#: Metadata keys (Media Streams): which agent reply an utterance belongs to.
+#: A reply is everything one task sends (a channel turn, a watchdog prompt, a
+#: re-ask), split again by `begin_reply` after a tool result. A VAD onset is
+#: tagged with the reply that was audible when it was taken, and confirms a
+#: barge-in only in that reply. This relies on a turn speaking all of its
+#: lines from its own task: speaking one through `create_task` or `gather`
+#: would split the reply, and an onset from its first line would no longer
+#: confirm the caller's "Stop" in the next one.
+REPLY_SEQ_KEY = "reply_seq"
+REPLY_TASK_KEY = "reply_task"
+AUDIBLE_REPLY_KEY = "audible_reply"
 #: Metadata key (Media Streams): playout ids whose audio was written but whose
 #: mark Twilio has not echoed yet, in playout order.
 PLAYOUT_PENDING_KEY = "playout_pending"
@@ -264,6 +276,8 @@ class _SpeechProgress:
     cut: bool = False
     #: The utterance's playout id (Media Streams; see SPEECH_SEQ_KEY).
     playout_id: str = ""
+    #: The reply the utterance belongs to (Media Streams; see REPLY_SEQ_KEY).
+    reply: int = 0
 
 
 class VoiceEngine(ABC):
@@ -382,6 +396,12 @@ class VoiceEngine(ABC):
     async def interrupt_speech(self, call_sid: str, *, by_caller: bool = True) -> None:
         """Silence the agent. ``by_caller=False`` is our own cut (shutdown):
         the audio stops, but no caller interruption is counted."""
+
+    def begin_reply(self, call_sid: str) -> None:
+        """What the agent says next is a new reply, though the same task sends
+        it (the follow-up after a tool result). Only Media Streams tracks
+        replies; see REPLY_SEQ_KEY."""
+        return None
 
     async def wait_for_playout(self, call_sid: str) -> None:
         """Return once the speech already sent for the call has been heard.
@@ -1642,21 +1662,27 @@ class MediaStreamEngine(VoiceEngine):
             return all(started <= stt_started + word.start * 1_000_000_000 < window_end for word in words)
 
         def _vad_onset_confirmed(transcript: Any) -> bool:
-            # The onset lives for one reply: a final pops it, and so does the
-            # next reply's first chunk (see _stream_tts). Within the reply it
-            # survives a new stretch of audio — a caller who said "Stop" during
-            # sentence 1 still stops sentence 2. What it must not confirm is
-            # the echo of that new stretch's first syllable: such an interim
-            # leaves the onset in place for the caller's real words.
+            # The onset lives for one reply: a final pops it, and so does any
+            # word heard once another reply's audio is playing (the onset is
+            # tagged with the reply audible when it was taken). Within the
+            # reply it survives a new stretch of audio — a caller who said
+            # "Stop" during sentence 1 still stops sentence 2. What it must
+            # not confirm is the echo of that new stretch's first syllable:
+            # such an interim leaves the onset in place for the caller's real
+            # words.
             onset = int(state.metadata.get("vad_onset_ns", 0))
             if not onset:
                 return False
-            if (_mono_ns() - onset) > BARGE_IN_CONFIRM_WINDOW_MS * 1_000_000:
+            if (_mono_ns() - onset) > BARGE_IN_CONFIRM_WINDOW_MS * 1_000_000 or state.metadata.get(
+                "vad_onset_reply"
+            ) != state.metadata.get(AUDIBLE_REPLY_KEY, 0):
                 state.metadata.pop("vad_onset_ns", None)
+                state.metadata.pop("vad_onset_reply", None)
                 return False
             if _echo_of_our_onset(transcript):
                 return False
             state.metadata.pop("vad_onset_ns", None)
+            state.metadata.pop("vad_onset_reply", None)
             return True
 
         async def _cancel_reask() -> None:
@@ -1772,8 +1798,10 @@ class MediaStreamEngine(VoiceEngine):
                     if getattr(transcript, "speech_started", False):
                         state.metadata["caller_onset_ns"] = _mono_ns()
                         if trigger == "vad" and _agent_audible() and _armed():
-                            # A candidate only, confirmed by the words below.
+                            # A candidate only, confirmed by the words below,
+                            # and only while the same reply is playing.
                             state.metadata["vad_onset_ns"] = _mono_ns()
+                            state.metadata["vad_onset_reply"] = state.metadata.get(AUDIBLE_REPLY_KEY, 0)
                         continue
                     if transcript.text and trigger != "off" and _agent_audible():
                         if _vad_onset_confirmed(transcript):
@@ -1788,9 +1816,6 @@ class MediaStreamEngine(VoiceEngine):
                         # The utterance the onset belonged to is over (UtteranceEnd
                         # arrives as an empty final); it must not confirm a later one.
                         state.metadata.pop("vad_onset_ns", None)
-                        if transcript.text:
-                            # Whatever we say next is a new reply to it.
-                            state.metadata["new_reply_pending"] = True
                         await _handle_final_transcript(transcript)
                     elif transcript.text and "first_partial_ns" not in state.metadata:
                         # Interim results are not acted on, but the FIRST one
@@ -1963,7 +1988,20 @@ class MediaStreamEngine(VoiceEngine):
         state.metadata[SPEECH_SEQ_KEY] = seq
         playout_id = f"s{seq}"
         _playout_id.set(playout_id)
-        progress = _SpeechProgress(epoch=int(state.metadata.get("speech_epoch", 0)), playout_id=playout_id)
+        # One task's sends are one reply; a send from another task (the next
+        # turn, a watchdog prompt, a re-ask) starts the next one.
+        # A weak reference: a finished task (and its result or traceback)
+        # is not kept alive until the next send just to be compared.
+        task = asyncio.current_task()
+        reply_task_ref = state.metadata.get(REPLY_TASK_KEY)
+        if task is None or reply_task_ref is None or reply_task_ref() is not task:
+            state.metadata[REPLY_TASK_KEY] = weakref.ref(task) if task is not None else None
+            state.metadata[REPLY_SEQ_KEY] = int(state.metadata.get(REPLY_SEQ_KEY, 0)) + 1
+        progress = _SpeechProgress(
+            epoch=int(state.metadata.get("speech_epoch", 0)),
+            playout_id=playout_id,
+            reply=int(state.metadata.get(REPLY_SEQ_KEY, 0)),
+        )
 
         try:
             delivered = await self._synthesize_with_retry(call_sid, state, segments, progress)
@@ -2155,10 +2193,9 @@ class MediaStreamEngine(VoiceEngine):
                                 turn.first_audio(kind="audio", engine="media_streams")
                             progress.wrote_audio = True
                             state.metadata["audio_since_clear"] = True
-                            if state.metadata.pop("new_reply_pending", False):
-                                # A new reply's first audio: an onset taken
-                                # before it belongs to the old reply.
-                                state.metadata.pop("vad_onset_ns", None)
+                            # From here on an onset taken during an earlier
+                            # reply's audio no longer confirms (see REPLY_SEQ_KEY).
+                            state.metadata[AUDIBLE_REPLY_KEY] = progress.reply
                             # Twilio plays out in real time; the end of what it
                             # holds is what barge-in detection checks against.
                             now_ns = _mono_ns()
@@ -2251,6 +2288,11 @@ class MediaStreamEngine(VoiceEngine):
             telemetry.buffer_cleared(call_sid, since_ns=detected_ns, acknowledged=False)
 
         logger.debug("MS interrupt [%s]", call_sid)
+
+    def begin_reply(self, call_sid: str) -> None:
+        state = self._active_calls.get(call_sid)
+        if state is not None:
+            state.metadata[REPLY_SEQ_KEY] = int(state.metadata.get(REPLY_SEQ_KEY, 0)) + 1
 
     async def wait_for_playout(self, call_sid: str) -> None:
         state = self._active_calls.get(call_sid)

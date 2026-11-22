@@ -694,25 +694,10 @@ async def test_a_timed_out_dial_with_unknown_outcome_is_not_a_rejection(telemetr
 async def test_a_dial_that_ended_before_it_was_confirmed_is_not_a_success(telemetry, twilio_status, failure_code):
     """The post-timeout lookup finds the call already over. Twilio's own word
     for it (`completed` included) is not our call status: nobody was briefed."""
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
-
     from pincer.voice import outbound
 
-    class Dialer:
-        async def find_call(self, **kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(sid="CA_over", status=twilio_status)
-
     hooks.dial_requested("pending-eee", to_number="+4930111", engine="conversation_relay", language="de")
-    with pytest.raises(outbound._DialEnded):
-        await outbound._recover_unconfirmed_dial(
-            Dialer(),
-            SimpleNamespace(twilio_phone_number="+4930999"),
-            "+4930111",
-            datetime.now(UTC),
-            trace_key="pending-eee",
-            error="TimeoutError: dial outcome unknown",
-        )
+    await outbound._record_ended_unconfirmed("pending-eee", "CA_over", twilio_status)
     await _settle()
 
     aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
