@@ -941,3 +941,141 @@ async def test_deepgram_speech_started_becomes_a_transcript_event():
     assert got[0].speech_started and got[0].text == "" and got[0].timestamp_s == 1.25
     assert got[1].text == "hallo" and got[1].is_final and not got[1].speech_started
     assert got[2].text == "" and got[2].is_final and got[2].speech_final and not got[2].speech_started
+
+
+# ── Issue #282 D: a VAD onset belongs to the reply that was audible ──────
+
+
+def _armed_now(state: Any) -> None:
+    """Our audio started longer ago than the arm delay."""
+    state.metadata["playout_started_ns"] -= (BARGE_IN_ARM_DELAY_MS + 50) * 1_000_000
+
+
+def _words_now(state: Any, *texts: str) -> Transcript:
+    """An interim whose words are timed at this moment: past any arm window,
+    so the echo refusal does not cover them."""
+    from pincer.voice.telemetry.clock import mono_ns
+
+    at = (mono_ns() - int(state.metadata["stt_started_ns"])) / 1_000_000_000
+    words = [TranscriptWord(text, start=at + 0.2 * i, end=at + 0.2 * i + 0.15) for i, text in enumerate(texts)]
+    return Transcript(text=" ".join(texts), words=words)
+
+
+async def test_a_final_during_a_reply_does_not_carry_its_onset_into_the_next_reply():
+    """A short "okay" final arrives while reply A is still being sent, and A's
+    next sentence follows it. A VAD onset then lands on A's tail. Reply B
+    starts, and a two-word echo of B (outside any arm window, below
+    min_words) arrives. The onset is A's: it must not cut B off."""
+    engine = _engine(FakeTTS(), "vad", min_words=3)
+    sock, stt = await _call(engine, "CA_ms")
+    state = engine.get_call_state("CA_ms")
+    next_sentence = asyncio.Event()
+
+    async def reply_a() -> None:
+        await engine.send_speech("CA_ms", SENTENCE_1)
+        await next_sentence.wait()
+        await engine.send_speech("CA_ms", SENTENCE_2)
+
+    task_a = asyncio.create_task(reply_a())
+    async with asyncio.timeout(2):
+        while not sock.events("media"):
+            await asyncio.sleep(0)
+    await _fed(stt, _final("okay"))  # below min_words: no barge-in
+    next_sentence.set()
+    await task_a  # A's next sentence is at Twilio
+
+    _armed_now(state)
+    await _fed(stt, SPEECH_STARTED)  # noise or echo on A's tail
+    assert state.metadata.get("vad_onset_ns"), "precondition: the onset was taken as a candidate"
+    await asyncio.create_task(engine.send_speech("CA_ms", SENTENCE_3))  # reply B
+
+    await _fed(stt, _words_now(state, "Ihr", "Termin"))
+
+    assert sock.events("clear") == []
+
+
+async def test_an_onset_does_not_carry_into_a_reply_no_final_precedes():
+    """A watchdog prompt (or any reply sent by another task) follows reply A
+    with no final in between. An onset taken during A must not confirm one
+    stray word in the prompt."""
+    engine = _engine(FakeTTS(), "vad", min_words=2)
+    sock, stt = await _call(engine, "CA_ms")
+    state = engine.get_call_state("CA_ms")
+
+    await asyncio.create_task(engine.send_speech("CA_ms", SENTENCE_1))
+    _armed_now(state)
+    await _fed(stt, SPEECH_STARTED)
+    assert state.metadata.get("vad_onset_ns"), "precondition: the onset was taken as a candidate"
+    await asyncio.create_task(engine.send_speech("CA_ms", SENTENCE_2))  # the watchdog's line
+
+    await _fed(stt, _words_now(state, "Ja"))
+
+    assert sock.events("clear") == []
+
+
+async def test_a_tool_follow_up_is_a_new_reply_for_the_onset():
+    """The same task speaks before and after a tool result. `begin_reply`
+    makes the follow-up a new reply: an onset from before it does not
+    confirm a stray word in it."""
+    engine = _engine(FakeTTS(), "vad", min_words=2)
+    sock, stt = await _call(engine, "CA_ms")
+    state = engine.get_call_state("CA_ms")
+    tool_done = asyncio.Event()
+    onset_taken = asyncio.Event()
+
+    async def turn() -> None:
+        await engine.send_speech("CA_ms", SENTENCE_1)
+        onset_taken.set()
+        await tool_done.wait()
+        engine.begin_reply("CA_ms")
+        await engine.send_speech("CA_ms", SENTENCE_2)
+
+    task = asyncio.create_task(turn())
+    await asyncio.wait_for(onset_taken.wait(), timeout=2)
+    _armed_now(state)
+    await _fed(stt, SPEECH_STARTED)
+    assert state.metadata.get("vad_onset_ns"), "precondition: the onset was taken as a candidate"
+    tool_done.set()
+    await task
+
+    await _fed(stt, _words_now(state, "Ja"))
+
+    assert sock.events("clear") == []
+
+
+async def test_an_echo_interim_leaves_the_onset_for_the_callers_words():
+    """The caller's onset comes during sentence 1. Sentence 2 starts a new
+    stretch of audio, and the echo of its first syllable (untimed, inside the
+    arm window) is refused WITHOUT consuming the onset: the caller's own word
+    that follows still confirms it, though one word is below min_words."""
+    engine = _engine(FakeTTS(), "vad", min_words=2)
+    sock, stt = await _call(engine, "CA_ms")
+    state = engine.get_call_state("CA_ms")
+    next_sentence = asyncio.Event()
+
+    async def reply() -> None:
+        await engine.send_speech("CA_ms", SENTENCE_1)
+        await next_sentence.wait()
+        await engine.send_speech("CA_ms", SENTENCE_2)
+
+    task = asyncio.create_task(reply())
+    async with asyncio.timeout(2):
+        while not sock.events("media"):
+            await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    _armed_now(state)
+    await _fed(stt, SPEECH_STARTED)
+    onset = state.metadata.get("vad_onset_ns")
+    assert onset, "precondition: the onset was taken as a candidate"
+    state.metadata["playout_until_ns"] = 0  # sentence 1 played out
+    next_sentence.set()
+    await task
+    assert state.metadata["playout_started_ns"] > onset, "precondition: a new stretch of audio"
+
+    await _fed(stt, Transcript(text="Am"))  # echo of sentence 2's first syllable
+    assert sock.events("clear") == [], "an echo is not a barge-in"
+
+    spoken_at = (onset - int(state.metadata["stt_started_ns"])) / 1_000_000_000
+    await _fed(stt, Transcript(text="Stop", words=[TranscriptWord("Stop", start=spoken_at, end=spoken_at + 0.3)]))
+
+    assert len(sock.events("clear")) == 1

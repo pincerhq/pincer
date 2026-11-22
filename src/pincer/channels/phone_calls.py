@@ -1692,6 +1692,9 @@ class VoiceChannel(BaseChannel):
                         )
                         await speak(filler, last=True)
                 elif chunk.type == StreamEventType.TOOL_DONE:
+                    # What follows a tool result is a new reply: an onset
+                    # taken during the earlier lines must not cut it off.
+                    engine.begin_reply(call_sid)
                     if gate is not None and gate.suppress_llm_speech:
                         suppress_rest = True  # the gate spoke the outcome
                 elif chunk.type == StreamEventType.DONE:
