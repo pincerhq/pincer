@@ -12,9 +12,11 @@ save. Each message is now a row of `pincer_session_messages`, ordered by (`creat
 ZONE` on Postgres and `YYYY-MM-DDTHH:MM:SS.mmm+00:00` text on SQLite (`db.types.UtcDateTime`), cut to
 the millisecond. The floats are 8-byte, so the milliseconds they held are kept.
 
-Messages had no time of their own. A session's N messages are spread evenly over its life: message i
-gets `created_at + i * (updated_at - created_at) / (N - 1)`, cut to the millisecond, so the first is
-dated when the session was created and the last when it was last saved. Each id is minted at its
+Messages had no time of their own. A session's N units are spread evenly over its life: unit i gets
+`created_at + i * (updated_at - created_at) / (N - 1)`, cut to the millisecond, so the first is dated
+when the session was created and the last when it was last saved. A unit is one message, or a tool
+group (an assistant message with tool calls and its results), which an identity merge joining two
+histories by time must not split. Each id is minted at its
 message's millisecond by a per-session `Uuid7Sequence`, strictly increasing, so (`created_at`, `id`) is
 the list's order even where messages share a millisecond.
 
@@ -71,12 +73,16 @@ _SAVED_ROLE_FIELDS = ("tool_call_id", "tool_calls", "raw", "wire", "context")
 TIMES = ("created_at", "updated_at")
 #: Rows per INSERT of the backfill.
 BATCH = 1000
+#: Sessions whose histories are read at once, either way: a long one's list (provider output included)
+#: runs to megabytes, so the whole table is never held in memory.
+SESSIONS_PER_READ = 100
 #: `UtcDateTime`'s DDL, spelled out: `op.create_table` renders the type decorator as a plain
 #: `TIMESTAMP WITH TIME ZONE` (precision 6), not the `TIMESTAMP(3)` it declares.
 _MILLISECONDS = sa.Text().with_variant(postgresql.TIMESTAMP(timezone=True, precision=3), "postgresql")
 #: The latest millisecond a `datetime` can hold (9999-12-31T23:59:59.999).
 _MAX_MS = 253_402_300_799_999
 
+_sessions = sa.table(SESSIONS, sa.column("id", Uuid7()), sa.column("messages", sa.Text()))
 _messages = sa.table(
     MESSAGES,
     sa.column("id", Uuid7()),
@@ -97,16 +103,23 @@ _messages = sa.table(
 def upgrade() -> None:
     bind = op.get_bind()
     hold_transaction(bind)
-    # Read before the times change type: as floats, on both dialects.
-    sessions = bind.execute(sa.text(f"SELECT id, messages, created_at, updated_at FROM {SESSIONS}")).all()  # noqa: S608
+    # Read before the times change type: as floats, on both dialects. The histories are read later, a few
+    # sessions at a time
+    times = {
+        str(session_ref): (_ms(created), _ms(updated))
+        for session_ref, created, updated in bind.execute(
+            sa.text(f"SELECT id, created_at, updated_at FROM {SESSIONS}")  # noqa: S608
+        ).all()
+    }
     _times_to_datetimes(bind)
     _create_messages_table()
     rows: list[dict[str, Any]] = []
-    for session_ref, stored, created, updated in sessions:
-        rows.extend(_rows_of(str(session_ref), stored, _ms(created), _ms(updated)))
-        if len(rows) >= BATCH:
-            bind.execute(_messages.insert(), rows)
-            rows = []
+    for chunk in _chunks(list(times)):
+        for session_ref, stored in _legacy_values(bind, chunk).items():
+            rows.extend(_rows_of(session_ref, stored, *times[session_ref]))
+            if len(rows) >= BATCH:
+                bind.execute(_messages.insert(), rows)
+                rows = []
     if rows:
         bind.execute(_messages.insert(), rows)
 
@@ -114,26 +127,30 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     hold_transaction(bind)
-    legacy = {
-        str(session_ref): stored
-        for session_ref, stored in bind.execute(sa.text(f"SELECT id, messages FROM {SESSIONS}")).all()  # noqa: S608
-    }
-    histories: dict[str, list[dict[str, Any]]] = {ref: [] for ref in legacy}
-    ordered = sa.select(_messages).order_by(_messages.c.session_id, _messages.c.created_at, _messages.c.id)
-    for row in bind.execute(ordered).mappings():
-        if (history := histories.get(str(row["session_id"]))) is not None:
-            history.append(_as_dict(row))
-    update = sa.text(f"UPDATE {SESSIONS} SET messages = :messages WHERE id = :id")  # noqa: S608
-    # Sessions left with no rows too: the legacy column was not written since the upgrade, so a session
-    # cleared since then would otherwise get back the history it had before it. Except one whose legacy
-    # value the upgrade could not read (not a JSON list): it moved nothing, so that value is the only copy
-    params = [
-        {"id": ref, "messages": json.dumps(history)}
-        for ref, history in histories.items()
-        if history or _legacy_list(legacy[ref]) is not None
-    ]
-    if params:
-        bind.execute(update.bindparams(sa.bindparam("id", type_=Uuid7())), params)
+    update = sa.update(_sessions).where(_sessions.c.id == sa.bindparam("ref")).values(messages=sa.bindparam("text"))
+    refs = [str(ref) for (ref,) in bind.execute(sa.text(f"SELECT id FROM {SESSIONS}")).all()]  # noqa: S608
+    for chunk in _chunks(refs):
+        histories: dict[str, list[dict[str, Any]]] = {ref: [] for ref in chunk}
+        ordered = (
+            sa.select(_messages)
+            .where(_messages.c.session_id.in_(chunk))
+            .order_by(_messages.c.session_id, _messages.c.created_at, _messages.c.id)
+        )
+        for row in bind.execute(ordered).mappings():
+            histories[str(row["session_id"])].append(_as_dict(row))
+        # Sessions left with no rows too: the legacy column was not written since the upgrade, so a session
+        # cleared since then would otherwise get back the history it had before it. Except one whose legacy
+        # value the upgrade could not read (not a JSON list): it moved nothing, so that value is the only
+        # copy. Only these sessions' legacy values are read
+        empty = [ref for ref, history in histories.items() if not history]
+        readable = {ref for ref, stored in _legacy_values(bind, empty).items() if _legacy_list(stored) is not None}
+        params = [
+            {"ref": ref, "text": json.dumps(history)}
+            for ref, history in histories.items()
+            if history or ref in readable
+        ]
+        if params:
+            bind.execute(update, params)
     op.drop_table(MESSAGES)
     _times_to_floats(bind)
 
@@ -189,8 +206,26 @@ def _role_checks() -> list[sa.CheckConstraint]:
     ]
 
 
+def _chunks(refs: list[str]) -> Iterator[list[str]]:
+    for start in range(0, len(refs), SESSIONS_PER_READ):
+        yield refs[start : start + SESSIONS_PER_READ]
+
+
+def _legacy_values(bind: sa.Connection, refs: list[str]) -> dict[str, str | None]:
+    """The legacy `messages` value of each of these sessions."""
+    if not refs:
+        return {}
+    stmt = sa.select(_sessions.c.id, _sessions.c.messages).where(_sessions.c.id.in_(refs))
+    return {str(ref): stored for ref, stored in bind.execute(stmt).all()}
+
+
 def _rows_of(session_ref: str, stored: str | None, created: int, updated: int) -> Iterator[dict[str, Any]]:
-    """The rows of one session's stored list, dated evenly from `created` to `updated` (epoch ms)."""
+    """The rows of one session's stored list, dated evenly from `created` to `updated` (epoch ms).
+
+    A tool group (an assistant message with tool calls and the results after it) shares one millisecond,
+    the ids keeping its order: these times are made up, and a group spread over the session's life would
+    have another conversation's messages between its call and its results once an identity merge joins
+    the two by time (`SessionMessageRepository.move`), and the agent would drop the pair."""
     history = _legacy_list(stored)
     if history is None:
         logger.warning(
@@ -198,12 +233,27 @@ def _rows_of(session_ref: str, stored: str | None, created: int, updated: int) -
         )
         return
     messages = [m for m in history if _is_message(session_ref, m)]
-    last = len(messages) - 1
+    units = _units(messages)
+    last = units[-1] if units else 0
     span = max(updated - created, 0)
     ids = Uuid7Sequence()
-    for index, message in enumerate(messages):
-        ms = created + (index * span // last if last else 0)
+    for message, unit in zip(messages, units, strict=True):
+        ms = created + (unit * span // last if last else 0)
         yield _as_row(session_ref, message, ms, ids.next(in_range(ms)))
+
+
+def _units(messages: list[dict[str, Any]]) -> list[int]:
+    """Each message's place among the history's units: a tool group is one, any other message one."""
+    units: list[int] = []
+    unit = -1
+    in_group = False
+    for message in messages:
+        role = message["role"]
+        if not (in_group and role == "tool_result"):
+            unit += 1
+            in_group = role == "assistant" and bool(message.get("tool_calls"))
+        units.append(unit)
+    return units
 
 
 def _legacy_list(stored: str | None) -> list[Any] | None:

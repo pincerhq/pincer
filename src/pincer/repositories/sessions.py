@@ -391,7 +391,12 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
     async def move(self, old_session_id: str, new_session_id: str) -> int:
         """Move every message of `old_session_id` to `new_session_id`, two sessions joined into one: the
         conversations interleave by time. A messenger id both hold names one message, kept on the
-        target's copy. Returns the messages moved."""
+        target's copy. Returns the messages moved.
+
+        Lossy for a tool call whose results came later than a message of the other conversation (both
+        live at once, within the seconds a tool ran): the agent's tool-pair repair drops that pair on the
+        next turn, rewriting the cached request prefix once. Migration 0035 dates each migrated tool group
+        at one millisecond, so the histories it moved do not split this way."""
         source, target = _session_ref(old_session_id), _session_ref(new_session_id)
         held = select(SessionMessage.channel_message_id).where(
             col(SessionMessage.session_id) == target, col(SessionMessage.channel_message_id).is_not(None)

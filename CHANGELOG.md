@@ -161,7 +161,11 @@ and the deletion of the ones dropped.
   milliseconds.
 - It then moves every stored message to a row. A session's messages are dated
   evenly between its `created_at` and its `updated_at`, and each id carries its
-  message's millisecond, so the order is kept.
+  message's millisecond, so the order is kept. A tool call and its results share
+  one millisecond, so a later identity merge, which joins two histories by time,
+  does not put the other conversation's messages between them.
+- It reads the stored histories a hundred sessions at a time, both ways, so a
+  large install's histories are never all in memory at once.
 - A stored list that does not parse is skipped. So is a message with no known
   role. Both are logged.
 - A NUL character is stripped from text, because Postgres text takes none, and

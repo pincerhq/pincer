@@ -631,17 +631,58 @@ async def test_an_edit_through_the_manager_rewrites_the_message_and_the_next_tur
     assert row.updated_at is not None
 
 
-async def test_the_migration_holds_the_same_role_fields_as_the_model():
+def migration_0035() -> Any:
     import importlib.util
-
-    from pincer.models.sessions import ROLE_FIELDS
 
     path = Path(__file__).resolve().parents[2] / "src/pincer/db/migrations/versions/0035_session_messages.py"
     spec = importlib.util.spec_from_file_location("migration_0035", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.ROLE_FIELDS == ROLE_FIELDS
+    return module
+
+
+async def test_the_migration_holds_the_same_role_fields_as_the_model():
+    from pincer.models.sessions import ROLE_FIELDS
+
+    assert migration_0035().ROLE_FIELDS == ROLE_FIELDS
+
+
+def test_migrated_histories_joined_by_time_keep_every_tool_pair():
+    """0035 makes the times up, spread over each session's life. Two sessions that lived at the same
+    time interleave by those times when an identity merge joins them (`SessionMessageRepository.move`):
+    each tool group shares one millisecond, so no message of the other lands between a call and its
+    result, and the agent's repair drops nothing."""
+    module = migration_0035()
+
+    def history(name: str) -> list[dict[str, Any]]:
+        turns: list[dict[str, Any]] = []
+        for n in range(6):
+            call = {"id": f"{name}{n}", "name": "lookup", "arguments": {}}
+            turns += [
+                {"role": "user", "content": f"{name} asks {n}"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "tool_result", "content": "ok", "tool_call_id": call["id"]},
+                {"role": "assistant", "content": f"{name} answer {n}"},
+            ]
+        return turns
+
+    rows = [
+        *module._rows_of(new_id(), json.dumps(history("a")), 1_000_000, 1_090_000),
+        *module._rows_of(new_id(), json.dumps(history("b")), 1_000_001, 1_090_001),
+    ]
+    rows.sort(key=lambda row: (row["created_at"], row["id"]))
+    joined = [
+        LLMMessage.from_dict({k: v for k, v in row.items() if v is not None and k not in ("id", "session_id")})
+        for row in rows
+    ]
+
+    assert [m.role for m in joined].count(MessageRole.TOOL_RESULT) == 12
+    assert _sanitize_tool_pairs(joined) == joined
+    # The group's messages share a millisecond, the ids keeping their order
+    a_call = next(i for i, m in enumerate(joined) if m.tool_calls and m.tool_calls[0].id == "a0")
+    assert joined[a_call + 1].tool_call_id == "a0"
+    assert rows[a_call]["created_at"] == rows[a_call + 1]["created_at"]
 
 
 async def test_clearing_deletes_every_message_row(url):

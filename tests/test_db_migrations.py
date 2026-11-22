@@ -2875,7 +2875,7 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
     sessions_at_0034, sessions, messages = _0035_tables()
     cfg = _config(migration_url, tmp_path)
     command.upgrade(cfg, "0034")
-    ids = {key: new_id() for key in ("alice", "guest", "broken", "odd", "pair")}
+    ids = {key: new_id() for key in ("alice", "guest", "broken", "odd", "pair", *(f"filler{n}" for n in range(100)))}
     pair = [
         {"role": "assistant", "content": "", "tool_calls": [{"id": "t\x002", "name": "no\x00te", "arguments": {}}]},
         {"role": "tool_result", "content": "ok", "tool_call_id": "t\x002"},
@@ -2886,6 +2886,11 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         ("broken", "web:broken", "not json", 1.0, 2.0),
         ("odd", "web:odd", json.dumps([{"role": "tool", "content": "?"}, {"role": "user", "content": "kept"}]), 10, 11),
         ("pair", "web:pair", json.dumps(pair), 20, 21),
+        # Enough sessions that the histories are read in more than one chunk, either way
+        *(
+            (f"filler{n}", f"web:filler{n}", json.dumps([{"role": "user", "content": f"f{n}"}]), 5, 6)
+            for n in range(100)
+        ),
     ]
     with _connect(migration_url) as conn:
         conn.execute(
@@ -2914,7 +2919,8 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         alice = rows("alice")
         assert [r["role"] for r in alice] == [m["role"] for m in _HISTORY_0035]
         # Spread evenly from the session's creation to its last save, each id carrying its own millisecond
-        assert [epoch_ms(r["created_at"]) for r in alice] == [100_000, 100_100, 100_200, 100_300, 100_400]
+        # The tool call and its result are one unit, at one millisecond, ordered by their ids
+        assert [epoch_ms(r["created_at"]) for r in alice] == [100_000, 100_133, 100_266, 100_266, 100_400]
         assert [uuid7_ms(r["id"]) for r in alice] == [epoch_ms(r["created_at"]) for r in alice]
         window, user, call, result, reply = alice
         assert (window["raw"], window["wire"], window["content"]) == (
@@ -2948,6 +2954,7 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
         assert rows("broken") == []  # not a list: nothing to move, and the upgrade goes on
         assert [r["content"] for r in rows("odd")] == ["kept"]  # a role no code writes is dropped
         # A call's id loses its NUL as its result's TEXT `tool_call_id` does, so the two still pair
+        assert [[r["content"] for r in rows(f"filler{n}")] for n in range(100)] == [[f"f{n}"] for n in range(100)]
         call, result = rows("pair")
         assert (call["tool_calls"], result["tool_call_id"]) == ([{"id": "t2", "name": "note", "arguments": {}}], "t2")
 
@@ -2989,6 +2996,9 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
     # One whose stored text never was a history moved nothing, so it keeps that text, the only copy
     assert back["web:guest"]["messages"] == "[]"
     assert back["web:broken"]["messages"] == "not json"
+    assert all(
+        json.loads(back[f"web:filler{n}"]["messages"]) == [{"role": "user", "content": f"f{n}"}] for n in range(100)
+    )
     assert json.loads(back["web:odd"]["messages"]) == [{"role": "user", "content": "kept"}]
     assert (back["unified:alice"]["created_at"], back["unified:alice"]["updated_at"]) == pytest.approx((100.0, 100.4))
     assert back["web:guest"]["created_at"] == pytest.approx(50.123)
