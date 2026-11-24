@@ -7,9 +7,11 @@ count: it is compacted by prompt tokens (`pincer.core.compaction`).
 
 Each message is a row of its own (`pincer_session_messages`), ordered by (`created_at`, `id`). A
 save writes only what changed since the last one: the messages added, the ones edited in place, and
-the deletion of the ones dropped (`_plan`). The history in memory is the list as the agent left it;
-the rows follow its order, so the provider output each assistant message replays (`raw`, see
-`llm.replay`) and the latest compaction window come back where they were.
+the retirement of the ones dropped (`_save_plan`). A dropped message's row is kept, retired: the model
+is sent the live rows only, while the history people read (`SessionService.history`) keeps them all.
+The history in memory is the list as the agent left it; the rows follow its order, so the provider
+output each assistant message replays (`raw`, see `llm.replay`) and the latest compaction window come
+back where they were.
 """
 
 from __future__ import annotations
@@ -155,7 +157,9 @@ class Session:
         first stored message). Its id carries that millisecond and sorts
         after the previous message's id, so (`created_at`, `id`) is the list's order. A stored message
         that would sort before the one in front of it (something new was put ahead of it with no room)
-        moves to a new row the same way. Rows no message holds any more are deleted.
+        moves to a new row the same way, and its old row is deleted: the message lives on in the new one.
+        Every other row no message holds any more is retired (compacted, cut, cleared, a dropped tool
+        pair): it leaves the model's history and stays in the one people read.
         """
         owned = self._saved_rows.keys() | self._pending_rows
         # The millisecond of the first row this session holds after each message, if any
@@ -172,6 +176,8 @@ class Session:
         updates: list[dict[str, Any]] = []
         placed: list[tuple[LLMMessage, str, StoredRow]] = []
         rows: dict[str, int] = {}
+        # The rows of messages still in the history that move to new rows
+        moved: set[str] = set()
         for index, message in enumerate(self.messages):
             fingerprint = _fingerprint(message)
             saved_id = message.stored.id if message.stored is not None else None
@@ -195,6 +201,8 @@ class Session:
                 rows[row.id] = fingerprint
                 previous = row
                 continue
+            if row is not None and row.id is not None and row.id in owned:
+                moved.add(row.id)
             if row is not None:
                 target_ms = epoch_ms(row.created_at)
             elif stored_after[index] is not None:
@@ -210,8 +218,14 @@ class Session:
             placed.append((message, row_id, new_row))
             rows[row_id] = fingerprint
             previous = new_row
-        deletes = [row_id for row_id in owned if row_id not in rows]
-        return _SavePlan(MessageChanges(insert=inserts, update=updates, delete=deletes), placed, rows)
+        dropped = [row_id for row_id in owned if row_id not in rows]
+        changes = MessageChanges(
+            insert=inserts,
+            update=updates,
+            delete=[row_id for row_id in dropped if row_id in moved],
+            retire=[row_id for row_id in dropped if row_id not in moved],
+        )
+        return _SavePlan(changes, placed, rows)
 
     def _place(self, plan: _SavePlan) -> None:
         """Before a save: the new messages take their rows, which a retry reuses."""
@@ -294,8 +308,8 @@ class SessionManager:
         only if `kept_ok` accepts the messages that would follow the replacement, judged under
         the turn lock, when no turn can add to them. True if the history changed.
 
-        The replacement takes the row (and time) of the first message it replaces, so it is
-        stored where that one was, before every message kept.
+        The replacement takes the time of the first message it replaces, so it is stored where that
+        one was, before every message kept; the replaced messages' rows are retired, not overwritten.
         """
         return await self._replace_prefix(session, prefix, [replacement], kept_ok)
 
@@ -691,15 +705,16 @@ def _loaded(stored: dict[str, Any], photos: dict[str, ImageContent], *, own: boo
 
 
 def _take_place(replacement: list[LLMMessage], prefix: list[LLMMessage]) -> None:
-    """Give the first new message of `replacement` the row of the first message of `prefix`, which it
-    replaces (a compaction summary takes the place of what it summarizes). Messages the replacement
-    keeps from the prefix (a cut keeps its summaries) keep their own."""
+    """Give the first new message of `replacement` the time of the first message of `prefix`, which it
+    replaces (a compaction summary takes the place of what it summarizes), and a row of its own: the
+    replaced message's row is retired with the rest of the prefix, kept for the history people read.
+    Messages the replacement keeps from the prefix (a cut keeps its summaries) keep their own."""
     first = prefix[0] if prefix else None
     if first is None or first.stored is None or any(message is first for message in replacement):
         return
     for message in replacement:
         if message.stored is None:
-            message.stored = first.stored
+            message.stored = StoredRow(None, first.stored.created_at)
             return
 
 

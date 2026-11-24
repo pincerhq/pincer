@@ -25,6 +25,17 @@ class ChatSession(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("session_id", name="uq_sessions_session_id"),
         Index("idx_session_user", "user_id", "channel"),
+        # The web chat's conversation list: a user's conversations, latest activity first
+        Index("idx_sessions_user_channel_updated", "user_id", "channel", "updated_at", "id"),
+        # Who owns a web chat conversation id: the session created first that names it
+        Index(
+            "idx_sessions_conversation_id",
+            "conversation_id",
+            "created_at",
+            "id",
+            postgresql_where=sa.text("conversation_id IS NOT NULL"),
+            sqlite_where=sa.text("conversation_id IS NOT NULL"),
+        ),
     )
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -39,6 +50,12 @@ class ChatSession(SQLModel, table=True):
     session_metadata: str | None = Field(
         default=None, sa_column=Column("metadata", Text(), nullable=False, server_default=sa.text("'{}'"))
     )
+    # The web chat conversation the session is (`web:<user>:<conversation_id>`), NULL for any other
+    # session. The session created first that names an id owns it (`SessionRepository.owner_of`): another
+    # identity naming it is refused, never given the owner's history. Not unique, so an identity rename
+    # that joins two sessions of one person naming the same id (`_rekey_sessions`) never fails a save.
+    # Kept on a re-key, which never changes the conversation.
+    conversation_id: str | None = Field(default=None, sa_column=Column(Uuid7()))
     created_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
     updated_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
 
@@ -79,6 +96,11 @@ def role_checks(role_fields: dict[str, tuple[str, ...]] = ROLE_FIELDS) -> list[C
 class SessionMessage(SQLModel, table=True):
     """One message of a conversation, in the order (`created_at`, `id`).
 
+    A message that leaves the model's history (compaction, the emergency cut, a clear, a dropped tool
+    pair) is not deleted: its row is *retired* (`retired_at`). The model is sent only the live rows; the
+    history people read keeps them all. Only a message that moves to a new row loses its old one, since
+    it lives on in the new row.
+
     `role` and `content` are always there; every other field belongs to some roles and is NULL
     elsewhere (never `''` or `[]`), as `ROLE_FIELDS` says. The CHECKs hold only what the code
     guarantees: a constraint the agent could break would fail a turn's save, not the bug.
@@ -94,6 +116,9 @@ class SessionMessage(SQLModel, table=True):
     - `context`: the per-turn context of a user message (recalled memories, the time).
     - `channel_message_id`, `updated_at`: the messenger's id of a user message, and when it was
       edited there. User messages only.
+    - `is_error` on an assistant message: a reply cut short (the client went away while it streamed);
+      `content` is what was streamed of it.
+    - `retired_at`: when the row left the model's history; NULL while it is in it.
 
     `id` is a UUIDv7 carrying `created_at`'s millisecond; within one millisecond it orders the rows.
     """
@@ -129,6 +154,7 @@ class SessionMessage(SQLModel, table=True):
     channel_message_id: str | None = Field(default=None, sa_column=Column(Text()))
     created_at: datetime = Field(sa_column=Column(UtcDateTime(), nullable=False))
     updated_at: datetime | None = Field(default=None, sa_column=Column(UtcDateTime()))
+    retired_at: datetime | None = Field(default=None, sa_column=Column(UtcDateTime()))
 
 
 class SessionImage(SQLModel, table=True):

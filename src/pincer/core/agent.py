@@ -1398,22 +1398,8 @@ class Agent:
         if onboarding.ingest and not (budget_stop is not None and budget_stop.check_failed):
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
 
-        # Store the final exchange as a memory for future retrieval
-        if self._memory and memory and reply:
-            try:
-                tag_channel = channel_name or channel
-                extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
-                await self._memory.store_memory(
-                    user_id=user_id,
-                    content=(
-                        f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n"
-                        f"{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {final_text}"
-                    ),
-                    category="exchange",
-                    extra_tags=extra_tags,
-                )
-            except Exception:
-                logger.debug("Failed to store exchange memory", exc_info=True)
+        if memory and reply:
+            await self._store_exchange(user_id, channel_name or channel, channel_user_id, text, reply)
 
         _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
         return AgentResponse(
@@ -1586,6 +1572,36 @@ class Agent:
             # Also when the client stops reading after DONE
             if session is not None:
                 self._schedule_compaction(session)
+
+    async def _store_exchange(
+        self, user_id: str, tag_channel: str, channel_user_id: str | None, text: str, reply: str
+    ) -> None:
+        """Store the turn's exchange as a memory for future retrieval, on either path. A failure is
+        logged and never fails the turn."""
+        if self._memory is None:
+            return
+        try:
+            extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
+            await self._memory.store_memory(
+                user_id=user_id,
+                content=(
+                    f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {reply}"
+                ),
+                category="exchange",
+                extra_tags=extra_tags,
+            )
+        except Exception:
+            logger.debug("Failed to store exchange memory", exc_info=True)
+
+    async def _save_interrupted(self, session: Session, streamed: str) -> None:
+        """Save what a step had streamed when its client went away, once, as an assistant message
+        flagged `is_error` (the history people read shows it as cut short). Shielded: the turn is
+        being cancelled, and the save must not be."""
+        message = LLMMessage(role=MessageRole.ASSISTANT, content=streamed, is_error=True)
+        try:
+            await asyncio.shield(self._sessions.add_message(session, message))
+        except Exception:
+            logger.warning("Could not save the reply cut short in %s", session.session_id, exc_info=True)
 
     async def _turn_admitted(self) -> bool:
         """False when the daily budget refuses the turn before its first request.
@@ -1840,6 +1856,13 @@ class Agent:
                     await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=ending))
                 yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
                 return
+        except (GeneratorExit, asyncio.CancelledError):
+            # The client went away mid-turn (the web chat closes the stream): what the current step
+            # streamed is in no saved message yet, so it is saved as the reply that was cut short.
+            # Earlier steps' text went with their tool calls
+            if step_text.strip():
+                await self._save_interrupted(session, step_text)
+            raise
         except Exception:
             if not call_sids:
                 raise
@@ -1888,6 +1911,10 @@ class Agent:
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
             await self._ingest_onboarding_reply(text, user_id, channel, onboarding)
+
+        # The exchange as a memory, as the blocking path stores it: most web turns stream
+        if memory and saved:
+            await self._store_exchange(user_id, channel, channel_user_id, text, saved)
 
         _log_turn(session.session_id, turn_requests, turn_usage, total_cost)
         yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)

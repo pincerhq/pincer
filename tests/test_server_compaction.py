@@ -302,7 +302,7 @@ async def test_a_history_changed_during_the_compaction_discards_it_and_leaves_st
     ]
 
 
-async def test_the_swap_deletes_the_photos_only_the_summarized_messages_showed(
+async def test_the_swap_takes_the_summarized_messages_photos_out_of_the_history_and_keeps_them_stored(
     settings, session_manager, cost_tracker, registry
 ):
     old_photo, new_photo = b"photo-in-a-summarized-message", jpeg(64, 48)  # the new one is sent, so it must be readable
@@ -320,7 +320,8 @@ async def test_the_swap_deletes_the_photos_only_the_summarized_messages_showed(
         await asyncio.wait_for(agent.wait_compactions(), timeout=5)
 
     stored = await _stored(session_manager, "user1", "test")
-    assert stored["photos"] == [hashlib.sha256(new_photo).hexdigest()]
+    # Kept for the retired messages that show it (issue #243); the model's history shows only the new one
+    assert stored["photos"] == both
     assert stored_history(stored)[2]["images"] == [
         {"sha256": hashlib.sha256(new_photo).hexdigest(), "media_type": "image/jpeg"}
     ]

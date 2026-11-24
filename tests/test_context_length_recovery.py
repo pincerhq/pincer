@@ -102,7 +102,8 @@ async def test_the_photo_that_made_the_history_too_big_goes_with_its_turn(
     assert len(llm.requests) == 2
     assert not any(m.images for m in session.messages)
     assert session.messages[1].content.startswith("question 1 ")  # the photo's turn was the one that went
-    assert await _stored_photos(session_manager, "test:user1") == 0
+    # The model's history no longer shows it; the store keeps it for the retired turn (issue #243)
+    assert await _stored_photos(session_manager, "test:user1") == 1
 
 
 async def test_a_streamed_turn_recovers_the_same_way(settings, session_manager, cost_tracker, registry):

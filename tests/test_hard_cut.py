@@ -311,7 +311,7 @@ async def _photo_shas(sessions: SessionManager) -> list[str]:
     return sorted(photo.sha256 for photo in row["images"])
 
 
-async def test_a_failed_compaction_over_the_hard_limit_cuts_the_oldest_turns_and_their_photos(
+async def test_a_failed_compaction_over_the_hard_limit_cuts_the_oldest_turns_out_of_the_history(
     settings, session_manager, cost_tracker, caplog
 ):
     caplog.set_level(logging.WARNING, logger="pincer.core.compaction")
@@ -332,7 +332,8 @@ async def test_a_failed_compaction_over_the_hard_limit_cuts_the_oldest_turns_and
     assert [r.getMessage() for r in caplog.records if "hard limit" in r.getMessage()] == [_CUT_WARNING]
     import hashlib
 
-    assert await _photo_shas(session_manager) == [hashlib.sha256(new).hexdigest()]  # the cut photo is gone
+    # The cut photo leaves the model's history and stays stored for the retired turn (issue #243)
+    assert await _photo_shas(session_manager) == sorted(hashlib.sha256(p).hexdigest() for p in (old, new))
     print(f"\nHARD CUT: estimate {before:.0f} -> {_estimate(last, session.messages):.0f}; kept {len(session.messages)}")
 
 

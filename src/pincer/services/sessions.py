@@ -14,7 +14,9 @@ import logging
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
+
+from fastapi import Depends
 
 from pincer.db.session import session_scope
 from pincer.models.sessions import ROLE_FIELDS, SessionImage, SessionMessage
@@ -49,14 +51,16 @@ class ImageSet:
 @dataclass(frozen=True, slots=True)
 class MessageChanges:
     """What a save does to a session's messages: rows to insert and rows to rewrite (message dicts with
-    their `id` and `created_at`), and the ids of the rows to delete."""
+    their `id` and `created_at`), the ids of the rows that leave the model's history (`retire`: kept, as
+    the history people read), and of the rows to delete (a message that moved to a new row)."""
 
     insert: Sequence[dict[str, Any]] = ()
     update: Sequence[dict[str, Any]] = ()
     delete: Sequence[str] = ()
+    retire: Sequence[str] = ()
 
     def __bool__(self) -> bool:
-        return bool(self.insert or self.update or self.delete)
+        return bool(self.insert or self.update or self.delete or self.retire)
 
 
 class SessionCache(Protocol):
@@ -106,7 +110,8 @@ class SessionService(DatabaseService):
                 row = await repo.newest_for(user_id, channel, exclude_prefix=f"{session_id}:")
             if row is None:
                 return None
-            # By the row's own id: a session left under the pre-unified key keeps its messages and photos there
+            # By the row's own id: a session left under the pre-unified key keeps its messages and photos there.
+            # The live rows only: retired ones left the model's history
             messages = await SessionMessageRepository(session).for_session(row.id)
             photos = await SessionImageRepository(session).for_session(row.id)
             return _as_dict(row) | {
@@ -115,15 +120,34 @@ class SessionService(DatabaseService):
             }
 
     async def history(
-        self, session_id: str, *, limit: int, before: tuple[datetime, str] | None = None
+        self, session_id: str, *, limit: int, before: tuple[datetime, str] | None = None, transcript: bool = False
     ) -> list[dict[str, Any]]:
         """A page of the session's messages as people see them (no `context`, no `raw`): the latest
-        `limit` before the (`created_at`, `id`) cursor `before`, oldest first. Empty for no such session."""
+        `limit` before the (`created_at`, `id`) cursor `before`, oldest first. Empty for no such session.
+
+        With `transcript`, the conversation as it was shown: retired rows included, and only the user's
+        messages and the assistant's text (no system messages, tool results or tool-call-only steps)."""
         async with session_scope(self._url) as session:
             row = await SessionRepository(session).get_by(session_id=session_id)
             if row is None:
                 return []
-            return await SessionMessageRepository(session).page(row.id, limit=limit, before=before)
+            return await SessionMessageRepository(session).page(
+                row.id, limit=limit, before=before, transcript=transcript
+            )
+
+    async def conversation_owner(self, conversation_id: str) -> str | None:
+        """The key of the session that owns the web chat conversation `conversation_id` (the one created
+        first that names it), or None for an id no session has taken yet."""
+        async with session_scope(self._url) as session:
+            return await SessionRepository(session).owner_of(conversation_id)
+
+    async def conversations(
+        self, user_id: str, channel: str, *, limit: int, before: tuple[datetime, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """A page of the user's web chat conversations, latest activity first (see
+        `SessionRepository.conversations`)."""
+        async with session_scope(self._url) as session:
+            return await SessionRepository(session).conversations(user_id, channel, limit=limit, before=before)
 
     async def edit(self, session_id: str, channel_message_id: str, content: str, *, at: datetime) -> bool:
         """Rewrite the text of the user message the messenger calls `channel_message_id`, edited there
@@ -173,13 +197,27 @@ class SessionService(DatabaseService):
                     insert_rows=[_message_row(m) for m in messages.insert],
                     update_rows=[_message_row(m) for m in messages.update],
                     delete_ids=messages.delete,
+                    retire_ids=messages.retire,
+                    retired_at=updated_at,
                 )
             if images is not None:
+                # The photos the retired rows show stay too: they are part of the history people read
+                retired = await SessionMessageRepository(session).retired_image_refs(session_ref)
                 await SessionImageRepository(session).sync(
                     session_ref,
-                    images.keep,
+                    images.keep | retired,
                     [_as_row(image, created_at=time.time()) for image in images.add],
                 )
+
+
+async def get_session_service() -> SessionService:
+    """FastAPI dependency: the sessions on the configured database."""
+    from pincer.config import get_settings_relaxed
+
+    return await SessionService.for_path(get_settings_relaxed().db_path)
+
+
+SessionServiceDep = Annotated[SessionService, Depends(get_session_service)]
 
 
 def _as_dict(row: Any) -> dict[str, Any]:

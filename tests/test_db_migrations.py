@@ -3004,3 +3004,157 @@ def test_0035_moves_each_message_to_a_row_dated_across_its_session_s_life(migrat
     assert back["web:guest"]["created_at"] == pytest.approx(50.123)
 
     command.upgrade(cfg, "0035")  # and up again
+
+
+# ── 0036: retired messages are parked, never dropped ──────────────────
+
+
+def _0036_tables():
+    from pincer.db.types import JsonbDocument, UtcDateTime, Uuid7
+
+    sessions = sa.table(
+        "pincer_sessions",
+        sa.column("id", Uuid7()),
+        sa.column("session_id", sa.Text()),
+        sa.column("user_id", sa.Text()),
+        sa.column("channel", sa.Text()),
+        sa.column("created_at", UtcDateTime()),
+        sa.column("updated_at", UtcDateTime()),
+    )
+    messages = sa.table(
+        "pincer_session_messages",
+        sa.column("id", Uuid7()),
+        sa.column("session_id", Uuid7()),
+        sa.column("role", sa.Text()),
+        sa.column("content", sa.Text()),
+        sa.column("images", JsonbDocument),
+        sa.column("created_at", UtcDateTime()),
+    )
+    images = sa.table(
+        "pincer_session_images",
+        sa.column("id", Uuid7()),
+        sa.column("session_ref", Uuid7()),
+        sa.column("sha256", sa.Text()),
+        sa.column("media_type", sa.Text()),
+        sa.column("data", sa.LargeBinary()),
+        sa.column("created_at", sa.Float()),
+    )
+    return sessions, messages, images
+
+
+def test_0036_parks_retired_rows_on_downgrade_and_retires_them_again_on_upgrade(migration_url, tmp_path, caplog):
+    from pincer.db.ids import new_id
+    from pincer.db.types import UtcDateTime, Uuid7, from_epoch_ms
+
+    sessions, messages, images = _0036_tables()
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0035")
+    conversation, other = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+    refs = {name: new_id() for name in ("alice", "bob", "gone", "tg", "main")}
+    rows = {name: new_id() for name in ("live", "retired", "orphan")}
+    keys = {
+        "alice": f"web:alice:{conversation}",
+        "bob": f"web:bob:{conversation}",  # names alice's conversation, created later
+        "gone": f"web:alice:{other}",
+        "tg": "telegram:alice",
+        "main": "web:alice",
+    }
+    with _connect(migration_url) as conn:
+        conn.execute(
+            sessions.insert(),
+            [
+                {
+                    "id": refs[name],
+                    "session_id": key,
+                    "user_id": key.split(":")[1],
+                    "channel": key.split(":")[0],
+                    "created_at": from_epoch_ms(1000 * (n + 1)),
+                    "updated_at": from_epoch_ms(1000 * (n + 1)),
+                }
+                for n, (name, key) in enumerate(keys.items())
+            ],
+        )
+        seeded = [
+            (rows["live"], refs["alice"], "kept", None),
+            (rows["retired"], refs["alice"], "compacted away", [{"sha256": "bb", "media_type": "image/jpeg"}]),
+            (rows["orphan"], refs["gone"], "lonely", None),
+        ]
+        conn.execute(
+            messages.insert(),
+            [
+                {"id": row_id, "session_id": ref, "role": "user", "content": text, "images": shown}
+                | {"created_at": from_epoch_ms(5000 + n)}
+                for n, (row_id, ref, text, shown) in enumerate(seeded)
+            ],
+        )
+        conn.execute(
+            images.insert(),
+            [
+                {
+                    "id": new_id(),
+                    "session_ref": refs["alice"],
+                    "sha256": "bb",
+                    "media_type": "image/jpeg",
+                    "data": b"\x01",
+                    "created_at": 1.0,
+                }
+            ],
+        )
+
+    command.upgrade(cfg, "0036")
+    with _connect(migration_url) as conn:
+        owners = dict(
+            conn.execute(sa.text("SELECT session_id, CAST(conversation_id AS TEXT) FROM pincer_sessions")).all()
+        )
+        assert owners == {
+            keys["alice"]: conversation,
+            keys["bob"]: conversation,
+            keys["gone"]: other,
+            keys["tg"]: None,
+            keys["main"]: None,
+        }
+        retire = sa.text("UPDATE pincer_session_messages SET retired_at = :at WHERE id IN (:a, :b)").bindparams(
+            sa.bindparam("at", from_epoch_ms(9000), type_=UtcDateTime()),
+            sa.bindparam("a", rows["retired"], type_=Uuid7()),
+            sa.bindparam("b", rows["orphan"], type_=Uuid7()),
+        )
+        conn.execute(retire)
+
+    command.downgrade(cfg, "0035")
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        assert {"pincer_session_messages_retired", "pincer_session_images_retired"} <= set(inspector.get_table_names())
+        assert "retired_at" in {c["name"] for c in inspector.get_columns("pincer_session_messages")}  # kept
+        assert "conversation_id" not in {c["name"] for c in inspector.get_columns("pincer_sessions")}
+        live = conn.execute(sa.text("SELECT content FROM pincer_session_messages")).scalars().all()
+        assert live == ["kept"]  # older code sees the model's history only
+        parked = conn.execute(sa.text("SELECT content FROM pincer_session_messages_retired ORDER BY content")).scalars()
+        assert list(parked) == ["compacted away", "lonely"]
+        # Older code: its photo sync drops the photo no live message shows, and a session goes
+        conn.execute(sa.text("DELETE FROM pincer_session_images"))
+        conn.execute(sa.text("DELETE FROM pincer_sessions WHERE session_id = :k"), {"k": keys["gone"]})
+
+    with caplog.at_level(logging.WARNING, logger="alembic.runtime.migration"):
+        command.upgrade(cfg, "0036")
+    with _connect(migration_url) as conn:
+        back = conn.execute(
+            sa.text("SELECT content, retired_at FROM pincer_session_messages ORDER BY created_at, id")
+        ).all()
+        assert [(content, at is not None) for content, at in back] == [("kept", False), ("compacted away", True)]
+        assert conn.execute(sa.text("SELECT sha256 FROM pincer_session_images")).scalars().all() == ["bb"]
+        tables = set(sa.inspect(conn).get_table_names())
+        assert "pincer_session_images_retired" not in tables  # emptied, so dropped
+        # The orphan's session is gone: it stays parked, nothing deleted
+        assert conn.execute(sa.text("SELECT content FROM pincer_session_messages_retired")).scalars().all() == [
+            "lonely"
+        ]
+    assert "Keeping 1 parked message(s)" in caplog.text
+
+    # Round trip again: no row twice anywhere
+    command.downgrade(cfg, "0035")
+    command.upgrade(cfg, "0036")
+    with _connect(migration_url) as conn:
+        contents = conn.execute(sa.text("SELECT content FROM pincer_session_messages ORDER BY content")).scalars()
+        assert list(contents) == ["compacted away", "kept"]
+        parked = conn.execute(sa.text("SELECT content FROM pincer_session_messages_retired")).scalars().all()
+        assert parked == ["lonely"]
