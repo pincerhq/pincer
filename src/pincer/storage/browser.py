@@ -165,9 +165,15 @@ class StorageBrowser:
     def scheme(self) -> str:
         return clients.uri_scheme(str(self.root)) if self.is_cloud else "file"
 
+    @property
+    def is_encrypted(self) -> bool:
+        """True when the cloud root's objects are encrypted with a customer key."""
+        return not isinstance(self.root, Path) and getattr(self.root.client, "encryption_key", None) is not None
+
     def info(self) -> dict[str, Any]:
         return {
             "backend": self.scheme,
+            "encrypted": self.is_encrypted,
             "root": str(self.root),
             "protected": self.protected,
             "presign_ttl": self.presign_ttl,
@@ -178,8 +184,15 @@ class StorageBrowser:
     # ── Paths ──
 
     def confine(self, key: str, *, allow_root: bool = True) -> StoragePath:
-        """The path for `key`, guaranteed to be inside the root."""
+        """The path for `key`, guaranteed to be inside the root.
+
+        What Pincer keeps at the root of a cloud root for storage encryption
+        (`.pincer/`, `.encrypted`) does not exist as far as the browser goes:
+        every request for it is a 404, whether it is there or not.
+        """
         normalized = normalize_key(key, allow_root=allow_root)
+        if self.is_cloud and self._reserved(normalized):
+            raise KeyNotFound(f"No such file or folder: {key}")
         try:
             if isinstance(self.root, Path):
                 return confine_path(self.root, normalized or ".", label="the storage root")
@@ -273,12 +286,26 @@ class StorageBrowser:
             source = ((child, child.is_dir()) for child in folder.iterdir())
         children: list[tuple[StoragePath, bool]] = []
         for child, is_dir in source:
-            if child == folder or is_hidden(child.name):
+            if child == folder or is_hidden(child.name) or self._is_reserved_child(child):
                 continue
             children.append((child, is_dir))
             if len(children) > MAX_LIST_ENTRIES:
                 break
         return children
+
+    @staticmethod
+    def _reserved(normalized: str) -> bool:
+        """True for a root-relative key at or under a name Pincer reserves (see `RESERVED_NAMES`)."""
+        from pincer.storage.encryption_state import RESERVED_NAMES
+
+        return normalized.split("/", 1)[0] in RESERVED_NAMES
+
+    def _is_reserved_child(self, path: StoragePath) -> bool:
+        """A reserved name directly under a cloud root: hidden from listings."""
+        if not self.is_cloud or not self._reserved(path.name):
+            return False
+        # A bucket root keeps its trailing slash (`s3://b/`); its children's parent may not.
+        return str(path.parent).rstrip("/") == str(self.root).rstrip("/")
 
     @staticmethod
     def _stat(path: StoragePath) -> tuple[int | None, float | None]:
@@ -684,14 +711,15 @@ class StorageBrowser:
 
         Cloud roots sign with the provider (see `pincer.storage.objects`); local
         roots get a relative `/api/storage/signed/<token>` URL, HMAC-signed (see
-        `pincer.storage.signing`). Only the API's own responses carry the
-        nosniff and sandbox headers: a cloud link is served by the provider,
-        from its own origin.
+        `pincer.storage.signing`). So do cloud roots encrypted with a customer
+        key: a provider link cannot carry the key, so the API serves the file,
+        decrypted. Only the API's own responses carry the nosniff and sandbox
+        headers: a cloud link is served by the provider, from its own origin.
         """
         path = self._file(key)
         normalized = normalize_key(key)
         expires = int(time.time()) + self.presign_ttl
-        if isinstance(path, Path):
+        if isinstance(path, Path) or not self._cloud().presignable:
             url = f"/api/storage/signed/{self.sign(normalized, expires, disposition)}"
         else:
             url = self._cloud().presign(path, disposition, self.presign_ttl)

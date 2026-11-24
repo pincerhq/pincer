@@ -92,10 +92,16 @@ def build_client(scheme: str, settings: Settings, cache_dir: Path | None, file_c
     credential chain covers anything left unset. `file_cache_mode` is passed
     through when given (cloudpathlib's default keeps cached copies).
     """
+    from pincer.storage import encryption
+
     cache_kwargs = _drop_none(
         local_cache_dir=str(cache_dir) if cache_dir else None,
         file_cache_mode=file_cache_mode,
     )
+    key = encryption.load_key(settings)
+    if key is not None and scheme in ("s3", "az", "gs"):
+        # A customer key is refused over plain HTTP: fail here, not on first use.
+        encryption.require_tls(scheme, settings)
 
     if scheme == "s3":
         import boto3
@@ -110,7 +116,10 @@ def build_client(scheme: str, settings: Settings, cache_dir: Path | None, file_c
                 region_name=settings.storage_s3_region or None,
             )
         )
-        return S3Client(
+        return _client(
+            S3Client,
+            "s3",
+            key,
             boto3_session=session,
             **_drop_none(endpoint_url=settings.storage_s3_endpoint_url or None),
             **cache_kwargs,
@@ -121,7 +130,7 @@ def build_client(scheme: str, settings: Settings, cache_dir: Path | None, file_c
 
         connection_string = _secret(settings.storage_azure_connection_string)
         if connection_string:
-            return AzureBlobClient(connection_string=connection_string, **cache_kwargs)
+            return _client(AzureBlobClient, "az", key, connection_string=connection_string, **cache_kwargs)
         account_url = settings.storage_azure_account_url or None
         credential: Any = _secret(settings.storage_azure_credential)
         if account_url and credential is None:
@@ -133,13 +142,18 @@ def build_client(scheme: str, settings: Settings, cache_dir: Path | None, file_c
             credential = DefaultAzureCredential()
         # With neither a connection string nor an account URL, cloudpathlib raises
         # MissingCredentialsError (unless AZURE_STORAGE_CONNECTION_STRING is set).
-        return AzureBlobClient(**_drop_none(account_url=account_url, credential=credential), **cache_kwargs)
+        return _client(
+            AzureBlobClient, "az", key, **_drop_none(account_url=account_url, credential=credential), **cache_kwargs
+        )
 
     if scheme == "gs":
         from cloudpathlib import GSClient
 
         credentials_file = settings.storage_gcs_credentials_file
-        return GSClient(
+        return _client(
+            GSClient,
+            "gs",
+            key,
             **_drop_none(
                 application_credentials=str(credentials_file) if credentials_file else None,
                 project=settings.storage_gcs_project or None,
@@ -148,6 +162,16 @@ def build_client(scheme: str, settings: Settings, cache_dir: Path | None, file_c
         )
 
     raise UnsupportedStorageScheme(f"Unsupported storage scheme: {scheme}://")
+
+
+def _client(plain: type[Any], scheme: str, key: Any, **kwargs: Any) -> Any:
+    """`plain(**kwargs)`, or its encrypting subclass when a customer key is set
+    (see `pincer.storage.encrypted_clients`)."""
+    if key is None:
+        return plain(**kwargs)
+    from pincer.storage.encrypted_clients import build_encrypted
+
+    return build_encrypted(scheme, key, **kwargs)
 
 
 def open_cloud_uri(
@@ -159,6 +183,7 @@ def open_cloud_uri(
     what: str,
     file_cache_mode: str | None = None,
     build: Callable[[str, Settings, Path | None], Any] | None = None,
+    check: bool = True,
 ) -> CloudPath:
     """`uri` as a CloudPath, on a client built from the `storage_*` settings.
 
@@ -168,7 +193,14 @@ def open_cloud_uri(
     (a bad profile, a malformed connection string), never the secret values.
     `build` stands in for `build_client`, for a caller that keeps a name of
     its own to patch in tests.
+
+    The location is checked against the storage encryption lock
+    (`encryption_state.check_location`) unless `check` is False: encrypted
+    storage is refused when the key is missing or wrong, and its lock is
+    created when encryption was just enabled.
     """
+    from pincer.storage.errors import StorageEncryptionError
+
     scheme = uri_scheme(uri)
     try:
         import cloudpathlib  # noqa: F401
@@ -181,9 +213,16 @@ def open_cloud_uri(
             client = build(scheme, settings, cache_dir)
         else:
             client = build_client(scheme, settings, cache_dir, file_cache_mode=file_cache_mode)
-        return client.CloudPath(uri)  # type: ignore[no-any-return]
+        path: CloudPath = client.CloudPath(uri)
+        if check:
+            from pincer.storage.encryption_state import check_location
+
+            check_location(path, settings)
+        return path
     except error:
         raise
+    except StorageEncryptionError as e:
+        raise error(str(e)) from e
     except Exception as e:
         raise error(f"Cannot open {what} {uri}: {type(e).__name__}: {e}. {STORAGE_HINTS.get(scheme, '')}") from e
 

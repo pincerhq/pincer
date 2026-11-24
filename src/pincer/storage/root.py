@@ -87,6 +87,8 @@ def resolve_storage_root(settings: Settings) -> tuple[StoragePath, list[str]]:
     See `pincer.storage.layout` for the folders Pincer keeps under the root.
 
     A local root that contains the data dir is refused (see `data_dir_conflict`).
+    The encryption lock of a cloud root (`.pincer/`, `.encrypted`) is not
+    listed here: the browser hides it and refuses every request for it.
     """
     from pincer.storage.layout import storage_root_for
 

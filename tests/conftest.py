@@ -1153,3 +1153,15 @@ def redis_url() -> str:
     if not url:
         pytest.skip("PINCER_TEST_REDIS_URL not set")
     return url
+
+
+@pytest.fixture(autouse=True)
+def _reset_storage_encryption_state() -> Iterator[None]:
+    """The storage encryption lock remembers checked and refused locations per process."""
+    from pincer.storage import encrypt_job, encryption_state
+
+    encryption_state.reset_for_tests()
+    encrypt_job.reset_for_tests()
+    yield
+    encryption_state.reset_for_tests()
+    encrypt_job.reset_for_tests()

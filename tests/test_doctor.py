@@ -37,7 +37,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 LLM pricing (issue #357) + 1 history compaction (issue #357)
     # + 1 WhatsApp session store + 1 telemetry config
     # + 1 LLM endpoints + 1 LLM features switched off (issue #358) + 1 API rate limits + 1 cache backend (issue #404)
-    assert len(report.checks) == 77
+    # + 1 storage encryption (issue #421)
+    assert len(report.checks) == 78
 
     assert 0 <= report.score <= 100
 

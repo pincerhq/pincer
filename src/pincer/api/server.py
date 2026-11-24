@@ -80,6 +80,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await init_database(audit_db)
 
+    # Storage encryption: refuse encrypted storage the key does not open, and
+    # encrypt what was stored before the key was set, in the background.
+    # Idempotent: `pincer run` has usually done it already.
+    try:
+        from pincer.storage import encrypt_job
+
+        await asyncio.to_thread(encrypt_job.start, get_settings_relaxed())
+    except Exception as e:
+        logging.getLogger(__name__).warning("Storage encryption start-up check skipped: %s", e)
+
     audit = await get_audit_logger(audit_db)
 
     if not getattr(app.state, "agent", None):

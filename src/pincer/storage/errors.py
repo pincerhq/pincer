@@ -47,6 +47,11 @@ class StorageUnavailable(StorageError):
     status = 503
 
 
+class StorageEncryptionError(StorageUnavailable):
+    """Encrypted storage that cannot be used as configured: the key is missing
+    or wrong, the endpoint is not TLS, or the provider refused a keyed request."""
+
+
 def describe(error: Exception) -> str:
     """`error` for a client: an OS error without the server path it names."""
     if isinstance(error, OSError) and error.strerror:

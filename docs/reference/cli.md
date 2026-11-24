@@ -226,6 +226,16 @@ See the [Skills Guide](../guides/skills-guide.md) for the format and the
 `load_skill` / `load_skill_reference` / `run_skill_script` tools the agent
 uses to read and act on them.
 
+## Storage
+
+| Command | What it does |
+|---|---|
+| `pincer storage encrypt` | Encrypt every object stored before `PINCER_STORAGE_ENCRYPTION_KEY` was set, in place, in the storage root and a cloud skills dir outside it. Safe to run again; a running `pincer run` does the same in the background |
+| `pincer storage encrypt --dry-run` | Only count the objects not encrypted yet |
+| `pincer storage encryption-status` | For each cloud storage location: encryption on or off, and how far encrypting existing data got |
+
+See [Storage encryption](../guides/storage-encryption.md).
+
 ## Memory
 
 | Command | Description | Sprint |
@@ -412,6 +422,7 @@ complete list. Key variables added in Sprint 5:
 | `PINCER_RATE_MESSAGES_PER_MIN` | `30` | Per-user message rate limit |
 | `PINCER_RATE_TOOLS_PER_MIN` | `20` | Per-user tool call rate limit |
 | `PINCER_MAX_CONCURRENT_LLM` | `5` | Max concurrent LLM requests |
+| `PINCER_STORAGE_ENCRYPTION_KEY` | (unset) | Customer-provided AES-256 key (`openssl rand -base64 32`) that encrypts all cloud storage on the provider side (S3 SSE-C, Azure CPK, GCS CSEK). Cannot be turned off or changed once set. **Encrypted data can only be read over TLS**; see [Storage encryption](../guides/storage-encryption.md#encrypted-data-can-only-be-read-over-tls) |
 
 ### Background tasks
 

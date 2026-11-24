@@ -85,6 +85,13 @@ class CoreSettings(BaseModel):
         default=None, description="Path to a Google service-account JSON key file"
     )
     storage_gcs_project: str | None = Field(default=None, description="Google Cloud project ID")
+    storage_encryption_key: SecretStr | None = Field(
+        default=None,
+        description="Customer-provided AES-256 key (32 random bytes, base64; `openssl rand -base64 32`) that "
+        "encrypts every object Pincer stores in cloud storage on the provider side: SSE-C on S3, CPK on Azure "
+        "Blob, CSEK on GCS. Once set, encryption cannot be turned off and the key cannot be changed. "
+        "Encrypted data can only be read over TLS",
+    )
     # ── Storage browser (/api/storage) ──
     storage_root: str | Path | None = Field(
         default=None,
@@ -156,6 +163,20 @@ class CoreSettings(BaseModel):
                 "use a local path or an s3://, az:// or gs:// URI"
             )
         return Path(value).expanduser()
+
+    @field_validator("storage_encryption_key", mode="before")
+    @classmethod
+    def _check_encryption_key(cls, value: Any) -> Any:
+        """Unset or empty is no encryption; anything else must be 32 bytes of base64."""
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if raw in (None, ""):
+            return None
+        from pincer.storage.encryption import parse_key
+
+        # Raises InvalidStorageKey, which pydantic does not wrap: a ValueError
+        # would become a ValidationError that prints the raw key.
+        parse_key(str(raw))
+        return value
 
     @field_validator("storage_upload_file_max_size", mode="before")
     @classmethod

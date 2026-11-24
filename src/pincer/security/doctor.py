@@ -154,10 +154,11 @@ class SecurityDoctor:
         report.checks.append(self._check_api_rate_limits(settings))
         report.checks.append(self._check_cache_backend(settings))
         report.checks.append(self._check_tool_call_limits(settings))
-        # Filesystem (5 checks)
+        # Filesystem (6 checks)
         report.checks.append(self._check_data_dir_permissions())
         report.checks.append(self._check_skills_dir_permissions(settings))
         report.checks.append(self._check_storage_root(settings))
+        report.checks.append(self._check_storage_encryption(settings))
         report.checks.append(self._check_no_world_readable_secrets())
         report.checks.append(self._check_sqlite_not_world_readable())
         # Network (2 checks)
@@ -1794,6 +1795,104 @@ class SecurityDoctor:
             f"Storage root {resolved} does not contain the data dir",
             category="filesystem",
         )
+
+    def _check_storage_encryption(self, cfg: Settings | None = None) -> CheckResult:
+        """Storage encryption with a customer key: the key, the TLS endpoint, the
+        one-way lock of each cloud location, the Azure hierarchical-namespace
+        probe, and how far encrypting existing data got."""
+        from pincer.storage import clients, encryption_state
+        from pincer.storage.encryption import TLS_WARNING_DOC, InvalidStorageKey, load_key, tls_problem
+        from pincer.storage.errors import StorageError
+
+        name, category = "storage_encryption", "filesystem"
+        settings = self._cfg(cfg)
+        try:
+            key = load_key(settings)
+        except InvalidStorageKey as e:
+            return CheckResult(
+                name, CheckStatus.CRITICAL, str(e), "Set a 32-byte base64 key: openssl rand -base64 32", category
+            )
+        locations = encryption_state.locations(settings)
+        if not locations:
+            if key is not None:
+                return CheckResult(
+                    name,
+                    CheckStatus.WARNING,
+                    "PINCER_STORAGE_ENCRYPTION_KEY is set, but no storage is in the cloud: it has no effect "
+                    "(it encrypts s3://, az:// and gs:// storage only)",
+                    "Unset it, or point PINCER_STORAGE_ROOT at a bucket",
+                    category,
+                )
+            return CheckResult(name, CheckStatus.SKIPPED, "No cloud storage configured", category=category)
+
+        problems: list[str] = []
+        warnings: list[str] = []
+        notes: list[str] = []
+        for location in locations:
+            scheme = clients.uri_scheme(location)
+            if key is not None and (tls := tls_problem(scheme, settings)):
+                problems.append(f"{location}: {tls}. Encrypted data can only be read over TLS (see {TLS_WARNING_DOC})")
+                continue
+            try:
+                root = clients.open_cloud_uri(
+                    location, settings, None, error=StorageError, what="storage location", check=False
+                )
+                hns_steps: list[tuple[str, str | None]] = []
+                client = root.client
+                if key is not None and hasattr(client, "probe_hns") and client.is_hns(root):
+                    hns_steps = client.probe_hns(root / encryption_state.STATE_DIR)
+                    failed = [f"{step}: {err}" for step, err in hns_steps if err]
+                    if failed:
+                        problems.append(f"{location}: Azure hierarchical-namespace probe failed at " + failed[0])
+                        continue
+                # Verify only: the doctor never enables encryption, and the HNS
+                # probe already ran above (step by step).
+                encryption_state.check_location(root, settings, thorough=True, create=False, probe=False)
+                marker = encryption_state.status(root) if key is not None else None
+            except StorageError as e:
+                problems.append(f"{location}: {e}")
+                continue
+            except Exception as e:
+                warnings.append(f"{location}: could not check ({type(e).__name__}: {e})")
+                continue
+            if key is None:
+                notes.append(f"{location}: not encrypted")
+                continue
+            hns = f"; HNS probe passed ({len(hns_steps)} steps)" if hns_steps else ""
+            if marker is None:
+                warnings.append(f"{location}: encryption is enabled on the next start of Pincer{hns}")
+                continue
+            migration = marker.get("migration", {})
+            state = migration.get("state", "pending")
+            if state != "complete":
+                warnings.append(
+                    f"{location}: encrypting existing data is {state} ({migration.get('done', 0)} object(s) done){hns}"
+                )
+            else:
+                notes.append(f"{location}: encrypted, existing data complete{hns}")
+
+        if problems:
+            return CheckResult(
+                name,
+                CheckStatus.CRITICAL,
+                "; ".join(problems),
+                "Pincer refuses this storage. Encryption cannot be turned off and its key cannot be changed: "
+                "set PINCER_STORAGE_ENCRYPTION_KEY to the key it was enabled with, over an https:// endpoint",
+                category,
+            )
+        if warnings:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                "; ".join(warnings + notes),
+                "Run `pincer storage encrypt` (a running `pincer run` also does it in the background)",
+                category,
+            )
+        if key is None:
+            return CheckResult(
+                name, CheckStatus.SKIPPED, "Storage encryption is off: " + "; ".join(notes), category=category
+            )
+        return CheckResult(name, CheckStatus.PASS, "; ".join(notes), category=category)
 
     def _check_remote_skills_root(self, uri: str, cfg: Settings) -> CheckResult:
         """Remote roots have no POSIX mode to check; verify the extra is installed
