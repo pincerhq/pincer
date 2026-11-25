@@ -606,6 +606,50 @@ async def test_a_move_retried_after_a_failed_save_deletes_the_old_row_and_retire
     assert [(r.content, r.retired_at) for r in every] == [("one", None), ("two", None), ("three", None)]
 
 
+@pytest.mark.parametrize("landed", [False, True], ids=["failed-before-commit", "landed-then-failed"])
+async def test_a_message_whose_move_failed_and_that_then_leaves_the_history_stays_in_it_once(url, landed):
+    """A failed save moved "three" to a new row; it is cut before the retry. Both rows are retired, not
+    deleted: the failed save wrote the new one and deleted the old one, or did neither, so exactly one of
+    them holds it."""
+    at = from_epoch_ms(1_000_000)
+    first, second = sorted({uuid7_at(1_000_000, 5) for _ in range(2)} | {uuid7_at(1_000_000, 5)})[:2]
+    await save(
+        url,
+        [
+            {"role": "user", "content": "one", "id": first, "created_at": at},
+            {"role": "user", "content": "three", "id": second, "created_at": at},
+        ],
+    )
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    real = manager._store.save
+
+    async def fails(**kwargs: Any) -> None:
+        if landed:
+            await real(**kwargs)
+        raise OSError("connection lost")
+
+    manager._store.save = fails  # type: ignore[method-assign]
+    session.messages.insert(1, user("two"))  # "three" has to move after it
+    with pytest.raises(OSError):
+        await manager.save(session)
+    moved_to = session.messages[2].stored.id
+    manager._store.save = real  # type: ignore[method-assign]
+    del session.messages[2]  # cut before the retry
+    saves = spy_saves(manager)
+    await manager.save(session)
+
+    ((changes),) = saves
+    assert (list(changes.delete), sorted(changes.retire)) == ([], sorted([second, moved_to]))
+    every = await all_rows_of(url, "web:alice")
+    # Where "three" sorts depends on which of its rows held it; it is there once, retired
+    assert sorted((r.content, r.retired_at is not None) for r in every) == [
+        ("one", False),
+        ("three", True),
+        ("two", False),
+    ]
+
+
 async def test_an_emergency_cut_retires_only_the_rows_it_drops_and_keeps_the_summaries(url):
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "web")

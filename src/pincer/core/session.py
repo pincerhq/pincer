@@ -43,7 +43,7 @@ from pincer.services.sessions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection
+    from collections.abc import AsyncIterator, Callable, Collection, Mapping
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -108,10 +108,11 @@ class Session:
     # all: the next one writes those rows again (upserted by id) rather than new ones, and deletes the ones
     # no message holds any more, as it does saved rows
     _pending_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
-    # The rows a save that has not gone through moved messages away from. Their messages now hold the new
-    # rows, so a retry's walk no longer sees the move: these are still deleted, not retired, or the
-    # history people read would show those messages twice
-    _moved_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    # The moves a save that has not gone through made: each row a message moved away from, to the row it
+    # moved to. The message now holds the new row, so a retry's walk no longer sees the move: `_save_plan`
+    # resolves it from here (`_moved_rows_to_delete`), or the history people read would show the message
+    # twice, or lose it
+    _moved_rows: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
     # Held by each save, from its plan to its bookkeeping: a slower save finishing after a later one (an
     # eviction outside the turn lock) would otherwise leave rows the later one gave unowned, and saved again
     _save_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
@@ -180,8 +181,8 @@ class Session:
         updates: list[dict[str, Any]] = []
         placed: list[tuple[LLMMessage, str, StoredRow]] = []
         rows: dict[str, int] = {}
-        # The rows of messages still in the history that move to new rows, this save or a failed one
-        moved: set[str] = set(self._moved_rows)
+        # Each row a message moves away from, to its new row: in this save, or in one that failed
+        moved: dict[str, str] = dict(self._moved_rows)
         for index, message in enumerate(self.messages):
             fingerprint = _fingerprint(message)
             saved_id = message.stored.id if message.stored is not None else None
@@ -205,8 +206,7 @@ class Session:
                 rows[row.id] = fingerprint
                 previous = row
                 continue
-            if row is not None and row.id is not None and row.id in owned:
-                moved.add(row.id)
+            moved_from = row.id if row is not None and row.id is not None and row.id in owned else None
             if row is not None:
                 target_ms = epoch_ms(row.created_at)
             elif stored_after[index] is not None:
@@ -220,16 +220,19 @@ class Session:
             new_row = StoredRow(row_id, from_epoch_ms(uuid7_ms(row_id)))
             inserts.append(_as_stored(message, new_row))
             placed.append((message, row_id, new_row))
+            if moved_from is not None:
+                moved[moved_from] = row_id
             rows[row_id] = fingerprint
             previous = new_row
         dropped = [row_id for row_id in owned if row_id not in rows]
+        delete = _moved_rows_to_delete(dropped, moved, rows)
         changes = MessageChanges(
             insert=inserts,
             update=updates,
-            delete=[row_id for row_id in dropped if row_id in moved],
-            retire=[row_id for row_id in dropped if row_id not in moved],
+            delete=[row_id for row_id in dropped if row_id in delete],
+            retire=[row_id for row_id in dropped if row_id not in delete],
         )
-        return _SavePlan(changes, placed, rows, frozenset(moved))
+        return _SavePlan(changes, placed, rows, moved)
 
     def _place(self, plan: _SavePlan) -> None:
         """Before a save: the new messages take their rows, which a retry reuses, and the rows they moved
@@ -237,7 +240,7 @@ class Session:
         for message, row_id, row in plan.placed:
             message.stored = row
             self._pending_rows.add(row_id)
-        self._moved_rows |= plan.moved
+        self._moved_rows.update(plan.moved)
 
     def _saved(self, plan: _SavePlan) -> None:
         """Once a save went through: its rows are the session's."""
@@ -730,13 +733,33 @@ def _take_place(replacement: list[LLMMessage], prefix: list[LLMMessage]) -> None
 @dataclass
 class _SavePlan:
     """What a save does to the rows (`changes`), the row it gives each new message (`placed`, with its id), the
-    fingerprints of the session's rows once it went through (`rows`), and the rows messages moved away from
-    (`moved`, deleted rather than retired)."""
+    fingerprints of the session's rows once it went through (`rows`), and the moves not yet saved (`moved`: each
+    row a message moved away from, to the row it moved to)."""
 
     changes: MessageChanges
     placed: list[tuple[LLMMessage, str, StoredRow]]
     rows: dict[str, int]
-    moved: frozenset[str] = frozenset()
+    moved: dict[str, str] = field(default_factory=dict)
+
+
+def _moved_rows_to_delete(dropped: Collection[str], moved: Mapping[str, str], rows: Collection[str]) -> set[str]:
+    """The dropped rows a message moved away from and still lives on from: it holds the row it moved to (or
+    the row that one moved to in turn). They are deleted; every other dropped row is retired.
+
+    A message that left the history before its move was saved has its old row and its new one retired
+    alike: the failed save either deleted the old one and wrote the new one or did neither, so exactly
+    one of them is there to hold it.
+    """
+    delete: set[str] = set()
+    for row_id in dropped:
+        seen: set[str] = set()
+        target = moved.get(row_id)
+        while target is not None and target not in rows and target not in seen:
+            seen.add(target)
+            target = moved.get(target)
+        if target is not None and target in rows:
+            delete.add(row_id)
+    return delete
 
 
 def _holds_row(message: LLMMessage, owned: Collection[str]) -> bool:
