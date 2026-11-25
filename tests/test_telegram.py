@@ -8,6 +8,7 @@ import pytest
 from aiogram import Router
 
 from pincer.channels.telegram import TelegramChannel, split_message
+from pincer.core.approval import ApprovalOutcome
 
 
 def test_split_short_message() -> None:
@@ -110,7 +111,7 @@ async def test_request_approval_falls_back_to_plain_text_on_markdown_error() -> 
     channel._pending_approvals["123456789"].set_result(True)
     result = await task
 
-    assert result is True
+    assert result is ApprovalOutcome.APPROVED
     assert channel._bot.send_message.call_count == 2
     first_call, second_call = channel._bot.send_message.call_args_list
     assert first_call.kwargs["chat_id"] == 123456789
@@ -118,6 +119,39 @@ async def test_request_approval_falls_back_to_plain_text_on_markdown_error() -> 
     assert second_call.kwargs["chat_id"] == 123456789
     assert second_call.kwargs["parse_mode"] is None
     assert "reply_markup" in second_call.kwargs
+
+
+async def test_request_approval_deny_is_denied() -> None:
+    channel = _make_channel()
+    channel._bot.send_message = AsyncMock()
+
+    task = asyncio.ensure_future(channel.request_approval("123456789", "some_tool", {}))
+    await asyncio.sleep(0)
+    channel._pending_approvals["123456789"].set_result(False)
+
+    assert await task is ApprovalOutcome.DENIED
+
+
+async def test_request_approval_timeout_is_timed_out() -> None:
+    channel = _make_channel()
+    channel._bot.send_message = AsyncMock()
+
+    task = asyncio.ensure_future(channel.request_approval("123456789", "some_tool", {}))
+    await asyncio.sleep(0)
+    channel._pending_approvals["123456789"].set_exception(TimeoutError())
+
+    assert await task is ApprovalOutcome.TIMED_OUT
+    assert "123456789" not in channel._pending_approvals
+
+
+async def test_request_approval_unavailable_when_prompt_undeliverable() -> None:
+    channel = _make_channel()
+    channel._bot.send_message = AsyncMock(side_effect=[Exception("bad markup"), Exception("chat not found")])
+
+    result = await channel.request_approval("123456789", "some_tool", {})
+
+    assert result is ApprovalOutcome.UNAVAILABLE
+    assert "123456789" not in channel._pending_approvals
 
 
 async def test_send_photo_fast_path_uses_chat_id() -> None:

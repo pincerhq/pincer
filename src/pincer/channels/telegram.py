@@ -29,6 +29,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 from pincer.channels.group_trigger import matches_group_trigger
 from pincer.channels.telegram_formatters import markdown_to_telegram_html
+from pincer.core.approval import ApprovalOutcome, await_decision
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -100,7 +101,7 @@ class TelegramChannel(BaseChannel):
         user_id: str,
         tool_name: str,
         arguments: dict[str, Any],
-    ) -> bool:
+    ) -> ApprovalOutcome:
         """Send an inline-keyboard approval prompt and block until the user responds."""
         assert self._bot is not None
 
@@ -127,24 +128,33 @@ class TelegramChannel(BaseChannel):
             )
         except Exception as e:
             logger.warning("Approval markdown send failed, retrying plain: %s", e)
-            await self._bot.send_message(
-                chat_id=chat_id,
-                text=prompt_text,
-                parse_mode=None,
-                reply_markup=keyboard,
-            )
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=prompt_text,
+                    parse_mode=None,
+                    reply_markup=keyboard,
+                )
+            except Exception as plain_err:
+                logger.warning(
+                    "Approval prompt undeliverable to %s for %s (%s); approval unavailable",
+                    user_id,
+                    tool_name,
+                    plain_err,
+                )
+                return ApprovalOutcome.UNAVAILABLE
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         self._pending_approvals[user_id] = future
 
         try:
-            return await asyncio.wait_for(future, timeout=120)
-        except TimeoutError:
-            logger.info("Approval timed out for user %s, tool %s", user_id, tool_name)
-            return False
+            outcome = await await_decision(future, 120)
         finally:
             self._pending_approvals.pop(user_id, None)
+        if outcome is ApprovalOutcome.TIMED_OUT:
+            logger.info("Approval timed out for user %s, tool %s", user_id, tool_name)
+        return outcome
 
     # ── Sprint 11: in-call approval card (`user` mode) ──────────────
 

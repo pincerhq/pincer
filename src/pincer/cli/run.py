@@ -29,6 +29,7 @@ from pincer.cli.daemon import (
     refuse_unless_a_known_daemon,
     start_daemon,
 )
+from pincer.core.approval import ApprovalOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -1439,7 +1440,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
         arguments: dict,
         user_id: str,
         channel: str,
-    ) -> bool:
+    ) -> ApprovalOutcome:
         if channel == "telegram" and tg is not None:
             raw_id = await _raw_id(user_id, "telegram")
             return await tg.request_approval(raw_id, tool_name, arguments)
@@ -1454,11 +1455,11 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
             return await request_web_approval(tool_name, arguments, user_id, channel)
         logger.warning(
-            "No approval UI for channel %s; denying %s",
+            "No approval UI for channel %s; approval unavailable for %s",
             channel,
             tool_name,
         )
-        return False
+        return ApprovalOutcome.UNAVAILABLE
 
     async def _channel_ask_user(user_id: str, channel: str, question: str) -> str:
         if channel == "whatsapp" and wa is not None:
@@ -1916,11 +1917,10 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
         _mcp_full_cfg = _load_mcp_cfg(pincer_vars=_pincer_config_vars(settings))
         if _mcp_full_cfg.server.enabled:
-            _acb = agent._approval_callback
             mcp_server = PincerMCPServer(
                 config=_mcp_full_cfg.server,
                 tool_registry=tools,
-                approval_callback=((lambda tn, args: _acb(tn, args, "", "")) if _acb else None),
+                approval_callback=(agent._approve_on_active_channel if agent._approval_callback else None),
                 ask_user_callback=(
                     (lambda q: agent._ask_user_on_active_channel(q)) if agent._ask_user_callback else None
                 ),

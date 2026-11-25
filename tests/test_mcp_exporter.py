@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from pincer.core.approval import ApprovalOutcome
 from pincer.mcp.exporter import PincerToolExporter
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -161,6 +164,29 @@ async def test_exported_tool_approval_denied():
     result = await handler(to="a@b.com", subject="Hi", body="Hello")
 
     assert "[Denied]" in result
+
+
+@pytest.mark.parametrize(
+    ("approval_cb", "expected"),
+    [
+        (AsyncMock(return_value=ApprovalOutcome.TIMED_OUT), "expired without an answer"),
+        (AsyncMock(return_value=ApprovalOutcome.UNAVAILABLE), "could not be requested"),
+        (AsyncMock(side_effect=RuntimeError("boom")), "could not be requested"),
+    ],
+    ids=["timed_out", "unavailable", "raises"],
+)
+async def test_exported_tool_not_approved_is_not_reported_as_declined(approval_cb, expected):
+    reg = _make_registry(["email_send"])
+    fmcp = _make_fmcp()
+    exporter = PincerToolExporter(reg, expose_tools=["email_send"], approval_callback=approval_cb)
+    exporter.export_to(fmcp)
+    handler = next(fn for name, fn in fmcp._registered if name == "pincer_email_send")
+
+    result = await handler(to="a@b.com", subject="Hi", body="Hello")
+
+    assert result.startswith("[Not approved]")
+    assert "declined" not in result
+    assert expected in result
 
 
 async def test_approval_not_called_for_non_approval_tools():

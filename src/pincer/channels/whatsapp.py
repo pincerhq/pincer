@@ -66,6 +66,7 @@ from pincer.channels.base import (
 )
 from pincer.channels.group_trigger import matches_group_trigger, strip_group_triggers
 from pincer.config.channels import WHATSAPP_SQLITE_FILE, is_postgres_url
+from pincer.core.approval import ApprovalOutcome, await_decision
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -264,15 +265,16 @@ class WhatsAppChannel(BaseChannel):
         user_id: str,
         tool_name: str,
         arguments: dict[str, Any],
-    ) -> bool:
+    ) -> ApprovalOutcome:
         if self._client is None:
-            return False
+            logger.warning("WA approval for %s requested while WhatsApp is not connected", tool_name)
+            return ApprovalOutcome.UNAVAILABLE
         # One prompt per user at a time: a second run for the same user waits
         # here instead of replacing the prompt the user is answering.
         async with self._prompt_locks[("approval", user_id)]:
             return await self._ask_approval(user_id, tool_name, arguments)
 
-    async def _ask_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
+    async def _ask_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> ApprovalOutcome:
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
@@ -287,16 +289,15 @@ class WhatsAppChannel(BaseChannel):
         try:
             prompt_id = await self._send_tracked(user_id, prompt)
         except Exception as e:
-            # Can't reach the user to ask — deny cleanly so the tool call
-            # surfaces as "declined by user" rather than a confusing
-            # "approval callback failed" error upstream.
+            # Can't reach the user to ask: the agent reports it as "could not
+            # be requested", not as a decline.
             logger.warning(
-                "WA approval prompt undeliverable to %s for %s (%s); denying.",
+                "WA approval prompt undeliverable to %s for %s (%s); approval unavailable.",
                 user_id,
                 tool_name,
                 e,
             )
-            return False
+            return ApprovalOutcome.UNAVAILABLE
 
         loop = asyncio.get_running_loop()
         pending = _PendingPrompt(loop.create_future(), chat)
@@ -304,15 +305,15 @@ class WhatsAppChannel(BaseChannel):
         if prompt_id:
             self._approval_prompt_ids[prompt_id] = user_id
         try:
-            return await asyncio.wait_for(pending.future, timeout=120)
-        except TimeoutError:
-            logger.info("WA approval timed out for %s / %s", user_id, tool_name)
-            return False
+            outcome = await await_decision(pending.future, 120)
         finally:
             if self._pending_approvals.get(user_id) is pending:
                 del self._pending_approvals[user_id]
             if prompt_id:
                 self._approval_prompt_ids.pop(prompt_id, None)
+        if outcome is ApprovalOutcome.TIMED_OUT:
+            logger.info("WA approval timed out for %s / %s", user_id, tool_name)
+        return outcome
 
     async def request_input(self, user_id: str, question: str) -> str:
         """Prompt the user and wait for their next message as the answer."""

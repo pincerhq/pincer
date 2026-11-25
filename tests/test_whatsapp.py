@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from pincer.channels.base import ChannelType
+from pincer.core.approval import ApprovalOutcome
 
 
 def _ensure_neonize_mocks():
@@ -460,7 +461,7 @@ class TestWhatsAppMediaAndApproval:
         resolver = asyncio.create_task(resolve_later())
         result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "ls"})
         await resolver
-        assert result is True
+        assert result is ApprovalOutcome.APPROVED
 
     @pytest.mark.asyncio
     async def test_request_approval_no(self, wa_channel):
@@ -474,11 +475,32 @@ class TestWhatsAppMediaAndApproval:
         t = asyncio.create_task(deny_later())
         result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "rm -rf"})
         await t
-        assert result is False
+        assert result is ApprovalOutcome.DENIED
 
     @pytest.mark.asyncio
-    async def test_request_approval_denies_when_send_fails(self, wa_channel, caplog):
-        """Undeliverable approval prompts (e.g. no LID) should deny cleanly."""
+    async def test_request_approval_timeout_is_timed_out(self, wa_channel):
+        wa_channel._client = MagicMock()
+        wa_channel._client.send_message = AsyncMock()
+
+        async def expire_later():
+            await asyncio.sleep(0.01)
+            wa_channel._pending_approvals["491234567890"].future.set_exception(TimeoutError())
+
+        t = asyncio.create_task(expire_later())
+        result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "ls"})
+        await t
+        assert result is ApprovalOutcome.TIMED_OUT
+        assert "491234567890" not in wa_channel._pending_approvals
+
+    @pytest.mark.asyncio
+    async def test_request_approval_unavailable_when_not_connected(self, wa_channel):
+        wa_channel._client = None
+        result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "ls"})
+        assert result is ApprovalOutcome.UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_request_approval_unavailable_when_send_fails(self, wa_channel, caplog):
+        """Undeliverable approval prompts (e.g. no LID) fail closed as UNAVAILABLE, not a decline."""
         import logging
 
         wa_channel._client = MagicMock()
@@ -489,7 +511,7 @@ class TestWhatsAppMediaAndApproval:
         with caplog.at_level(logging.WARNING, logger="pincer.channels.whatsapp"):
             result = await wa_channel.request_approval("491234567890", "google__create_doc", {"title": "x"})
 
-        assert result is False
+        assert result is ApprovalOutcome.UNAVAILABLE
         assert "491234567890" not in wa_channel._pending_approvals
         assert any("undeliverable" in r.message for r in caplog.records)
 

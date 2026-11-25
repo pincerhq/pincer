@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from mcp.server.fastmcp import FastMCP
 
+    from pincer.core.approval import ApprovalOutcome
     from pincer.mcp.auth import MCPAuthProvider
     from pincer.mcp.config import MCPServerExportConfig
     from pincer.mcp.prompts import PromptRegistry
@@ -54,7 +55,7 @@ class PincerMCPServer:
         self,
         config: MCPServerExportConfig,
         tool_registry: ToolRegistry,
-        approval_callback: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None,
+        approval_callback: Callable[[str, dict[str, Any]], Awaitable[bool | ApprovalOutcome]] | None = None,
         ask_user_callback: Callable[[str], Awaitable[str]] | None = None,
         audit_logger: Any | None = None,
         auth_provider: MCPAuthProvider | None = None,

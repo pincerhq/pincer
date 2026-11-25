@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pincer.config.llm import STRUCTURED_CALL_EFFORT, STRUCTURED_CALL_THINKING, call_effort, call_thinking
 from pincer.config.pricing import TokenUsage
+from pincer.core.approval import ApprovalOutcome, approval_tool_message, as_outcome
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
 from pincer.core.compaction import LastRequest, SentRequest, choose_halving_cut, droppable_share, kept_summaries
 from pincer.core.log_once import LogOnce
@@ -66,8 +67,9 @@ from pincer.voice.outbound import TOOL_NAME as CALL_TOOL_NAME
 from pincer.voice.outbound import placed_call_sid
 from pincer.voice.truncation import TruncationAction, decide_voice_truncation
 
-# Signature: (tool_name, arguments, user_id, channel) -> approved?
-ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
+# Signature: (tool_name, arguments, user_id, channel) -> outcome.
+# A plain bool still works: True is approved, False is denied.
+ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool | ApprovalOutcome]]
 
 # Signature: (phase, tool_name, arguments, user_id, channel) -> None
 # phase is "start" (before execution) or "end" (after execution, success or error).
@@ -1017,6 +1019,22 @@ class Agent:
         except Exception as e:
             logger.exception("ask_user callback failed")
             return f"[Error contacting user: {e}]"
+
+    async def _approve_on_active_channel(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalOutcome:
+        """Ask the user's most-recently active channel to approve *tool_name*.
+
+        Called by the MCP server when an external client invokes an
+        approval-gated tool. UNAVAILABLE when no channel is active yet.
+        """
+        if not self._approval_callback or not self._last_active:
+            logger.warning("MCP approval for %s requested with no active messaging channel", tool_name)
+            return ApprovalOutcome.UNAVAILABLE
+        user_id, channel_name = self._last_active
+        try:
+            return as_outcome(await self._approval_callback(tool_name, arguments, user_id, channel_name))
+        except Exception:
+            logger.exception("Approval callback failed for MCP tool '%s'", tool_name)
+            return ApprovalOutcome.UNAVAILABLE
 
     @staticmethod
     def _note_request(
@@ -2929,19 +2947,22 @@ class Agent:
         if not skip_approval and self._tools.requires_approval(tool_call.name):
             if self._approval_callback:
                 try:
-                    approved = await self._approval_callback(
-                        tool_call.name,
-                        await self._tools.approval_display_args(tool_call.name, tool_call.arguments),
-                        user_id,
-                        channel_name or channel,
+                    outcome = as_outcome(
+                        await self._approval_callback(
+                            tool_call.name,
+                            await self._tools.approval_display_args(tool_call.name, tool_call.arguments),
+                            user_id,
+                            channel_name or channel,
+                        )
                     )
                 except Exception:
                     logger.exception("Approval callback failed for '%s'", tool_call.name)
-                    approved = False
-                if not approved:
+                    outcome = ApprovalOutcome.UNAVAILABLE
+                if outcome is not ApprovalOutcome.APPROVED:
+                    # The callback has already logged why (timeout, missing stream, ...).
                     return ToolResult(
                         tool_call_id=tool_call.id,
-                        content=f"Action '{tool_call.name}' was declined by the user.",
+                        content=approval_tool_message(tool_call.name, outcome),
                         is_error=True,
                     )
             else:

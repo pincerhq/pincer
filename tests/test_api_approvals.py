@@ -29,6 +29,7 @@ from pincer.api.approvals import (  # noqa: E402
 )
 from pincer.api.server import create_app  # noqa: E402
 from pincer.core.agent import StreamChunk, StreamEventType  # noqa: E402
+from pincer.core.approval import ApprovalOutcome  # noqa: E402
 
 UUID = "11111111-1111-4111-8111-111111111111"
 OTHER_UUID = "22222222-2222-4222-8222-222222222222"
@@ -88,16 +89,20 @@ async def test_request_web_approval_resolves_when_approved():
     finally:
         reset_send_event(token)
 
-    assert approved is True
+    assert approved is ApprovalOutcome.APPROVED
     assert sent[0][0] == "approval"
     assert sent[0][1]["tool"] == "google__create_doc"
     assert sent[0][1]["args"] == {"title": "test"}
+    assert sent[1] == ("approval_resolved", {"approval_id": sent[0][1]["approval_id"], "status": "approved"})
     assert pending_count() == 0
 
 
 @pytest.mark.asyncio
-async def test_request_web_approval_returns_false_on_deny():
+async def test_request_web_approval_returns_denied_on_deny():
+    sent: list[tuple[str, dict]] = []
+
     async def send_event(name, data):
+        sent.append((name, data))
         approval_id = data["approval_id"]
         asyncio.get_running_loop().call_soon(lambda: resolve_web_approval(approval_id, UUID, False))
 
@@ -106,20 +111,26 @@ async def test_request_web_approval_returns_false_on_deny():
         approved = await request_web_approval("google__upload_file", {"file_path": "/tmp/x"}, UUID, "web", timeout=2.0)
     finally:
         reset_send_event(token)
-    assert approved is False
+    assert approved is ApprovalOutcome.DENIED
+    assert sent[-1] == ("approval_resolved", {"approval_id": sent[0][1]["approval_id"], "status": "denied"})
 
 
 @pytest.mark.asyncio
-async def test_request_web_approval_times_out():
-    async def send_event(_name, _data):
-        pass  # never resolve
+async def test_request_web_approval_times_out(caplog):
+    caplog.set_level("INFO", logger="pincer.api.approvals")
+    sent: list[tuple[str, dict]] = []
+
+    async def send_event(name, data):
+        sent.append((name, data))  # never resolve
 
     token = set_send_event(send_event)
     try:
         approved = await request_web_approval("google__create_doc", {}, UUID, "web", timeout=0.05)
     finally:
         reset_send_event(token)
-    assert approved is False
+    assert approved is ApprovalOutcome.TIMED_OUT
+    assert any("timed out" in r.getMessage() and r.levelname == "INFO" for r in caplog.records)
+    assert sent[-1] == ("approval_resolved", {"approval_id": sent[0][1]["approval_id"], "status": "expired"})
     assert pending_count() == 0
 
 
@@ -127,14 +138,48 @@ async def test_request_web_approval_times_out():
 async def test_request_web_approval_denies_non_web_channel():
     """Web approval is web-only; other channels must use their own UI."""
     approved = await request_web_approval("x", {}, UUID, "telegram")
-    assert approved is False
+    assert approved is ApprovalOutcome.UNAVAILABLE
 
 
 @pytest.mark.asyncio
-async def test_request_web_approval_denies_when_no_send_event_bound():
-    """A web approval with no SSE stream attached fails closed (deny)."""
+async def test_request_web_approval_unavailable_when_no_send_event_bound(caplog):
+    """A web approval with no SSE stream attached fails closed, as UNAVAILABLE with a WARNING."""
     approved = await request_web_approval("x", {}, UUID, "web", timeout=0.05)
-    assert approved is False
+    assert approved is ApprovalOutcome.UNAVAILABLE
+    assert not approved
+    assert any("no SSE stream" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_request_web_approval_unavailable_when_emit_fails():
+    async def send_event(_name, _data):
+        raise RuntimeError("stream closed")
+
+    token = set_send_event(send_event)
+    try:
+        approved = await request_web_approval("x", {}, UUID, "web", timeout=0.05)
+    finally:
+        reset_send_event(token)
+    assert approved is ApprovalOutcome.UNAVAILABLE
+    assert pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_request_web_approval_outcome_survives_failed_resolved_event():
+    """A failure sending `approval_resolved` must not change the decision."""
+
+    async def send_event(name, data):
+        if name == "approval_resolved":
+            raise RuntimeError("stream closed")
+        approval_id = data["approval_id"]
+        asyncio.get_running_loop().call_soon(lambda: resolve_web_approval(approval_id, UUID, True))
+
+    token = set_send_event(send_event)
+    try:
+        approved = await request_web_approval("x", {}, UUID, "web", timeout=2.0)
+    finally:
+        reset_send_event(token)
+    assert approved is ApprovalOutcome.APPROVED
 
 
 def test_resolve_web_approval_unknown_id_returns_false():
@@ -166,7 +211,7 @@ async def test_resolve_web_approval_rejects_other_user():
         reset_send_event(token)
 
     # The legitimate user's deferred resolve still wins.
-    assert approved is True
+    assert approved is ApprovalOutcome.APPROVED
 
 
 def test_sanitize_args_truncates_long_strings_and_handles_bytes():

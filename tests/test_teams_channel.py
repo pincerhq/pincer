@@ -21,6 +21,7 @@ from pincer.channels.microsoft_teams import (
     _ActivityFilterMiddleware,
     split_message,
 )
+from pincer.core.approval import ApprovalOutcome
 
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
 
@@ -321,6 +322,39 @@ async def test_handle_activity_answers_pending_approval(text: str, expected: boo
 
     assert fut.result() is expected
     handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolve", "expected"),
+    [
+        (lambda fut: fut.set_result(True), ApprovalOutcome.APPROVED),
+        (lambda fut: fut.set_result(False), ApprovalOutcome.DENIED),
+        (lambda fut: fut.set_exception(TimeoutError()), ApprovalOutcome.TIMED_OUT),
+    ],
+    ids=["approved", "denied", "timed_out"],
+)
+async def test_request_approval_outcome(resolve, expected) -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._send_to_user = AsyncMock()
+
+    task = asyncio.ensure_future(ch.request_approval("u1", "some_tool", {}))
+    for _ in range(10):
+        if "u1" in ch._pending_approvals:
+            break
+        await asyncio.sleep(0)
+    resolve(ch._pending_approvals["u1"])
+
+    assert await task is expected
+    assert "u1" not in ch._pending_approvals
+
+
+@pytest.mark.asyncio
+async def test_request_approval_unavailable_when_prompt_undeliverable() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._send_to_user = AsyncMock(side_effect=RuntimeError("no conversation reference"))
+
+    assert await ch.request_approval("u1", "some_tool", {}) is ApprovalOutcome.UNAVAILABLE
 
 
 @pytest.mark.asyncio

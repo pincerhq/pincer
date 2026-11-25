@@ -1272,6 +1272,24 @@ mounting a directory. Install the new `remote-skills` extra
   the reminder loop. Only those two named reasons count as an exhausted quota:
   a `RATE_LIMIT_EXCEEDED` whose `quota_limit` is a per-day limit, or a bare
   `RESOURCE_EXHAUSTED`, is still retried.
+- **A tool approval that expired or could not be asked is no longer reported
+  as "declined by the user" (#227).** Every approval that didn't go through
+  reached the model as a decline, so it made up a cause ("a permissions
+  problem") and didn't offer to retry. Approval callbacks now return an
+  `ApprovalOutcome` (`APPROVED`, `DENIED`, `TIMED_OUT`, `UNAVAILABLE`; a plain
+  bool still works), and each reaches the model with its own message: a
+  decline asks it not to retry, an expired request asks it to offer another
+  try, and an approval that could not be requested (no SSE stream, an
+  undeliverable prompt, a failing callback) asks it not to guess a cause.
+  This covers web chat, Telegram, WhatsApp, Teams and tools called through
+  the MCP server. Web chat sends a new `approval_resolved` SSE event
+  (`approval_id`, `status`: `approved` / `denied` / `expired`) so the approval
+  card can show its final state.
+- **MCP server: approval-gated tools ask the user again (#227).** The MCP
+  server's approval callback was called with no user or channel, so it never
+  reached anyone and every approval-gated call was refused. It now asks the
+  user's most recently active channel, the same way `pincer_ask_user` does,
+  and returns "could not be requested" when no channel has been active yet.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

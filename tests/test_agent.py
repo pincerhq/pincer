@@ -26,6 +26,7 @@ from pincer.core.agent import (
     _placed_call_sid,
     _sanitize_tool_pairs,
 )
+from pincer.core.approval import ApprovalOutcome
 from pincer.core.session import SessionManager
 from pincer.exceptions import LLMError, LLMOutputTruncatedError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall, ToolResult
@@ -2431,3 +2432,101 @@ async def test_failed_language_read_keeps_the_memories(
 
     assert "likes tea" in _sent_user_context(mock_llm)
     assert "[User preferred language:" not in mock_llm.complete.call_args.kwargs["system"]
+
+
+# ── Approval outcomes (Issue #227) ───────────────────────────────────────────
+
+
+async def _risky_tool_result(settings, mock_llm, session_manager, cost_tracker, approval_callback) -> str:
+    """Run one approval-gated tool call and return the tool-result text the LLM got."""
+    registry = ToolRegistry()
+
+    async def risky() -> str:
+        return "tool output"
+
+    registry.register(name="risky", description="risky", handler=risky, require_approval=True)
+    mock_llm.complete.side_effect = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc1", name="risky", arguments={})],
+            model="test",
+            input_tokens=10,
+            output_tokens=5,
+            stop_reason="tool_use",
+        ),
+        _DONE,
+    ]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry, approval_callback=approval_callback)
+    await agent.handle_message("user", "chat", "go", memory=False)
+    session = await session_manager.get_or_create("user", "chat")
+    (tool_msg,) = [m for m in session.messages if m.role == MessageRole.TOOL_RESULT]
+    return tool_msg.content
+
+
+@pytest.mark.parametrize("denied", [False, ApprovalOutcome.DENIED])
+async def test_explicit_deny_still_reads_declined_by_the_user(
+    settings, mock_llm, session_manager, cost_tracker, denied
+):
+    content = await _risky_tool_result(
+        settings, mock_llm, session_manager, cost_tracker, AsyncMock(return_value=denied)
+    )
+    assert "Action 'risky' was declined by the user." in content
+
+
+async def test_approval_timeout_is_not_reported_as_declined(settings, mock_llm, session_manager, cost_tracker):
+    content = await _risky_tool_result(
+        settings, mock_llm, session_manager, cost_tracker, AsyncMock(return_value=ApprovalOutcome.TIMED_OUT)
+    )
+    assert "declined" not in content
+    assert "expired without an answer" in content
+
+
+@pytest.mark.parametrize(
+    "callback",
+    [AsyncMock(return_value=ApprovalOutcome.UNAVAILABLE), AsyncMock(side_effect=RuntimeError("boom"))],
+    ids=["unavailable", "raises"],
+)
+async def test_unavailable_approval_is_not_reported_as_declined(
+    settings, mock_llm, session_manager, cost_tracker, callback
+):
+    content = await _risky_tool_result(settings, mock_llm, session_manager, cost_tracker, callback)
+    assert "declined" not in content
+    assert "could not be requested" in content
+
+
+# ── MCP approvals go to the active channel ──────────────────────────────────
+
+
+async def test_mcp_approval_uses_last_active_channel(settings, mock_llm, session_manager, cost_tracker, tool_registry):
+    callback = AsyncMock(return_value=True)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, approval_callback=callback)
+    agent._last_active = ("user1", "telegram")
+
+    outcome = await agent._approve_on_active_channel("email_send", {"to": "a@b.c"})
+
+    assert outcome is ApprovalOutcome.APPROVED
+    callback.assert_awaited_once_with("email_send", {"to": "a@b.c"}, "user1", "telegram")
+
+
+async def test_mcp_approval_unavailable_without_active_channel(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    callback = AsyncMock(return_value=True)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, approval_callback=callback)
+
+    with caplog.at_level(logging.WARNING, logger="pincer.core.agent"):
+        outcome = await agent._approve_on_active_channel("email_send", {})
+
+    assert outcome is ApprovalOutcome.UNAVAILABLE
+    callback.assert_not_awaited()
+    assert any("no active messaging channel" in r.getMessage() for r in caplog.records)
+
+
+async def test_mcp_approval_unavailable_when_callback_raises(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    callback = AsyncMock(side_effect=RuntimeError("boom"))
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, approval_callback=callback)
+    agent._last_active = ("user1", "whatsapp")
+
+    assert await agent._approve_on_active_channel("email_send", {}) is ApprovalOutcome.UNAVAILABLE

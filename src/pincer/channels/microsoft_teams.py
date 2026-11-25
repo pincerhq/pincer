@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.channels.approval_text import parse_yes_no
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.core.approval import ApprovalOutcome, await_decision
 
 if TYPE_CHECKING:
     from pincer.config import Settings
@@ -383,7 +384,7 @@ class MicrosoftTeamsChannel(BaseChannel):
         else:
             await self.send(user_id, text)
 
-    async def request_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
+    async def request_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> ApprovalOutcome:
         """Send an approval prompt and wait up to 120 s for a yes/no reply."""
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
@@ -393,21 +394,21 @@ class MicrosoftTeamsChannel(BaseChannel):
             await self._send_to_user(user_id, prompt)
         except Exception as e:
             logger.warning(
-                "Teams approval prompt undeliverable to %s for %s (%s); denying.",
+                "Teams approval prompt undeliverable to %s for %s (%s); approval unavailable.",
                 user_id,
                 tool_name,
                 e,
             )
-            return False
+            return ApprovalOutcome.UNAVAILABLE
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending_approvals[user_id] = fut
         try:
-            return await asyncio.wait_for(fut, timeout=120)
-        except TimeoutError:
-            logger.info("Teams approval timed out for %s / %s", user_id, tool_name)
-            return False
+            outcome = await await_decision(fut, 120)
         finally:
             self._pending_approvals.pop(user_id, None)
+        if outcome is ApprovalOutcome.TIMED_OUT:
+            logger.info("Teams approval timed out for %s / %s", user_id, tool_name)
+        return outcome
 
     async def request_input(self, user_id: str, question: str) -> str:
         """Send a question and wait up to 120 s for the user's reply."""

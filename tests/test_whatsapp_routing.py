@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from pincer.channels.base import ChannelType, IncomingMessage
+from pincer.core.approval import ApprovalOutcome
 
 
 def _ensure_neonize_mocks():
@@ -1224,12 +1225,12 @@ class TestGroupApproval:
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
-            ("yes", True),
-            ("Yes!", True),
-            ("pincer yes", True),
-            (f"@{OWNER_PHONE} yes", True),
-            ("no", False),
-            ("pincer, no thanks", False),
+            ("yes", ApprovalOutcome.APPROVED),
+            ("Yes!", ApprovalOutcome.APPROVED),
+            ("pincer yes", ApprovalOutcome.APPROVED),
+            (f"@{OWNER_PHONE} yes", ApprovalOutcome.APPROVED),
+            ("no", ApprovalOutcome.DENIED),
+            ("pincer, no thanks", ApprovalOutcome.DENIED),
         ],
     )
     async def test_text_answer_from_requester_resolves(self, routing_channel, text, expected):
@@ -1250,7 +1251,7 @@ class TestGroupApproval:
 
         await ch._on_message(ch._client, _reaction_event(sender_user=OTHER_PHONE, emoji=emoji))
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
         assert PROMPT_ID not in ch._approval_prompt_ids
 
     async def test_thumbs_down_reaction_denies(self, routing_channel):
@@ -1259,7 +1260,7 @@ class TestGroupApproval:
 
         await ch._on_message(ch._client, _reaction_event(sender_user=OTHER_PHONE, emoji="👎🏿"))
 
-        assert await asyncio.wait_for(task, 1) is False
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.DENIED
 
     async def test_reaction_from_another_member_is_ignored(self, routing_channel, caplog):
         ch = routing_channel
@@ -1287,7 +1288,7 @@ class TestGroupApproval:
 
         await ch._on_message(ch._client, _reaction_event(sender_user=OWNER_PHONE, emoji="👍", from_me=True))
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
 
     async def test_owner_plain_yes_from_own_number_approves(self, routing_channel):
         ch = routing_channel
@@ -1295,7 +1296,7 @@ class TestGroupApproval:
 
         await ch._on_message(ch._client, _group_text("yes", sender_user=OWNER_PHONE, from_me=True))
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
 
     async def test_yes_in_another_group_does_not_answer(self, routing_channel):
         ch = routing_channel
@@ -1353,7 +1354,7 @@ class TestGroupApproval:
         )
         await ch._on_message(ch._client, event)
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
 
     async def test_voice_note_answer_in_group(self, routing_channel):
         ch = routing_channel
@@ -1367,7 +1368,7 @@ class TestGroupApproval:
 
         await ch._on_message(ch._client, event)
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
         ch._handler.assert_not_called()
 
     async def test_captioned_image_answer_in_group(self, routing_channel):
@@ -1379,7 +1380,7 @@ class TestGroupApproval:
 
         await ch._on_message(ch._client, event)
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
         ch._extract_message.assert_not_called()
 
     async def test_echo_of_the_question_does_not_answer_it(self, routing_channel):
@@ -1416,7 +1417,7 @@ class TestGroupApproval:
         assert ch._client.send_message.await_count == 1  # only the first prompt so far
 
         await ch._on_message(ch._client, _group_text("yes"))
-        assert await asyncio.wait_for(first, 1) is True
+        assert await asyncio.wait_for(first, 1) is ApprovalOutcome.APPROVED
         for _ in range(100):
             if ch._client.send_message.await_count == 2 and OTHER_PHONE in ch._pending_approvals:
                 break
@@ -1424,7 +1425,7 @@ class TestGroupApproval:
         assert "to=boss" in ch._client.send_message.await_args.args[1]
 
         await ch._on_message(ch._client, _group_text("no", msg_id="second-answer"))
-        assert await asyncio.wait_for(second, 1) is False
+        assert await asyncio.wait_for(second, 1) is ApprovalOutcome.DENIED
         assert OTHER_PHONE not in ch._pending_approvals
 
     async def test_approval_and_question_in_different_chats(self, routing_channel):
@@ -1445,7 +1446,7 @@ class TestGroupApproval:
         assert await asyncio.wait_for(question, 1) == "Home"
 
         await ch._on_message(ch._client, _group_text("yes"))
-        assert await asyncio.wait_for(approval, 1) is True
+        assert await asyncio.wait_for(approval, 1) is ApprovalOutcome.APPROVED
 
     async def test_group_yes_does_not_answer_a_direct_chat_prompt(self, routing_channel):
         ch = routing_channel
@@ -1477,7 +1478,7 @@ class TestDirectChatApproval:
 
         await ch._on_message(ch._client, self._self_chat("yes please"))
 
-        assert await asyncio.wait_for(task, 1) is True
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
         ch._handler.assert_not_called()
 
     async def test_other_text_reprompts(self, routing_channel):

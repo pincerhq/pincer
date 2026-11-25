@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pincer.core.approval import ApprovalOutcome, approval_tool_message, as_outcome
 from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, MCP_TOOL_CONTEXT, CalendarTodayAlias
 from pincer.mcp.config import missing_export_log_level
 
@@ -59,7 +60,7 @@ class PincerToolExporter:
         self,
         tool_registry: ToolRegistry,
         expose_tools: list[str],
-        approval_callback: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None,
+        approval_callback: Callable[[str, dict[str, Any]], Awaitable[bool | ApprovalOutcome]] | None = None,
         ask_user_callback: Callable[[str], Awaitable[str]] | None = None,
         security_gate: MCPSecurityGate | None = None,
     ) -> None:
@@ -134,12 +135,14 @@ class PincerToolExporter:
             if needs_approval and approval_cb:
                 try:
                     shown = await registry.approval_display_args(pincer_name, kwargs)
-                    approved = await approval_cb(pincer_name, shown)
+                    outcome = as_outcome(await approval_cb(pincer_name, shown))
                 except Exception:
                     logger.exception("Approval callback raised for '%s'", pincer_name)
-                    approved = False
-                if not approved:
+                    outcome = ApprovalOutcome.UNAVAILABLE
+                if outcome is ApprovalOutcome.DENIED:
                     return f"[Denied] User declined to execute {pincer_name}"
+                if outcome is not ApprovalOutcome.APPROVED:
+                    return f"[Not approved] {approval_tool_message(pincer_name, outcome)}"
             return await registry.execute(pincer_name, kwargs, context=dict(MCP_TOOL_CONTEXT))
 
         async def _handler(**kwargs: Any) -> str:
