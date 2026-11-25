@@ -25,6 +25,7 @@ that job.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -38,6 +39,8 @@ from pincer.storage.encryption import (
     StorageKey,
     azure_error_code,
     keyed_request_hit_plain_object,
+    note_plain,
+    request_hit_encrypted_object,
 )
 from pincer.storage.errors import KeyConflict, StorageEncryptionError, StorageUnavailable
 
@@ -53,21 +56,6 @@ logger = logging.getLogger(__name__)
 _CPK_CODE_MARKERS = ("CustomerSpecifiedEncryption", "CustomerProvidedKey", "EncryptionKey")
 #: Object metadata an in-place S3 rewrite carries over (a multipart copy would drop it).
 _S3_KEPT_HEADERS = ("ContentType", "ContentEncoding", "ContentDisposition", "ContentLanguage", "CacheControl")
-
-_warned_plain: set[str] = set()
-
-
-def _note_plain(path: object) -> None:
-    """Log once per object that it was read without the key."""
-    name = str(path)
-    if name not in _warned_plain:
-        _warned_plain.add(name)
-        logger.warning(
-            "Storage encryption: %s is not encrypted yet; read it without the key "
-            "(`pincer storage encrypt` encrypts it)",
-            name,
-        )
-
 
 # ── S3 (SSE-C) ─────────────────────────────────────────────────────────
 
@@ -104,6 +92,7 @@ class EncryptedS3Client(S3Client):
             raise StorageEncryptionError(
                 f"s3://{bucket}/{key} is encrypted with a different customer key than PINCER_STORAGE_ENCRYPTION_KEY"
             )
+        note_plain(f"s3://{bucket}/{key}")
         return data, False
 
     def _raise_if_another_key(self, bucket: str, key: str, keyed_error: Exception) -> None:
@@ -115,7 +104,7 @@ class EncryptedS3Client(S3Client):
         try:
             self.client.head_object(Bucket=bucket, Key=key, **self._plain_dl_args)
         except ClientError as plain_error:
-            if plain_error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 400:
+            if request_hit_encrypted_object(plain_error):
                 raise StorageEncryptionError(
                     f"s3://{bucket}/{key} is encrypted with a different customer key than PINCER_STORAGE_ENCRYPTION_KEY"
                 ) from keyed_error
@@ -145,7 +134,7 @@ class EncryptedS3Client(S3Client):
         except ClientError as e:
             if not keyed_request_hit_plain_object(e):
                 raise
-            _note_plain(cloud_path)
+            note_plain(cloud_path)
             obj.download_file(str(local_path), Config=self.boto3_transfer_config, ExtraArgs=self._plain_dl_args)
         return local_path
 
@@ -191,6 +180,14 @@ class EncryptedS3Client(S3Client):
 
     def is_encrypted(self, path: CloudPath) -> bool:
         return self._head(path.bucket, path.key)[1]  # type: ignore[attr-defined]
+
+    def old_versions_kept(self, root: CloudPath) -> list[str]:
+        """Why plain versions replaced by an in-place rewrite stay readable: bucket versioning."""
+        bucket = root.bucket  # type: ignore[attr-defined]
+        status = self.client.get_bucket_versioning(Bucket=bucket).get("Status")
+        if status in ("Enabled", "Suspended"):
+            return [f"versioning is {status.lower()} on S3 bucket {bucket}, so the plain versions stay readable"]
+        return []
 
     def encrypt_in_place(self, path: CloudPath) -> None:
         """Copy the plain object onto itself, encrypted, unless it changed since its HEAD.
@@ -243,7 +240,7 @@ class EncryptedGSClient(GSClient):
         if _gcs_keyed(blob):
             blob.encryption_key = self.encryption_key.raw
         else:
-            _note_plain(f"gs://{bucket_name}/{name}")
+            note_plain(f"gs://{bucket_name}/{name}")
         return blob
 
     def _download_file(self, cloud_path: Any, local_path: str | os.PathLike[str]) -> Path:
@@ -289,6 +286,20 @@ class EncryptedGSClient(GSClient):
         if blob is None:
             raise FileNotFoundError(f"File does not exist: {path}")
         return _gcs_keyed(blob)
+
+    def old_versions_kept(self, root: CloudPath) -> list[str]:
+        """Why plain generations replaced by an in-place rewrite stay readable:
+        object versioning (noncurrent generations) or soft delete."""
+        name = root.bucket  # type: ignore[attr-defined]
+        bucket = self.client.get_bucket(name)
+        notes = []
+        if bucket.versioning_enabled:
+            notes.append(f"object versioning is on for GCS bucket {name}, so the plain noncurrent generations stay")
+        policy = getattr(bucket, "soft_delete_policy", None)
+        seconds = getattr(policy, "retention_duration_seconds", None) or 0
+        if seconds:
+            notes.append(f"soft delete keeps the plain generations of GCS bucket {name} for {seconds // 86400} day(s)")
+        return notes
 
     def encrypt_in_place(self, path: CloudPath) -> None:
         """Rewrite the plain object onto itself with the key, unless its generation changed.
@@ -360,7 +371,7 @@ class EncryptedAzureBlobClient(AzureBlobClient):
         except HttpResponseError as e:
             if not keyed_request_hit_plain_object(e):
                 raise
-        _note_plain(path)
+        note_plain(path)
         return call()
 
     def _blob_client(self, path: Any) -> Any:
@@ -467,6 +478,26 @@ class EncryptedAzureBlobClient(AzureBlobClient):
             self._blob_client(path).get_blob_properties, self.encryption_key.azure_cpk(), path
         )
         return bool(properties.encryption_key_sha256)
+
+    def old_versions_kept(self, root: CloudPath) -> list[str]:
+        """Why plain blobs replaced by an in-place rewrite stay readable: blob
+        versioning (seen as version ids in a listing) or blob soft delete."""
+        container = root.container  # type: ignore[attr-defined]
+        notes = []
+        listing = self.service_client.get_container_client(container).list_blobs(
+            name_starts_with=root.blob or None,  # type: ignore[attr-defined]
+            include=["versions"],
+            results_per_page=1,
+        )
+        if any(getattr(blob, "version_id", None) for blob in itertools.islice(listing, 1)):
+            notes.append(f"blob versioning is on for Azure container {container}, so the plain versions stay")
+        retention = self.service_client.get_service_properties().get("delete_retention_policy")
+        if retention is not None and getattr(retention, "enabled", False):
+            notes.append(
+                f"blob soft delete keeps the plain blobs of Azure container {container} "
+                f"for {getattr(retention, 'days', None) or '?'} day(s)"
+            )
+        return notes
 
     def encrypt_in_place(self, path: CloudPath) -> None:
         """Download the plain blob and upload it over itself with the key,

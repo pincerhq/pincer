@@ -98,6 +98,26 @@ class DoctorReport:
         }
 
 
+def load_settings() -> tuple[Settings, Exception | None]:
+    """The settings the doctor checks, and the error of a malformed storage key.
+
+    A malformed `PINCER_STORAGE_ENCRYPTION_KEY` fails settings loading, which
+    would stop the doctor before any check. It is reported as the
+    `storage_encryption` check instead, and every other check runs on the
+    settings without the key.
+    """
+    from pincer.config import get_settings_relaxed
+    from pincer.config.main import _RelaxedSettings
+    from pincer.storage.encryption import InvalidStorageKey
+
+    try:
+        return get_settings_relaxed(), None
+    except InvalidStorageKey as e:
+        settings = _RelaxedSettings(storage_encryption_key=None)  # type: ignore[call-arg]
+        settings.ensure_dirs()
+        return settings, e
+
+
 class SecurityDoctor:
     """Runs comprehensive security checks on a Pincer installation."""
 
@@ -118,19 +138,28 @@ class SecurityDoctor:
         # The identity roster, read once per `run_all` instead of once per
         # access check (each read opens its own loop and engine).
         self._roster_cache: dict[Path, tuple[bool, list[str]]] | None = None
+        # The settings of the running `run_all` (see `load_settings`).
+        self._settings: Settings | None = None
 
     def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
+            if self._settings is not None:
+                return self._settings
             from pincer.config import get_settings_relaxed
 
             return get_settings_relaxed()
         return cfg
 
     def run_all(self) -> DoctorReport:
-        from pincer.config import get_settings_relaxed
-
         self._roster_cache = {}
-        settings = get_settings_relaxed()
+        settings, key_error = load_settings()
+        self._settings = settings
+        try:
+            return self._run_all(settings, key_error)
+        finally:
+            self._settings = None
+
+    def _run_all(self, settings: Settings, key_error: Exception | None) -> DoctorReport:
         report = DoctorReport()
         # Secrets (6 checks)
         report.checks.append(self._check_env_file_permissions())
@@ -158,7 +187,9 @@ class SecurityDoctor:
         report.checks.append(self._check_data_dir_permissions())
         report.checks.append(self._check_skills_dir_permissions(settings))
         report.checks.append(self._check_storage_root(settings))
-        report.checks.append(self._check_storage_encryption(settings))
+        report.checks.append(
+            self._invalid_storage_key(key_error) if key_error else self._check_storage_encryption(settings)
+        )
         report.checks.append(self._check_no_world_readable_secrets())
         report.checks.append(self._check_sqlite_not_world_readable())
         # Network (2 checks)
@@ -1801,18 +1832,15 @@ class SecurityDoctor:
         one-way lock of each cloud location, the Azure hierarchical-namespace
         probe, and how far encrypting existing data got."""
         from pincer.storage import clients, encryption_state
-        from pincer.storage.encryption import TLS_WARNING_DOC, InvalidStorageKey, load_key, tls_problem
+        from pincer.storage.encryption import TLS_WARNING_DOC, load_key, tls_problem
         from pincer.storage.errors import StorageError
+        from pincer.storage.layout import storage_root_for
 
         name, category = "storage_encryption", "filesystem"
         settings = self._cfg(cfg)
-        try:
-            key = load_key(settings)
-        except InvalidStorageKey as e:
-            return CheckResult(
-                name, CheckStatus.CRITICAL, str(e), "Set a 32-byte base64 key: openssl rand -base64 32", category
-            )
+        key = load_key(settings)
         locations = encryption_state.locations(settings)
+        local_root = key is not None and not clients.is_remote_uri(storage_root_for(settings))
         if not locations:
             if key is not None:
                 return CheckResult(
@@ -1828,6 +1856,11 @@ class SecurityDoctor:
         problems: list[str] = []
         warnings: list[str] = []
         notes: list[str] = []
+        if local_root:
+            warnings.append(
+                "the storage root is local: PINCER_STORAGE_ENCRYPTION_KEY has no effect on it "
+                "(it encrypts s3://, az:// and gs:// storage only)"
+            )
         for location in locations:
             scheme = clients.uri_scheme(location)
             if key is not None and (tls := tls_problem(scheme, settings)):
@@ -1868,6 +1901,11 @@ class SecurityDoctor:
                 warnings.append(
                     f"{location}: encrypting existing data is {state} ({migration.get('done', 0)} object(s) done){hns}"
                 )
+            elif migration.get("old_versions"):
+                warnings.append(
+                    f"{location}: encrypted, but old plain versions remain readable: {migration['old_versions']}. "
+                    "Delete them (see docs/guides/storage-encryption.md#versioned-buckets)"
+                )
             else:
                 notes.append(f"{location}: encrypted, existing data complete{hns}")
 
@@ -1885,7 +1923,8 @@ class SecurityDoctor:
                 name,
                 CheckStatus.WARNING,
                 "; ".join(warnings + notes),
-                "Run `pincer storage encrypt` (a running `pincer run` also does it in the background)",
+                "Run `pincer storage encrypt` (a running `pincer run` also does it in the background); "
+                "on a versioned bucket, delete the old plain versions once it is complete",
                 category,
             )
         if key is None:
@@ -1893,6 +1932,17 @@ class SecurityDoctor:
                 name, CheckStatus.SKIPPED, "Storage encryption is off: " + "; ".join(notes), category=category
             )
         return CheckResult(name, CheckStatus.PASS, "; ".join(notes), category=category)
+
+    @staticmethod
+    def _invalid_storage_key(error: Exception) -> CheckResult:
+        """A malformed PINCER_STORAGE_ENCRYPTION_KEY; the message never carries the value."""
+        return CheckResult(
+            "storage_encryption",
+            CheckStatus.CRITICAL,
+            str(error),
+            "Set a 32-byte base64 key: openssl rand -base64 32. Pincer does not start with this key",
+            "filesystem",
+        )
 
     def _check_remote_skills_root(self, uri: str, cfg: Settings) -> CheckResult:
         """Remote roots have no POSIX mode to check; verify the extra is installed

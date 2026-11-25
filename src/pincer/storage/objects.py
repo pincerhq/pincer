@@ -32,7 +32,7 @@ import shutil
 from typing import IO, TYPE_CHECKING, Any
 from urllib.parse import quote
 
-from pincer.storage.encryption import keyed_request_hit_plain_object
+from pincer.storage.encryption import keyed_request_hit_plain_object, note_plain
 from pincer.storage.errors import KeyConflict, KeyNotFound
 from pincer.storage.keys import content_type_for, etag
 from pincer.storage.limits import COPY_CHUNK
@@ -233,6 +233,7 @@ class S3Objects(SdkObjects):
         except ClientError as e:
             if not keyed_request_hit_plain_object(e):
                 raise
+        note_plain(path)
         return call()
 
     def _get(self, path: CloudPath) -> Any:
@@ -410,6 +411,7 @@ class AzureObjects(SdkObjects):
             except HttpResponseError as e:
                 if not (self.encryption_key and keyed_request_hit_plain_object(e)):
                     raise
+            note_plain(path)
             return blob.download_blob()
         except ResourceNotFoundError as e:
             raise KeyNotFound(f"No such file: {path}") from e
@@ -464,6 +466,8 @@ class GSObjects(SdkObjects):
             raise KeyNotFound(f"No such file: {path}")
         if (getattr(found, "_properties", None) or {}).get("customerEncryption"):
             found.encryption_key = self.encryption_key.raw
+        else:
+            note_plain(path)
         return found
 
     def read(self, path: CloudPath) -> tuple[bytes, object]:

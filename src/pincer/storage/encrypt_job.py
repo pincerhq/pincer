@@ -40,6 +40,7 @@ from pincer.storage.encryption_state import (
     JOB_LOCK,
     SENTINEL,
     STATE_DIR,
+    is_not_found,
     read_marker,
     verify_at_startup,
     write_marker,
@@ -62,6 +63,8 @@ PROGRESS_EVERY = 100
 LEASE_SECONDS = 15 * 60
 #: Providers that list keys in lexical order, so a restart can resume after the cursor.
 _ORDERED_LISTING = ("s3", "gs")
+#: How many times an object that changed mid-rewrite, and is still plain, is tried again.
+CONFLICT_RETRIES = 1
 
 _started = False
 _start_lock = threading.Lock()
@@ -76,6 +79,8 @@ class Progress:
     changed: int = 0
     failed: list[str] = field(default_factory=list)
     state: str = "running"
+    #: Why the plain versions from before may still be readable (bucket versioning, soft delete), or None.
+    old_versions: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +91,7 @@ class Progress:
             "changed_meanwhile": self.changed,
             "failed": len(self.failed),
             "state": self.state,
+            "old_versions": self.old_versions,
         }
 
 
@@ -133,6 +139,38 @@ class _Marker:
         logger.warning("Storage encryption: could not save progress of %s", self.root)
 
 
+def _encrypt_one(client: Any, path: CloudPath) -> str:
+    """Encrypt one plain object in place: "encrypted", or "changed" when it was
+    rewritten with the key meanwhile.
+
+    A rewrite that loses a race (the object changed since it was read) is
+    checked again: a writer in a shared bucket may be another service that
+    writes plain, so the object is tried again while it is still plain. One
+    that keeps changing, still plain, raises KeyConflict and counts as failed.
+    """
+    for _ in range(CONFLICT_RETRIES + 1):
+        try:
+            client.encrypt_in_place(path)
+            return "encrypted"
+        except KeyConflict:
+            if client.is_encrypted(path):
+                return "changed"
+    raise KeyConflict(f"{path} kept changing, still without the key, while it was being encrypted")
+
+
+def _old_versions(client: Any, root: CloudPath) -> str | None:
+    """Why the plain versions an in-place rewrite replaces may stay readable, if they may."""
+    check = getattr(client, "old_versions_kept", None)
+    if check is None:
+        return None
+    try:
+        notes: list[str] = check(root)
+    except Exception as e:
+        logger.debug("Storage encryption: could not check %s for old versions: %s", root, e)
+        return None
+    return "; ".join(notes) or None
+
+
 def encrypt_location(
     root: CloudPath,
     *,
@@ -150,6 +188,10 @@ def encrypt_location(
     `heartbeat()` runs whenever progress is saved (it renews the lease); when
     it returns False the lease was lost to another process, and the run
     stops, saving progress.
+
+    The saved cursor never passes an object that failed, so a run that ends
+    early (restart, lost lease, stop) tries it again on resume. A dry run
+    counts every object, whatever the cursor.
     """
     client = root.client
     if not hasattr(client, "encrypt_in_place"):
@@ -161,11 +203,19 @@ def encrypt_location(
     migration = marker.migration
     resume_after = None
     scheme = clients.uri_scheme(str(root))
-    if migration.get("state") != "complete" and scheme in _ORDERED_LISTING:
+    if not dry_run and migration.get("state") != "complete" and scheme in _ORDERED_LISTING:
         resume_after = migration.get("cursor")
     done_before = int(migration.get("done") or 0) if resume_after else 0
+    progress.old_versions = _old_versions(client, root)
+    if progress.old_versions:
+        logger.warning(
+            "Storage encryption of %s: %s. Encrypting rewrites objects in place; delete the old versions "
+            "to remove the plain copies",
+            root,
+            progress.old_versions,
+        )
     if not dry_run:
-        marker.save(state="running")
+        marker.save(state="running", old_versions=progress.old_versions)
 
     def report(key: str, outcome: str) -> None:
         if on_object is not None:
@@ -191,19 +241,20 @@ def encrypt_location(
                 progress.pending += 1
                 report(key, "pending")
             else:
-                client.encrypt_in_place(path)
-                progress.encrypted += 1
-                report(key, "encrypted")
-        except FileNotFoundError:
-            continue  # deleted while the job ran
-        except KeyConflict:
-            progress.changed += 1
-            report(key, "changed")
+                outcome = _encrypt_one(client, path)
+                if outcome == "encrypted":
+                    progress.encrypted += 1
+                else:
+                    progress.changed += 1
+                report(key, outcome)
         except Exception as e:
+            if is_not_found(e):
+                continue  # deleted while the job ran
             logger.warning("Storage encryption: could not encrypt %s: %s: %s", path, type(e).__name__, e)
             progress.failed.append(key)
             report(key, "failed")
-        cursor = key
+        if not progress.failed:
+            cursor = key  # never past a failed object: a resumed run tries it again
         since_save += 1
         if not dry_run and since_save >= PROGRESS_EVERY:
             since_save = 0

@@ -84,9 +84,13 @@ save, upload, move, delete, new folder) answers 404 for them, whether they
 exist or not.
 
 Only an answer about the key itself counts as a wrong or missing key.
-Throttling, timeouts and server errors are reported as unreachable storage,
-not as a refusal; a location Pincer couldn't check at startup gets the full
-check on its next use. A malformed key is reported without its value.
+Throttling, timeouts, server errors and other 400s (an expired token, a
+malformed authorization header, a bad bucket name) are reported as
+unreachable storage, not as a refusal; a location Pincer couldn't check gets
+the full check on its next use. A refused location stays refused until Pincer
+restarts, whether it was refused at startup or on a later use. A malformed key
+is reported without its value, and `pincer doctor` reports it as a failed
+`storage_encryption` check instead of stopping.
 
 A refused location is not used at all: the storage browser answers 503 with
 the reason, and skills and the workspace fail with the same message. The rest
@@ -135,14 +139,53 @@ and keeps its content type and metadata:
 | GCS | Rewrite onto itself with the key, on condition of its generation |
 | Azure | Download and upload over itself with the key, on condition of its ETag |
 
-An object that changed during the rewrite was written by Pincer in the
-meantime, which already encrypts, so it is left as it is. Progress is saved in
-the marker every 100 objects. On S3 and GCS a restart resumes after the last
-key; on Azure it lists again and skips what is already encrypted. When every
-object is done the state is `complete`, and the `.encrypted` check file
-appears. A run with failed objects leaves the state `pending` and writes no
-check file. Running the job again is always safe:
-it also picks up plain objects that another service dropped into the bucket.
+When an object changed during the rewrite, the job checks it again. If it is
+now encrypted (Pincer wrote it meanwhile, with the key), it is left as it is.
+If it is still plain (another service in a shared bucket wrote it), it is
+tried once more, and counted as failed if it changes again. An object deleted
+while the job runs is skipped.
+
+Progress is saved in the marker every 100 objects. On S3 and GCS a restart
+resumes after the last key, but never after an object that failed, so a
+failed object is tried again. On Azure it lists again and skips what is
+already encrypted. When every object is done the state is `complete`, and the
+`.encrypted` check file appears. A run with failed objects leaves the state
+`pending` and writes no check file. Running the job again is always safe: it
+also picks up plain objects that another service dropped into the bucket.
+
+`pincer storage encrypt` exits with status 1 unless every location ends
+`complete`: a failed object, or a run stopped because another process took
+the lease, is not done. `--dry-run` exits with status 1 when some objects
+could not be checked.
+
+### Versioned buckets
+
+The job rewrites each object **in place**. On a bucket that keeps old
+versions, the plain version from before stays behind, readable by anyone
+with read access to the bucket, until it is deleted:
+
+| Provider | What keeps the plain copy |
+|---|---|
+| S3 | Bucket versioning (enabled or suspended): the previous version |
+| GCS | Object versioning: the noncurrent generation; soft delete: the overwritten generation, for its retention |
+| Azure | Blob versioning: the previous version; blob soft delete: a soft-deleted snapshot, for its retention |
+
+The job detects these settings, records them in the marker, and
+`pincer storage encrypt`, `pincer storage encryption-status` and
+`pincer doctor` warn about them, even once the state is `complete`. After the
+job is complete, delete the old versions with the provider's tools, for
+example:
+
+- S3: delete the noncurrent versions (`aws s3api list-object-versions`, then
+  `delete-object --version-id`), or add a lifecycle rule that expires
+  noncurrent versions.
+- GCS: delete the noncurrent generations (`gcloud storage ls --all-versions`,
+  then `gcloud storage rm gs://bucket/object#<generation>` for each old one),
+  or add a lifecycle rule on `isLive: false`; soft-deleted objects expire with
+  their retention.
+- Azure: delete the previous versions (`az storage blob delete --version-id`)
+  or set a lifecycle rule on versions; soft-deleted snapshots expire with their
+  retention.
 
 !!! note "A shared bucket"
     Encryption covers the whole storage root, including folders that belong

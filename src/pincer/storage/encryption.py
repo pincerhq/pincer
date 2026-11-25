@@ -19,6 +19,8 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +34,16 @@ if TYPE_CHECKING:
 TLS_WARNING_DOC = "docs/guides/storage-encryption.md#encrypted-data-can-only-be-read-over-tls"
 KEY_BYTES = 32
 _FINGERPRINT_LABEL = b"pincer-storage-key-check"
+#: Azure's answer to a keyed request for an object stored without a key.
+_AZURE_PLAIN_CODES = frozenset({"BlobDoesNotUseCustomerSpecifiedEncryption"})
+#: Azure's answer to a request without a key for an object stored with one.
+_AZURE_ENCRYPTED_CODES = frozenset({"BlobUsesCustomerSpecifiedEncryption"})
+#: Azure error codes about the customer key itself: missing, wrong or not applicable.
+_AZURE_KEY_CODE_MARKERS = ("CustomerSpecifiedEncryption", "CustomerProvidedKey", "EncryptionKey")
+#: The codes botocore gives a bodyless 400, which is all S3 sends for a HEAD.
+_S3_BODYLESS_400 = frozenset({"400", "Bad Request", "BadRequest"})
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -163,7 +175,36 @@ def require_tls(scheme: str, settings: Settings) -> None:
 
 # ── Telling a plain object from an encrypted one, by the error a keyed request gets ──
 
-_AZURE_PLAIN_CODES = frozenset({"BlobDoesNotUseCustomerSpecifiedEncryption"})
+
+def _s3_encryption_400(error: Exception) -> bool | None:
+    """For a botocore ClientError: True when it is S3's 400 about server-side
+    encryption parameters, False for any other S3 error; None when `error` is
+    not from S3.
+
+    S3 answers a GET with `InvalidRequest` and a message about server-side
+    encryption, and a HEAD with a bodyless 400 (no code, no message). Other
+    400s (`ExpiredToken`, `AuthorizationHeaderMalformed`, `InvalidToken`,
+    `InvalidBucketName`, ...) carry their own code and are not about the key.
+    """
+    response = getattr(error, "response", None)
+    if not (isinstance(response, dict) and "Error" in response):
+        return None
+    if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 400:
+        return False
+    details = response.get("Error", {})
+    code = str(details.get("Code") or "")
+    if code in _S3_BODYLESS_400:
+        return True
+    return code == "InvalidRequest" and "encrypt" in str(details.get("Message") or "").lower()
+
+
+def _gcs_encryption_400(error: Exception) -> bool:
+    """GCS's 400 about a customer-supplied encryption key; its message says so."""
+    return (
+        type(error).__name__ == "BadRequest"
+        and type(error).__module__.startswith("google.api_core")
+        and "encrypt" in str(error).lower()
+    )
 
 
 def keyed_request_hit_plain_object(error: Exception) -> bool:
@@ -171,17 +212,17 @@ def keyed_request_hit_plain_object(error: Exception) -> bool:
     that was not stored with one (written before encryption was enabled, or by
     another service). The caller retries once without the key.
 
-    - S3 answers a keyed GET/HEAD of a plain object with 400 (`InvalidRequest`,
-      or a bodyless `400` for HEAD). A wrong key is 403, which is not retried.
-    - GCS answers a keyed download of a plain object with 400 Bad Request.
+    - S3 answers a keyed GET/HEAD of a plain object with 400 (`InvalidRequest`
+      about encryption parameters, or a bodyless `400` for HEAD). A wrong key
+      is 403, which is not retried.
+    - GCS answers a keyed download of a plain object with 400 Bad Request,
+      about the encryption key.
     - Azure answers with `BlobDoesNotUseCustomerSpecifiedEncryption`.
     """
-    response = getattr(error, "response", None)
-    if isinstance(response, dict) and "Error" in response:  # botocore ClientError
-        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        code = response.get("Error", {}).get("Code")
-        return status == 400 or code in ("400", "InvalidRequest")
-    if type(error).__name__ == "BadRequest" and type(error).__module__.startswith("google.api_core"):
+    s3 = _s3_encryption_400(error)
+    if s3 is not None:
+        return s3
+    if _gcs_encryption_400(error):
         return True
     return azure_error_code(error) in _AZURE_PLAIN_CODES
 
@@ -190,41 +231,40 @@ def request_hit_encrypted_object(error: Exception) -> bool:
     """True when `error` is a provider refusing a read without a key (or with
     another key) because the object is stored with a customer key.
 
-    - S3: 400 for a GET/HEAD of an SSE-C object without its key.
-    - GCS: 400 Bad Request for a download of a CSEK object without its key.
+    - S3: 400 for a GET/HEAD of an SSE-C object without its key
+      (`InvalidRequest` about server-side encryption, or bodyless for HEAD).
+    - GCS: 400 Bad Request, about the encryption key, for a download of a
+      CSEK object without its key.
     - Azure: `BlobUsesCustomerSpecifiedEncryption`.
     """
-    response = getattr(error, "response", None)
-    if isinstance(response, dict) and "Error" in response:  # botocore ClientError
-        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        return status == 400 or response.get("Error", {}).get("Code") in ("400", "InvalidRequest")
-    if type(error).__name__ == "BadRequest" and type(error).__module__.startswith("google.api_core"):
+    s3 = _s3_encryption_400(error)
+    if s3 is not None:
+        return s3
+    if _gcs_encryption_400(error):
         return True
     return azure_error_code(error) in _AZURE_ENCRYPTED_CODES
-
-
-_AZURE_ENCRYPTED_CODES = frozenset({"BlobUsesCustomerSpecifiedEncryption"})
-#: Azure error codes about the customer key itself: missing, wrong or not applicable.
-_AZURE_KEY_CODE_MARKERS = ("CustomerSpecifiedEncryption", "CustomerProvidedKey", "EncryptionKey")
 
 
 def is_key_error(error: Exception) -> bool:
     """True when `error` may be the provider refusing the key itself (a
     wrong key, or none), rather than the store being unreachable.
 
-    - S3: 400 or 403 for a keyed request (a wrong SSE-C key is 403; 403 is
-      also a missing permission, which the caller tells apart by reading
-      without the key).
-    - GCS: 400 Bad Request (a wrong CSEK key) or 403.
+    - S3: 403 for a keyed request (a wrong SSE-C key is 403; 403 is also a
+      missing permission, which the caller tells apart by reading without the
+      key), or a 400 about server-side encryption. Other 400s, such as an
+      expired token, are not.
+    - GCS: 400 Bad Request about the encryption key (a wrong CSEK key), or 403.
     - Azure: an error code about the customer-provided key.
 
     Throttling, timeouts and server errors (5xx) are never key errors.
     """
     response = getattr(error, "response", None)
     if isinstance(response, dict) and "Error" in response:  # botocore ClientError
-        return response.get("ResponseMetadata", {}).get("HTTPStatusCode") in (400, 403)
+        if response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 403:
+            return True
+        return bool(_s3_encryption_400(error))
     if type(error).__module__.startswith("google.api_core"):
-        return type(error).__name__ in ("BadRequest", "Forbidden")
+        return type(error).__name__ == "Forbidden" or _gcs_encryption_400(error)
     code = azure_error_code(error)
     return code is not None and any(marker in code for marker in _AZURE_KEY_CODE_MARKERS)
 
@@ -235,3 +275,22 @@ def azure_error_code(error: Exception) -> str | None:
     if code is None:
         return None
     return str(getattr(code, "value", code))
+
+
+# ── Plain objects read with the fallback ──
+
+_noted_plain: set[str] = set()
+_noted_lock = threading.Lock()
+
+
+def note_plain(path: object) -> None:
+    """Log, once per object, that a keyed read found it stored without the key."""
+    name = str(path)
+    with _noted_lock:
+        if name in _noted_plain:
+            return
+        _noted_plain.add(name)
+    logger.warning(
+        "Storage encryption: %s is not encrypted yet; read it without the key (`pincer storage encrypt` encrypts it)",
+        name,
+    )

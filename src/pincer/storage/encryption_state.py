@@ -84,11 +84,20 @@ def reset_for_tests() -> None:
         _unchecked.clear()
 
 
-def _is_not_found(error: Exception) -> bool:
-    """A listing or read of something that is not there, in any SDK's words."""
+def is_not_found(error: Exception) -> bool:
+    """A listing or read of something that is not there, in any SDK's words:
+    cloudpathlib's FileNotFoundError, botocore's 404 / `NoSuchKey`, azure-core's
+    ResourceNotFoundError, google-api-core's NotFound."""
     if isinstance(error, FileNotFoundError | NotADirectoryError | KeyNotFound):
         return True
-    return type(error).__name__ in ("ResourceNotFoundError", "NotFound", "NoSuchKey")
+    if type(error).__name__ in ("ResourceNotFoundError", "NotFound", "NoSuchKey"):
+        return True
+    response = getattr(error, "response", None)
+    if isinstance(response, dict) and "Error" in response:  # botocore ClientError
+        code = str(response.get("Error", {}).get("Code") or "")
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return status == 404 or code in ("404", "NoSuchKey", "NotFound")
+    return False
 
 
 # ── Locations ──────────────────────────────────────────────────────────
@@ -147,7 +156,7 @@ def marker_listed(location: CloudPath) -> bool:
     except Exception as e:
         # A missing `.pincer/`: on an Azure HNS account, Data Lake says so
         # with ResourceNotFoundError rather than an empty listing.
-        if _is_not_found(e):
+        if is_not_found(e):
             return False
         raise
 
@@ -393,8 +402,9 @@ def check_location(
     stays free, as it is without encryption); only a `thorough` check reads
     the bucket for the lock. Pincer's start sequence, `pincer doctor` and
     `pincer storage` run it thoroughly, and a location they refused stays
-    refused for the process. A location whose startup check could not finish
-    (the store was unreachable) gets the full check on its next open.
+    refused for the process, as does a location refused on an ordinary open.
+    A location whose check could not finish (the store was unreachable) gets
+    the full check on its next open.
 
     Not `create`: verify only, never write the lock (read-only commands).
     Not `probe`: skip the Azure hierarchical-namespace probe.
@@ -410,10 +420,16 @@ def check_location(
         if key is None and not thorough and location not in _unchecked:
             return
         base = path.client.CloudPath(location)
-        if key is None:
-            ensure_disabled_allowed(base)
-        elif ensure_enabled(base, key, create=create, probe=probe) is None:
-            return  # read-only and never enabled: nothing verified to remember
+        try:
+            if key is None:
+                ensure_disabled_allowed(base)
+            elif ensure_enabled(base, key, create=create, probe=probe) is None:
+                return  # read-only and never enabled: nothing verified to remember
+        except StorageEncryptionError as e:
+            # Refused (wrong or missing key, failed HNS probe): every later
+            # open of the location fails fast with the same reason.
+            _refused[location] = str(e)
+            raise
         _unchecked.discard(location)
         if create:
             _verified.add(cache_key)

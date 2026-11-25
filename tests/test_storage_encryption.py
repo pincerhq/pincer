@@ -46,10 +46,17 @@ def _settings(tmp_path: Path, **overrides: Any) -> Any:
     return _RelaxedSettings(**values)  # type: ignore[call-arg]
 
 
-def _client_error(status: int, code: str, op: str = "HeadObject") -> Exception:
+#: What S3 says with a 400 `InvalidRequest` about SSE-C, as on a keyed GET of a plain object.
+S3_SSE_MESSAGE = "The encryption parameters are not applicable to this object."
+
+
+def _client_error(status: int, code: str, op: str = "HeadObject", message: str | None = None) -> Exception:
     from botocore.exceptions import ClientError
 
-    return ClientError({"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}, op)
+    if message is None and code == "InvalidRequest":
+        message = S3_SSE_MESSAGE
+    error = {"Code": code, **({"Message": message} if message else {})}
+    return ClientError({"Error": error, "ResponseMetadata": {"HTTPStatusCode": status}}, op)
 
 
 # ── The key ──────────────────────────────────────────────────────────────────
@@ -150,12 +157,39 @@ def test_encrypted_object_errors() -> None:
 
     assert request_hit_encrypted_object(_client_error(400, "InvalidRequest", "GetObject"))
     assert not request_hit_encrypted_object(_client_error(404, "NoSuchKey", "GetObject"))
-    assert request_hit_encrypted_object(BadRequest("CSEK object"))
+    assert request_hit_encrypted_object(
+        BadRequest("The target object is encrypted by a customer-supplied encryption key.")
+    )
     azure = HttpResponseError("encrypted")
     azure.error_code = "BlobUsesCustomerSpecifiedEncryption"
     assert request_hit_encrypted_object(azure)
     azure.error_code = "ServerBusy"
     assert not request_hit_encrypted_object(azure)
+
+
+@pytest.mark.parametrize(
+    "code", ["ExpiredToken", "AuthorizationHeaderMalformed", "InvalidToken", "InvalidBucketName", "InvalidArgument"]
+)
+def test_an_s3_400_not_about_encryption_is_not_about_the_key(code: str) -> None:
+    from pincer.storage.encryption import is_key_error, request_hit_encrypted_object
+
+    error = _client_error(400, code, "GetObject", message="The provided token has expired.")
+    assert not request_hit_encrypted_object(error)
+    assert not keyed_request_hit_plain_object(error)
+    assert not is_key_error(error)
+    # Only an InvalidRequest about encryption is.
+    assert not request_hit_encrypted_object(_client_error(400, "InvalidRequest", message="Missing required header"))
+
+
+def test_a_gcs_400_not_about_encryption_is_not_about_the_key() -> None:
+    from google.api_core.exceptions import BadRequest
+
+    from pincer.storage.encryption import is_key_error, request_hit_encrypted_object
+
+    error = BadRequest("Invalid bucket name: 'docs!'")
+    assert not request_hit_encrypted_object(error)
+    assert not keyed_request_hit_plain_object(error)
+    assert not is_key_error(error)
 
 
 def test_plain_object_errors() -> None:
@@ -167,7 +201,9 @@ def test_plain_object_errors() -> None:
     from azure.core.exceptions import HttpResponseError
     from google.api_core.exceptions import BadRequest, Forbidden
 
-    assert keyed_request_hit_plain_object(BadRequest("not a CSEK object"))
+    assert keyed_request_hit_plain_object(
+        BadRequest("The target object is not encrypted by a customer-supplied encryption key.")
+    )
     assert not keyed_request_hit_plain_object(Forbidden("wrong key"))
     azure = HttpResponseError("plain")
     azure.error_code = "BlobDoesNotUseCustomerSpecifiedEncryption"
@@ -904,8 +940,14 @@ class _Encrypting:
 
     def __init__(self, client: Any) -> None:
         self.encrypted: set[str] = set()
+        #: Rewritten by Pincer (with the key) while being encrypted.
         self.conflicts: set[str] = set()
+        #: Rewritten plain by another service, this many more times.
+        self.plain_writes: dict[str, int] = {}
+        #: Deleted while the job runs (botocore's 404).
+        self.gone: set[str] = set()
         self.broken: set[str] = set()
+        self.calls: list[str] = []
         client.is_encrypted = lambda path: str(path) in self.encrypted
         client.encrypt_in_place = self._encrypt
         client.encryption_key = KEY
@@ -913,7 +955,14 @@ class _Encrypting:
 
     def _encrypt(self, path: Any) -> None:
         name = str(path)
+        self.calls.append(name)
+        if name in self.gone:
+            raise _client_error(404, "404")
         if name in self.conflicts:
+            self.encrypted.add(name)  # the other write already carried the key
+            raise KeyConflict(name)
+        if self.plain_writes.get(name):
+            self.plain_writes[name] -= 1
             raise KeyConflict(name)
         if name in self.broken:
             raise RuntimeError("provider down")
@@ -952,6 +1001,80 @@ def test_the_job_encrypts_plain_objects_and_skips_the_rest(seeded: Any) -> None:
     assert marker["migration"]["done"] == 3
     # Every object encrypted: only now does the check file appear.
     assert (root / ".encrypted").read_text() == KEY.fingerprint
+
+
+def test_an_object_another_service_rewrote_plain_is_tried_again(seeded: Any) -> None:
+    root, fake = seeded
+    fake.plain_writes["s3://docs/a.txt"] = 1
+    progress = encrypt_job.encrypt_location(root)
+    assert "s3://docs/a.txt" in fake.encrypted
+    assert fake.calls.count("s3://docs/a.txt") == 2
+    assert progress.state == "complete"
+
+
+def test_an_object_that_keeps_changing_plain_fails_and_the_job_stays_pending(seeded: Any) -> None:
+    root, fake = seeded
+    fake.plain_writes["s3://docs/a.txt"] = 99
+    progress = encrypt_job.encrypt_location(root)
+    assert progress.failed == ["a.txt"]
+    assert progress.state == "pending"
+    assert not (root / ".encrypted").exists()
+
+
+def test_an_object_deleted_while_the_job_runs_is_skipped(seeded: Any) -> None:
+    root, fake = seeded
+    fake.gone.add("s3://docs/b/c.txt")
+    seen: list[tuple[str, str]] = []
+    progress = encrypt_job.encrypt_location(root, on_object=lambda k, o: seen.append((k, o)))
+    assert "b/c.txt" not in dict(seen)
+    assert progress.failed == []
+    assert progress.state == "complete"
+
+
+def test_the_saved_cursor_never_passes_a_failed_object(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    monkeypatch.setattr(encrypt_job, "PROGRESS_EVERY", 1)
+    fake.broken.add("s3://docs/a.txt")
+    lease_lost = iter([True, True, False])  # the run stops early, as on a restart
+    progress = encrypt_job.encrypt_location(root, heartbeat=lambda: next(lease_lost))
+    assert progress.state == "running"
+    assert encryption_state.status(root)["migration"]["cursor"] is None  # a.txt comes first, and failed
+    fake.broken.clear()
+    seen: list[str] = []
+    progress = encrypt_job.encrypt_location(root, on_object=lambda k, _o: seen.append(k))
+    assert seen[0] == "a.txt"  # tried again
+    assert progress.state == "complete"
+    assert "s3://docs/a.txt" in fake.encrypted
+
+
+def test_a_dry_run_counts_every_object_whatever_the_cursor(seeded: Any) -> None:
+    root, _ = seeded
+    marker, version = encryption_state.read_marker(root)  # type: ignore[misc]
+    marker["migration"].update(state="running", cursor="b/d.txt", done=3)
+    encryption_state.write_marker(root, marker, if_version=version)
+    assert encrypt_job.encrypt_location(root, dry_run=True).pending == 4
+
+
+def test_the_job_records_old_versions_that_stay_plain(seeded: Any) -> None:
+    root, fake = seeded
+    root.client.old_versions_kept = lambda _root: ["versioning is enabled on S3 bucket docs"]
+    try:
+        progress = encrypt_job.encrypt_location(root)
+    finally:
+        del root.client.old_versions_kept
+    assert progress.state == "complete"
+    assert progress.old_versions == "versioning is enabled on S3 bucket docs"
+    assert encryption_state.status(root)["migration"]["old_versions"] == progress.old_versions
+
+
+def test_an_old_versions_check_that_fails_is_not_a_job_failure(seeded: Any) -> None:
+    root, _ = seeded
+    root.client.old_versions_kept = MagicMock(side_effect=_client_error(403, "AccessDenied"))
+    try:
+        progress = encrypt_job.encrypt_location(root)
+    finally:
+        del root.client.old_versions_kept
+    assert progress.state == "complete" and progress.old_versions is None
 
 
 def test_a_dry_run_changes_nothing(seeded: Any) -> None:
@@ -1189,9 +1312,11 @@ def test_a_dry_run_command_writes_no_lock(bucket: Callable[..., tuple[Any, Any]]
 def _cli(settings: Any, monkeypatch: Any, *args: str) -> Any:
     from typer.testing import CliRunner
 
+    from pincer.cli._shared import console
     from pincer.cli.main import app
 
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+    monkeypatch.setattr(console, "_width", 400)  # one line per table row
     return CliRunner().invoke(app, ["storage", *args])
 
 
@@ -1372,3 +1497,154 @@ def test_the_api_start_up_never_fails_on_storage_encryption(caplog: Any) -> None
     with patch.object(encrypt_job, "start", side_effect=RuntimeError("boom")):
         asyncio.run(server._start_storage_encryption())
     assert "Storage encryption start-up check skipped: boom" in caplog.text
+
+
+# ── Review round 1 ───────────────────────────────────────────────────────────
+
+
+def test_encrypt_command_fails_when_the_run_stopped_early(seeded: Any, monkeypatch: Any) -> None:
+    root, _ = seeded
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    stopped = encrypt_job.Progress("s3://docs", encrypted=1, state="running")
+    with patch.object(encrypt_job, "encrypt_location", return_value=stopped):
+        result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1  # lost the lease: not done, though nothing failed
+    assert "running" in result.output
+
+
+def test_a_dry_run_command_fails_when_objects_could_not_be_checked(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    real = root.client.is_encrypted
+
+    def is_encrypted(path: Any) -> bool:
+        if "a.txt" in str(path):
+            raise RuntimeError("down")
+        return bool(real(path))
+
+    root.client.is_encrypted = is_encrypted
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    result = _cli(settings, monkeypatch, "encrypt", "--dry-run")
+    assert result.exit_code == 1
+    assert "3 object(s) to encrypt" in result.output and "1 could not be checked" in result.output
+
+
+def test_encrypt_and_status_commands_warn_about_old_versions(seeded: Any, monkeypatch: Any) -> None:
+    root, _ = seeded
+    root.client.old_versions_kept = lambda _root: ["versioning is enabled on S3 bucket docs"]
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    try:
+        result = _cli(settings, monkeypatch, "encrypt")
+    finally:
+        del root.client.old_versions_kept
+    assert result.exit_code == 0, result.output
+    assert "versioning is enabled on S3 bucket docs" in result.output
+    status = _cli(settings, monkeypatch, "encryption-status")
+    assert "old plain versions remain" in status.output
+    doctor = _doctor(settings)
+    assert doctor.status == "warning" and "old plain versions remain readable" in doctor.message
+
+
+def test_doctor_reports_a_malformed_key_instead_of_failing(tmp_path: Path, monkeypatch: Any) -> None:
+    from pincer.security.doctor import SecurityDoctor, load_settings
+
+    monkeypatch.setenv("PINCER_STORAGE_ENCRYPTION_KEY", "abc")
+    with patch("pincer.config.get_settings_relaxed", side_effect=lambda: parse_key("abc")):
+        settings, error = load_settings()
+    assert error is not None and settings.storage_encryption_key is None
+    doctor = SecurityDoctor()
+    clean = _settings(tmp_path, storage_encryption_key=None)
+    with patch("pincer.security.doctor.load_settings", return_value=(clean, error)):
+        report = doctor.run_all()
+    (check,) = [c for c in report.checks if c.name == "storage_encryption"]
+    assert check.status == "critical"
+    assert "abc" not in check.message
+
+
+def test_doctor_warns_a_local_root_even_with_a_cloud_skills_dir(
+    tmp_path: Path, bucket: Callable[..., tuple[Any, Any]]
+) -> None:
+    bucket()
+    settings = _settings(
+        tmp_path, storage_root=str(tmp_path / "store"), skills_dir="s3://docs/skills", storage_encryption_key=KEY_B64
+    )
+    result = _doctor(settings)
+    assert result.status == "warning"
+    assert "the storage root is local" in result.message
+    assert "s3://docs/skills" in result.message
+
+
+def test_a_refusal_on_an_ordinary_open_is_remembered(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, _ = bucket()
+    _open(settings)
+    encryption_state.reset_for_tests()
+    other, _ = bucket(OTHER_B64)
+    with pytest.raises(StorageEncryptionError, match="cannot be changed"):
+        _open(other)
+    with (
+        patch.object(encryption_state, "ensure_enabled", side_effect=AssertionError("checked again")),
+        pytest.raises(StorageUnavailable, match="cannot be changed"),
+    ):
+        _open(other)
+
+
+def test_a_transient_400_at_startup_is_not_a_refusal(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, _ = bucket()
+    _open(settings)
+    encryption_state.reset_for_tests()
+    expired = _client_error(400, "ExpiredToken", "GetObject", message="The provided token has expired.")
+    with patch.object(encryption_state, "read_marker", side_effect=expired):
+        ((_, problem),) = encryption_state.verify_at_startup(settings)
+    assert problem is not None and "ExpiredToken" in problem  # could not check: unreachable, not refused
+    assert not encryption_state._refused
+    assert "s3://docs" in encryption_state._unchecked
+
+
+def test_the_sdk_layer_logs_a_plain_read_once(tmp_path: Path, caplog: Any) -> None:
+    from pincer.storage import encryption
+    from pincer.storage.objects import objects_for
+
+    encryption._noted_plain.clear()
+    client = _s3(tmp_path)
+    objects = objects_for(client.CloudPath("s3://b/"))
+    body = MagicMock()
+    body.read.return_value = b"old"
+    plain = _client_error(400, "InvalidRequest", "GetObject")
+    client.client.get_object.side_effect = [plain, {"Body": body, "ETag": "e"}, plain, {"Body": body, "ETag": "e"}]
+    objects.read(client.CloudPath("s3://b/old"))
+    objects.read(client.CloudPath("s3://b/old"))
+    assert caplog.text.count("s3://b/old is not encrypted yet") == 1
+
+
+def test_s3_reports_bucket_versioning(tmp_path: Path) -> None:
+    client = _s3(tmp_path)
+    root = client.CloudPath("s3://b/")
+    client.client.get_bucket_versioning.return_value = {"Status": "Enabled"}
+    assert client.old_versions_kept(root) == [
+        "versioning is enabled on S3 bucket b, so the plain versions stay readable"
+    ]
+    client.client.get_bucket_versioning.return_value = {}
+    assert client.old_versions_kept(root) == []
+
+
+def test_gcs_reports_versioning_and_soft_delete() -> None:
+    client = _gs()
+    bucket = client.client.get_bucket.return_value
+    bucket.versioning_enabled = True
+    bucket.soft_delete_policy.retention_duration_seconds = 7 * 86400
+    notes = client.old_versions_kept(client.CloudPath("gs://b/"))
+    assert len(notes) == 2 and "versioning" in notes[0] and "7 day(s)" in notes[1]
+    bucket.versioning_enabled = False
+    bucket.soft_delete_policy.retention_duration_seconds = 0
+    assert client.old_versions_kept(client.CloudPath("gs://b/")) == []
+
+
+def test_azure_reports_versioning_and_soft_delete() -> None:
+    client = _azure()
+    service = client.service_client
+    service.get_container_client.return_value.list_blobs.return_value = iter([MagicMock(version_id="v1")])
+    service.get_service_properties.return_value = {"delete_retention_policy": MagicMock(enabled=True, days=14)}
+    notes = client.old_versions_kept(client.CloudPath("az://c/"))
+    assert len(notes) == 2 and "blob versioning" in notes[0] and "14 day(s)" in notes[1]
+    service.get_container_client.return_value.list_blobs.return_value = iter([MagicMock(version_id=None)])
+    service.get_service_properties.return_value = {"delete_retention_policy": MagicMock(enabled=False)}
+    assert client.old_versions_kept(client.CloudPath("az://c/")) == []

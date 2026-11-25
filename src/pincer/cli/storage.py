@@ -103,9 +103,12 @@ def storage_encrypt(
                 lease.release()
         result = progress.as_dict()
         if dry_run:
+            colour = "yellow" if progress.failed else "default"
             console.print(
-                f"{location}: {result['pending']} object(s) to encrypt, {result['already_encrypted']} already encrypted"
+                f"[{colour}]{location}: {result['pending']} object(s) to encrypt, {result['already_encrypted']} "
+                f"already encrypted, {result['failed']} could not be checked[/{colour}]"
             )
+            failed = failed or bool(progress.failed)
         else:
             colour = "green" if progress.state == "complete" else "yellow"
             console.print(
@@ -113,7 +116,13 @@ def storage_encrypt(
                 f"encrypted, {result['changed_meanwhile']} changed meanwhile, {result['failed']} failed "
                 f"— {progress.state}[/{colour}]"
             )
-            failed = failed or bool(progress.failed)
+            # Stopped early (lost lease) or failed objects: not done, whatever the counts say.
+            failed = failed or progress.state != "complete"
+        if progress.old_versions:
+            console.print(
+                f"[yellow]{location}: {progress.old_versions}. Delete the old versions to remove the plain "
+                "copies (see docs/guides/storage-encryption.md#versioned-buckets).[/yellow]"
+            )
     if failed:
         raise typer.Exit(code=1)
 
@@ -156,10 +165,12 @@ def storage_encryption_status() -> None:
         migration = marker.get("migration", {})
         state = migration.get("state", "pending")
         colour = "green" if state == "complete" else "yellow"
+        old_versions = migration.get("old_versions")
         table.add_row(
             location,
             f"[green]on since {marker.get('enabled_at', '?')}[/green]",
-            f"[{colour}]{state}[/{colour}] ({migration.get('done', 0)} object(s))",
+            f"[{colour}]{state}[/{colour}] ({migration.get('done', 0)} object(s))"
+            + (f"\n[yellow]old plain versions remain: {old_versions}[/yellow]" if old_versions else ""),
             str(migration.get("updated_at", "")),
         )
     console.print(table)
