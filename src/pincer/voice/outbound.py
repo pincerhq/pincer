@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pincer.core.phone import normalize_e164
+from pincer.utils.shield import shielded
 from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
 from pincer.voice.engine import CLAIMED_SID_KEY
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
@@ -34,11 +35,6 @@ BUDGET_CHECK_FAILED = "Error: could not check the daily budget, call not placed.
 # it; an "Error..." result may name a SID in passing, but no report follows it.
 _CALL_SID_LINE = "Call SID: {}"
 _CALL_SID_LINE_RE = re.compile(r"^Call SID: (\S+)$", re.MULTILINE)
-# Shielded bookkeeping tasks still running. `asyncio.shield` keeps no strong
-# reference to the task it runs, and the event loop holds tasks only weakly:
-# once the turn that awaited it is cancelled, nothing else would keep a
-# half-written cooldown or binding from being garbage-collected mid-write.
-_SHIELDED_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def placed_call_sid(result: str) -> str:
@@ -245,21 +241,9 @@ LIVE_CALL_STATUSES = frozenset({"queued", "initiated", "ringing", "in-progress"}
 
 
 def _shielded[T](coro: Awaitable[T]) -> asyncio.Future[T]:
-    """`asyncio.shield` over a task that is kept alive until it finishes.
-
-    A failure is logged here: once the awaiting turn is cancelled, nobody
-    else sees the task's exception, and a half-bound call would leave no trace.
-    """
-    task = asyncio.ensure_future(coro)
-    _SHIELDED_TASKS.add(task)
-    task.add_done_callback(_SHIELDED_TASKS.discard)
-    task.add_done_callback(_log_shielded_failure)
-    return asyncio.shield(task)
-
-
-def _log_shielded_failure(task: asyncio.Future[Any]) -> None:
-    if not task.cancelled() and task.exception() is not None:
-        logger.error("Shielded outbound bookkeeping failed", exc_info=task.exception())
+    """`shielded` for outbound bookkeeping: a half-written cooldown or binding is still finished, and its
+    failure logged, once the awaiting turn is cancelled."""
+    return shielded(coro, logger=logger, failure="Shielded outbound bookkeeping failed")
 
 
 async def _find_unconfirmed_dial(dialer: Any, settings: Any, to_number: str, dialed_at: datetime) -> Any | None:

@@ -126,6 +126,8 @@ class ConversationOut(BaseModel):
 
 
 class ConversationsOut(BaseModel):
+    """A page of the caller's web chat conversations, latest activity first."""
+
     items: list[ConversationOut]
     next_cursor: str | None = Field(description="Pass as `cursor` for the next page; null on the last page")
 
@@ -136,11 +138,16 @@ class TranscriptMessageOut(BaseModel):
     id: str
     role: str = Field(description="`user` or `assistant`")
     content: str
-    interrupted: bool = Field(description="A reply cut short: the client went away while it streamed")
+    interrupted: bool = Field(
+        description="A reply cut short: the client went away while it streamed, or the daily budget stopped it"
+    )
+    images: int = Field(description="The photos the message carried (a photo-only message has empty `content`)")
     created_at: datetime
 
 
 class TranscriptOut(BaseModel):
+    """A page of a conversation's transcript, oldest first."""
+
     messages: list[TranscriptMessageOut] = Field(description="Oldest first")
     has_more: bool = Field(description="Older messages exist")
     next_before: str | None = Field(description="Pass as `before` for the older page; null when there is none")
@@ -192,13 +199,27 @@ def _conversation_session_key(user_id: str, conversation_id: str | None) -> str 
 _TITLE_CHARS = 80
 
 
-async def _require_own_conversation(sessions: SessionServiceDep, user_id: str, conversation_id: str) -> str:
-    """The caller's session key for `conversation_id`, or 404 when another identity owns the id.
+async def _require_own_conversation(
+    sessions: SessionServiceDep, user_id: str, conversation_id: str, *, claimed: bool
+) -> str:
+    """The caller's session key for `conversation_id`, or a 404.
 
-    An id nobody has used yet is free: the first turn sent with it makes it the caller's."""
+    Args:
+        sessions: The session store.
+        user_id: The caller.
+        conversation_id: The conversation id, canonical.
+        claimed: Whether the caller must own the id already (reading it). Without, an id nobody has
+            used yet is free too (posting to it): the first turn sent with it makes it the caller's.
+
+    Returns:
+        The caller's session key for the conversation.
+
+    Raises:
+        HTTPException: 404 when another identity owns the id, or with `claimed` when nobody does.
+    """
     key = conversation_key(user_id, _CHANNEL, conversation_id)
     owner = await sessions.conversation_owner(conversation_id)
-    if owner is not None and owner != key:
+    if owner != key and (claimed or owner is not None):
         raise HTTPException(404, "Unknown conversation")
     return key
 
@@ -242,7 +263,7 @@ async def post_message(
 ) -> dict[str, Any]:
     agent = _get_agent(request)
     if body.conversation_id is not None:
-        await _require_own_conversation(sessions, user_id, body.conversation_id)
+        await _require_own_conversation(sessions, user_id, body.conversation_id, claimed=False)
     try:
         resp = await agent.handle_message(
             user_id,
@@ -285,7 +306,7 @@ async def post_stream(
     agent = _get_agent(request)
     # Before the stream opens, so a refused id is a plain 404, not an `error` event
     if body.conversation_id is not None:
-        await _require_own_conversation(sessions, user_id, body.conversation_id)
+        await _require_own_conversation(sessions, user_id, body.conversation_id, claimed=False)
 
     async def gen() -> AsyncIterator[str]:
         # Multiplex agent stream events and approval-prompt events onto one queue.
@@ -416,8 +437,22 @@ async def get_conversations(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: Annotated[str | None, Query(description="`next_cursor` of the previous page")] = None,
 ) -> ConversationsOut:
-    """The caller's web chat conversations, latest activity first. Call summaries and
-    knowledge-base questions (`memory: false`) are not listed."""
+    """The caller's web chat conversations, latest activity first.
+
+    Call summaries and knowledge-base questions (`memory: false`) are not listed.
+
+    Args:
+        user_id: The caller.
+        sessions: The session store.
+        limit: The conversations per page.
+        cursor: `next_cursor` of the previous page; the first page without.
+
+    Returns:
+        The page, with the cursor of the next one.
+
+    Raises:
+        HTTPException: 422 for a cursor this endpoint did not hand out.
+    """
     before = None if cursor is None else _decode_cursor(cursor)
     rows = await sessions.conversations(user_id, _CHANNEL, limit=limit + 1, before=before)
     page = rows[:limit]
@@ -444,14 +479,27 @@ async def get_conversation_messages(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: Annotated[str | None, Query(description="`next_before` of the newer page")] = None,
 ) -> TranscriptOut:
-    """A conversation's transcript as the person saw it, oldest first: the newest `limit` messages,
-    or those before `before`. Everything compaction took out of the model's context is still here."""
-    conversation = str(uuid.UUID(conversation_id))
-    key = conversation_key(user_id, _CHANNEL, conversation)
-    if await sessions.conversation_owner(conversation) != key:
-        raise HTTPException(404, "Unknown conversation")
+    """A conversation's transcript as the person saw it, oldest first.
+
+    Everything compaction took out of the model's context is still here.
+
+    Args:
+        conversation_id: The conversation, as sent in `conversation_id`.
+        user_id: The caller.
+        sessions: The session store.
+        limit: The messages per page: the newest ones, or those before `before`.
+        before: `next_before` of the newer page; the newest page without.
+
+    Returns:
+        The page, and whether older messages exist.
+
+    Raises:
+        HTTPException: 404 unless the caller owns the conversation; 422 for a cursor this endpoint did
+            not hand out.
+    """
+    key = await _require_own_conversation(sessions, user_id, str(uuid.UUID(conversation_id)), claimed=True)
     cursor = None if before is None else _decode_cursor(before)
-    rows = await sessions.history(key, limit=limit + 1, before=cursor, transcript=True)
+    rows = await sessions.transcript(key, limit=limit + 1, before=cursor)
     has_more = len(rows) > limit
     page = rows[1:] if has_more else rows
     return TranscriptOut(
@@ -461,6 +509,7 @@ async def get_conversation_messages(
                 role=row["role"],
                 content=row["content"],
                 interrupted=bool(row["is_error"]) and row["role"] == "assistant",
+                images=len(row["images"] or ()),
                 created_at=row["created_at"],
             )
             for row in page

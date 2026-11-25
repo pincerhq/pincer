@@ -316,7 +316,8 @@ class SessionManager:
     async def cut(self, session: Session, prefix: list[LLMMessage], keep: list[LLMMessage] | None = None) -> bool:
         """Drop the session's oldest messages `prefix` (the emergency cut), between turns, on the
         same terms as `compact`, except `keep`: the messages of the prefix that stay at the head (its
-        summaries). The photos only the dropped messages showed are deleted with them."""
+        summaries). The dropped messages' rows are retired, and the photos they showed stay stored with
+        them, for the history people read."""
         return await self._replace_prefix(session, prefix, keep or [], None)
 
     async def _replace_prefix(
@@ -626,8 +627,9 @@ class SessionManager:
         ``only_if_changed``, nothing at all when neither they nor the metadata did).
 
         Its photos follow its messages: new ones are stored, and the ones no message holds any
-        more are deleted, whichever code removed those messages. ``force_images`` also deletes
-        what an earlier session of this process left behind (a clear).
+        more, live or retired, are deleted, whichever code removed those messages. ``force_images``
+        also deletes what an earlier session of this process left behind (a clear), except the photos
+        its retired rows show.
         """
         async with session._save_lock:
             plan = session._save_plan(_now())

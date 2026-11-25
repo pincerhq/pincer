@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -59,6 +60,7 @@ from pincer.memory.base import (
 from pincer.memory.profile import get_preferred_language
 from pincer.tools.builtin.language_pref import TOOL_NAME as LANGUAGE_TOOL_NAME
 from pincer.tools.path_sandbox import SandboxDenied
+from pincer.utils.shield import shielded
 from pincer.voice.localtime import get_voice_timezone
 from pincer.voice.outbound import TOOL_NAME as CALL_TOOL_NAME
 from pincer.voice.outbound import placed_call_sid
@@ -406,6 +408,12 @@ class _BudgetStop:
     text: str  # what the client gets, never saved
     marker: str  # closes the turn's history after its tool results
     check_failed: bool  # the budget could not be read, rather than reached
+
+
+def _budget_marker(stop: _BudgetStop) -> LLMMessage:
+    """The message closing a budget-stopped turn's history: its marker, flagged `is_error` so the
+    transcript shows the turn as cut short (the client got the stop's warning, flagged, instead)."""
+    return LLMMessage(role=MessageRole.ASSISTANT, content=stop.marker, is_error=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1384,9 +1392,7 @@ class Agent:
         # marker closes the history after the turn's tool results (PR #366 review)
         reply = ""
         if budget_stop is not None:
-            await self._sessions.add_message(
-                session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
-            )
+            await self._sessions.add_message(session, _budget_marker(budget_stop))
         else:
             final_text = await self._save_reply(
                 session, onboarding, user_id, channel, final_text, streamed=False, response=reply_response
@@ -1598,10 +1604,10 @@ class Agent:
         flagged `is_error` (the history people read shows it as cut short). Shielded: the turn is
         being cancelled, and the save must not be."""
         message = LLMMessage(role=MessageRole.ASSISTANT, content=streamed, is_error=True)
-        try:
-            await asyncio.shield(self._sessions.add_message(session, message))
-        except Exception:
-            logger.warning("Could not save the reply cut short in %s", session.session_id, exc_info=True)
+        failure = f"Could not save the reply cut short in {session.session_id}"
+        # Logged by `shielded` itself, which still sees the failure once this turn is gone
+        with contextlib.suppress(Exception):
+            await shielded(self._sessions.add_message(session, message), logger=logger, failure=failure)
 
     async def _turn_admitted(self) -> bool:
         """False when the daily budget refuses the turn before its first request.
@@ -1793,8 +1799,10 @@ class Agent:
                     [tc.name for tc in response.tool_calls],
                 )
                 assistant_msg = LLMMessage.from_response(response)
+                # Cleared before the save: `add_message` holds the step's text in the session at once,
+                # so a client gone while it writes must not have that text saved a second time
+                step_text = ""
                 await self._sessions.add_message(session, assistant_msg)
-                step_text = ""  # saved with its tool calls
 
                 iteration_had_error = False
                 skills_loaded: list[str] = []
@@ -1838,13 +1846,14 @@ class Agent:
                 else:
                     consecutive_errors = 0
             else:
-                ending = _MAX_ITERATIONS_TEXT  # not saved, as before
+                ending = _MAX_ITERATIONS_TEXT
             if circuit_broken:
                 ending = _TOOL_FAILURES_TEXT
 
             if ending is not None:
                 # No request answers the last tools: the reply is the last step's text, already
-                # streamed, or a canned line sent now
+                # streamed and saved with its tool calls, or a canned line sent and saved now (once:
+                # the transcript shows what the client got)
                 if response is not None and response.content.strip():
                     ending = response.content
                 else:
@@ -1852,8 +1861,9 @@ class Agent:
                         yield StreamChunk(StreamEventType.TEXT, separator)
                     full_text += separator + ending
                     yield StreamChunk(StreamEventType.TEXT, ending)
-                if circuit_broken:
                     await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=ending))
+                if memory:
+                    await self._store_exchange(user_id, channel, channel_user_id, text, ending)
                 yield StreamChunk(StreamEventType.DONE, full_text, cost_usd=total_cost)
                 return
         except (GeneratorExit, asyncio.CancelledError):
@@ -1879,9 +1889,7 @@ class Agent:
         if budget_stop is not None:
             # A refusal, not a reply (PR #366 review): no streamed text, no onboarding question,
             # and only the marker saved; the client gets it as the turn's end, flagged
-            await self._sessions.add_message(
-                session, LLMMessage(role=MessageRole.ASSISTANT, content=budget_stop.marker)
-            )
+            await self._sessions.add_message(session, _budget_marker(budget_stop))
             # A reached budget still reads the answer; a failed check sends no further request
             if onboarding.ingest and not budget_stop.check_failed:
                 await self._ingest_onboarding_reply(text, user_id, channel, onboarding)

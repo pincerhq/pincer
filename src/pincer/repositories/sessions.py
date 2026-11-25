@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import bindparam, case, func, or_, tuple_, update
+from sqlalchemy import and_, bindparam, case, func, or_, tuple_, update
 from sqlalchemy import exists as sa_exists
 from sqlalchemy.orm import aliased
 from sqlmodel import col, select
@@ -282,20 +282,25 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         """
         memory_free = json_text_field(dialect_of(self.session), col(ChatSession.session_metadata), MEMORY_FREE_KEY)
         earlier = aliased(ChatSession)
-        shown = (
-            col(SessionMessage.session_id) == col(ChatSession.id),
-            col(SessionMessage.role).in_(TRANSCRIPT_ROLES),
-            col(SessionMessage.content) != "",
-        )
         title = (
             select(SessionMessage.content)
-            .where(col(SessionMessage.session_id) == col(ChatSession.id), col(SessionMessage.role) == "user")
+            .where(
+                col(SessionMessage.session_id) == col(ChatSession.id),
+                col(SessionMessage.role) == "user",
+                col(SessionMessage.content) != "",
+            )
             .order_by(col(SessionMessage.created_at), col(SessionMessage.id))
             .limit(1)
             .correlate(ChatSession)
             .scalar_subquery()
         )
-        count = select(func.count()).select_from(SessionMessage).where(*shown).correlate(ChatSession).scalar_subquery()
+        count = (
+            select(func.count())
+            .select_from(SessionMessage)
+            .where(col(SessionMessage.session_id) == col(ChatSession.id), _shown_in_transcript())
+            .correlate(ChatSession)
+            .scalar_subquery()
+        )
         columns: list[Any] = [ChatSession.id, ChatSession.conversation_id, ChatSession.updated_at, title, count]
         stmt = select(*columns).where(
             col(ChatSession.user_id) == user_id,
@@ -309,10 +314,7 @@ class SessionRepository(BaseRepository[ChatSession, str]):
             ),
         )
         if before is not None:
-            cursor = tuple_(
-                bindparam("before_at", before[0], type_=UtcDateTime()), bindparam("before_id", before[1], type_=Uuid7())
-            )
-            stmt = stmt.where(tuple_(col(ChatSession.updated_at), col(ChatSession.id)) < cursor)
+            stmt = stmt.where(_before(ChatSession.updated_at, ChatSession.id, before))
         stmt = stmt.order_by(col(ChatSession.updated_at).desc(), col(ChatSession.id).desc()).limit(limit)
         return [
             {
@@ -326,6 +328,23 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         ]
 
 
+def _before(at: Any, row_id: Any, cursor: tuple[datetime, str]) -> Any:
+    """Rows strictly before the keyset `cursor`, a (time, id) pair, in the order (`at`, `row_id`)."""
+    bound = tuple_(
+        bindparam("before_at", cursor[0], type_=UtcDateTime()), bindparam("before_id", cursor[1], type_=Uuid7())
+    )
+    return tuple_(col(at), col(row_id)) < bound
+
+
+def _shown_in_transcript() -> Any:
+    """A row the transcript shows: a user's message or Pincer's text, with words or photos (not a
+    system message, a tool result or a tool-call-only step)."""
+    return and_(
+        col(SessionMessage.role).in_(TRANSCRIPT_ROLES),
+        or_(col(SessionMessage.content) != "", col(SessionMessage.images).is_not(None)),
+    )
+
+
 def _session_ref(session_id: str) -> Any:
     """The `id` of the session with this key, as a scalar subquery."""
     return select(ChatSession.id).where(col(ChatSession.session_id) == session_id).scalar_subquery()
@@ -337,6 +356,13 @@ class SessionImageRepository(BaseRepository[SessionImage, str]):
     async def for_session(self, session_ref: str) -> Sequence[SessionImage]:
         """The photos of the session whose `id` is `session_ref`, oldest first."""
         return await self.list(col(SessionImage.session_ref) == session_ref, order_by=[col(SessionImage.created_at)])
+
+    async def stored_beyond(self, session_ref: str, keep: Collection[str]) -> set[str]:
+        """The hashes of the session's stored photos that are not in `keep`: what `sync` would delete."""
+        stmt = select(SessionImage.sha256).where(col(SessionImage.session_ref) == session_ref)
+        if keep:
+            stmt = stmt.where(col(SessionImage.sha256).notin_(keep))
+        return set((await self.session.exec(stmt)).all())
 
     async def sync(self, session_ref: str, keep: Collection[str], add: Sequence[SessionImage]) -> None:
         """Make the photos of the session whose `id` is `session_ref` exactly `keep`: store the ones
@@ -405,40 +431,43 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
             order_by=[col(SessionMessage.created_at), col(SessionMessage.id)],
         )
 
-    async def retired_image_refs(self, session_ref: str) -> set[str]:
-        """The hashes of the photos the session's retired rows show."""
+    async def retired_image_refs(self, session_ref: str, among: Collection[str]) -> set[str]:
+        """The hashes in `among` of photos the session's retired rows show. Read through the partial
+        index of retired rows with photos, so it costs the photos retired, not the history's length."""
+        if not among:
+            return set()
         stmt = select(SessionMessage.images).where(
             col(SessionMessage.session_id) == session_ref,
             col(SessionMessage.retired_at).is_not(None),
             col(SessionMessage.images).is_not(None),
         )
+        wanted = set(among)
         refs: set[str] = set()
         for images in (await self.session.exec(stmt)).all():
-            refs.update(ref["sha256"] for ref in images or () if isinstance(ref, dict) and ref.get("sha256"))
+            refs.update(ref["sha256"] for ref in images or () if isinstance(ref, dict) and ref.get("sha256") in wanted)
         return refs
 
     async def page(
-        self,
-        session_ref: str,
-        *,
-        limit: int,
-        before: tuple[datetime, str] | None = None,
-        transcript: bool = False,
+        self, session_ref: str, *, limit: int, before: tuple[datetime, str] | None = None
     ) -> list[dict[str, Any]]:
-        """The latest `limit` messages of the session before the (`created_at`, `id`) cursor `before`
-        (the newest, without one), oldest first, as `DISPLAY_COLUMNS` only: the live ones, or with
-        `transcript` the user's and the assistant's text of every row, retired included."""
+        """The latest `limit` live messages of the session (its model history) before the (`created_at`,
+        `id`) cursor `before` (the newest, without one), oldest first, as `DISPLAY_COLUMNS` only."""
+        return await self._display_page(session_ref, col(SessionMessage.retired_at).is_(None), limit, before)
+
+    async def transcript_page(
+        self, session_ref: str, *, limit: int, before: tuple[datetime, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """`page` of the session's transcript: every row it showed people (`_shown_in_transcript`),
+        retired included."""
+        return await self._display_page(session_ref, _shown_in_transcript(), limit, before)
+
+    async def _display_page(
+        self, session_ref: str, shown: Any, limit: int, before: tuple[datetime, str] | None
+    ) -> list[dict[str, Any]]:
         columns = [getattr(SessionMessage, name) for name in DISPLAY_COLUMNS]
-        stmt = select(*columns).where(col(SessionMessage.session_id) == session_ref)
-        if transcript:
-            stmt = stmt.where(col(SessionMessage.role).in_(TRANSCRIPT_ROLES), col(SessionMessage.content) != "")
-        else:
-            stmt = stmt.where(col(SessionMessage.retired_at).is_(None))
+        stmt = select(*columns).where(col(SessionMessage.session_id) == session_ref, shown)
         if before is not None:
-            cursor = tuple_(
-                bindparam("before_at", before[0], type_=UtcDateTime()), bindparam("before_id", before[1], type_=Uuid7())
-            )
-            stmt = stmt.where(tuple_(col(SessionMessage.created_at), col(SessionMessage.id)) < cursor)
+            stmt = stmt.where(_before(SessionMessage.created_at, SessionMessage.id, before))
         stmt = stmt.order_by(col(SessionMessage.created_at).desc(), col(SessionMessage.id).desc()).limit(limit)
         rows = (await self.session.exec(stmt)).all()
         return [dict(zip(DISPLAY_COLUMNS, row, strict=True)) for row in reversed(rows)]

@@ -17,7 +17,7 @@ import pytest
 
 from pincer.core.agent import Agent, StreamEventType
 from pincer.core.session import SessionManager, conversation_key
-from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, StreamTurnEvent
+from pincer.llm.base import ImageContent, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 from pincer.services.sessions import SessionService, get_session_service
 
 if TYPE_CHECKING:
@@ -202,6 +202,97 @@ async def test_a_reply_cut_short_is_saved_once_with_what_was_streamed(
     ]
 
 
+def _tool_step(text: str = "") -> LLMResponse:
+    call = ToolCall(id=f"t{id(text)}", name="no_such_tool", arguments={})
+    return LLMResponse(
+        content=text, model="test-model", input_tokens=10, output_tokens=5, stop_reason="tool_use", tool_calls=[call]
+    )
+
+
+async def test_a_client_gone_while_the_tool_step_saves_keeps_its_text_once(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, monkeypatch
+):
+    """The step's message is in the session as soon as `add_message` is called: a cancel while it is
+    written must not save its text a second time, as a reply cut short."""
+
+    async def stream_turn(*args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
+        yield StreamTurnEvent(text="Let me check")
+        yield StreamTurnEvent(response=_tool_step("Let me check"))
+
+    mock_llm.stream_turn = stream_turn
+    persist = session_manager._persist
+    writing = asyncio.Event()
+
+    async def slow_persist(session: Any, **kwargs: Any) -> None:
+        if session.messages[-1].tool_calls and not writing.is_set():
+            writing.set()
+            await asyncio.Event().wait()  # the client goes away while the tool step is written
+        await persist(session, **kwargs)
+
+    monkeypatch.setattr(session_manager, "_persist", slow_persist)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    key = conversation_key(ALICE, "web", CHAT_A)
+
+    async def read() -> None:
+        async for _chunk in agent.handle_message_stream(ALICE, "web", "check it", session_key=key):
+            pass
+
+    task = asyncio.create_task(read())
+    await asyncio.wait_for(writing.wait(), 2)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    session = await session_manager.get_or_create(ALICE, "web", session_key=key)
+    assistant = [m for m in session.messages if m.role is MessageRole.ASSISTANT]
+    assert [(m.content, bool(m.tool_calls), m.is_error) for m in assistant] == [("Let me check", True, False)]
+
+
+async def test_a_streamed_turn_ending_at_the_iteration_limit_stores_its_exchange(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, tmp_path, monkeypatch
+):
+    """The canned ending is the reply the client got: saved once, and remembered as the blocking path
+    remembers it."""
+
+    async def stream_turn(*args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
+        yield StreamTurnEvent(response=_tool_step())
+
+    mock_llm.stream_turn = stream_turn
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+    settings = settings.model_copy(update={"max_tool_iterations": 1})
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    done = await _stream(agent, ALICE, "loop forever", CHAT_A)
+
+    assert done == "Max iterations reached."
+    exchanges = [c for c in memory.store_memory.await_args_list if c.kwargs.get("category") == "exchange"]
+    assert len(exchanges) == 1
+    assert "Max iterations reached." in exchanges[0].kwargs["content"]
+    transcript = _transcript(_client_on(tmp_path / "test.db", monkeypatch), ALICE, CHAT_A, limit=50)
+    assert [(m["role"], m["content"]) for m in transcript] == [
+        ("user", "loop forever"),
+        ("assistant", "Max iterations reached."),
+    ]
+
+
+async def test_a_turn_the_budget_stops_mid_way_shows_as_cut_short(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, tmp_path, monkeypatch
+):
+    async def stream_turn(*args: Any, **kwargs: Any) -> AsyncIterator[StreamTurnEvent]:
+        yield StreamTurnEvent(response=_tool_step())
+
+    mock_llm.stream_turn = stream_turn
+    monkeypatch.setattr(cost_tracker, "budget_reached", AsyncMock(side_effect=[False, True]))
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    await _stream(agent, ALICE, "spend it all", CHAT_A)
+
+    transcript = _transcript(_client_on(tmp_path / "test.db", monkeypatch), ALICE, CHAT_A, limit=50)
+    assert [(m["role"], m["interrupted"]) for m in transcript] == [("user", False), ("assistant", True)]
+    assert transcript[-1]["content"].startswith("(Stopped before answering")
+
+
 async def test_a_streamed_turn_stores_its_exchange_as_a_memory(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
@@ -306,8 +397,6 @@ async def test_the_transcript_shows_what_was_said_not_tool_steps_or_summaries(tm
     manager = SessionManager(db)
     await manager.initialize()
     session = await manager.get_or_create(ALICE, "web", session_key=conversation_key(ALICE, "web", CHAT_A))
-    from pincer.llm.base import ToolCall
-
     call = ToolCall(id="t1", name="lookup", arguments={})
     for message in (
         LLMMessage(role=MessageRole.USER, content="look it up"),
@@ -323,3 +412,29 @@ async def test_the_transcript_shows_what_was_said_not_tool_steps_or_summaries(tm
     transcript = _transcript(_client_on(db, monkeypatch), ALICE, CHAT_A, limit=50)
 
     assert [(m["role"], m["content"]) for m in transcript] == [("user", "look it up"), ("assistant", "It is 42.")]
+
+
+async def test_a_photo_only_message_is_in_the_transcript_and_not_the_title(tmp_path, monkeypatch):
+    db = tmp_path / "pincer.db"
+    manager = SessionManager(db)
+    await manager.initialize()
+    session = await manager.get_or_create(ALICE, "web", session_key=conversation_key(ALICE, "web", CHAT_A))
+    photo = ImageContent.from_bytes(b"\x89PNG fake", "image/png")
+    for message in (
+        LLMMessage(role=MessageRole.USER, content="", images=[photo]),
+        LLMMessage(role=MessageRole.ASSISTANT, content="A cat."),
+        LLMMessage(role=MessageRole.USER, content="what breed?"),
+    ):
+        await manager.add_message(session, message)
+    await manager.close()
+    client = _client_on(db, monkeypatch)
+
+    transcript = _transcript(client, ALICE, CHAT_A, limit=50)
+    listed = client.get("/api/chat/conversations", headers={"X-Pincer-User": ALICE}).json()["items"]
+
+    assert [(m["role"], m["content"], m["images"]) for m in transcript] == [
+        ("user", "", 1),
+        ("assistant", "A cat.", 0),
+        ("user", "what breed?", 0),
+    ]
+    assert [(i["title"], i["message_count"]) for i in listed] == [("what breed?", 3)]

@@ -275,7 +275,7 @@ async def test_the_iteration_limit_ends_the_turn_without_another_request(  # typ
     assert llm.requests == 2
     assert texts == expected
     session = await session_manager.get_or_create("user1", "web")
-    assert session.messages[-1].role is MessageRole.TOOL_RESULT  # nothing saved after the tools, as before
+    _assert_ending_saved_once(session, last_text, expected[0])
 
 
 @pytest.mark.parametrize(
@@ -289,7 +289,8 @@ async def test_the_iteration_limit_ends_the_turn_without_another_request(  # typ
 async def test_the_circuit_breaker_ends_the_turn_without_another_request(  # type: ignore[no-untyped-def]
     fixture_settings, session_manager, cost_tracker, last_text, expected
 ) -> None:
-    """Three steps in a row whose tools fail. The reply is saved after the tool results, as before."""
+    """Three steps in a row whose tools fail. The canned line is saved after the tool results; the last
+    step's own text is saved once, with its tool calls."""
     llm = _Steps(_calls("nope", n=1), _calls("nope", n=2), _calls("nope", last_text, n=3))
     agent = Agent(fixture_settings, llm, session_manager, cost_tracker, _registry())
 
@@ -298,5 +299,15 @@ async def test_the_circuit_breaker_ends_the_turn_without_another_request(  # typ
     assert llm.requests == 3
     assert texts == expected
     session = await session_manager.get_or_create("user1", "web")
-    assert [m.role for m in session.messages[-2:]] == [MessageRole.TOOL_RESULT, MessageRole.ASSISTANT]
-    assert session.messages[-1].content == expected[0]
+    _assert_ending_saved_once(session, last_text, expected[0])
+
+
+def _assert_ending_saved_once(session: Any, last_text: str, ending: str) -> None:
+    """The ending the client got is in the history once (the transcript shows what was sent): a canned
+    line as its own message after the tool results, the last step's text with that step's tool calls."""
+    if last_text:
+        assert session.messages[-1].role is MessageRole.TOOL_RESULT
+    else:
+        assert [m.role for m in session.messages[-2:]] == [MessageRole.TOOL_RESULT, MessageRole.ASSISTANT]
+        assert session.messages[-1].content == ending
+    assert [m.content for m in session.messages if m.role is MessageRole.ASSISTANT].count(ending) == 1

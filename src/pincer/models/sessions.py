@@ -135,6 +135,13 @@ class SessionMessage(SQLModel, table=True):
             postgresql_where=sa.text("channel_message_id IS NOT NULL"),
             sqlite_where=sa.text("channel_message_id IS NOT NULL"),
         ),
+        # The retired rows showing photos: a photo the live rows let go of is kept while one shows it
+        Index(
+            "idx_session_messages_retired_images",
+            "session_id",
+            postgresql_where=sa.text("retired_at IS NOT NULL AND images IS NOT NULL"),
+            sqlite_where=sa.text("retired_at IS NOT NULL AND images IS NOT NULL"),
+        ),
     )
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))

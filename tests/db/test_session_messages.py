@@ -861,11 +861,9 @@ async def test_a_transcript_page_keeps_retired_rows_and_leaves_out_what_was_not_
     await manager.add_message(session, cut_short)
     service = SessionService(url)
 
-    shown = await service.history("web:alice", limit=10, transcript=True)
-    newest = await service.history("web:alice", limit=2, transcript=True)
-    older = await service.history(
-        "web:alice", limit=2, before=(newest[0]["created_at"], newest[0]["id"]), transcript=True
-    )
+    shown = await service.transcript("web:alice", limit=10)
+    newest = await service.transcript("web:alice", limit=2)
+    older = await service.transcript("web:alice", limit=2, before=(newest[0]["created_at"], newest[0]["id"]))
 
     assert [(m["role"], m["content"], m["is_error"]) for m in shown] == [
         ("user", "one", False),

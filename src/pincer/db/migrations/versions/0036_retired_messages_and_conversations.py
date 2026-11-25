@@ -9,14 +9,17 @@
   that user is refused the id from now on. Indexed with the creation time, not unique: one person's two
   sessions naming one id are joined by an identity rename, which must not fail first.
 - `idx_sessions_user_channel_updated`: a user's conversations, latest activity first.
+- `idx_session_messages_retired_images`: the retired rows showing photos, read on a save whose live rows
+  let a photo go (it stays while a retired row shows it).
 
 The downgrade loses nothing. Code before this revision cannot tell a retired row from a live one, and
 would send the whole history to the model again, so the retired rows are *parked*: moved to
 `pincer_session_messages_retired` (no foreign key, so a session deleted meanwhile does not take them
 with it), and the photos they show copied to `pincer_session_images_retired` (older code deletes the
 photos no live message shows). `retired_at` stays (empty once its rows are parked; older code never
-names it). `conversation_id` and the two indexes go: they are derived from the session keys, so nothing
-is lost, and an older revision's table rebuild would trip over an index on a column it removes.
+names it). `conversation_id` and the three indexes go: they are derived from the session keys and
+rows, so nothing is lost, and an older revision's table rebuild would trip over an index on a column
+it removes.
 
 The upgrade, whenever it runs again (forward, rollback, forward), brings parked rows and photos back
 retired, for the sessions that still exist, without duplicating any. Rows whose session is gone stay
@@ -40,7 +43,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-from pincer.db.migration_helpers import hold_transaction
+from pincer.db.migration_helpers import drop_stale_batch_table, hold_transaction
 from pincer.db.types import JsonbDocument, JsonDocument, Real, UtcDateTime, Uuid7
 
 revision = "0036"
@@ -57,6 +60,7 @@ PARKED_MESSAGES = "pincer_session_messages_retired"
 PARKED_IMAGES = "pincer_session_images_retired"
 CONVERSATION_INDEX = "idx_sessions_conversation_id"
 LIST_INDEX = "idx_sessions_user_channel_updated"
+RETIRED_IMAGES_INDEX = "idx_session_messages_retired_images"
 #: Rows per UPDATE of the backfill.
 BATCH = 1000
 #: `UtcDateTime`'s DDL, spelled out as in 0035: `op.add_column` renders the type decorator with
@@ -104,6 +108,14 @@ def upgrade() -> None:
         )
     if LIST_INDEX not in indexes:
         op.create_index(LIST_INDEX, SESSIONS, ["user_id", "channel", "updated_at", "id"])
+    if RETIRED_IMAGES_INDEX not in {index["name"] for index in inspector.get_indexes(MESSAGES)}:
+        op.create_index(
+            RETIRED_IMAGES_INDEX,
+            MESSAGES,
+            ["session_id"],
+            postgresql_where=sa.text("retired_at IS NOT NULL AND images IS NOT NULL"),
+            sqlite_where=sa.text("retired_at IS NOT NULL AND images IS NOT NULL"),
+        )
     tables = set(inspector.get_table_names())
     if PARKED_MESSAGES in tables:
         _restore_messages(bind)
@@ -131,8 +143,10 @@ def downgrade() -> None:
     bind.execute(sa.text(f"DELETE FROM {MESSAGES} WHERE retired_at IS NOT NULL"))  # noqa: S608
     if parked:
         logger.info("Parked %d retired message(s) in %s until the next upgrade", parked, PARKED_MESSAGES)
+    op.drop_index(RETIRED_IMAGES_INDEX, table_name=MESSAGES)
     op.drop_index(LIST_INDEX, table_name=SESSIONS)
     op.drop_index(CONVERSATION_INDEX, table_name=SESSIONS)
+    drop_stale_batch_table(SESSIONS)
     with op.batch_alter_table(SESSIONS) as batch:
         batch.drop_column("conversation_id")
 
@@ -295,7 +309,10 @@ def _fill_conversation_ids(bind: sa.Connection) -> None:
 
 
 def _conversation_of(key: str) -> str | None:
-    """The conversation id of a `web:<user>:<conversation>` key: a canonical lowercase UUID after a user."""
+    """The conversation id of a `web:<user>:<conversation>` key: a canonical lowercase UUID after a user.
+
+    A copy of `pincer.repositories.sessions.conversation_of`, on purpose: a migration keeps the rule it
+    shipped with, whatever the application code does later."""
     head, _, last = key.rpartition(":")
     if not head.startswith("web:") or len(head) <= len("web:"):
         return None

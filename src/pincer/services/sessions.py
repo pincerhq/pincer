@@ -120,20 +120,27 @@ class SessionService(DatabaseService):
             }
 
     async def history(
-        self, session_id: str, *, limit: int, before: tuple[datetime, str] | None = None, transcript: bool = False
+        self, session_id: str, *, limit: int, before: tuple[datetime, str] | None = None
     ) -> list[dict[str, Any]]:
-        """A page of the session's messages as people see them (no `context`, no `raw`): the latest
-        `limit` before the (`created_at`, `id`) cursor `before`, oldest first. Empty for no such session.
-
-        With `transcript`, the conversation as it was shown: retired rows included, and only the user's
-        messages and the assistant's text (no system messages, tool results or tool-call-only steps)."""
+        """A page of the session's live messages as people see them (no `context`, no `raw`): the latest
+        `limit` before the (`created_at`, `id`) cursor `before`, oldest first. Empty for no such session."""
         async with session_scope(self._url) as session:
             row = await SessionRepository(session).get_by(session_id=session_id)
             if row is None:
                 return []
-            return await SessionMessageRepository(session).page(
-                row.id, limit=limit, before=before, transcript=transcript
-            )
+            return await SessionMessageRepository(session).page(row.id, limit=limit, before=before)
+
+    async def transcript(
+        self, session_id: str, *, limit: int, before: tuple[datetime, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """`history` of the conversation as it was shown: retired rows included, and only the user's
+        messages and the assistant's text or photos (no system messages, tool results or tool-call-only
+        steps)."""
+        async with session_scope(self._url) as session:
+            row = await SessionRepository(session).get_by(session_id=session_id)
+            if row is None:
+                return []
+            return await SessionMessageRepository(session).transcript_page(row.id, limit=limit, before=before)
 
     async def conversation_owner(self, conversation_id: str) -> str | None:
         """The key of the session that owns the web chat conversation `conversation_id` (the one created
@@ -201,9 +208,12 @@ class SessionService(DatabaseService):
                     retired_at=updated_at,
                 )
             if images is not None:
-                # The photos the retired rows show stay too: they are part of the history people read
-                retired = await SessionMessageRepository(session).retired_image_refs(session_ref)
-                await SessionImageRepository(session).sync(
+                # The photos the retired rows show stay too: they are part of the history people read.
+                # Only the ones the live rows no longer hold are looked up there
+                photos = SessionImageRepository(session)
+                leaving = await photos.stored_beyond(session_ref, images.keep)
+                retired = await SessionMessageRepository(session).retired_image_refs(session_ref, leaving)
+                await photos.sync(
                     session_ref,
                     images.keep | retired,
                     [_as_row(image, created_at=time.time()) for image in images.add],
