@@ -35,6 +35,7 @@ from pincer.services.sessions import MessageChanges, SessionService
 _TABLES = [IdentityProfile.__table__, ChatSession.__table__, SessionMessage.__table__, SessionImage.__table__]
 _WIRE = "anthropic:claude-x"
 _OPENAI = "openai:gpt-x"
+_CONVERSATION = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
@@ -572,6 +573,39 @@ async def test_a_stored_message_that_has_to_move_keeps_its_own_time(url):
     assert [(r.content, r.created_at) for r in rows] == [("one", at), ("two", at), ("three", at)]
 
 
+async def test_a_move_retried_after_a_failed_save_deletes_the_old_row_and_retires_nothing(url):
+    """The failed save already gave the moved message its new row, so the retry's walk sees no move: the
+    old row is still deleted (the message lives on in the new one), not retired and shown twice."""
+    at = from_epoch_ms(1_000_000)
+    first, second = sorted({uuid7_at(1_000_000, 5) for _ in range(2)} | {uuid7_at(1_000_000, 5)})[:2]
+    await save(
+        url,
+        [
+            {"role": "user", "content": "one", "id": first, "created_at": at},
+            {"role": "user", "content": "three", "id": second, "created_at": at},
+        ],
+    )
+    manager = manager_on(url)
+    session = await manager.get_or_create("alice", "web")
+    real = manager._store.save
+
+    async def fails(**kwargs: Any) -> None:
+        raise OSError("connection lost before the commit")
+
+    manager._store.save = fails  # type: ignore[method-assign]
+    session.messages.insert(1, user("two"))  # "three" has to move after it
+    with pytest.raises(OSError):
+        await manager.save(session)
+    manager._store.save = real  # type: ignore[method-assign]
+    saves = spy_saves(manager)
+    await manager.save(session)
+
+    ((changes),) = saves
+    assert (list(changes.delete), list(changes.retire)) == ([second], [])
+    every = await all_rows_of(url, "web:alice")
+    assert [(r.content, r.retired_at) for r in every] == [("one", None), ("two", None), ("three", None)]
+
+
 async def test_an_emergency_cut_retires_only_the_rows_it_drops_and_keeps_the_summaries(url):
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "web")
@@ -878,9 +912,6 @@ async def test_a_transcript_page_keeps_retired_rows_and_leaves_out_what_was_not_
         "two",
         "half a",
     ]
-
-
-_CONVERSATION = "22222222-2222-4222-8222-222222222222"
 
 
 async def test_a_web_conversation_s_session_records_its_id_and_no_other_session_does(url):

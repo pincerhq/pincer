@@ -108,6 +108,10 @@ class Session:
     # all: the next one writes those rows again (upserted by id) rather than new ones, and deletes the ones
     # no message holds any more, as it does saved rows
     _pending_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    # The rows a save that has not gone through moved messages away from. Their messages now hold the new
+    # rows, so a retry's walk no longer sees the move: these are still deleted, not retired, or the
+    # history people read would show those messages twice
+    _moved_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     # Held by each save, from its plan to its bookkeeping: a slower save finishing after a later one (an
     # eviction outside the turn lock) would otherwise leave rows the later one gave unowned, and saved again
     _save_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
@@ -176,8 +180,8 @@ class Session:
         updates: list[dict[str, Any]] = []
         placed: list[tuple[LLMMessage, str, StoredRow]] = []
         rows: dict[str, int] = {}
-        # The rows of messages still in the history that move to new rows
-        moved: set[str] = set()
+        # The rows of messages still in the history that move to new rows, this save or a failed one
+        moved: set[str] = set(self._moved_rows)
         for index, message in enumerate(self.messages):
             fingerprint = _fingerprint(message)
             saved_id = message.stored.id if message.stored is not None else None
@@ -225,18 +229,21 @@ class Session:
             delete=[row_id for row_id in dropped if row_id in moved],
             retire=[row_id for row_id in dropped if row_id not in moved],
         )
-        return _SavePlan(changes, placed, rows)
+        return _SavePlan(changes, placed, rows, frozenset(moved))
 
     def _place(self, plan: _SavePlan) -> None:
-        """Before a save: the new messages take their rows, which a retry reuses."""
+        """Before a save: the new messages take their rows, which a retry reuses, and the rows they moved
+        from stay marked as moved for it."""
         for message, row_id, row in plan.placed:
             message.stored = row
             self._pending_rows.add(row_id)
+        self._moved_rows |= plan.moved
 
     def _saved(self, plan: _SavePlan) -> None:
         """Once a save went through: its rows are the session's."""
         self._saved_rows = plan.rows
         self._pending_rows.clear()
+        self._moved_rows.clear()
 
     def _has_changes(self) -> bool:
         """True when a save would write something: a message or the metadata changed since the last one."""
@@ -722,12 +729,14 @@ def _take_place(replacement: list[LLMMessage], prefix: list[LLMMessage]) -> None
 
 @dataclass
 class _SavePlan:
-    """What a save does to the rows (`changes`), the row it gives each new message (`placed`, with its id), and the
-    fingerprints of the session's rows once it went through (`rows`)."""
+    """What a save does to the rows (`changes`), the row it gives each new message (`placed`, with its id), the
+    fingerprints of the session's rows once it went through (`rows`), and the rows messages moved away from
+    (`moved`, deleted rather than retired)."""
 
     changes: MessageChanges
     placed: list[tuple[LLMMessage, str, StoredRow]]
     rows: dict[str, int]
+    moved: frozenset[str] = frozenset()
 
 
 def _holds_row(message: LLMMessage, owned: Collection[str]) -> bool:

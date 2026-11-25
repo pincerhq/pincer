@@ -8,6 +8,7 @@ The read endpoints serve it, scoped to the caller; a conversation id another ide
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -389,7 +390,39 @@ async def test_the_conversation_list_is_the_caller_s_latest_first_without_memory
     assert second["next_cursor"] is None
     assert items[0]["title"] == "chat 4 starts here"
     assert all(i["message_count"] == 4 for i in items)
-    assert client.get("/api/chat/conversations", params={"cursor": "%%%"}, headers=alice).status_code == 422
+
+
+def _b64(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+
+
+_ANY_ID = "00000000-0000-0000-0000-000000000000"
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "%%%",
+        _b64(f"2026-01-01T00:00:00|{_ANY_ID}"),
+        _b64(f"0001-01-01T00:00:00+05:00|{_ANY_ID}"),
+        _b64("2026-01-01T00:00:00+00:00"),
+    ],
+    ids=["not-base64", "naive-time", "out-of-range-time", "no-separator"],
+)
+@pytest.mark.parametrize("endpoint", ["list", "transcript"])
+async def test_a_cursor_this_api_did_not_hand_out_is_a_422(tmp_path, monkeypatch, cursor, endpoint):
+    db = tmp_path / "pincer.db"
+    await _seed(db, ALICE, CHAT_A, "hello")
+    client = _client_on(db, monkeypatch)
+
+    if endpoint == "list":
+        r = client.get("/api/chat/conversations", params={"cursor": cursor}, headers={"X-Pincer-User": ALICE})
+    else:
+        r = client.get(
+            f"/api/chat/conversations/{CHAT_A}/messages", params={"before": cursor}, headers={"X-Pincer-User": ALICE}
+        )
+
+    assert r.status_code == 422, r.text
 
 
 async def test_the_transcript_shows_what_was_said_not_tool_steps_or_summaries(tmp_path, monkeypatch):

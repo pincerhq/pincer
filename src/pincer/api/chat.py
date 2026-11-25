@@ -40,6 +40,7 @@ from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
 from pincer.core.ratelimit import Rate, RateLimitResult, rate_limit
 from pincer.core.session import channel_session_key, conversation_key
+from pincer.db.types import to_millis
 from pincer.exceptions import BudgetCheckFailedError, LLMError
 from pincer.services.sessions import SessionServiceDep
 from pincer.services.voice import CallsServiceDep
@@ -78,6 +79,8 @@ _UUID_RE = re.compile(
 )
 _CHANNEL = "web"
 _DONE_SENTINEL = object()
+#: The characters of a conversation's first message its title keeps.
+_TITLE_CHARS = 80
 
 
 class ChatIn(BaseModel):
@@ -195,10 +198,6 @@ def _conversation_session_key(user_id: str, conversation_id: str | None) -> str 
     return conversation_key(user_id, _CHANNEL, conversation_id) if conversation_id else None
 
 
-#: The characters of a conversation's first message its title keeps.
-_TITLE_CHARS = 80
-
-
 async def _require_own_conversation(
     sessions: SessionServiceDep, user_id: str, conversation_id: str, *, claimed: bool
 ) -> str:
@@ -229,11 +228,13 @@ def _encode_cursor(at: datetime, row_id: str) -> str:
 
 
 def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """The (time, id) a cursor of `_encode_cursor` carries, or 422 for anything else: also a naive or
+    out-of-range time, which would otherwise fail only when the query binds it (a 500)."""
     try:
         text = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
         at, row_id = text.split("|", 1)
-        return datetime.fromisoformat(at), str(uuid.UUID(row_id))
-    except (binascii.Error, UnicodeDecodeError, ValueError) as e:
+        return to_millis(datetime.fromisoformat(at)), str(uuid.UUID(row_id))
+    except (binascii.Error, UnicodeDecodeError, ValueError, OverflowError) as e:
         raise HTTPException(422, "Invalid cursor") from e
 
 
