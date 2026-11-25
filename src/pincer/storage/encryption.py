@@ -20,7 +20,9 @@ import binascii
 import hashlib
 import hmac
 import logging
+import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -42,8 +44,27 @@ _AZURE_ENCRYPTED_CODES = frozenset({"BlobUsesCustomerSpecifiedEncryption"})
 _AZURE_KEY_CODE_MARKERS = ("CustomerSpecifiedEncryption", "CustomerProvidedKey", "EncryptionKey")
 #: The codes botocore gives a bodyless 400, which is all S3 sends for a HEAD.
 _S3_BODYLESS_400 = frozenset({"400", "Bad Request", "BadRequest"})
+#: The "GET https://...: " prefix google-api-core puts before a service's message.
+_GOOGLE_REQUEST_PREFIX = re.compile(r"^[A-Z]+ \S+: ")
+#: How many objects `note_plain` remembers having logged (least recently logged forgotten first).
+NOTED_PLAIN_MAX = 1024
 
 logger = logging.getLogger(__name__)
+#: Objects `note_plain` logged, most recent last.
+_noted_plain: OrderedDict[str, None] = OrderedDict()
+_noted_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class OldVersions:
+    """Why plain copies an in-place rewrite replaced may stay readable.
+
+    `retention_seconds`: soft delete, which removes them on its own that long
+    after the rewrite; None for versioning, which keeps them until deleted.
+    """
+
+    note: str
+    retention_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -182,8 +203,10 @@ def _s3_encryption_400(error: Exception) -> bool | None:
     not from S3.
 
     S3 answers a GET with `InvalidRequest` and a message about server-side
-    encryption, and a HEAD with a bodyless 400 (no code, no message). Other
-    400s (`ExpiredToken`, `AuthorizationHeaderMalformed`, `InvalidToken`,
+    encryption, and a HEAD with a bodyless 400 (no code, no message). Some
+    S3-compatible servers send `InvalidRequest` with no message at all, which
+    counts too; one with a message about something else does not. Other 400s
+    (`ExpiredToken`, `AuthorizationHeaderMalformed`, `InvalidToken`,
     `InvalidBucketName`, ...) carry their own code and are not about the key.
     """
     response = getattr(error, "response", None)
@@ -195,16 +218,33 @@ def _s3_encryption_400(error: Exception) -> bool | None:
     code = str(details.get("Code") or "")
     if code in _S3_BODYLESS_400:
         return True
-    return code == "InvalidRequest" and "encrypt" in str(details.get("Message") or "").lower()
+    if code != "InvalidRequest":
+        return False
+    message = str(details.get("Message") or "").strip()
+    return not message or "encrypt" in message.lower()
+
+
+def _google_service_texts(error: Exception) -> list[str]:
+    """What the service said in a google-api-core error, without the request
+    line: each entry of `errors` (its message and reason), and the message
+    with its "GET <url>: " prefix removed. The URL names the object, and the
+    check file is called `.encrypted`, so it must never be matched."""
+    texts = [
+        f"{entry.get('reason', '')} {entry.get('message', '')}"
+        for entry in getattr(error, "errors", None) or ()
+        if isinstance(entry, dict)
+    ]
+    message = getattr(error, "message", None)
+    if isinstance(message, str):
+        texts.append(_GOOGLE_REQUEST_PREFIX.sub("", message, count=1))
+    return texts
 
 
 def _gcs_encryption_400(error: Exception) -> bool:
-    """GCS's 400 about a customer-supplied encryption key; its message says so."""
-    return (
-        type(error).__name__ == "BadRequest"
-        and type(error).__module__.startswith("google.api_core")
-        and "encrypt" in str(error).lower()
-    )
+    """GCS's 400 about a customer-supplied encryption key; the service's message (or reason) says so."""
+    if not (type(error).__name__ == "BadRequest" and type(error).__module__.startswith("google.api_core")):
+        return False
+    return any("encrypt" in text.lower() for text in _google_service_texts(error))
 
 
 def keyed_request_hit_plain_object(error: Exception) -> bool:
@@ -279,17 +319,21 @@ def azure_error_code(error: Exception) -> str | None:
 
 # ── Plain objects read with the fallback ──
 
-_noted_plain: set[str] = set()
-_noted_lock = threading.Lock()
-
 
 def note_plain(path: object) -> None:
-    """Log, once per object, that a keyed read found it stored without the key."""
+    """Log, once per object, that a read found it stored without the key.
+
+    For reads and stats only: the encryption job's own checks do not call it.
+    Remembers at most `NOTED_PLAIN_MAX` objects, so a bucket full of plain
+    objects does not grow the process."""
     name = str(path)
     with _noted_lock:
         if name in _noted_plain:
+            _noted_plain.move_to_end(name)
             return
-        _noted_plain.add(name)
+        _noted_plain[name] = None
+        while len(_noted_plain) > NOTED_PLAIN_MAX:
+            _noted_plain.popitem(last=False)
     logger.warning(
         "Storage encryption: %s is not encrypted yet; read it without the key (`pincer storage encrypt` encrypts it)",
         name,

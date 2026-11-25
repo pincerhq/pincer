@@ -170,11 +170,27 @@ with read access to the bucket, until it is deleted:
 | GCS | Object versioning: the noncurrent generation; soft delete: the overwritten generation, for its retention |
 | Azure | Blob versioning: the previous version; blob soft delete: a soft-deleted snapshot, for its retention |
 
-The job detects these settings, records them in the marker, and
+The job detects these settings and records them in the marker.
 `pincer storage encrypt`, `pincer storage encryption-status` and
-`pincer doctor` warn about them, even once the state is `complete`. After the
-job is complete, delete the old versions with the provider's tools, for
-example:
+`pincer doctor` warn about them, even once the state is `complete`. The status
+command and the doctor check the bucket again each time they run:
+
+- Soft delete removes the plain copies on its own: the warning ends once its
+  retention has passed since the job completed.
+- Versioning keeps them until they are deleted: the warning stays while
+  versioning is on (enabled or, on S3, suspended), because Pincer cannot tell
+  which old versions predate encryption. Once you have deleted those, it is
+  safe to ignore.
+
+Running `pincer storage encrypt` again also refreshes what the marker
+records.
+
+Checking needs `s3:GetBucketVersioning` on S3, `storage.buckets.get` on GCS,
+and the account's service properties on Azure. Without them, Pincer logs a
+warning, keeps the last answer it recorded, or reports "unknown".
+
+After the job is complete, delete the old versions with the provider's tools,
+for example:
 
 - S3: delete the noncurrent versions (`aws s3api list-object-versions`, then
   `delete-object --version-id`), or add a lifecycle rule that expires

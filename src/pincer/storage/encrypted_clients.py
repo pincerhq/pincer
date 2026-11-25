@@ -36,8 +36,10 @@ from cloudpathlib import AzureBlobClient, GSClient, S3Client
 
 from pincer.storage.encryption import (
     TLS_WARNING_DOC,
+    OldVersions,
     StorageKey,
     azure_error_code,
+    is_key_error,
     keyed_request_hit_plain_object,
     note_plain,
     request_hit_encrypted_object,
@@ -74,8 +76,9 @@ class EncryptedS3Client(S3Client):
         self.boto3_dl_extra_args = self._keyed_dl_args
         self.boto3_copy_extra_args = {**self._base_copy_args, **sse}
 
-    def _head(self, bucket: str, key: str) -> tuple[dict[str, Any], bool]:
-        """The object's HEAD and whether it is stored with the key."""
+    def _head(self, bucket: str, key: str, *, log: bool = True) -> tuple[dict[str, Any], bool]:
+        """The object's HEAD and whether it is stored with the key. `log`: note
+        a plain object (reads and stats do; the encryption job's check does not)."""
         from botocore.exceptions import ClientError
 
         try:
@@ -92,7 +95,8 @@ class EncryptedS3Client(S3Client):
             raise StorageEncryptionError(
                 f"s3://{bucket}/{key} is encrypted with a different customer key than PINCER_STORAGE_ENCRYPTION_KEY"
             )
-        note_plain(f"s3://{bucket}/{key}")
+        if log:
+            note_plain(f"s3://{bucket}/{key}")
         return data, False
 
     def _raise_if_another_key(self, bucket: str, key: str, keyed_error: Exception) -> None:
@@ -179,14 +183,15 @@ class EncryptedS3Client(S3Client):
     # ── For the encryption job ──
 
     def is_encrypted(self, path: CloudPath) -> bool:
-        return self._head(path.bucket, path.key)[1]  # type: ignore[attr-defined]
+        return self._head(path.bucket, path.key, log=False)[1]  # type: ignore[attr-defined]
 
-    def old_versions_kept(self, root: CloudPath) -> list[str]:
+    def old_versions_kept(self, root: CloudPath) -> list[OldVersions]:
         """Why plain versions replaced by an in-place rewrite stay readable: bucket versioning."""
         bucket = root.bucket  # type: ignore[attr-defined]
         status = self.client.get_bucket_versioning(Bucket=bucket).get("Status")
         if status in ("Enabled", "Suspended"):
-            return [f"versioning is {status.lower()} on S3 bucket {bucket}, so the plain versions stay readable"]
+            note = f"versioning is {status.lower()} on S3 bucket {bucket}, so the plain versions stay readable"
+            return [OldVersions(note)]
         return []
 
     def encrypt_in_place(self, path: CloudPath) -> None:
@@ -287,18 +292,25 @@ class EncryptedGSClient(GSClient):
             raise FileNotFoundError(f"File does not exist: {path}")
         return _gcs_keyed(blob)
 
-    def old_versions_kept(self, root: CloudPath) -> list[str]:
+    def old_versions_kept(self, root: CloudPath) -> list[OldVersions]:
         """Why plain generations replaced by an in-place rewrite stay readable:
         object versioning (noncurrent generations) or soft delete."""
         name = root.bucket  # type: ignore[attr-defined]
         bucket = self.client.get_bucket(name)
         notes = []
         if bucket.versioning_enabled:
-            notes.append(f"object versioning is on for GCS bucket {name}, so the plain noncurrent generations stay")
+            notes.append(
+                OldVersions(f"object versioning is on for GCS bucket {name}, so the plain noncurrent generations stay")
+            )
         policy = getattr(bucket, "soft_delete_policy", None)
-        seconds = getattr(policy, "retention_duration_seconds", None) or 0
+        seconds = int(getattr(policy, "retention_duration_seconds", None) or 0)
         if seconds:
-            notes.append(f"soft delete keeps the plain generations of GCS bucket {name} for {seconds // 86400} day(s)")
+            notes.append(
+                OldVersions(
+                    f"soft delete keeps the plain generations of GCS bucket {name} for {seconds // 86400} day(s)",
+                    retention_seconds=seconds,
+                )
+            )
         return notes
 
     def encrypt_in_place(self, path: CloudPath) -> None:
@@ -362,8 +374,9 @@ class EncryptedAzureBlobClient(AzureBlobClient):
         super().__init__(*args, **kwargs)
         self.encryption_key = encryption_key
 
-    def _keyed_then_plain[T](self, call: Callable[..., T], cpk: Any, path: object) -> T:
-        """`call(cpk=...)`; once more without the key when the object is stored without one."""
+    def _keyed_then_plain[T](self, call: Callable[..., T], cpk: Any, path: object, *, log: bool = True) -> T:
+        """`call(cpk=...)`; once more without the key when the object is stored
+        without one. `log`: note the plain object (not for the encryption job's check)."""
         from azure.core.exceptions import HttpResponseError
 
         try:
@@ -371,7 +384,8 @@ class EncryptedAzureBlobClient(AzureBlobClient):
         except HttpResponseError as e:
             if not keyed_request_hit_plain_object(e):
                 raise
-        note_plain(path)
+        if log:
+            note_plain(path)
         return call()
 
     def _blob_client(self, path: Any) -> Any:
@@ -475,28 +489,54 @@ class EncryptedAzureBlobClient(AzureBlobClient):
 
     def is_encrypted(self, path: CloudPath) -> bool:
         properties = self._keyed_then_plain(
-            self._blob_client(path).get_blob_properties, self.encryption_key.azure_cpk(), path
+            self._blob_client(path).get_blob_properties, self.encryption_key.azure_cpk(), path, log=False
         )
         return bool(properties.encryption_key_sha256)
 
-    def old_versions_kept(self, root: CloudPath) -> list[str]:
+    def old_versions_kept(self, root: CloudPath) -> list[OldVersions]:
         """Why plain blobs replaced by an in-place rewrite stay readable: blob
-        versioning (seen as version ids in a listing) or blob soft delete."""
+        versioning (seen as version ids in a listing) or blob soft delete.
+
+        The two are checked independently: one that cannot be checked (soft
+        delete needs the account's service properties) is reported as such
+        next to the other's answer. Raises when neither can be checked."""
         container = root.container  # type: ignore[attr-defined]
-        notes = []
-        listing = self.service_client.get_container_client(container).list_blobs(
-            name_starts_with=root.blob or None,  # type: ignore[attr-defined]
-            include=["versions"],
-            results_per_page=1,
-        )
-        if any(getattr(blob, "version_id", None) for blob in itertools.islice(listing, 1)):
-            notes.append(f"blob versioning is on for Azure container {container}, so the plain versions stay")
-        retention = self.service_client.get_service_properties().get("delete_retention_policy")
-        if retention is not None and getattr(retention, "enabled", False):
-            notes.append(
-                f"blob soft delete keeps the plain blobs of Azure container {container} "
-                f"for {getattr(retention, 'days', None) or '?'} day(s)"
+
+        def versioning() -> OldVersions | None:
+            listing = self.service_client.get_container_client(container).list_blobs(
+                name_starts_with=root.blob or None,  # type: ignore[attr-defined]
+                include=["versions"],
+                results_per_page=1,
             )
+            if any(getattr(blob, "version_id", None) for blob in itertools.islice(listing, 1)):
+                return OldVersions(f"blob versioning is on for Azure container {container}, so the plain versions stay")
+            return None
+
+        def soft_delete() -> OldVersions | None:
+            retention = self.service_client.get_service_properties().get("delete_retention_policy")
+            if retention is not None and getattr(retention, "enabled", False):
+                days = getattr(retention, "days", None)
+                return OldVersions(
+                    f"blob soft delete keeps the plain blobs of Azure container {container} for {days or '?'} day(s)",
+                    retention_seconds=int(days) * 86400 if days else None,
+                )
+            return None
+
+        notes: list[OldVersions] = []
+        errors: list[Exception] = []
+        for what, probe in (("blob versioning", versioning), ("blob soft delete", soft_delete)):
+            try:
+                note = probe()
+            except Exception as e:
+                errors.append(e)
+                notes.append(
+                    OldVersions(f"could not check {what} for Azure container {container} ({type(e).__name__}: {e})")
+                )
+                continue
+            if note:
+                notes.append(note)
+        if len(errors) == 2:
+            raise errors[0]
         return notes
 
     def encrypt_in_place(self, path: CloudPath) -> None:
@@ -532,8 +572,12 @@ class EncryptedAzureBlobClient(AzureBlobClient):
 
         Steps: write the file with the key, read its properties through Data
         Lake with the key, read it back, rename it, delete it. Returns each
-        step and None, or the error that stopped it (later steps are not run).
-        The probe file is removed whatever happens.
+        step and None, or the error that stopped it (later steps are not run):
+        a refusal about the key or the content. An error that is not about the
+        key (throttling, a timeout, a server error, a missing permission)
+        raises StorageUnavailable instead, so the location is not refused for
+        it and is probed again on its next use. The probe file is removed
+        whatever happens.
         """
         token = uuid.uuid4().hex
         first = base / f"probe-{token}"
@@ -580,7 +624,15 @@ class EncryptedAzureBlobClient(AzureBlobClient):
             for name, step in steps:
                 try:
                     step()
+                except StorageEncryptionError as e:
+                    results.append((name, f"{type(e).__name__}: {e}"))
+                    break
                 except Exception as e:
+                    if not is_key_error(e):
+                        raise StorageUnavailable(
+                            f"Storage encryption check on the Azure hierarchical-namespace account of {base} "
+                            f"could not finish step '{name}': {type(e).__name__}: {e}"
+                        ) from e
                     results.append((name, f"{type(e).__name__}: {e}"))
                     break
                 results.append((name, None))

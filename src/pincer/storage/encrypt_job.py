@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pincer.storage import clients
-from pincer.storage.encryption import load_key
+from pincer.storage.encryption import OldVersions, load_key
 from pincer.storage.encryption_state import (
     JOB_LOCK,
     SENTINEL,
@@ -158,17 +158,48 @@ def _encrypt_one(client: Any, path: CloudPath) -> str:
     raise KeyConflict(f"{path} kept changing, still without the key, while it was being encrypted")
 
 
-def _old_versions(client: Any, root: CloudPath) -> str | None:
-    """Why the plain versions an in-place rewrite replaces may stay readable, if they may."""
-    check = getattr(client, "old_versions_kept", None)
+def old_versions(root: CloudPath, recorded: str | None = None, *, rewritten_at: str | None = None) -> str | None:
+    """Why plain versions replaced by an in-place rewrite may stay readable at
+    `root` (bucket versioning, soft delete), or None when they do not.
+
+    Read-only: the job runs it, and `pincer doctor` and `encryption-status`
+    run it again, so the answer follows the bucket's settings once the old
+    versions are deleted. When it cannot be checked (the credentials may lack
+    `s3:GetBucketVersioning`, `storage.buckets.get` or the Azure service
+    properties), it logs a warning and keeps `recorded`, the answer saved in
+    the marker; with none, it answers "unknown".
+
+    `rewritten_at` (ISO time the job last completed): soft delete whose
+    retention has passed since then has removed the plain copies on its own,
+    so it no longer counts.
+    """
+    check = getattr(root.client, "old_versions_kept", None)
     if check is None:
+        return recorded
+    try:
+        found: list[OldVersions] = check(root)
+    except Exception as e:
+        logger.warning(
+            "Storage encryption: could not check %s for old plain versions (%s: %s)", root, type(e).__name__, e
+        )
+        return recorded or f"unknown: could not check for old versions ({type(e).__name__})"
+    elapsed = _seconds_since(rewritten_at)
+    notes = [
+        item.note
+        for item in found
+        if item.retention_seconds is None or elapsed is None or elapsed < item.retention_seconds
+    ]
+    return "; ".join(notes) or None
+
+
+def _seconds_since(iso: str | None) -> float | None:
+    if not iso:
         return None
     try:
-        notes: list[str] = check(root)
-    except Exception as e:
-        logger.debug("Storage encryption: could not check %s for old versions: %s", root, e)
+        then = datetime.fromisoformat(iso)
+    except ValueError:
         return None
-    return "; ".join(notes) or None
+    return (datetime.now(UTC) - then).total_seconds()
 
 
 def encrypt_location(
@@ -206,7 +237,7 @@ def encrypt_location(
     if not dry_run and migration.get("state") != "complete" and scheme in _ORDERED_LISTING:
         resume_after = migration.get("cursor")
     done_before = int(migration.get("done") or 0) if resume_after else 0
-    progress.old_versions = _old_versions(client, root)
+    progress.old_versions = old_versions(root, migration.get("old_versions"))
     if progress.old_versions:
         logger.warning(
             "Storage encryption of %s: %s. Encrypting rewrites objects in place; delete the old versions "
@@ -223,6 +254,8 @@ def encrypt_location(
 
     since_save = 0
     cursor = resume_after
+    # `done` as of the cursor: objects past it are listed, and counted, again on resume.
+    done_at_cursor = done_before
     for path, is_dir in client._list_dir(root, recursive=True):
         if is_dir:
             continue
@@ -255,10 +288,11 @@ def encrypt_location(
             report(key, "failed")
         if not progress.failed:
             cursor = key  # never past a failed object: a resumed run tries it again
+            done_at_cursor = done_before + progress.encrypted + progress.already
         since_save += 1
         if not dry_run and since_save >= PROGRESS_EVERY:
             since_save = 0
-            marker.save(state="running", cursor=cursor, done=done_before + progress.encrypted + progress.already)
+            marker.save(state="running", cursor=cursor, done=done_at_cursor)
             if heartbeat is not None and not heartbeat():
                 logger.warning("Storage encryption of %s: lost the lease to another process; stopping", root)
                 stop = stop or threading.Event()
@@ -270,7 +304,7 @@ def encrypt_location(
         return progress
     if stopped:
         progress.state = "running"
-        marker.save(state="running", cursor=cursor, done=done_before + progress.encrypted + progress.already)
+        marker.save(state="running", cursor=cursor, done=done_at_cursor)
     elif progress.failed:
         # Resume from the start next time: the failed objects come before the cursor.
         progress.state = "pending"

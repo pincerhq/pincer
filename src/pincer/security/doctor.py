@@ -1831,7 +1831,7 @@ class SecurityDoctor:
         """Storage encryption with a customer key: the key, the TLS endpoint, the
         one-way lock of each cloud location, the Azure hierarchical-namespace
         probe, and how far encrypting existing data got."""
-        from pincer.storage import clients, encryption_state
+        from pincer.storage import clients, encrypt_job, encryption_state
         from pincer.storage.encryption import TLS_WARNING_DOC, load_key, tls_problem
         from pincer.storage.errors import StorageError
         from pincer.storage.layout import storage_root_for
@@ -1901,9 +1901,12 @@ class SecurityDoctor:
                 warnings.append(
                     f"{location}: encrypting existing data is {state} ({migration.get('done', 0)} object(s) done){hns}"
                 )
-            elif migration.get("old_versions"):
+            elif old := encrypt_job.old_versions(
+                root, migration.get("old_versions"), rewritten_at=migration.get("updated_at")
+            ):
+                # Checked again now (read-only): the warning ends once the old versions are gone.
                 warnings.append(
-                    f"{location}: encrypted, but old plain versions remain readable: {migration['old_versions']}. "
+                    f"{location}: encrypted, but old plain versions may remain readable: {old}. "
                     "Delete them (see docs/guides/storage-encryption.md#versioned-buckets)"
                 )
             else:

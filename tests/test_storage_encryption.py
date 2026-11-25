@@ -23,6 +23,7 @@ from pincer.storage.browser import StorageBrowser
 from pincer.storage.encryption import (
     TLS_WARNING_DOC,
     InvalidStorageKey,
+    OldVersions,
     StorageKey,
     keyed_request_hit_plain_object,
     load_key,
@@ -1057,7 +1058,7 @@ def test_a_dry_run_counts_every_object_whatever_the_cursor(seeded: Any) -> None:
 
 def test_the_job_records_old_versions_that_stay_plain(seeded: Any) -> None:
     root, fake = seeded
-    root.client.old_versions_kept = lambda _root: ["versioning is enabled on S3 bucket docs"]
+    root.client.old_versions_kept = lambda _root: [OldVersions("versioning is enabled on S3 bucket docs")]
     try:
         progress = encrypt_job.encrypt_location(root)
     finally:
@@ -1074,7 +1075,8 @@ def test_an_old_versions_check_that_fails_is_not_a_job_failure(seeded: Any) -> N
         progress = encrypt_job.encrypt_location(root)
     finally:
         del root.client.old_versions_kept
-    assert progress.state == "complete" and progress.old_versions is None
+    assert progress.state == "complete"
+    assert progress.old_versions == "unknown: could not check for old versions (ClientError)"
 
 
 def test_a_dry_run_changes_nothing(seeded: Any) -> None:
@@ -1530,18 +1532,22 @@ def test_a_dry_run_command_fails_when_objects_could_not_be_checked(seeded: Any, 
 
 def test_encrypt_and_status_commands_warn_about_old_versions(seeded: Any, monkeypatch: Any) -> None:
     root, _ = seeded
-    root.client.old_versions_kept = lambda _root: ["versioning is enabled on S3 bucket docs"]
+    root.client.old_versions_kept = lambda _root: [OldVersions("versioning is enabled on S3 bucket docs")]
     settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
     try:
         result = _cli(settings, monkeypatch, "encrypt")
+        assert result.exit_code == 0, result.output
+        assert "versioning is enabled on S3 bucket docs" in result.output
+        status = _cli(settings, monkeypatch, "encryption-status")
+        assert "old plain versions may remain" in status.output
+        doctor = _doctor(settings)
+        assert doctor.status == "warning" and "old plain versions may remain readable" in doctor.message
+        # Versioning turned off (old versions dealt with): status and doctor check again, and stop warning.
+        root.client.old_versions_kept = lambda _root: []
+        assert "old plain versions" not in _cli(settings, monkeypatch, "encryption-status").output
+        assert _doctor(settings).status == "pass"
     finally:
         del root.client.old_versions_kept
-    assert result.exit_code == 0, result.output
-    assert "versioning is enabled on S3 bucket docs" in result.output
-    status = _cli(settings, monkeypatch, "encryption-status")
-    assert "old plain versions remain" in status.output
-    doctor = _doctor(settings)
-    assert doctor.status == "warning" and "old plain versions remain readable" in doctor.message
 
 
 def test_doctor_reports_a_malformed_key_instead_of_failing(tmp_path: Path, monkeypatch: Any) -> None:
@@ -1620,7 +1626,7 @@ def test_s3_reports_bucket_versioning(tmp_path: Path) -> None:
     root = client.CloudPath("s3://b/")
     client.client.get_bucket_versioning.return_value = {"Status": "Enabled"}
     assert client.old_versions_kept(root) == [
-        "versioning is enabled on S3 bucket b, so the plain versions stay readable"
+        OldVersions("versioning is enabled on S3 bucket b, so the plain versions stay readable")
     ]
     client.client.get_bucket_versioning.return_value = {}
     assert client.old_versions_kept(root) == []
@@ -1632,7 +1638,8 @@ def test_gcs_reports_versioning_and_soft_delete() -> None:
     bucket.versioning_enabled = True
     bucket.soft_delete_policy.retention_duration_seconds = 7 * 86400
     notes = client.old_versions_kept(client.CloudPath("gs://b/"))
-    assert len(notes) == 2 and "versioning" in notes[0] and "7 day(s)" in notes[1]
+    assert len(notes) == 2 and "versioning" in notes[0].note and "7 day(s)" in notes[1].note
+    assert notes[0].retention_seconds is None and notes[1].retention_seconds == 7 * 86400
     bucket.versioning_enabled = False
     bucket.soft_delete_policy.retention_duration_seconds = 0
     assert client.old_versions_kept(client.CloudPath("gs://b/")) == []
@@ -1644,7 +1651,163 @@ def test_azure_reports_versioning_and_soft_delete() -> None:
     service.get_container_client.return_value.list_blobs.return_value = iter([MagicMock(version_id="v1")])
     service.get_service_properties.return_value = {"delete_retention_policy": MagicMock(enabled=True, days=14)}
     notes = client.old_versions_kept(client.CloudPath("az://c/"))
-    assert len(notes) == 2 and "blob versioning" in notes[0] and "14 day(s)" in notes[1]
+    assert len(notes) == 2 and "blob versioning" in notes[0].note and "14 day(s)" in notes[1].note
+    assert notes[1].retention_seconds == 14 * 86400
     service.get_container_client.return_value.list_blobs.return_value = iter([MagicMock(version_id=None)])
     service.get_service_properties.return_value = {"delete_retention_policy": MagicMock(enabled=False)}
     assert client.old_versions_kept(client.CloudPath("az://c/")) == []
+
+
+# ── Review round 2 ───────────────────────────────────────────────────────────
+
+
+def test_the_jobs_check_does_not_log_plain_objects(tmp_path: Path, caplog: Any) -> None:
+    from pincer.storage import encryption
+
+    encryption._noted_plain.clear()
+    s3 = _s3(tmp_path)
+    s3.client.head_object.side_effect = [_client_error(400, "400"), _head()]
+    assert s3.is_encrypted(s3.CloudPath("s3://b/plain")) is False
+    azure = _azure()
+    blob = azure.service_client.get_blob_client.return_value
+    blob.get_blob_properties.side_effect = [
+        _azure_error("BlobDoesNotUseCustomerSpecifiedEncryption"),
+        MagicMock(encryption_key_sha256=None),
+    ]
+    assert azure.is_encrypted(azure.CloudPath("az://c/plain")) is False
+    assert "is not encrypted yet" not in caplog.text
+    assert not encryption._noted_plain
+    # A real stat still logs.
+    s3.client.head_object.side_effect = [_client_error(400, "400"), _head()]
+    s3._get_metadata(s3.CloudPath("s3://b/plain"))
+    assert "s3://b/plain is not encrypted yet" in caplog.text
+
+
+def test_note_plain_remembers_a_bounded_number_of_objects(monkeypatch: Any) -> None:
+    from pincer.storage import encryption
+
+    encryption._noted_plain.clear()
+    monkeypatch.setattr(encryption, "NOTED_PLAIN_MAX", 3)
+    for n in range(10):
+        encryption.note_plain(f"s3://b/{n}")
+    assert list(encryption._noted_plain) == ["s3://b/7", "s3://b/8", "s3://b/9"]
+
+
+def _gcs_http_400(message: str, path: str = ".encrypted", reason: str = "invalid") -> Exception:
+    from google.api_core.exceptions import BadRequest
+
+    url = f"https://storage.googleapis.com/download/storage/v1/b/docs/o/{path}?alt=media"
+    return BadRequest(f"GET {url}: {message}", errors=[{"message": message, "reason": reason}])
+
+
+def test_a_gcs_400_on_the_check_file_is_not_read_from_its_url() -> None:
+    from pincer.storage.encryption import is_key_error, request_hit_encrypted_object
+
+    error = _gcs_http_400("Invalid argument.")
+    assert ".encrypted" in str(error)
+    assert not request_hit_encrypted_object(error)
+    assert not keyed_request_hit_plain_object(error)
+    assert not is_key_error(error)
+    keyed = _gcs_http_400("The target object is encrypted by a customer-supplied encryption key.", "a.txt")
+    assert request_hit_encrypted_object(keyed)
+    by_reason = _gcs_http_400("Bad request.", "a.txt", reason="customerEncryptionKeyIsIncorrect")
+    assert is_key_error(by_reason)
+
+
+def test_an_s3_invalid_request_with_no_message_is_about_encryption() -> None:
+    from pincer.storage.encryption import request_hit_encrypted_object
+
+    bare = _client_error(400, "InvalidRequest", "GetObject", message="")
+    assert keyed_request_hit_plain_object(bare)
+    assert request_hit_encrypted_object(bare)
+    other = _client_error(400, "InvalidRequest", "GetObject", message="Missing required header for this request")
+    assert not keyed_request_hit_plain_object(other)
+
+
+def test_an_old_versions_check_that_fails_keeps_what_was_recorded(seeded: Any, caplog: Any) -> None:
+    root, _ = seeded
+    marker, version = encryption_state.read_marker(root)  # type: ignore[misc]
+    marker["migration"]["old_versions"] = "versioning is enabled on S3 bucket docs"
+    encryption_state.write_marker(root, marker, if_version=version)
+    root.client.old_versions_kept = MagicMock(side_effect=_client_error(403, "AccessDenied"))
+    try:
+        progress = encrypt_job.encrypt_location(root)
+    finally:
+        del root.client.old_versions_kept
+    assert progress.old_versions == "versioning is enabled on S3 bucket docs"
+    assert encryption_state.status(root)["migration"]["old_versions"] == progress.old_versions
+    assert "could not check s3://docs" in caplog.text and "AccessDenied" in caplog.text
+
+
+def test_soft_delete_stops_counting_once_its_retention_has_passed(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    client = _s3(tmp_path)
+    root = client.CloudPath("s3://b/")
+    client.old_versions_kept = lambda _root: [
+        OldVersions("soft delete keeps them for 7 day(s)", retention_seconds=7 * 86400),
+        OldVersions("versioning is on"),
+    ]
+    recent = datetime.now(UTC).isoformat()
+    long_ago = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    both = "soft delete keeps them for 7 day(s); versioning is on"
+    assert encrypt_job.old_versions(root, rewritten_at=recent) == both
+    assert encrypt_job.old_versions(root, rewritten_at=long_ago) == "versioning is on"
+
+
+def test_azure_old_versions_are_checked_independently() -> None:
+    client = _azure()
+    service = client.service_client
+    service.get_container_client.return_value.list_blobs.return_value = iter([MagicMock(version_id="v1")])
+    service.get_service_properties.side_effect = _azure_error("AuthorizationPermissionMismatch")
+    notes = [item.note for item in client.old_versions_kept(client.CloudPath("az://c/"))]
+    assert "blob versioning is on" in notes[0]
+    assert "could not check blob soft delete" in notes[1]
+    service.get_container_client.return_value.list_blobs.side_effect = _azure_error("AuthorizationPermissionMismatch")
+    with pytest.raises(Exception, match="AuthorizationPermissionMismatch"):
+        client.old_versions_kept(client.CloudPath("az://c/"))
+
+
+def test_done_counts_only_up_to_a_held_back_cursor(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    monkeypatch.setattr(encrypt_job, "PROGRESS_EVERY", 1)
+    fake.broken.add("s3://docs/b/c.txt")  # the second object fails; the cursor stays at a.txt
+    lease = iter([True, True, True, False])  # stops after the fourth object, as on a restart
+    encrypt_job.encrypt_location(root, heartbeat=lambda: next(lease))
+    migration = encryption_state.status(root)["migration"]
+    assert migration["cursor"] == "a.txt"
+    assert migration["done"] == 1  # a.txt only: b/d.txt and skills/... come again on resume
+    fake.broken.clear()
+    encrypt_job.encrypt_location(root)
+    assert encryption_state.status(root)["migration"]["done"] == 4
+
+
+def test_a_transient_hns_probe_error_is_not_a_refusal() -> None:
+    client = _azure(hns=True)
+    blob = client.service_client.get_blob_client.return_value
+    uploaded: list[bytes] = []
+    blob.upload_blob.side_effect = lambda data, **_: uploaded.append(data)
+    blob.download_blob.return_value.readall.side_effect = lambda: uploaded[0]
+    fc = client.data_lake_client.get_file_system_client.return_value.get_file_client.return_value
+    fc.get_file_properties.return_value = {}
+    busy = _azure_error("ServerBusy")
+    busy.status_code = 503
+    fc.rename_file.side_effect = busy
+    with pytest.raises(StorageUnavailable, match="could not finish step 'rename through Data Lake'") as caught:
+        client.probe_hns(client.CloudPath("az://c/.pincer"))
+    assert not isinstance(caught.value, StorageEncryptionError)
+    assert blob.delete_blob.call_count == 2  # still cleaned up
+
+
+def test_an_unreachable_hns_probe_on_an_ordinary_open_is_not_cached(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, root = bucket()
+    root.client.is_hns = lambda _root: True
+    root.client.probe_hns = MagicMock(side_effect=StorageUnavailable("ServerBusy"))
+    try:
+        with pytest.raises(StorageUnavailable, match="ServerBusy"):
+            _open(settings)
+        assert not encryption_state._refused
+        root.client.probe_hns = lambda _base: [("write with the key", None)]
+        _open(settings)  # checked again, and passes
+    finally:
+        del root.client.is_hns, root.client.probe_hns

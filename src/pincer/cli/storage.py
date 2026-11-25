@@ -133,7 +133,7 @@ def storage_encryption_status() -> None:
     from rich.table import Table
 
     from pincer.config import get_settings_relaxed
-    from pincer.storage import clients
+    from pincer.storage import clients, encrypt_job
     from pincer.storage.encryption import load_key
     from pincer.storage.encryption_state import check_location, status
     from pincer.storage.errors import StorageError
@@ -165,12 +165,17 @@ def storage_encryption_status() -> None:
         migration = marker.get("migration", {})
         state = migration.get("state", "pending")
         colour = "green" if state == "complete" else "yellow"
-        old_versions = migration.get("old_versions")
+        # Checked again now (read-only): the warning ends once the old versions are gone.
+        old_versions = encrypt_job.old_versions(
+            root,
+            migration.get("old_versions"),
+            rewritten_at=migration.get("updated_at") if state == "complete" else None,
+        )
         table.add_row(
             location,
             f"[green]on since {marker.get('enabled_at', '?')}[/green]",
             f"[{colour}]{state}[/{colour}] ({migration.get('done', 0)} object(s))"
-            + (f"\n[yellow]old plain versions remain: {old_versions}[/yellow]" if old_versions else ""),
+            + (f"\n[yellow]old plain versions may remain: {old_versions}[/yellow]" if old_versions else ""),
             str(migration.get("updated_at", "")),
         )
     console.print(table)
