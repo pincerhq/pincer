@@ -1184,3 +1184,191 @@ def test_a_dry_run_command_writes_no_lock(bucket: Callable[..., tuple[Any, Any]]
     assert result.exit_code == 0, result.output
     assert "1 object(s) to encrypt" in result.output
     assert not (root / ".pincer").exists()
+
+
+def _cli(settings: Any, monkeypatch: Any, *args: str) -> Any:
+    from typer.testing import CliRunner
+
+    from pincer.cli.main import app
+
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+    return CliRunner().invoke(app, ["storage", *args])
+
+
+def test_encrypt_command_needs_a_key(bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any) -> None:
+    settings, _ = bucket(None)
+    result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert "nothing to encrypt with" in result.output
+
+
+def test_encrypt_command_needs_cloud_storage(tmp_path: Path, monkeypatch: Any) -> None:
+    settings = _settings(tmp_path, storage_root=str(tmp_path / "store"), storage_encryption_key=KEY_B64)
+    result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert "No cloud storage is configured" in result.output
+
+
+def test_encrypt_command_encrypts_everything(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 0, result.output
+    assert "4 encrypted" in result.output and "complete" in result.output
+    assert (root / ".encrypted").read_text() == KEY.fingerprint
+    assert not (root / ".pincer" / "encrypt.lock").exists()  # the lease is released
+
+
+def test_encrypt_command_fails_when_an_object_fails(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    fake.broken.add("s3://docs/a.txt")
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert "1 failed" in result.output and "pending" in result.output
+    assert not (root / ".encrypted").exists()
+
+
+def test_encrypt_command_refuses_a_changed_key(bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any) -> None:
+    settings, _ = bucket()
+    _open(settings)
+    encryption_state.reset_for_tests()
+    other, _ = bucket(OTHER_B64)
+    result = _cli(other, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert "cannot be changed" in result.output
+
+
+def test_encrypt_command_reports_an_unexpected_check_error(
+    bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any
+) -> None:
+    settings, _ = bucket()
+    with patch.object(encryption_state, "check_location", side_effect=RuntimeError("boom")):
+        result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert "could not check (RuntimeError: boom)" in result.output
+
+
+def test_encrypt_command_waits_for_another_process(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    assert encrypt_job.Lease(root).acquire()  # held by "another process", not expired
+    with patch.object(encrypt_job.Lease, "acquire", return_value=False):
+        settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+        result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert "another process is encrypting it" in result.output
+    assert fake.encrypted == set()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(StorageUnavailable("store is down"), "store is down"), (RuntimeError("boom"), "stopped (RuntimeError: boom)")],
+)
+def test_encrypt_command_reports_a_job_that_stopped(
+    seeded: Any, monkeypatch: Any, error: Exception, expected: str
+) -> None:
+    root, _ = seeded
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    with patch.object(encrypt_job, "encrypt_location", side_effect=error):
+        result = _cli(settings, monkeypatch, "encrypt")
+    assert result.exit_code == 1
+    assert expected in result.output
+    assert not (root / ".pincer" / "encrypt.lock").exists()  # released on failure too
+
+
+def test_status_command_off_without_a_key(bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any) -> None:
+    settings, _ = bucket(None)
+    result = _cli(settings, monkeypatch, "encryption-status")
+    assert result.exit_code == 0, result.output
+    assert "off" in result.output
+
+
+def test_status_command_before_the_first_start(bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any) -> None:
+    settings, root = bucket()
+    result = _cli(settings, monkeypatch, "encryption-status")
+    assert result.exit_code == 0, result.output
+    assert "enabled on the next start" in result.output
+    assert not (root / ".pincer").exists()  # the status command never enables it
+
+
+def test_status_command_shows_progress(bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any) -> None:
+    settings, root = bucket()
+    _open(settings)
+    _finish(root)
+    result = _cli(settings, monkeypatch, "encryption-status")
+    assert result.exit_code == 0, result.output
+    assert "on since" in result.output and "complete" in result.output
+
+
+def test_status_command_shows_a_refusal(bucket: Callable[..., tuple[Any, Any]], monkeypatch: Any) -> None:
+    settings, _ = bucket()
+    _open(settings)
+    encryption_state.reset_for_tests()
+    off, _ = bucket(None)
+    result = _cli(off, monkeypatch, "encryption-status")
+    assert result.exit_code == 0, result.output
+    assert "refused" in result.output
+
+
+# ── Start sequence ───────────────────────────────────────────────────────────
+
+
+def test_start_runs_once_and_encrypts_in_the_background(seeded: Any) -> None:
+    root, fake = seeded
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    thread = encrypt_job.start(settings)
+    assert thread is not None
+    thread.join(timeout=10)
+    assert len(fake.encrypted) == 4
+    assert encryption_state.status(root)["migration"]["state"] == "complete"
+    assert encrypt_job.start(settings) is None  # once per process
+
+
+def test_start_has_nothing_to_do_once_complete(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, root = bucket()
+    _open(settings)
+    _finish(root)
+    assert encrypt_job.start(settings) is None
+
+
+def test_start_without_a_key_starts_no_job(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, _ = bucket(None)
+    assert encrypt_job.start(settings) is None
+
+
+def test_start_never_raises(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, _ = bucket()
+    with patch.object(encrypt_job, "verify_at_startup", side_effect=RuntimeError("boom")):
+        assert encrypt_job.start(settings) is None
+
+
+def test_the_background_job_logs_a_location_that_stopped(seeded: Any, caplog: Any) -> None:
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    with patch.object(encrypt_job, "run_with_lease", side_effect=RuntimeError("boom")):
+        thread = encrypt_job.start(settings)
+        assert thread is not None
+        thread.join(timeout=10)
+    assert "stopped: RuntimeError: boom" in caplog.text
+
+
+def test_pending_locations_skips_a_location_it_cannot_open(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, _ = bucket()
+    with patch.object(encrypt_job, "_open", side_effect=StorageUnavailable("down")):
+        assert encrypt_job.pending_locations(settings) == []
+
+
+def test_run_with_lease_skips_a_location_another_process_holds(seeded: Any) -> None:
+    root, fake = seeded
+    with patch.object(encrypt_job.Lease, "acquire", return_value=False):
+        assert encrypt_job.run_with_lease(root) is None
+    assert fake.encrypted == set()
+
+
+def test_the_api_start_up_never_fails_on_storage_encryption(caplog: Any) -> None:
+    import asyncio
+
+    from pincer.api import server
+
+    with patch.object(encrypt_job, "start", side_effect=RuntimeError("boom")):
+        asyncio.run(server._start_storage_encryption())
+    assert "Storage encryption start-up check skipped: boom" in caplog.text

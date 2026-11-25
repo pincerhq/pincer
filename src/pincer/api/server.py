@@ -53,6 +53,18 @@ def _dashboard_dist() -> Path:
     return project_root / "dashboard" / "dist"
 
 
+async def _start_storage_encryption() -> None:
+    """Check storage encryption and start the background job; never blocks start-up."""
+    import logging
+
+    try:
+        from pincer.storage import encrypt_job
+
+        await asyncio.to_thread(encrypt_job.start, get_settings_relaxed())
+    except Exception as e:
+        logging.getLogger(__name__).warning("Storage encryption start-up check skipped: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     import logging
@@ -83,12 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Storage encryption: refuse encrypted storage the key does not open, and
     # encrypt what was stored before the key was set, in the background.
     # Idempotent: `pincer run` has usually done it already.
-    try:
-        from pincer.storage import encrypt_job
-
-        await asyncio.to_thread(encrypt_job.start, get_settings_relaxed())
-    except Exception as e:
-        logging.getLogger(__name__).warning("Storage encryption start-up check skipped: %s", e)
+    await _start_storage_encryption()
 
     audit = await get_audit_logger(audit_db)
 
