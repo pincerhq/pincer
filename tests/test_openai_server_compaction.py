@@ -302,7 +302,7 @@ async def test_a_history_that_changed_while_the_compaction_ran_discards_the_wind
     assert len(stored) == 10 and all("raw" not in m or m["role"] == "assistant" for m in stored)
 
 
-async def test_the_swap_deletes_the_photos_only_the_replaced_messages_showed(
+async def test_the_swap_takes_the_replaced_messages_photos_out_of_the_history_and_keeps_them_stored(
     openai_settings, session_manager, cost_tracker, registry
 ):
     old_photo, new_photo = b"photo-in-a-replaced-message", jpeg(64, 48)  # the new one is sent, so it must be readable
@@ -320,7 +320,8 @@ async def test_the_swap_deletes_the_photos_only_the_replaced_messages_showed(
     gate.set()
     await agent.wait_compactions()
 
-    assert await _photo_rows(session_manager, "user1", "test") == [_sha(new_photo)]
+    # Kept for the retired messages that show it (issue #243); the model's history shows only the new one
+    assert await _photo_rows(session_manager, "user1", "test") == sorted([_sha(old_photo), _sha(new_photo)])
     kept = [m for m in await _stored(session_manager, "user1", "test") if m.get("images")]
     assert [m["images"] for m in kept] == [[{"sha256": _sha(new_photo), "media_type": "image/jpeg"}]]
 

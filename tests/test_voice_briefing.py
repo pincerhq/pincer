@@ -21,6 +21,7 @@ from voice_harness.settings import apply_in_call_tool_defaults, apply_test_paths
 from voice_harness.transport_fakes import FakeSocket, install_fake_twilio
 
 from pincer.channels.phone_calls import VoiceChannel
+from pincer.utils.shield import SHIELDED_TASKS
 from pincer.voice import briefing as bf
 from pincer.voice import outbound, status_notify
 from pincer.voice.briefing import (
@@ -733,7 +734,7 @@ async def test_a_shielded_write_that_fails_after_the_cancel_is_logged(caplog):
     with caplog.at_level("ERROR", logger="pincer.voice.outbound"):
         release.set()
         async with asyncio.timeout(2):
-            while outbound._SHIELDED_TASKS:
+            while SHIELDED_TASKS:
                 await asyncio.sleep(0)
 
     failures = [r for r in caplog.records if r.message == "Shielded outbound bookkeeping failed"]

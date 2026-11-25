@@ -7,9 +7,11 @@ count: it is compacted by prompt tokens (`pincer.core.compaction`).
 
 Each message is a row of its own (`pincer_session_messages`), ordered by (`created_at`, `id`). A
 save writes only what changed since the last one: the messages added, the ones edited in place, and
-the deletion of the ones dropped (`_plan`). The history in memory is the list as the agent left it;
-the rows follow its order, so the provider output each assistant message replays (`raw`, see
-`llm.replay`) and the latest compaction window come back where they were.
+the retirement of the ones dropped (`_save_plan`). A dropped message's row is kept, retired: the model
+is sent the live rows only, while the history people read (`SessionService.history`) keeps them all.
+The history in memory is the list as the agent left it; the rows follow its order, so the provider
+output each assistant message replays (`raw`, see `llm.replay`) and the latest compaction window come
+back where they were.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from pincer.services.sessions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection
+    from collections.abc import AsyncIterator, Callable, Collection, Mapping
     from pathlib import Path
 
     from pincer.core.compaction import LastRequest
@@ -106,6 +108,11 @@ class Session:
     # all: the next one writes those rows again (upserted by id) rather than new ones, and deletes the ones
     # no message holds any more, as it does saved rows
     _pending_rows: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    # The moves a save that has not gone through made: each row a message moved away from, to the row it
+    # moved to. The message now holds the new row, so a retry's walk no longer sees the move: `_save_plan`
+    # resolves it from here (`_moved_rows_to_delete`), or the history people read would show the message
+    # twice, or lose it
+    _moved_rows: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
     # Held by each save, from its plan to its bookkeeping: a slower save finishing after a later one (an
     # eviction outside the turn lock) would otherwise leave rows the later one gave unowned, and saved again
     _save_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
@@ -155,7 +162,9 @@ class Session:
         first stored message). Its id carries that millisecond and sorts
         after the previous message's id, so (`created_at`, `id`) is the list's order. A stored message
         that would sort before the one in front of it (something new was put ahead of it with no room)
-        moves to a new row the same way. Rows no message holds any more are deleted.
+        moves to a new row the same way, and its old row is deleted: the message lives on in the new one.
+        Every other row no message holds any more is retired (compacted, cut, cleared, a dropped tool
+        pair): it leaves the model's history and stays in the one people read.
         """
         owned = self._saved_rows.keys() | self._pending_rows
         # The millisecond of the first row this session holds after each message, if any
@@ -172,6 +181,8 @@ class Session:
         updates: list[dict[str, Any]] = []
         placed: list[tuple[LLMMessage, str, StoredRow]] = []
         rows: dict[str, int] = {}
+        # Each row a message moves away from, to its new row: in this save, or in one that failed
+        moved: dict[str, str] = dict(self._moved_rows)
         for index, message in enumerate(self.messages):
             fingerprint = _fingerprint(message)
             saved_id = message.stored.id if message.stored is not None else None
@@ -195,6 +206,7 @@ class Session:
                 rows[row.id] = fingerprint
                 previous = row
                 continue
+            moved_from = row.id if row is not None and row.id is not None and row.id in owned else None
             if row is not None:
                 target_ms = epoch_ms(row.created_at)
             elif stored_after[index] is not None:
@@ -208,21 +220,33 @@ class Session:
             new_row = StoredRow(row_id, from_epoch_ms(uuid7_ms(row_id)))
             inserts.append(_as_stored(message, new_row))
             placed.append((message, row_id, new_row))
+            if moved_from is not None:
+                moved[moved_from] = row_id
             rows[row_id] = fingerprint
             previous = new_row
-        deletes = [row_id for row_id in owned if row_id not in rows]
-        return _SavePlan(MessageChanges(insert=inserts, update=updates, delete=deletes), placed, rows)
+        dropped = [row_id for row_id in owned if row_id not in rows]
+        delete = _moved_rows_to_delete(dropped, moved, rows)
+        changes = MessageChanges(
+            insert=inserts,
+            update=updates,
+            delete=[row_id for row_id in dropped if row_id in delete],
+            retire=[row_id for row_id in dropped if row_id not in delete],
+        )
+        return _SavePlan(changes, placed, rows, moved)
 
     def _place(self, plan: _SavePlan) -> None:
-        """Before a save: the new messages take their rows, which a retry reuses."""
+        """Before a save: the new messages take their rows, which a retry reuses, and the rows they moved
+        from stay marked as moved for it."""
         for message, row_id, row in plan.placed:
             message.stored = row
             self._pending_rows.add(row_id)
+        self._moved_rows.update(plan.moved)
 
     def _saved(self, plan: _SavePlan) -> None:
         """Once a save went through: its rows are the session's."""
         self._saved_rows = plan.rows
         self._pending_rows.clear()
+        self._moved_rows.clear()
 
     def _has_changes(self) -> bool:
         """True when a save would write something: a message or the metadata changed since the last one."""
@@ -294,15 +318,16 @@ class SessionManager:
         only if `kept_ok` accepts the messages that would follow the replacement, judged under
         the turn lock, when no turn can add to them. True if the history changed.
 
-        The replacement takes the row (and time) of the first message it replaces, so it is
-        stored where that one was, before every message kept.
+        The replacement takes the time of the first message it replaces, so it is stored where that
+        one was, before every message kept; the replaced messages' rows are retired, not overwritten.
         """
         return await self._replace_prefix(session, prefix, [replacement], kept_ok)
 
     async def cut(self, session: Session, prefix: list[LLMMessage], keep: list[LLMMessage] | None = None) -> bool:
         """Drop the session's oldest messages `prefix` (the emergency cut), between turns, on the
         same terms as `compact`, except `keep`: the messages of the prefix that stay at the head (its
-        summaries). The photos only the dropped messages showed are deleted with them."""
+        summaries). The dropped messages' rows are retired, and the photos they showed stay stored with
+        them, for the history people read."""
         return await self._replace_prefix(session, prefix, keep or [], None)
 
     async def _replace_prefix(
@@ -612,8 +637,9 @@ class SessionManager:
         ``only_if_changed``, nothing at all when neither they nor the metadata did).
 
         Its photos follow its messages: new ones are stored, and the ones no message holds any
-        more are deleted, whichever code removed those messages. ``force_images`` also deletes
-        what an earlier session of this process left behind (a clear).
+        more, live or retired, are deleted, whichever code removed those messages. ``force_images``
+        also deletes what an earlier session of this process left behind (a clear), except the photos
+        its retired rows show.
         """
         async with session._save_lock:
             plan = session._save_plan(_now())
@@ -691,26 +717,49 @@ def _loaded(stored: dict[str, Any], photos: dict[str, ImageContent], *, own: boo
 
 
 def _take_place(replacement: list[LLMMessage], prefix: list[LLMMessage]) -> None:
-    """Give the first new message of `replacement` the row of the first message of `prefix`, which it
-    replaces (a compaction summary takes the place of what it summarizes). Messages the replacement
-    keeps from the prefix (a cut keeps its summaries) keep their own."""
+    """Give the first new message of `replacement` the time of the first message of `prefix`, which it
+    replaces (a compaction summary takes the place of what it summarizes), and a row of its own: the
+    replaced message's row is retired with the rest of the prefix, kept for the history people read.
+    Messages the replacement keeps from the prefix (a cut keeps its summaries) keep their own."""
     first = prefix[0] if prefix else None
     if first is None or first.stored is None or any(message is first for message in replacement):
         return
     for message in replacement:
         if message.stored is None:
-            message.stored = first.stored
+            message.stored = StoredRow(None, first.stored.created_at)
             return
 
 
 @dataclass
 class _SavePlan:
-    """What a save does to the rows (`changes`), the row it gives each new message (`placed`, with its id), and the
-    fingerprints of the session's rows once it went through (`rows`)."""
+    """What a save does to the rows (`changes`), the row it gives each new message (`placed`, with its id), the
+    fingerprints of the session's rows once it went through (`rows`), and the moves not yet saved (`moved`: each
+    row a message moved away from, to the row it moved to)."""
 
     changes: MessageChanges
     placed: list[tuple[LLMMessage, str, StoredRow]]
     rows: dict[str, int]
+    moved: dict[str, str] = field(default_factory=dict)
+
+
+def _moved_rows_to_delete(dropped: Collection[str], moved: Mapping[str, str], rows: Collection[str]) -> set[str]:
+    """The dropped rows a message moved away from and still lives on from: it holds the row it moved to (or
+    the row that one moved to in turn). They are deleted; every other dropped row is retired.
+
+    A message that left the history before its move was saved has its old row and its new one retired
+    alike: the failed save either deleted the old one and wrote the new one or did neither, so exactly
+    one of them is there to hold it.
+    """
+    delete: set[str] = set()
+    for row_id in dropped:
+        seen: set[str] = set()
+        target = moved.get(row_id)
+        while target is not None and target not in rows and target not in seen:
+            seen.add(target)
+            target = moved.get(target)
+        if target is not None and target in rows:
+            delete.add(row_id)
+    return delete
 
 
 def _holds_row(message: LLMMessage, owned: Collection[str]) -> bool:

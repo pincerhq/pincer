@@ -16,6 +16,8 @@ real time.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -24,7 +26,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -38,7 +40,9 @@ from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
 from pincer.core.ratelimit import Rate, RateLimitResult, rate_limit
 from pincer.core.session import channel_session_key, conversation_key
+from pincer.db.types import to_millis
 from pincer.exceptions import BudgetCheckFailedError, LLMError
+from pincer.services.sessions import SessionServiceDep
 from pincer.services.voice import CallsServiceDep
 
 if TYPE_CHECKING:
@@ -75,6 +79,8 @@ _UUID_RE = re.compile(
 )
 _CHANNEL = "web"
 _DONE_SENTINEL = object()
+#: The characters of a conversation's first message its title keeps.
+_TITLE_CHARS = 80
 
 
 class ChatIn(BaseModel):
@@ -111,6 +117,43 @@ class CallReportOut(BaseModel):
     text: str
     created_at: str
     reported_at: str
+
+
+class ConversationOut(BaseModel):
+    """One web chat conversation of the caller's."""
+
+    id: str = Field(description="The conversation id, as sent in `conversation_id`")
+    title: str = Field(description="The first message of the conversation, clipped")
+    last_message_at: datetime
+    message_count: int = Field(description="The messages its transcript shows")
+
+
+class ConversationsOut(BaseModel):
+    """A page of the caller's web chat conversations, latest activity first."""
+
+    items: list[ConversationOut]
+    next_cursor: str | None = Field(description="Pass as `cursor` for the next page; null on the last page")
+
+
+class TranscriptMessageOut(BaseModel):
+    """A message as the person saw it: what they wrote, or Pincer's text."""
+
+    id: str
+    role: str = Field(description="`user` or `assistant`")
+    content: str
+    interrupted: bool = Field(
+        description="A reply cut short: the client went away while it streamed, or the daily budget stopped it"
+    )
+    images: int = Field(description="The photos the message carried (a photo-only message has empty `content`)")
+    created_at: datetime
+
+
+class TranscriptOut(BaseModel):
+    """A page of a conversation's transcript, oldest first."""
+
+    messages: list[TranscriptMessageOut] = Field(description="Oldest first")
+    has_more: bool = Field(description="Older messages exist")
+    next_before: str | None = Field(description="Pass as `before` for the older page; null when there is none")
 
 
 class ApprovalIn(BaseModel):
@@ -155,6 +198,51 @@ def _conversation_session_key(user_id: str, conversation_id: str | None) -> str 
     return conversation_key(user_id, _CHANNEL, conversation_id) if conversation_id else None
 
 
+async def _require_own_conversation(
+    sessions: SessionServiceDep, user_id: str, conversation_id: str, *, claimed: bool
+) -> str:
+    """The caller's session key for `conversation_id`, or a 404.
+
+    Args:
+        sessions: The session store.
+        user_id: The caller.
+        conversation_id: The conversation id, canonical.
+        claimed: Whether the caller must own the id already (reading it). Without, an id nobody has
+            used yet is free too (posting to it): the first turn sent with it makes it the caller's.
+
+    Returns:
+        The caller's session key for the conversation.
+
+    Raises:
+        HTTPException: 404 when another identity owns the id, or with `claimed` when nobody does.
+    """
+    key = conversation_key(user_id, _CHANNEL, conversation_id)
+    owner = await sessions.conversation_owner(conversation_id)
+    if owner != key and (claimed or owner is not None):
+        raise HTTPException(404, "Unknown conversation")
+    return key
+
+
+def _encode_cursor(at: datetime, row_id: str) -> str:
+    return base64.urlsafe_b64encode(f"{at.isoformat()}|{row_id}".encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """The (time, id) a cursor of `_encode_cursor` carries, or 422 for anything else: also a naive or
+    out-of-range time, which would otherwise fail only when the query binds it (a 500)."""
+    try:
+        text = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+        at, row_id = text.split("|", 1)
+        return to_millis(datetime.fromisoformat(at)), str(uuid.UUID(row_id))
+    except (binascii.Error, UnicodeDecodeError, ValueError, OverflowError) as e:
+        raise HTTPException(422, "Invalid cursor") from e
+
+
+def _clipped(text: str) -> str:
+    line = " ".join(text.split())
+    return line if len(line) <= _TITLE_CHARS else line[: _TITLE_CHARS - 1].rstrip() + "…"
+
+
 def _get_agent(request: Request) -> Agent:
     agent: Agent | None = getattr(request.app.state, "agent", None)
     if agent is None:
@@ -172,8 +260,11 @@ async def post_message(
     body: ChatIn,
     request: Request,
     user_id: ChatUser,
+    sessions: SessionServiceDep,
 ) -> dict[str, Any]:
     agent = _get_agent(request)
+    if body.conversation_id is not None:
+        await _require_own_conversation(sessions, user_id, body.conversation_id, claimed=False)
     try:
         resp = await agent.handle_message(
             user_id,
@@ -211,8 +302,12 @@ async def post_stream(
     body: ChatIn,
     request: Request,
     user_id: ChatUser,
+    sessions: SessionServiceDep,
 ) -> StreamingResponse:
     agent = _get_agent(request)
+    # Before the stream opens, so a refused id is a plain 404, not an `error` event
+    if body.conversation_id is not None:
+        await _require_own_conversation(sessions, user_id, body.conversation_id, claimed=False)
 
     async def gen() -> AsyncIterator[str]:
         # Multiplex agent stream events and approval-prompt events onto one queue.
@@ -334,6 +429,95 @@ async def get_call_reports(
         )
         for row in rows
     ]
+
+
+@router.get("/conversations", response_model=ConversationsOut)
+async def get_conversations(
+    user_id: ChatUser,
+    sessions: SessionServiceDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query(description="`next_cursor` of the previous page")] = None,
+) -> ConversationsOut:
+    """The caller's web chat conversations, latest activity first.
+
+    Call summaries and knowledge-base questions (`memory: false`) are not listed.
+
+    Args:
+        user_id: The caller.
+        sessions: The session store.
+        limit: The conversations per page.
+        cursor: `next_cursor` of the previous page; the first page without.
+
+    Returns:
+        The page, with the cursor of the next one.
+
+    Raises:
+        HTTPException: 422 for a cursor this endpoint did not hand out.
+    """
+    before = None if cursor is None else _decode_cursor(cursor)
+    rows = await sessions.conversations(user_id, _CHANNEL, limit=limit + 1, before=before)
+    page = rows[:limit]
+    next_cursor = _encode_cursor(page[-1]["updated_at"], page[-1]["id"]) if len(rows) > limit else None
+    return ConversationsOut(
+        items=[
+            ConversationOut(
+                id=row["conversation_id"],
+                title=_clipped(row["title"]),
+                last_message_at=row["updated_at"],
+                message_count=row["message_count"],
+            )
+            for row in page
+        ],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/conversations/{conversation_id}/messages", response_model=TranscriptOut)
+async def get_conversation_messages(
+    conversation_id: Annotated[str, Path(pattern=_UUID_RE.pattern)],
+    user_id: ChatUser,
+    sessions: SessionServiceDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[str | None, Query(description="`next_before` of the newer page")] = None,
+) -> TranscriptOut:
+    """A conversation's transcript as the person saw it, oldest first.
+
+    Everything compaction took out of the model's context is still here.
+
+    Args:
+        conversation_id: The conversation, as sent in `conversation_id`.
+        user_id: The caller.
+        sessions: The session store.
+        limit: The messages per page: the newest ones, or those before `before`.
+        before: `next_before` of the newer page; the newest page without.
+
+    Returns:
+        The page, and whether older messages exist.
+
+    Raises:
+        HTTPException: 404 unless the caller owns the conversation; 422 for a cursor this endpoint did
+            not hand out.
+    """
+    key = await _require_own_conversation(sessions, user_id, str(uuid.UUID(conversation_id)), claimed=True)
+    cursor = None if before is None else _decode_cursor(before)
+    rows = await sessions.transcript(key, limit=limit + 1, before=cursor)
+    has_more = len(rows) > limit
+    page = rows[1:] if has_more else rows
+    return TranscriptOut(
+        messages=[
+            TranscriptMessageOut(
+                id=str(row["id"]),
+                role=row["role"],
+                content=row["content"],
+                interrupted=bool(row["is_error"]) and row["role"] == "assistant",
+                images=len(row["images"] or ()),
+                created_at=row["created_at"],
+            )
+            for row in page
+        ],
+        has_more=has_more,
+        next_before=_encode_cursor(page[0]["created_at"], str(page[0]["id"])) if has_more and page else None,
+    )
 
 
 # Re-exported for tests.

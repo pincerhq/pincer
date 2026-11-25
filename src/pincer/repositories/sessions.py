@@ -10,9 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import bindparam, case, func, or_, tuple_, update
+from sqlalchemy import and_, bindparam, case, func, or_, tuple_, update
+from sqlalchemy import exists as sa_exists
+from sqlalchemy.orm import aliased
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, json_text_field, upsert
@@ -23,7 +26,6 @@ from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
-    from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,14 @@ def rekeyed_session_id(session_id: str, old_user_id: str, new_user_id: str) -> s
     if head.endswith(suffix) and _is_conversation_id(conversation):
         return f"{head.removesuffix(suffix)}:{new_user_id}:{conversation}"
     return None
+
+
+def conversation_of(session_id: str) -> str | None:
+    """The web chat conversation a `web:<user>:<conversation>` key is, or None for any other key."""
+    head, _, conversation = session_id.rpartition(":")
+    if not head.startswith("web:") or len(head) <= len("web:") or not _is_conversation_id(conversation):
+        return None
+    return conversation
 
 
 def _is_conversation_id(segment: str) -> bool:
@@ -139,12 +149,14 @@ class SessionRepository(BaseRepository[ChatSession, str]):
 
         `created_at` deliberately keeps its stored value: only the metadata
         and `updated_at` move. The messages are rows of their own
-        (`SessionMessageRepository`).
+        (`SessionMessageRepository`). A web chat conversation's key gives the
+        new row its `conversation_id` (see `owner_of`).
         """
+        conversation = conversation_of(str(values["session_id"]))
         stmt = upsert(
             dialect_of(self.session),
             ChatSession,
-            values,
+            values | ({"conversation_id": conversation} if conversation else {}),
             index_elements=["session_id"],
             set_=lambda excluded: {
                 "metadata": excluded.metadata,
@@ -245,6 +257,93 @@ class SessionRepository(BaseRepository[ChatSession, str]):
     async def ids(self) -> Sequence[str]:
         return (await self.session.exec(select(ChatSession.session_id))).all()
 
+    async def owner_of(self, conversation_id: str) -> str | None:
+        """The key of the session that owns the web chat conversation `conversation_id`, if any: the one
+        created first that names it. A later one (another identity that raced the owner's first turn,
+        or named the id before ownership was recorded) never becomes the owner."""
+        stmt = (
+            select(ChatSession.session_id)
+            .where(col(ChatSession.conversation_id) == conversation_id)
+            .order_by(col(ChatSession.created_at), col(ChatSession.id))
+            .limit(1)
+        )
+        return (await self.session.exec(stmt)).first()
+
+    async def conversations(
+        self, user_id: str, channel: str, *, limit: int, before: tuple[datetime, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """The user's web chat conversations, latest activity first: `limit` of them before the
+        (`updated_at`, `id`) cursor `before`. Memory-free ones (a call summary, a knowledge-base
+        question) are not the user's conversations and are left out, and so is a session naming a
+        conversation an earlier session owns (`owner_of`).
+
+        Each is `{id, conversation_id, title, updated_at, message_count}`: `title` is the first message
+        the user wrote in it, retired or not, and `message_count` counts what its transcript shows.
+        """
+        memory_free = json_text_field(dialect_of(self.session), col(ChatSession.session_metadata), MEMORY_FREE_KEY)
+        earlier = aliased(ChatSession)
+        title = (
+            select(SessionMessage.content)
+            .where(
+                col(SessionMessage.session_id) == col(ChatSession.id),
+                col(SessionMessage.role) == "user",
+                col(SessionMessage.content) != "",
+            )
+            .order_by(col(SessionMessage.created_at), col(SessionMessage.id))
+            .limit(1)
+            .correlate(ChatSession)
+            .scalar_subquery()
+        )
+        count = (
+            select(func.count())
+            .select_from(SessionMessage)
+            .where(col(SessionMessage.session_id) == col(ChatSession.id), _shown_in_transcript())
+            .correlate(ChatSession)
+            .scalar_subquery()
+        )
+        columns: list[Any] = [ChatSession.id, ChatSession.conversation_id, ChatSession.updated_at, title, count]
+        stmt = select(*columns).where(
+            col(ChatSession.user_id) == user_id,
+            col(ChatSession.channel) == channel,
+            col(ChatSession.conversation_id).is_not(None),
+            or_(memory_free.is_(None), memory_free != "true"),
+            ~sa_exists().where(
+                col(earlier.conversation_id) == col(ChatSession.conversation_id),
+                tuple_(col(earlier.created_at), col(earlier.id))
+                < tuple_(col(ChatSession.created_at), col(ChatSession.id)),
+            ),
+        )
+        if before is not None:
+            stmt = stmt.where(_before(ChatSession.updated_at, ChatSession.id, before))
+        stmt = stmt.order_by(col(ChatSession.updated_at).desc(), col(ChatSession.id).desc()).limit(limit)
+        return [
+            {
+                "id": str(ref),
+                "conversation_id": str(conversation),
+                "updated_at": updated_at,
+                "title": title_text or "",
+                "message_count": int(message_count or 0),
+            }
+            for ref, conversation, updated_at, title_text, message_count in (await self.session.exec(stmt)).all()
+        ]
+
+
+def _before(at: Any, row_id: Any, cursor: tuple[datetime, str]) -> Any:
+    """Rows strictly before the keyset `cursor`, a (time, id) pair, in the order (`at`, `row_id`)."""
+    bound = tuple_(
+        bindparam("before_at", cursor[0], type_=UtcDateTime()), bindparam("before_id", cursor[1], type_=Uuid7())
+    )
+    return tuple_(col(at), col(row_id)) < bound
+
+
+def _shown_in_transcript() -> Any:
+    """A row the transcript shows: a user's message or Pincer's text, with words or photos (not a
+    system message, a tool result or a tool-call-only step)."""
+    return and_(
+        col(SessionMessage.role).in_(TRANSCRIPT_ROLES),
+        or_(col(SessionMessage.content) != "", col(SessionMessage.images).is_not(None)),
+    )
+
 
 def _session_ref(session_id: str) -> Any:
     """The `id` of the session with this key, as a scalar subquery."""
@@ -257,6 +356,13 @@ class SessionImageRepository(BaseRepository[SessionImage, str]):
     async def for_session(self, session_ref: str) -> Sequence[SessionImage]:
         """The photos of the session whose `id` is `session_ref`, oldest first."""
         return await self.list(col(SessionImage.session_ref) == session_ref, order_by=[col(SessionImage.created_at)])
+
+    async def stored_beyond(self, session_ref: str, keep: Collection[str]) -> set[str]:
+        """The hashes of the session's stored photos that are not in `keep`: what `sync` would delete."""
+        stmt = select(SessionImage.sha256).where(col(SessionImage.session_ref) == session_ref)
+        if keep:
+            stmt = stmt.where(col(SessionImage.sha256).notin_(keep))
+        return set((await self.session.exec(stmt)).all())
 
     async def sync(self, session_ref: str, keep: Collection[str], add: Sequence[SessionImage]) -> None:
         """Make the photos of the session whose `id` is `session_ref` exactly `keep`: store the ones
@@ -299,7 +405,10 @@ class SessionImageRepository(BaseRepository[SessionImage, str]):
 
 #: The columns of a message an API shows people: never `context` (Pincer's own per-turn context) or `raw`
 #: (the provider's output, replayed to it), which are most of a history's bytes.
-DISPLAY_COLUMNS = ("id", "role", "content", "tool_calls", "images", "created_at", "updated_at")
+DISPLAY_COLUMNS = ("id", "role", "content", "is_error", "tool_calls", "images", "created_at", "updated_at")
+
+#: The roles of the rows a transcript shows: what the person wrote and what Pincer answered.
+TRANSCRIPT_ROLES = ("user", "assistant")
 
 #: Rows per INSERT: a first save of a long history (one taken over from an older key) stays under
 #: SQLite's limit on bound parameters.
@@ -315,24 +424,50 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
     model = SessionMessage
 
     async def for_session(self, session_ref: str) -> Sequence[SessionMessage]:
-        """Every message of the session whose `id` is `session_ref`, in order."""
+        """Every live message of the session whose `id` is `session_ref` (its model history), in order."""
         return await self.list(
             col(SessionMessage.session_id) == session_ref,
+            col(SessionMessage.retired_at).is_(None),
             order_by=[col(SessionMessage.created_at), col(SessionMessage.id)],
         )
+
+    async def retired_image_refs(self, session_ref: str, among: Collection[str]) -> set[str]:
+        """The hashes in `among` of photos the session's retired rows show. Read through the partial
+        index of retired rows with photos, so it costs the photos retired, not the history's length."""
+        if not among:
+            return set()
+        stmt = select(SessionMessage.images).where(
+            col(SessionMessage.session_id) == session_ref,
+            col(SessionMessage.retired_at).is_not(None),
+            col(SessionMessage.images).is_not(None),
+        )
+        wanted = set(among)
+        refs: set[str] = set()
+        for images in (await self.session.exec(stmt)).all():
+            refs.update(ref["sha256"] for ref in images or () if isinstance(ref, dict) and ref.get("sha256") in wanted)
+        return refs
 
     async def page(
         self, session_ref: str, *, limit: int, before: tuple[datetime, str] | None = None
     ) -> list[dict[str, Any]]:
-        """The latest `limit` messages of the session before the (`created_at`, `id`) cursor `before`
-        (the newest, without one), oldest first, as `DISPLAY_COLUMNS` only."""
+        """The latest `limit` live messages of the session (its model history) before the (`created_at`,
+        `id`) cursor `before` (the newest, without one), oldest first, as `DISPLAY_COLUMNS` only."""
+        return await self._display_page(session_ref, col(SessionMessage.retired_at).is_(None), limit, before)
+
+    async def transcript_page(
+        self, session_ref: str, *, limit: int, before: tuple[datetime, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """`page` of the session's transcript: every row it showed people (`_shown_in_transcript`),
+        retired included."""
+        return await self._display_page(session_ref, _shown_in_transcript(), limit, before)
+
+    async def _display_page(
+        self, session_ref: str, shown: Any, limit: int, before: tuple[datetime, str] | None
+    ) -> list[dict[str, Any]]:
         columns = [getattr(SessionMessage, name) for name in DISPLAY_COLUMNS]
-        stmt = select(*columns).where(col(SessionMessage.session_id) == session_ref)
+        stmt = select(*columns).where(col(SessionMessage.session_id) == session_ref, shown)
         if before is not None:
-            cursor = tuple_(
-                bindparam("before_at", before[0], type_=UtcDateTime()), bindparam("before_id", before[1], type_=Uuid7())
-            )
-            stmt = stmt.where(tuple_(col(SessionMessage.created_at), col(SessionMessage.id)) < cursor)
+            stmt = stmt.where(_before(SessionMessage.created_at, SessionMessage.id, before))
         stmt = stmt.order_by(col(SessionMessage.created_at).desc(), col(SessionMessage.id).desc()).limit(limit)
         rows = (await self.session.exec(stmt)).all()
         return [dict(zip(DISPLAY_COLUMNS, row, strict=True)) for row in reversed(rows)]
@@ -344,13 +479,26 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
         insert_rows: Sequence[dict[str, Any]] = (),
         update_rows: Sequence[dict[str, Any]] = (),
         delete_ids: Collection[str] = (),
+        retire_ids: Collection[str] = (),
+        retired_at: datetime | None = None,
     ) -> None:
-        """Bring the session's rows up to date: delete `delete_ids`, rewrite the written columns of
-        `update_rows` (by `id`), and insert `insert_rows`. Only rows of this session are touched, so a
-        stale id can never reach another session's history."""
+        """Bring the session's rows up to date: delete `delete_ids`, retire `retire_ids` (dated
+        `retired_at`; a row retired already keeps its date), rewrite the written columns of `update_rows`
+        (by `id`), and insert `insert_rows`. Only rows of this session are touched, so a stale id can
+        never reach another session's history."""
         if delete_ids:
             await self.delete_where(
                 col(SessionMessage.session_id) == session_ref, col(SessionMessage.id).in_(list(delete_ids))
+            )
+        if retire_ids:
+            await self.session.exec(
+                update(SessionMessage)
+                .where(
+                    col(SessionMessage.session_id) == session_ref,
+                    col(SessionMessage.id).in_(list(retire_ids)),
+                    col(SessionMessage.retired_at).is_(None),
+                )
+                .values(retired_at=retired_at or _now())
             )
         # Core statements on the table, one executemany each: not the ORM's bulk modes
         table = SessionMessage.__table__  # type: ignore[attr-defined]
@@ -421,7 +569,12 @@ class SessionMessageRepository(BaseRepository[SessionMessage, str]):
                 col(SessionMessage.session_id) == session_ref,
                 col(SessionMessage.channel_message_id) == channel_message_id,
                 col(SessionMessage.role) == "user",
+                col(SessionMessage.retired_at).is_(None),
             )
             .values(content=content, updated_at=at)
         )
         return int((await self.session.exec(stmt)).rowcount) > 0
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)

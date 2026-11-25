@@ -225,16 +225,20 @@ async def test_a_voice_turn_cancelled_mid_reply_closes_the_http_stream_and_leave
     assert [m.role for m in session.messages] == [MessageRole.USER]
 
 
-async def test_a_web_chat_turn_cancelled_mid_reply_leaves_no_assistant_message(
+async def test_a_web_chat_turn_cancelled_mid_reply_keeps_what_was_streamed_and_no_provider_output(
     openai_settings, session_manager, cost_tracker
 ):
+    """The person saw the first words (issue #243): they are saved once, flagged cut short, as plain text.
+    The response never completed, so no reasoning or output item of it is kept to replay."""
     await session_manager.onboarding.complete(_USER, "web", now=1.0)
     agent, llm = _agent(openai_settings, session_manager, cost_tracker, [_text_then_hang()])
     got_text = asyncio.Event()
+    streamed: list[str] = []
 
     async def read() -> None:
         async for chunk in agent.handle_message_stream(_USER, "web", "Which tea?", memory=False):
             if chunk.type is StreamEventType.TEXT:
+                streamed.append(chunk.content)
                 got_text.set()
 
     task = asyncio.create_task(read())
@@ -248,7 +252,8 @@ async def test_a_web_chat_turn_cancelled_mid_reply_leaves_no_assistant_message(
 
     assert llm.streams[0].closed
     session = await session_manager.get_or_create(_USER, "web")
-    assert not [m for m in session.messages if m.role is MessageRole.ASSISTANT]
+    (cut_short,) = [m for m in session.messages if m.role is MessageRole.ASSISTANT]
+    assert (cut_short.content, cut_short.is_error, cut_short.raw, cut_short.wire) == ("".join(streamed), True, [], "")
 
 
 # ── run_headless ─────────────────────────────────────────────────────────────

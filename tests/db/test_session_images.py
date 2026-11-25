@@ -139,93 +139,92 @@ async def test_a_stored_photo_is_never_overwritten(url):
     assert [(i.sha256, i.data) for i in row["images"]] == [(first.sha256, b"first bytes")]
 
 
-# ── pruning: photos follow their messages out ────────────────────────
+# ── pruning: photos stay with retired messages, orphans go ───────────
 
 
-async def test_clearing_a_session_deletes_its_photos_and_only_its_own(url):
+async def test_clearing_a_session_keeps_its_photos_with_the_retired_messages(url):
+    """A clear retires the messages; the history people read still shows their photos."""
     manager = manager_on(url)
     mine = await manager.get_or_create("alice", "telegram")
     theirs = await manager.get_or_create("bob", "telegram")
     await say(manager, mine, "one", photo(1), photo(2))
     await say(manager, theirs, "mine", photo(1))  # the same photo, in another session
-    assert await photo_rows(url) == {  # precondition: both sessions hold photos
-        "telegram:alice": {photo(1).sha256, photo(2).sha256},
-        "telegram:bob": {photo(1).sha256},
-    }
 
     await manager.clear(mine)
 
-    assert await photo_rows(url) == {"telegram:bob": {photo(1).sha256}}
+    assert await photo_rows(url) == {
+        "telegram:alice": {photo(1).sha256, photo(2).sha256},
+        "telegram:bob": {photo(1).sha256},
+    }
+    assert await stored_refs(url, "telegram:alice") == []  # the model's history is empty
 
 
-async def test_clearing_deletes_photos_this_process_never_saw(url):
-    """A row an earlier process stored (or a crash left) is not in the session's own record of its photos."""
+async def test_clearing_deletes_photos_no_row_shows(url):
+    """A photo row a crash left behind, which no message (live or retired) shows, is deleted."""
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram")
     await say(manager, session, "one", photo(1))
-    session._synced_images = frozenset()  # as if another process had stored the photo
-    assert await photo_rows(url) == {"telegram:alice": {photo(1).sha256}}  # precondition
+    async with session_scope(url) as db:
+        ref = (await SessionRepository(db).get_by(session_id="telegram:alice")).id
+        orphan = photo(9)
+        db.add(
+            SessionImage(
+                session_ref=ref,
+                sha256=orphan.sha256,
+                media_type=orphan.media_type,
+                data=base64.b64decode(orphan.data),
+                created_at=1.0,
+            )
+        )
+    session._synced_images = frozenset()  # as if another process had stored the photos
 
     await manager.clear(session)
 
-    assert await photo_rows(url) == {}
+    assert await photo_rows(url) == {"telegram:alice": {photo(1).sha256}}
 
 
-async def test_a_repair_that_removes_a_message_deletes_only_the_photos_nothing_holds_any_more(url):
+async def test_a_repair_that_removes_a_message_keeps_its_photo_with_the_retired_row(url):
     """`Agent._repair_tool_pairs` and its clear fallback replace `session.messages` and save."""
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram")
     await say(manager, session, "kept", photo(1))
     await say(manager, session, "orphaned", photo(2))
-    assert await photo_rows(url) == {"telegram:alice": {photo(1).sha256, photo(2).sha256}}  # precondition
 
     session.messages = session.messages[:1]
     await manager.save(session)
-    assert await photo_rows(url) == {"telegram:alice": {photo(1).sha256}}
-
     session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]  # the clear fallback
     await manager.save(session)
-    assert await photo_rows(url) == {}
+
+    assert await photo_rows(url) == {"telegram:alice": {photo(1).sha256, photo(2).sha256}}
 
 
-async def test_the_client_summary_swap_deletes_the_photos_of_the_messages_it_replaced(url):
+async def test_the_client_summary_swap_keeps_the_photos_of_the_messages_it_replaced(url):
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram")
     await say(manager, session, "old", photo(1))
     await say(manager, session, "newer", photo(2))
-    await say(manager, session, "newest", photo(3), photo(1))  # also shows the old photo again
+    await say(manager, session, "newest", photo(3), photo(1))
     prefix = session.messages[:2]
     summary = LLMMessage(role=MessageRole.SYSTEM, content="summary")
-    assert len(await photo_rows(url)) == 1  # precondition: three photos stored
 
     assert await manager.compact(session, prefix, summary)
 
-    # photo 2 left with its message; photo 1 stays: a kept message still shows it
-    assert await photo_rows(url) == {"telegram:alice": {photo(3).sha256, photo(1).sha256}}
+    assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in (1, 2, 3)}}
+    assert await stored_refs(url, "telegram:alice") == [[], [photo(3).sha256, photo(1).sha256]]
 
 
-async def test_cutting_a_session_deletes_the_photos_of_the_messages_it_cut(url):
+async def test_cutting_a_session_keeps_the_photos_of_the_messages_it_cut(url):
     manager = manager_on(url)
     session = await manager.get_or_create("alice", "telegram")
     for n in range(1, 13):
         await say(manager, session, f"message {n}", photo(n))
-    assert len(next(iter((await photo_rows(url)).values()))) == 12  # precondition: every photo stored
 
     assert await manager.cut(session, list(session.messages[:6]))  # the emergency cut of the oldest six
 
     assert [m.content for m in session.messages] == [f"message {n}" for n in range(7, 13)]
-    assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in range(7, 13)}}
-
-
-async def test_a_cut_keeps_the_photo_a_kept_message_still_shows(url):
-    manager = manager_on(url)
-    session = await manager.get_or_create("alice", "telegram")
-    for n in range(1, 9):
-        await say(manager, session, f"message {n}", photo(1) if n in (1, 8) else photo(n))
-
-    assert await manager.cut(session, list(session.messages[:4]))
-
-    assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in (1, 5, 6, 7)}}
+    assert await photo_rows(url) == {"telegram:alice": {photo(n).sha256 for n in range(1, 13)}}
+    # A fresh process loads the live messages only, each with its photo
+    assert await stored_refs(url, "telegram:alice") == [[photo(n).sha256] for n in range(7, 13)]
 
 
 # ── identity merge ───────────────────────────────────────────────────
