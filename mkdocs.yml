@@ -34,6 +34,7 @@ nav:
     - MS365 setup: guides/ms365-setup.md
     - Signal setup: guides/signal-setup.md
     - Skills guide: guides/skills-guide.md
+    - Storage encryption: guides/storage-encryption.md
     - Voice calling setup: guides/voice-calling-setup.md
     - Inbound receptionist setup: guides/receptionist-setup.md
     - Pilot quickstart (EN): guides/pilot-quickstart-en.md

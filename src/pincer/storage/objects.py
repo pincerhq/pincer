@@ -14,6 +14,13 @@ write raises KeyConflict.
 
 Listing, stat, move and delete still go through cloudpathlib: none of them
 touch its cache.
+
+With a customer-provided encryption key (`pincer.storage.encryption`) every
+request that carries content carries the key too, and an object stored
+without it (written before encryption was enabled) is read without it.
+Provider links cannot carry the key, so `presignable` is False and the
+storage browser hands out its own signed links instead, which it serves
+decrypted.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ import shutil
 from typing import IO, TYPE_CHECKING, Any
 from urllib.parse import quote
 
+from pincer.storage.encryption import keyed_request_hit_plain_object, note_plain
 from pincer.storage.errors import KeyConflict, KeyNotFound
 from pincer.storage.keys import content_type_for, etag
 from pincer.storage.limits import COPY_CHUNK
@@ -32,6 +40,7 @@ from pincer.storage.limits import COPY_CHUNK
 if TYPE_CHECKING:
     from cloudpathlib import CloudPath
 
+    from pincer.storage.encryption import StorageKey
     from pincer.storage.signing import Disposition
 
 logger = logging.getLogger(__name__)
@@ -67,18 +76,19 @@ def _inline_safe(content_type: str) -> bool:
 type ObjectIO = PathObjects | SdkObjects
 
 
-def objects_for(root: CloudPath) -> ObjectIO:
-    """The object IO for `root`'s client."""
+def objects_for(root: CloudPath, *, keyed: bool = True) -> ObjectIO:
+    """The object IO for `root`'s client; without its customer key when not `keyed`."""
     from cloudpathlib import AzureBlobClient, GSClient, S3Client
 
     client = root.client
+    key: StorageKey | None = getattr(client, "encryption_key", None) if keyed else None
     if isinstance(client, S3Client):
-        return S3Objects(client)
+        return S3Objects(client, key)
     if isinstance(client, AzureBlobClient):
-        return AzureObjects(client)
+        return AzureObjects(client, key)
     if isinstance(client, GSClient):
-        return GSObjects(client)
-    return PathObjects()
+        return GSObjects(client, key)
+    return PathObjects(key)
 
 
 def _provider_link(path: CloudPath, ttl: int) -> str:
@@ -93,6 +103,15 @@ class PathObjects:
 
     #: Largest object one write may store; None for no limit of the store's own.
     max_object_bytes: int | None = None
+
+    def __init__(self, encryption_key: StorageKey | None = None) -> None:
+        self.encryption_key = encryption_key
+
+    @property
+    def presignable(self) -> bool:
+        """Whether `presign` gives a link the provider serves; False when objects
+        are encrypted with a customer key, which a provider link cannot carry."""
+        return self.encryption_key is None
 
     def read(self, path: CloudPath) -> tuple[bytes, object]:
         """The object's content, and a version to pass back as `if_version`."""
@@ -143,6 +162,13 @@ class SdkObjects:
 
     #: Largest object one write may store; None for no limit of the store's own.
     max_object_bytes: int | None = None
+    #: The customer key every request that carries content sends; None for none.
+    encryption_key: StorageKey | None = None
+
+    @property
+    def presignable(self) -> bool:
+        """False with a customer key: a provider link cannot carry it."""
+        return self.encryption_key is None
 
     def read(self, path: CloudPath) -> tuple[bytes, object]:
         raise NotImplementedError
@@ -188,17 +214,36 @@ class S3Objects(SdkObjects):
 
     max_object_bytes = _S3_MAX_PUT_BYTES
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, encryption_key: StorageKey | None = None) -> None:
         self._client = client
         self._s3 = client.client
         self._unconditional = False
         self._presigner: Any = None
+        self.encryption_key = encryption_key
+        self._sse: dict[str, str] = encryption_key.s3_args() if encryption_key else {}
+
+    def _keyed_then_plain(self, call: Any, path: CloudPath) -> Any:
+        """`call(**sse)`, once more without the key for an object stored without one."""
+        from botocore.exceptions import ClientError
+
+        if not self._sse:
+            return call()
+        try:
+            return call(**self._sse)
+        except ClientError as e:
+            if not keyed_request_hit_plain_object(e):
+                raise
+        note_plain(path)
+        return call()
 
     def _get(self, path: CloudPath) -> Any:
         from botocore.exceptions import ClientError
 
         try:
-            return self._s3.get_object(Bucket=path.bucket, Key=path.key)  # type: ignore[attr-defined]
+            return self._keyed_then_plain(
+                lambda **sse: self._s3.get_object(Bucket=path.bucket, Key=path.key, **sse),  # type: ignore[attr-defined]
+                path,
+            )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
                 raise KeyNotFound(f"No such file: {path}") from e
@@ -229,6 +274,7 @@ class S3Objects(SdkObjects):
                 Key=path.key,  # type: ignore[attr-defined]
                 Body=source,
                 ContentType=content_type,
+                **self._sse,
                 **extra,
             )
 
@@ -258,7 +304,10 @@ class S3Objects(SdkObjects):
         from botocore.exceptions import ClientError
 
         try:
-            head = self._s3.head_object(Bucket=path.bucket, Key=path.key)  # type: ignore[attr-defined]
+            head = self._keyed_then_plain(
+                lambda **sse: self._s3.head_object(Bucket=path.bucket, Key=path.key, **sse),  # type: ignore[attr-defined]
+                path,
+            )
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
                 return None
@@ -342,17 +391,28 @@ class _Reader(io.RawIOBase):
 class AzureObjects(SdkObjects):
     """Azure Blob through azure-storage-blob: `If-Match` on the ETag, no overwrite for a new blob."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, encryption_key: StorageKey | None = None) -> None:
         self._service = client.service_client
+        self.encryption_key = encryption_key
 
     def _blob(self, path: CloudPath) -> Any:
         return self._service.get_blob_client(container=path.container, blob=path.blob)  # type: ignore[attr-defined]
 
-    def _download(self, path: CloudPath) -> Any:
-        from azure.core.exceptions import ResourceNotFoundError
+    def _cpk(self) -> dict[str, Any]:
+        return {"cpk": self.encryption_key.azure_cpk()} if self.encryption_key else {}
 
+    def _download(self, path: CloudPath) -> Any:
+        from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+
+        blob = self._blob(path)
         try:
-            return self._blob(path).download_blob()
+            try:
+                return blob.download_blob(**self._cpk())
+            except HttpResponseError as e:
+                if not (self.encryption_key and keyed_request_hit_plain_object(e)):
+                    raise
+            note_plain(path)
+            return blob.download_blob()
         except ResourceNotFoundError as e:
             raise KeyNotFound(f"No such file: {path}") from e
 
@@ -371,7 +431,11 @@ class AzureObjects(SdkObjects):
         if version is not None:
             condition = {"etag": version, "match_condition": MatchConditions.IfNotModified}
         self._blob(path).upload_blob(
-            source, overwrite=not absent, content_settings=ContentSettings(content_type=content_type), **condition
+            source,
+            overwrite=not absent,
+            content_settings=ContentSettings(content_type=content_type),
+            **self._cpk(),
+            **condition,
         )
 
     def _refused(self, error: Exception) -> bool:
@@ -383,16 +447,33 @@ class AzureObjects(SdkObjects):
 class GSObjects(SdkObjects):
     """Google Cloud Storage through google-cloud-storage: `ifGenerationMatch`, 0 for a new object."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, encryption_key: StorageKey | None = None) -> None:
         self._gcs = client.client
+        self.encryption_key = encryption_key
 
     def _blob(self, path: CloudPath) -> Any:
-        return self._gcs.bucket(path.bucket).blob(path.blob)  # type: ignore[attr-defined]
+        """The blob to write: keyed when a customer key is set."""
+        raw = self.encryption_key.raw if self.encryption_key else None
+        return self._gcs.bucket(path.bucket).blob(path.blob, encryption_key=raw)  # type: ignore[attr-defined]
+
+    def _readable(self, path: CloudPath) -> Any:
+        """The blob to read: keyed only when it is stored with a customer key
+        (its metadata, readable without the key, says so)."""
+        if self.encryption_key is None:
+            return self._gcs.bucket(path.bucket).blob(path.blob)  # type: ignore[attr-defined]
+        found = self._gcs.bucket(path.bucket).get_blob(path.blob)  # type: ignore[attr-defined]
+        if found is None:
+            raise KeyNotFound(f"No such file: {path}")
+        if (getattr(found, "_properties", None) or {}).get("customerEncryption"):
+            found.encryption_key = self.encryption_key.raw
+        else:
+            note_plain(path)
+        return found
 
     def read(self, path: CloudPath) -> tuple[bytes, object]:
         from google.api_core.exceptions import NotFound
 
-        blob = self._blob(path)
+        blob = self._readable(path)
         try:
             data: bytes = blob.download_as_bytes()
         except NotFound as e:
@@ -401,7 +482,7 @@ class GSObjects(SdkObjects):
         return data, blob.generation
 
     def open(self, path: CloudPath) -> IO[bytes]:
-        return self._blob(path).open("rb")  # type: ignore[no-any-return]
+        return self._readable(path).open("rb")  # type: ignore[no-any-return]
 
     def _put(self, path: CloudPath, source: IO[bytes], content_type: str, *, version: object, absent: bool) -> None:
         condition: dict[str, Any] = {}

@@ -19,13 +19,12 @@ def doctor(
     import json as _json
     from pathlib import Path as _P
 
-    from pincer.config import get_settings_relaxed
-    from pincer.security.doctor import CheckStatus, SecurityDoctor
+    from pincer.security.doctor import CheckStatus, SecurityDoctor, load_settings
 
     doc = SecurityDoctor(
         data_dir=_P("data"),
         config_dir=_P("."),
-        skills_dir=get_settings_relaxed().skills_dir,
+        skills_dir=load_settings()[0].skills_dir,
         production=production,
     )
     report = doc.run_all()

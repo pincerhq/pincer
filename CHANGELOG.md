@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Storage encryption with a customer-provided key (#421)
+
+- `PINCER_STORAGE_ENCRYPTION_KEY` (32 random bytes, base64) encrypts everything
+  Pincer stores in cloud storage, on the provider side, with a key the provider
+  never keeps: SSE-C on S3, CPK on Azure Blob (hierarchical-namespace accounts
+  included), CSEK on GCS. It covers the storage root and a cloud skills dir
+  outside it.
+- One-way: two objects in the bucket, both written with the key, make Pincer
+  refuse the storage when the key is later unset or changed. The
+  `.pincer/encryption.json` marker (written when encryption is enabled) holds
+  an HMAC fingerprint of the key and the progress. The `.encrypted` check file
+  at the root holds only that HMAC and appears once every object is encrypted.
+  Either one alone keeps the lock, and Pincer writes the other one again. No
+  database is involved. Both are hidden from the storage browser, and every
+  storage endpoint answers 404 for them.
+- Existing objects are encrypted in place by a resumable background job, which
+  `pincer run` / `pincer serve` start on their own, or by
+  `pincer storage encrypt [--dry-run]`. `pincer storage encryption-status`
+  shows the progress. Until the job is done, objects stored without the key
+  stay readable. On a versioned bucket, `pincer storage old-versions-deleted`
+  records that the plain versions left behind were deleted.
+- The storage browser shows plain content: on an encrypted root, download and
+  preview links go through Pincer's `/api/storage/signed/{token}` route, which
+  serves the file decrypted. `GET /api/storage` gains `encrypted`.
+- On Azure hierarchical-namespace accounts, every Data Lake request is wrapped
+  in error handling, and a start-up probe (write, Data Lake properties, read,
+  rename, delete) refuses the account when any step fails.
+- `pincer doctor` gains a `storage_encryption` check: the key, a non-TLS
+  endpoint, the lock, the Azure probe step by step, and the progress.
+- **Encrypted data can only be read over TLS**: a key is refused together with
+  an `http://` S3 endpoint or Azure account URL / connection string. See
+  [Storage encryption](docs/guides/storage-encryption.md).
+
 #### HTTP API rate limiting and an opt-in response cache (#404)
 
 - Every `/api/*` request is rate limited. A per-IP ceiling runs before auth

@@ -312,6 +312,13 @@ async def _build_core(settings: Settings) -> CoreComponents:
     # process-cached and become a no-op after this.
     await init_database(settings.db_path)
 
+    # Storage encryption: refuse encrypted storage the key does not open (so
+    # skills and the workspace never use it half-working), and encrypt what
+    # was stored before the key was set, in the background.
+    from pincer.storage import encrypt_job
+
+    await asyncio.to_thread(encrypt_job.start, settings)
+
     # Initialize components
     session_mgr = SessionManager(settings.db_path)
     await session_mgr.initialize()

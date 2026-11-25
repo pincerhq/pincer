@@ -310,6 +310,7 @@ Key files to back up:
 - `data/` — WhatsApp session (neonize store); re-pair if lost
 - `.env` — your configuration
 - the storage root (`PINCER_STORAGE_ROOT`, default `<data_dir>/storage`) — custom skills in `skills/` and the agent's files in `workspace/`
+- `PINCER_STORAGE_ENCRYPTION_KEY`, when [storage encryption](../guides/storage-encryption.md) is on — without it the cloud storage cannot be read, by anyone
 
 ---
 

@@ -9,6 +9,8 @@ Downloads and previews go through presigned links (`/presign`): the browser
 can then use them in `<img src>` or a plain navigation, which cannot carry a
 bearer token. A cloud root signs with the provider; a local root signs with
 the JWT secret and serves the file from the public `/signed/{token}` route.
+So does a cloud root encrypted with a customer key (`PINCER_STORAGE_ENCRYPTION_KEY`):
+a provider link cannot carry the key, so every file is served decrypted by the API.
 
 Reading needs any authenticated identity; changing files needs a signed-in
 session, not an API key (see `InteractiveIdentity`).
@@ -53,6 +55,11 @@ _SAFE_FILE_HEADERS = {
 
 class StorageInfoOut(BaseModel):
     backend: str = Field(description="file, s3, az or gs")
+    encrypted: bool = Field(
+        default=False,
+        description="Objects are encrypted on the provider side with Pincer's customer key; "
+        "the API serves them decrypted",
+    )
     root: str
     protected: list[str] = Field(description="Root-relative prefixes that cannot be deleted or moved")
     presign_ttl: int = Field(description="Lifetime of presigned links, in seconds")
@@ -242,13 +249,14 @@ async def presign(
 
 @router.get("/signed/{token}")
 async def signed(token: str, browser: StorageBrowserDep) -> Response:
-    """Serve a file from a local root through a link minted by `/presign`.
+    """Serve a file through a link minted by `/presign`: from a local root, or
+    decrypted from a cloud root encrypted with a customer key.
 
     Public: the token is the credential (HMAC over key, expiry and disposition).
     """
 
     def open_signed(b: StorageBrowser) -> tuple[Download, Disposition]:
-        if b.is_cloud:
+        if b.is_cloud and not b.is_encrypted:
             raise KeyNotFound("Signed links of a cloud root are served by the storage provider")
         key, disposition = b.verify(token)
         return b.open_read(key), disposition

@@ -98,6 +98,26 @@ class DoctorReport:
         }
 
 
+def load_settings() -> tuple[Settings, Exception | None]:
+    """The settings the doctor checks, and the error of a malformed storage key.
+
+    A malformed `PINCER_STORAGE_ENCRYPTION_KEY` fails settings loading, which
+    would stop the doctor before any check. It is reported as the
+    `storage_encryption` check instead, and every other check runs on the
+    settings without the key.
+    """
+    from pincer.config import get_settings_relaxed
+    from pincer.config.main import _RelaxedSettings
+    from pincer.storage.encryption import InvalidStorageKey
+
+    try:
+        return get_settings_relaxed(), None
+    except InvalidStorageKey as e:
+        settings = _RelaxedSettings(storage_encryption_key=None)  # type: ignore[call-arg]
+        settings.ensure_dirs()
+        return settings, e
+
+
 class SecurityDoctor:
     """Runs comprehensive security checks on a Pincer installation."""
 
@@ -118,19 +138,28 @@ class SecurityDoctor:
         # The identity roster, read once per `run_all` instead of once per
         # access check (each read opens its own loop and engine).
         self._roster_cache: dict[Path, tuple[bool, list[str]]] | None = None
+        # The settings of the running `run_all` (see `load_settings`).
+        self._settings: Settings | None = None
 
     def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
+            if self._settings is not None:
+                return self._settings
             from pincer.config import get_settings_relaxed
 
             return get_settings_relaxed()
         return cfg
 
     def run_all(self) -> DoctorReport:
-        from pincer.config import get_settings_relaxed
-
         self._roster_cache = {}
-        settings = get_settings_relaxed()
+        settings, key_error = load_settings()
+        self._settings = settings
+        try:
+            return self._run_all(settings, key_error)
+        finally:
+            self._settings = None
+
+    def _run_all(self, settings: Settings, key_error: Exception | None) -> DoctorReport:
         report = DoctorReport()
         # Secrets (6 checks)
         report.checks.append(self._check_env_file_permissions())
@@ -154,10 +183,13 @@ class SecurityDoctor:
         report.checks.append(self._check_api_rate_limits(settings))
         report.checks.append(self._check_cache_backend(settings))
         report.checks.append(self._check_tool_call_limits(settings))
-        # Filesystem (5 checks)
+        # Filesystem (6 checks)
         report.checks.append(self._check_data_dir_permissions())
         report.checks.append(self._check_skills_dir_permissions(settings))
         report.checks.append(self._check_storage_root(settings))
+        report.checks.append(
+            self._invalid_storage_key(key_error) if key_error else self._check_storage_encryption(settings)
+        )
         report.checks.append(self._check_no_world_readable_secrets())
         report.checks.append(self._check_sqlite_not_world_readable())
         # Network (2 checks)
@@ -1793,6 +1825,132 @@ class SecurityDoctor:
             CheckStatus.PASS,
             f"Storage root {resolved} does not contain the data dir",
             category="filesystem",
+        )
+
+    def _check_storage_encryption(self, cfg: Settings | None = None) -> CheckResult:
+        """Storage encryption with a customer key: the key, the TLS endpoint, the
+        one-way lock of each cloud location, the Azure hierarchical-namespace
+        probe, and how far encrypting existing data got."""
+        from pincer.storage import clients, encrypt_job, encryption_state
+        from pincer.storage.encryption import TLS_WARNING_DOC, load_key, tls_problem
+        from pincer.storage.errors import StorageEncryptionError, StorageError
+        from pincer.storage.layout import storage_root_for
+
+        name, category = "storage_encryption", "filesystem"
+        settings = self._cfg(cfg)
+        key = load_key(settings)
+        locations = encryption_state.locations(settings)
+        local_root = key is not None and not clients.is_remote_uri(storage_root_for(settings))
+        if not locations:
+            if key is not None:
+                return CheckResult(
+                    name,
+                    CheckStatus.WARNING,
+                    "PINCER_STORAGE_ENCRYPTION_KEY is set, but no storage is in the cloud: it has no effect "
+                    "(it encrypts s3://, az:// and gs:// storage only)",
+                    "Unset it, or point PINCER_STORAGE_ROOT at a bucket",
+                    category,
+                )
+            return CheckResult(name, CheckStatus.SKIPPED, "No cloud storage configured", category=category)
+
+        problems: list[str] = []
+        warnings: list[str] = []
+        notes: list[str] = []
+        if local_root:
+            warnings.append(
+                "the storage root is local: PINCER_STORAGE_ENCRYPTION_KEY has no effect on it "
+                "(it encrypts s3://, az:// and gs:// storage only)"
+            )
+        for location in locations:
+            scheme = clients.uri_scheme(location)
+            if key is not None and (tls := tls_problem(scheme, settings)):
+                problems.append(f"{location}: {tls}. Encrypted data can only be read over TLS (see {TLS_WARNING_DOC})")
+                continue
+            try:
+                root = clients.open_cloud_uri(
+                    location, settings, None, error=StorageError, what="storage location", check=False
+                )
+                hns_steps: list[tuple[str, str | None]] = []
+                client = root.client
+                if key is not None and hasattr(client, "probe_hns") and client.is_hns(root):
+                    hns_steps = client.probe_hns(root / encryption_state.STATE_DIR)
+                    failed = [f"{step}: {err}" for step, err in hns_steps if err]
+                    if failed:
+                        problems.append(f"{location}: Azure hierarchical-namespace probe failed at " + failed[0])
+                        continue
+                # Verify only: the doctor never enables encryption, and the HNS
+                # probe already ran above (step by step).
+                encryption_state.check_location(root, settings, thorough=True, create=False, probe=False)
+                marker = encryption_state.status(root) if key is not None else None
+            except StorageEncryptionError as e:
+                # Refused for good: a wrong or missing key, a failed probe step.
+                problems.append(f"{location}: {e}")
+                continue
+            except Exception as e:
+                # Unreachable, throttled, a missing permission: not a refusal, and
+                # Pincer checks the location again on its next open.
+                warnings.append(
+                    f"{location}: could not check ({type(e).__name__}: {e}); it is checked again on its next use"
+                )
+                continue
+            if key is None:
+                notes.append(f"{location}: not encrypted")
+                continue
+            hns = f"; HNS probe passed ({len(hns_steps)} steps)" if hns_steps else ""
+            if marker is None:
+                warnings.append(f"{location}: encryption is enabled on the next start of Pincer{hns}")
+                continue
+            migration = marker.get("migration", {})
+            state = migration.get("state", "pending")
+            if state != "complete":
+                warnings.append(
+                    f"{location}: encrypting existing data is {state} ({migration.get('done', 0)} object(s) done){hns}"
+                )
+            elif old := encrypt_job.old_versions_now(root, migration):
+                # Checked again now (read-only). With versioning on it ends only
+                # once the owner records the deletion (or turns versioning off);
+                # soft delete also ends once its retention has passed.
+                warnings.append(
+                    f"{location}: encrypted, but old plain versions may remain readable: {old}. "
+                    f"Delete them, then run `pincer storage old-versions-deleted {location}` "
+                    "(see docs/guides/storage-encryption.md#versioned-buckets)"
+                )
+            else:
+                notes.append(f"{location}: encrypted, existing data complete{hns}")
+
+        if problems:
+            return CheckResult(
+                name,
+                CheckStatus.CRITICAL,
+                "; ".join(problems),
+                "Pincer refuses this storage. Encryption cannot be turned off and its key cannot be changed: "
+                "set PINCER_STORAGE_ENCRYPTION_KEY to the key it was enabled with, over an https:// endpoint",
+                category,
+            )
+        if warnings:
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                "; ".join(warnings + notes),
+                "Run `pincer storage encrypt` (a running `pincer run` also does it in the background); "
+                "on a versioned bucket, delete the old plain versions once it is complete",
+                category,
+            )
+        if key is None:
+            return CheckResult(
+                name, CheckStatus.SKIPPED, "Storage encryption is off: " + "; ".join(notes), category=category
+            )
+        return CheckResult(name, CheckStatus.PASS, "; ".join(notes), category=category)
+
+    @staticmethod
+    def _invalid_storage_key(error: Exception) -> CheckResult:
+        """A malformed PINCER_STORAGE_ENCRYPTION_KEY; the message never carries the value."""
+        return CheckResult(
+            "storage_encryption",
+            CheckStatus.CRITICAL,
+            str(error),
+            "Set a 32-byte base64 key: openssl rand -base64 32. Pincer does not start with this key",
+            "filesystem",
         )
 
     def _check_remote_skills_root(self, uri: str, cfg: Settings) -> CheckResult:

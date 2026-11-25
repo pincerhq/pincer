@@ -34,6 +34,7 @@ from pincer.cli import (
     signal,
     skills,
     slack,
+    storage,
     telephony,
     voice,
     whatsapp,
@@ -65,6 +66,7 @@ app.add_typer(audit.audit_app, name="audit")
 app.add_typer(memory.memory_app, name="memory")
 app.add_typer(schedule.schedule_app, name="schedule")
 app.add_typer(skills.skills_app, name="skills")
+app.add_typer(storage.storage_app, name="storage")
 app.add_typer(identity.identity_app, name="identity")
 app.add_typer(db.db_app, name="db")
 app.add_typer(mcp.mcp_app, name="mcp")
