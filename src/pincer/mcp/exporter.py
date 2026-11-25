@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("pincer.mcp.exporter")
 
+# An MCP call's approval needs a chat to show the prompt in; this is what the
+# client hears when there was none (or the prompt couldn't be delivered).
+_NO_CHAT_FOR_APPROVAL = (
+    "Approval for '{tool}' could not be requested: it needs a chat on Telegram, WhatsApp or Teams "
+    "where the user has written to Pincer, and web chat can't show it. Tell the user; do not retry until they have."
+)
+
 # Default approval-required tools (destructive or sensitive)
 _APPROVAL_REQUIRED = frozenset(
     {
@@ -138,9 +145,11 @@ class PincerToolExporter:
                     outcome = as_outcome(await approval_cb(pincer_name, shown))
                 except Exception:
                     logger.exception("Approval callback raised for '%s'", pincer_name)
-                    outcome = ApprovalOutcome.UNAVAILABLE
+                    return f"[Not approved] {approval_tool_message(pincer_name, ApprovalOutcome.UNAVAILABLE)}"
                 if outcome is ApprovalOutcome.DENIED:
                     return f"[Denied] User declined to execute {pincer_name}"
+                if outcome is ApprovalOutcome.UNAVAILABLE:
+                    return f"[Not approved] {_NO_CHAT_FOR_APPROVAL.format(tool=pincer_name)}"
                 if outcome is not ApprovalOutcome.APPROVED:
                     return f"[Not approved] {approval_tool_message(pincer_name, outcome)}"
             return await registry.execute(pincer_name, kwargs, context=dict(MCP_TOOL_CONTEXT))

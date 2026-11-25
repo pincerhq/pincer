@@ -23,6 +23,7 @@ import contextlib
 import json as _json
 import logging
 import re
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.approval_text import parse_yes_no
@@ -175,6 +176,9 @@ class MicrosoftTeamsChannel(BaseChannel):
         self._conversation_refs: dict[str, str] = {}
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._pending_inputs: dict[str, asyncio.Future[str]] = {}
+        # A yes/no reply can't say which prompt it answers, so one approval per
+        # user at a time: a second request waits here for the first.
+        self._approval_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Active ctx.send callbacks, keyed by user_id, set while a message is
         # being handled so approval/input prompts can reply in-thread instead
         # of going through the proactive send API (which 400s on thread convs).
@@ -384,12 +388,32 @@ class MicrosoftTeamsChannel(BaseChannel):
         else:
             await self.send(user_id, text)
 
-    async def request_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> ApprovalOutcome:
-        """Send an approval prompt and wait up to 120 s for a yes/no reply."""
+    async def request_approval(
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        requested_by: str | None = None,
+    ) -> ApprovalOutcome:
+        """Send an approval prompt and wait up to 120 s for a yes/no reply.
+
+        *requested_by* names who asked when it wasn't the agent itself (an MCP client).
+        """
+        async with self._approval_locks[user_id]:
+            return await self._ask_approval(user_id, tool_name, arguments, requested_by)
+
+    async def _ask_approval(
+        self, user_id: str, tool_name: str, arguments: dict[str, Any], requested_by: str | None
+    ) -> ApprovalOutcome:
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
-        prompt = f"🔐 **Approval required**\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nReply **yes** or **no**."
+        origin = f"Requested by: {requested_by}\n" if requested_by else ""
+        prompt = (
+            f"🔐 **Approval required**\n\n{origin}Tool: `{tool_name}`\nArgs: `{args_preview}`\n\n"
+            "Reply **yes** or **no**."
+        )
         try:
             await self._send_to_user(user_id, prompt)
         except Exception as e:

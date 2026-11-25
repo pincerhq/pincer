@@ -101,6 +101,11 @@ async def test_send_falls_back_to_plain_unconverted_text_on_error() -> None:
     assert second_call.kwargs == {"chat_id": 123456789, "text": "**bold**", "parse_mode": None}
 
 
+def _only_pending(channel: TelegramChannel) -> asyncio.Future[bool]:
+    (future,) = channel._pending_approvals.values()
+    return future
+
+
 async def test_request_approval_falls_back_to_plain_text_on_markdown_error() -> None:
     """Regression: a malformed-markdown args_preview must not silently drop the approval prompt."""
     channel = _make_channel()
@@ -108,7 +113,7 @@ async def test_request_approval_falls_back_to_plain_text_on_markdown_error() -> 
 
     task = asyncio.ensure_future(channel.request_approval("123456789", "some_tool", {"arg": "value"}))
     await asyncio.sleep(0)  # let request_approval register the pending future before we resolve it
-    channel._pending_approvals["123456789"].set_result(True)
+    _only_pending(channel).set_result(True)
     result = await task
 
     assert result is ApprovalOutcome.APPROVED
@@ -127,7 +132,7 @@ async def test_request_approval_deny_is_denied() -> None:
 
     task = asyncio.ensure_future(channel.request_approval("123456789", "some_tool", {}))
     await asyncio.sleep(0)
-    channel._pending_approvals["123456789"].set_result(False)
+    _only_pending(channel).set_result(False)
 
     assert await task is ApprovalOutcome.DENIED
 
@@ -138,10 +143,10 @@ async def test_request_approval_timeout_is_timed_out() -> None:
 
     task = asyncio.ensure_future(channel.request_approval("123456789", "some_tool", {}))
     await asyncio.sleep(0)
-    channel._pending_approvals["123456789"].set_exception(TimeoutError())
+    _only_pending(channel).set_exception(TimeoutError())
 
     assert await task is ApprovalOutcome.TIMED_OUT
-    assert "123456789" not in channel._pending_approvals
+    assert not channel._pending_approvals
 
 
 async def test_request_approval_unavailable_when_prompt_undeliverable() -> None:
@@ -151,7 +156,7 @@ async def test_request_approval_unavailable_when_prompt_undeliverable() -> None:
     result = await channel.request_approval("123456789", "some_tool", {})
 
     assert result is ApprovalOutcome.UNAVAILABLE
-    assert "123456789" not in channel._pending_approvals
+    assert not channel._pending_approvals
 
 
 async def test_send_photo_fast_path_uses_chat_id() -> None:
@@ -680,6 +685,8 @@ async def test_cmd_help_responds_when_allowed() -> None:
 
 async def test_tool_approval_callback_edits_message_with_escaped_label() -> None:
     channel, router = _registered_handlers()
+    future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    channel._pending_approvals["req-1"] = future
 
     callback = MagicMock()
     callback.data = "tool_approve:req-1"
@@ -695,3 +702,43 @@ async def test_tool_approval_callback_edits_message_with_escaped_label() -> None
     (edited_text,), _ = callback.message.edit_text.call_args
     assert "&lt;danger&gt;" in edited_text
     assert "<b>Approved</b>" in edited_text
+    assert future.result() is True
+
+
+async def test_tool_approval_callback_on_a_stale_card_says_expired() -> None:
+    channel, router = _registered_handlers()
+
+    callback = MagicMock()
+    callback.data = "tool_approve:gone"
+    callback.answer = AsyncMock()
+    callback.message.text = "Approval required"
+    callback.message.edit_text = AsyncMock()
+
+    await router.callback_query.handlers[0].callback(callback)
+
+    callback.answer.assert_awaited_once_with("Expired")
+
+
+async def test_two_open_cards_each_answer_their_own_prompt() -> None:
+    """An MCP prompt and an agent prompt for the same user don't overwrite each other (PR #423 review)."""
+    channel, router = _registered_handlers()
+    channel._bot = MagicMock()
+    channel._bot.send_message = AsyncMock()
+
+    first = asyncio.ensure_future(channel.request_approval("123456789", "email_send", {}))
+    await asyncio.sleep(0)
+    second = asyncio.ensure_future(
+        channel.request_approval("123456789", "google__send_message", {}, requested_by="an MCP client")
+    )
+    await asyncio.sleep(0)
+    first_card, second_card = (c.kwargs["reply_markup"] for c in channel._bot.send_message.call_args_list)
+    assert "Requested by: an MCP client" in channel._bot.send_message.call_args_list[1].kwargs["text"]
+
+    deny = MagicMock(data=second_card.inline_keyboard[0][1].callback_data, answer=AsyncMock())
+    approve = MagicMock(data=first_card.inline_keyboard[0][0].callback_data, answer=AsyncMock())
+    await router.callback_query.handlers[0].callback(deny)
+    await router.callback_query.handlers[0].callback(approve)
+
+    assert await first is ApprovalOutcome.APPROVED
+    assert await second is ApprovalOutcome.DENIED
+    assert not channel._pending_approvals

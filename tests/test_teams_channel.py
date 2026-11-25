@@ -350,6 +350,35 @@ async def test_request_approval_outcome(resolve, expected) -> None:
 
 
 @pytest.mark.asyncio
+async def test_second_approval_waits_for_the_first() -> None:
+    """A yes/no reply can't say which prompt it answers, so prompts for one user are serialised (PR #423 review)."""
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._send_to_user = AsyncMock()
+
+    first = asyncio.ensure_future(ch.request_approval("u1", "email_send", {}))
+    for _ in range(10):
+        if "u1" in ch._pending_approvals:
+            break
+        await asyncio.sleep(0)
+    first_future = ch._pending_approvals["u1"]
+    second = asyncio.ensure_future(ch.request_approval("u1", "google__send_message", {}, requested_by="an MCP client"))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert ch._send_to_user.await_count == 1
+    assert ch._pending_approvals["u1"] is first_future
+
+    first_future.set_result(True)
+    assert await first is ApprovalOutcome.APPROVED
+    for _ in range(10):
+        if ch._pending_approvals.get("u1") not in (None, first_future):
+            break
+        await asyncio.sleep(0)
+    assert "Requested by: an MCP client" in ch._send_to_user.await_args.args[1]
+    ch._pending_approvals["u1"].set_result(False)
+    assert await second is ApprovalOutcome.DENIED
+
+
+@pytest.mark.asyncio
 async def test_request_approval_unavailable_when_prompt_undeliverable() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
     ch._send_to_user = AsyncMock(side_effect=RuntimeError("no conversation reference"))

@@ -1353,6 +1353,16 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     # from, rather than the first-linked ID stored in the DB.
     _active_sender: dict[str, str] = {}
 
+    # Approval prompts for tools an MCP client calls go to the chat where a
+    # known user last wrote. `_channel_approval` is defined further down;
+    # the lambda looks it up only when an MCP client asks.
+    from pincer.mcp.channel_approval import MCPApprovalRouter
+
+    mcp_approvals = MCPApprovalRouter(
+        ask=lambda *args, **kwargs: _channel_approval(*args, **kwargs),
+        is_known=identity.is_active,
+    )
+
     _orig_on_message_fn = on_message
 
     async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[no-redef]
@@ -1360,6 +1370,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
         incoming = await _identity_pipeline(incoming)
         canonical_id = incoming.pincer_user_id or incoming.user_id
         _active_sender[f"{canonical_id}:{incoming.channel}"] = raw_user_id
+        await mcp_approvals.note_message(canonical_id, incoming.channel)
         fut = _pending_ask.get(canonical_id)
         if fut and not fut.done():
             fut.set_result(incoming.text)
@@ -1440,16 +1451,18 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
         arguments: dict,
         user_id: str,
         channel: str,
+        *,
+        requested_by: str | None = None,
     ) -> ApprovalOutcome:
         if channel == "telegram" and tg is not None:
             raw_id = await _raw_id(user_id, "telegram")
-            return await tg.request_approval(raw_id, tool_name, arguments)
+            return await tg.request_approval(raw_id, tool_name, arguments, requested_by=requested_by)
         if channel == "whatsapp" and wa is not None:
             raw_id = await _raw_id(user_id, "whatsapp")
-            return await wa.request_approval(raw_id, tool_name, arguments)
+            return await wa.request_approval(raw_id, tool_name, arguments, requested_by=requested_by)
         if channel == "teams" and ms is not None:
             raw_id = await _raw_id(user_id, "teams")
-            return await ms.request_approval(raw_id, tool_name, arguments)
+            return await ms.request_approval(raw_id, tool_name, arguments, requested_by=requested_by)
         if channel == "web":
             from pincer.api.approvals import request_web_approval
 
@@ -1920,7 +1933,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             mcp_server = PincerMCPServer(
                 config=_mcp_full_cfg.server,
                 tool_registry=tools,
-                approval_callback=(agent._approve_on_active_channel if agent._approval_callback else None),
+                approval_callback=(mcp_approvals if agent._approval_callback else None),
                 ask_user_callback=(
                     (lambda q: agent._ask_user_on_active_channel(q)) if agent._ask_user_callback else None
                 ),

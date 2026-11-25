@@ -1020,22 +1020,6 @@ class Agent:
             logger.exception("ask_user callback failed")
             return f"[Error contacting user: {e}]"
 
-    async def _approve_on_active_channel(self, tool_name: str, arguments: dict[str, Any]) -> ApprovalOutcome:
-        """Ask the user's most-recently active channel to approve *tool_name*.
-
-        Called by the MCP server when an external client invokes an
-        approval-gated tool. UNAVAILABLE when no channel is active yet.
-        """
-        if not self._approval_callback or not self._last_active:
-            logger.warning("MCP approval for %s requested with no active messaging channel", tool_name)
-            return ApprovalOutcome.UNAVAILABLE
-        user_id, channel_name = self._last_active
-        try:
-            return as_outcome(await self._approval_callback(tool_name, arguments, user_id, channel_name))
-        except Exception:
-            logger.exception("Approval callback failed for MCP tool '%s'", tool_name)
-            return ApprovalOutcome.UNAVAILABLE
-
     @staticmethod
     def _note_request(
         session: Session,

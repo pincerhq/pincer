@@ -170,8 +170,8 @@ async def test_exported_tool_approval_denied():
     ("approval_cb", "expected"),
     [
         (AsyncMock(return_value=ApprovalOutcome.TIMED_OUT), "expired without an answer"),
-        (AsyncMock(return_value=ApprovalOutcome.UNAVAILABLE), "could not be requested"),
-        (AsyncMock(side_effect=RuntimeError("boom")), "could not be requested"),
+        (AsyncMock(return_value=ApprovalOutcome.UNAVAILABLE), "web chat can't show it"),
+        (AsyncMock(side_effect=RuntimeError("boom")), "(internal error)"),
     ],
     ids=["timed_out", "unavailable", "raises"],
 )

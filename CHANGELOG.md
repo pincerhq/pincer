@@ -1287,9 +1287,16 @@ mounting a directory. Install the new `remote-skills` extra
   card can show its final state.
 - **MCP server: approval-gated tools ask the user again (#227).** The MCP
   server's approval callback was called with no user or channel, so it never
-  reached anyone and every approval-gated call was refused. It now asks the
-  user's most recently active channel, the same way `pincer_ask_user` does,
-  and returns "could not be requested" when no channel has been active yet.
+  reached anyone and every approval-gated call was refused. It now asks in the
+  Telegram, WhatsApp or Teams chat where a known identity last wrote to
+  Pincer; a guest's message never makes them the approver. The prompt reads
+  "Requested by: an MCP client". Web chat can't show these prompts, so with no
+  such chat yet the MCP client is told approval needs one.
+- **Telegram and Teams: two approvals for the same user no longer overwrite
+  each other (#227).** Each Telegram card now carries its own id, so its
+  buttons answer that prompt only, and a tap on an expired card answers
+  "Expired". Teams asks one approval per user at a time, as WhatsApp already
+  did; a second request waits for the first.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

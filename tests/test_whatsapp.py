@@ -493,6 +493,20 @@ class TestWhatsAppMediaAndApproval:
         assert "491234567890" not in wa_channel._pending_approvals
 
     @pytest.mark.asyncio
+    async def test_request_approval_names_the_requester(self, wa_channel):
+        wa_channel._client = MagicMock()
+        wa_channel._client.send_message = AsyncMock()
+
+        async def deny_later():
+            await asyncio.sleep(0.01)
+            wa_channel._pending_approvals["491234567890"].future.set_result(False)
+
+        t = asyncio.create_task(deny_later())
+        await wa_channel.request_approval("491234567890", "shell_exec", {}, requested_by="an MCP client")
+        await t
+        assert "Requested by: an MCP client" in wa_channel._client.send_message.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_request_approval_unavailable_when_not_connected(self, wa_channel):
         wa_channel._client = None
         result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "ls"})

@@ -265,16 +265,21 @@ class WhatsAppChannel(BaseChannel):
         user_id: str,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        requested_by: str | None = None,
     ) -> ApprovalOutcome:
+        """Ask *user_id* to approve a tool call; *requested_by* names a non-agent requester (an MCP client)."""
         if self._client is None:
             logger.warning("WA approval for %s requested while WhatsApp is not connected", tool_name)
             return ApprovalOutcome.UNAVAILABLE
         # One prompt per user at a time: a second run for the same user waits
         # here instead of replacing the prompt the user is answering.
         async with self._prompt_locks[("approval", user_id)]:
-            return await self._ask_approval(user_id, tool_name, arguments)
+            return await self._ask_approval(user_id, tool_name, arguments, requested_by)
 
-    async def _ask_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> ApprovalOutcome:
+    async def _ask_approval(
+        self, user_id: str, tool_name: str, arguments: dict[str, Any], requested_by: str | None = None
+    ) -> ApprovalOutcome:
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
@@ -284,7 +289,8 @@ class WhatsAppChannel(BaseChannel):
             if chat is not None
             else "Reply *yes* / *no*, or react with 👍 / 👎."
         )
-        prompt = f"🔐 *Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\n{how_to_answer}"
+        origin = f"Requested by: {requested_by}\n" if requested_by else ""
+        prompt = f"🔐 *Approval required*\n\n{origin}Tool: `{tool_name}`\nArgs: `{args_preview}`\n\n{how_to_answer}"
         prompt_id: str | None = None
         try:
             prompt_id = await self._send_tracked(user_id, prompt)
