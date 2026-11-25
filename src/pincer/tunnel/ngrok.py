@@ -7,6 +7,10 @@ so cloud and production deployments are unaffected.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyngrok.ngrok import NgrokTunnel as _PyngrokTunnel
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,7 @@ class NgrokTunnel:
         self._authtoken = authtoken
         self._domain = domain
         self._target_port = target_port
-        self._tunnel = None
+        self._tunnel: _PyngrokTunnel | None = None
 
     async def start(self) -> str:
         """Open the tunnel and return the public HTTPS URL, or '' if disabled."""
@@ -35,15 +39,15 @@ class NgrokTunnel:
             raise RuntimeError("pyngrok is not installed. Run: pip install 'pincer-agent[local]'") from None
         _ngrok.set_auth_token(self._authtoken)
 
-        kwargs: dict[str, object] = {
-            "proto": "http",
-        }
+        addr = str(self._target_port)
         if self._domain:
-            kwargs["domain"] = self._domain
-
-        self._tunnel = _ngrok.connect(self._target_port, **kwargs)
-        if self._tunnel is None:
-            raise RuntimeError("ngrok.connect returned None — check authtoken and network")
+            # pyngrok 9 defaults to ngrok config v3 (Endpoints), where a custom domain is set via `url`.
+            domain = self._domain.split("://", 1)[-1].rstrip("/")
+            self._tunnel = _ngrok.connect(addr, proto="http", url=f"https://{domain}")
+        else:
+            self._tunnel = _ngrok.connect(addr, proto="http")
+        if self._tunnel is None or not self._tunnel.public_url:
+            raise RuntimeError("ngrok.connect returned None or no public URL — check authtoken and network")
         public_url: str = self._tunnel.public_url
         if public_url.startswith("http://"):
             public_url = "https://" + public_url[7:]
@@ -57,7 +61,8 @@ class NgrokTunnel:
         try:
             from pyngrok import ngrok as _ngrok
 
-            _ngrok.disconnect(self._tunnel.public_url)
+            if self._tunnel.public_url:
+                _ngrok.disconnect(self._tunnel.public_url)
         except Exception as e:
             logger.debug("NgrokTunnel stop error: %s", e)
         finally:
