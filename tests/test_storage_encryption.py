@@ -1707,25 +1707,36 @@ def test_note_plain_remembers_a_bounded_number_of_objects(monkeypatch: Any) -> N
     encryption.reset_noted_plain()
 
 
-def test_note_plain_logs_at_debug_once_the_window_overflows(monkeypatch: Any, caplog: Any) -> None:
+def test_note_plain_limits_warnings_per_minute_and_counts_the_rest(monkeypatch: Any, caplog: Any) -> None:
     import logging
 
     from pincer.storage import encryption
 
+    clock = [1000.0]
     encryption.reset_noted_plain()
     monkeypatch.setattr(encryption, "NOTED_PLAIN_MAX", 3)
+    monkeypatch.setattr(encryption, "NOTED_PLAIN_WARNINGS_PER_MINUTE", 2)
+    monkeypatch.setattr(encryption.time, "monotonic", lambda: clock[0])
     caplog.set_level(logging.DEBUG, logger=encryption.logger.name)
     try:
         # A scan cycling over more plain objects than the window holds.
         for _ in range(3):
             for n in range(5):
                 encryption.note_plain(f"s3://b/{n}")
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert sum("is not encrypted yet" in w for w in warnings) == 2
+        assert any(
+            r.levelno == logging.DEBUG and "s3://b/4 is not encrypted yet" in r.getMessage() for r in caplog.records
+        )
+        # A minute later (the job may have completed long ago): a new plain object is a WARNING again.
+        caplog.clear()
+        clock[0] += 61
+        encryption.note_plain("s3://b/dropped-later")
     finally:
         encryption.reset_noted_plain()
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert sum("is not encrypted yet" in w for w in warnings) == 4
-    assert sum("more than 3 objects were read without the key" in w for w in warnings) == 1
-    assert any(r.levelno == logging.DEBUG and "s3://b/0 is not encrypted yet" in r.getMessage() for r in caplog.records)
+    assert "13 more object(s) were read without the key in the last minute" in warnings[0]
+    assert "s3://b/dropped-later is not encrypted yet" in warnings[1]
 
 
 def _gcs_http_400(message: str, path: str = ".encrypted", reason: str = "invalid") -> Exception:
@@ -1833,14 +1844,18 @@ def test_old_versions_deleted_ends_the_warning_until_the_next_rewrite(seeded: An
     settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
     try:
         # Not complete yet: refused, rewrites are still to come.
-        result = _cli(settings, monkeypatch, "old-versions-deleted")
+        result = _cli(settings, monkeypatch, "old-versions-deleted", "s3://docs", "--yes")
         assert result.exit_code == 1 and "run `pincer storage encrypt`" in result.output
         assert _cli(settings, monkeypatch, "encrypt").exit_code == 0
-        assert _doctor(settings).status == "warning"
-        result = _cli(settings, monkeypatch, "old-versions-deleted")
+        doctor = _doctor(settings)
+        assert doctor.status == "warning" and "old-versions-deleted s3://docs" in doctor.message
+        result = _cli(settings, monkeypatch, "old-versions-deleted", "s3://docs/", "--yes")
         assert result.exit_code == 0, result.output
         assert _doctor(settings).status == "pass"
         assert "old plain versions" not in _cli(settings, monkeypatch, "encryption-status").output
+        # A run that rewrites nothing leaves it cleared.
+        assert _cli(settings, monkeypatch, "encrypt").exit_code == 0
+        assert _doctor(settings).status == "pass"
         # Another service drops a plain object; the next run rewrites it: the warning is back.
         (root / "late.txt").write_text("late")
         assert _cli(settings, monkeypatch, "encrypt").exit_code == 0
@@ -1850,8 +1865,81 @@ def test_old_versions_deleted_ends_the_warning_until_the_next_rewrite(seeded: An
 
 
 def test_old_versions_deleted_needs_the_key(tmp_path: Path, monkeypatch: Any) -> None:
-    result = _cli(_settings(tmp_path), monkeypatch, "old-versions-deleted")
+    result = _cli(_settings(tmp_path), monkeypatch, "old-versions-deleted", "s3://docs", "--yes")
     assert result.exit_code == 1 and "is not set" in result.output
+
+
+def test_old_versions_deleted_takes_known_locations_and_asks_first(seeded: Any, monkeypatch: Any) -> None:
+    root, _ = seeded
+    encrypt_job.encrypt_location(root)
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    assert _cli(settings, monkeypatch, "old-versions-deleted").exit_code != 0  # a location is required
+    result = _cli(settings, monkeypatch, "old-versions-deleted", "gs://other", "--yes")
+    assert result.exit_code == 1 and "Not a storage location" in result.output and "s3://docs" in result.output
+    from typer.testing import CliRunner
+
+    from pincer.cli.main import app
+
+    declined = CliRunner().invoke(app, ["storage", "old-versions-deleted", "s3://docs"], input="n\n")
+    assert declined.exit_code == 1 and "s3://docs" in declined.output
+    assert "old_versions_deleted_at" not in encryption_state.status(root)["migration"]
+
+
+def test_old_versions_deleted_is_refused_while_a_job_holds_the_lease(seeded: Any) -> None:
+    root, _ = seeded
+    encrypt_job.encrypt_location(root)
+    other = encrypt_job.Lease(root)
+    other.owner = "other-host:1:1"
+    assert other.acquire()
+    try:
+        with pytest.raises(StorageEncryptionError, match="Another process is encrypting"):
+            encrypt_job.record_old_versions_deleted(root)
+    finally:
+        other.release()
+    assert "old_versions_deleted_at" not in encryption_state.status(root)["migration"]
+
+
+def test_old_versions_deleted_checks_the_state_again_after_a_conflict(seeded: Any) -> None:
+    root, _ = seeded
+    encrypt_job.encrypt_location(root)
+    real_write = encryption_state.write_marker
+    calls: list[int] = []
+
+    def racing_write(location: Any, marker: Any, **condition: Any) -> None:
+        if not calls:
+            calls.append(1)
+            # A job on another replica starts between the read and the write.
+            found, version = encryption_state.read_marker(location)  # type: ignore[misc]
+            found["migration"]["state"] = "running"
+            real_write(location, found, if_version=version)
+        real_write(location, marker, **condition)
+
+    with (
+        patch.object(encrypt_job, "write_marker", racing_write),
+        pytest.raises(StorageEncryptionError, match="is running"),
+    ):
+        encrypt_job.record_old_versions_deleted(root)
+    assert "old_versions_deleted_at" not in encryption_state.status(root)["migration"]
+
+
+def test_a_marker_without_last_rewrite_keeps_a_recorded_deletion(seeded: Any) -> None:
+    root, _ = seeded
+    root.client.old_versions_kept = lambda _root: [OldVersions("versioning is on")]
+    try:
+        encrypt_job.encrypt_location(root)
+        # A complete marker from before `last_rewrite_at` existed.
+        marker, version = encryption_state.read_marker(root)  # type: ignore[misc]
+        del marker["migration"]["last_rewrite_at"]
+        encryption_state.write_marker(root, marker, if_version=version)
+        encrypt_job.record_old_versions_deleted(root)
+        assert encrypt_job.old_versions_now(root, encryption_state.status(root)["migration"]) is None
+        # A later run that rewrites nothing does not stamp a rewrite.
+        assert encrypt_job.encrypt_location(root).encrypted == 0
+        migration = encryption_state.status(root)["migration"]
+        assert "last_rewrite_at" not in migration
+        assert encrypt_job.old_versions_now(root, migration) is None
+    finally:
+        del root.client.old_versions_kept
 
 
 def test_azure_old_versions_are_checked_independently() -> None:
@@ -1923,6 +2011,8 @@ def test_a_deterministic_hns_probe_4xx_is_a_failed_step() -> None:
     ("status", "code"),
     [
         (403, "AuthorizationPermissionMismatch"),
+        (404, "ContainerNotFound"),
+        (400, "InvalidAuthenticationInfo"),
         (429, "TooManyRequests"),
         (500, "InternalError"),
         (None, "ServiceRequestError"),
@@ -1945,7 +2035,28 @@ def test_an_unreachable_hns_probe_on_an_ordinary_open_is_not_cached(bucket: Call
         with pytest.raises(StorageUnavailable, match="ServerBusy"):
             _open(settings)
         assert not encryption_state._refused
+        assert root.client.probe_hns.call_count == 1
+        # Opened again at once: fails fast, without probing again.
+        with pytest.raises(StorageUnavailable, match="probed again in at most"):
+            _open(settings)
+        assert root.client.probe_hns.call_count == 1
         root.client.probe_hns = lambda _base: [("write with the key", None)]
-        _open(settings)  # checked again, and passes
+        with patch.object(encryption_state, "PROBE_RETRY_SECONDS", 0.0):
+            _open(settings)  # the back-off is over: checked again, and passes
+        assert not encryption_state._probe_failed
+    finally:
+        del root.client.is_hns, root.client.probe_hns
+
+
+def test_a_thorough_check_does_not_wait_for_the_probe_back_off(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, root = bucket()
+    root.client.is_hns = lambda _root: True
+    root.client.probe_hns = MagicMock(side_effect=StorageUnavailable("ServerBusy"))
+    try:
+        with pytest.raises(StorageUnavailable, match="ServerBusy"):
+            _open(settings)
+        root.client.probe_hns = MagicMock(return_value=[("write with the key", None)])
+        encryption_state.check_location(root, settings, thorough=True)
+        root.client.probe_hns.assert_called_once()
     finally:
         del root.client.is_hns, root.client.probe_hns

@@ -22,6 +22,7 @@ import hmac
 import logging
 import re
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -48,13 +49,16 @@ _S3_BODYLESS_400 = frozenset({"400", "Bad Request", "BadRequest"})
 _GOOGLE_REQUEST_PREFIX = re.compile(r"^[A-Z]+ \S+: ")
 #: How many objects `note_plain` remembers having logged (least recently logged forgotten first).
 NOTED_PLAIN_MAX = 1024
+#: At most this many "not encrypted yet" WARNINGs per minute; the rest go to DEBUG,
+#: and the next minute starts with one WARNING that counts them.
+NOTED_PLAIN_WARNINGS_PER_MINUTE = 10
 
 logger = logging.getLogger(__name__)
 #: Objects `note_plain` logged, most recent last.
 _noted_plain: OrderedDict[str, None] = OrderedDict()
 _noted_lock = threading.Lock()
-#: Set once more than NOTED_PLAIN_MAX objects were read plain: later ones log at DEBUG.
-_noted_overflow = False
+#: The current minute of `note_plain`: [start (monotonic), WARNINGs logged, objects logged at DEBUG].
+_noted_minute: list[float] = [0.0, 0, 0]
 
 
 @dataclass(frozen=True)
@@ -324,10 +328,9 @@ def azure_error_code(error: Exception) -> str | None:
 
 def reset_noted_plain() -> None:
     """Forget which objects were logged as plain (tests)."""
-    global _noted_overflow
     with _noted_lock:
         _noted_plain.clear()
-        _noted_overflow = False
+        _noted_minute[:] = [0.0, 0, 0]
 
 
 def note_plain(path: object) -> None:
@@ -335,14 +338,14 @@ def note_plain(path: object) -> None:
 
     For reads and stats only: the encryption job's own checks do not call it.
     Remembers at most `NOTED_PLAIN_MAX` objects, so a bucket full of plain
-    objects does not grow the process. Once more objects than that were read
-    plain, one WARNING says so and later ones are logged at DEBUG: a scan that
-    cycles over more plain objects than the window holds does not log a
-    WARNING on every read.
+    objects does not grow the process; one read again after it was forgotten
+    logs again. At most `NOTED_PLAIN_WARNINGS_PER_MINUTE` of these are
+    WARNINGs each minute, so a scan over many plain objects does not flood the
+    log; the rest go to DEBUG, and the next one after the minute is up is a
+    WARNING that says how many there were. So new plain objects always show
+    up at WARNING again within a minute, for the life of the process.
     """
-    global _noted_overflow
     name = str(path)
-    overflowed = False
     with _noted_lock:
         if name in _noted_plain:
             _noted_plain.move_to_end(name)
@@ -350,19 +353,22 @@ def note_plain(path: object) -> None:
         _noted_plain[name] = None
         while len(_noted_plain) > NOTED_PLAIN_MAX:
             _noted_plain.popitem(last=False)
-            if not _noted_overflow:
-                _noted_overflow = overflowed = True
-        quiet = _noted_overflow and not overflowed
+        now = time.monotonic()
+        quieted = 0
+        if now - _noted_minute[0] >= 60:
+            quieted = int(_noted_minute[2])
+            _noted_minute[:] = [now, 0, 0]
+        loud = _noted_minute[1] < NOTED_PLAIN_WARNINGS_PER_MINUTE
+        _noted_minute[1 if loud else 2] += 1
     message = (
         "Storage encryption: %s is not encrypted yet; read it without the key (`pincer storage encrypt` encrypts it)"
     )
-    if quiet:
-        logger.debug(message, name)
-        return
-    logger.warning(message, name)
-    if overflowed:
+    if quieted:
         logger.warning(
-            "Storage encryption: more than %d objects were read without the key; "
-            "further ones are logged at DEBUG until `pincer storage encrypt` completes",
-            NOTED_PLAIN_MAX,
+            "Storage encryption: %d more object(s) were read without the key in the last minute (logged at DEBUG)",
+            quieted,
         )
+    if loud:
+        logger.warning(message, name)
+    else:
+        logger.debug(message, name)

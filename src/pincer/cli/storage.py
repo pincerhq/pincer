@@ -178,16 +178,22 @@ def storage_encryption_status() -> None:
 
 
 @storage_app.command(name="old-versions-deleted")
-def storage_old_versions_deleted() -> None:
+def storage_old_versions_deleted(
+    location: list[str] = typer.Argument(  # noqa: B008
+        ...,
+        help="The storage location(s) whose old versions you deleted, as `pincer storage encryption-status` lists them",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
+) -> None:
     """Record that the plain versions left by encrypting in place were deleted.
 
     On a bucket with versioning (or soft delete), encrypting rewrites each
     object and keeps the plain one as an old version, so `pincer doctor` and
     `encryption-status` warn about it while versioning stays on. Once you have
-    deleted those versions (docs/guides/storage-encryption.md#versioned-buckets),
-    run this to end the warning; it comes back when the job rewrites another
-    object. Pincer cannot list which old versions predate encryption, so it
-    takes your word for it.
+    deleted those versions in a location (docs/guides/storage-encryption.md#versioned-buckets),
+    run this for that location to end its warning; it comes back when the job
+    rewrites another object there. Pincer cannot list which old versions
+    predate encryption, so it takes your word for it.
     """
     from pincer.config import get_settings_relaxed
     from pincer.storage import clients, encrypt_job
@@ -199,18 +205,31 @@ def storage_old_versions_deleted() -> None:
     if load_key(settings) is None:
         console.print("[red]PINCER_STORAGE_ENCRYPTION_KEY is not set: storage encryption is off.[/red]")
         raise typer.Exit(code=1)
+    known = {name.rstrip("/"): name for name in _locations()}
+    chosen = list(dict.fromkeys(name.rstrip("/") for name in location))
+    unknown = [name for name in chosen if name not in known]
+    if unknown:
+        console.print(
+            f"[red]Not a storage location of this Pincer: {', '.join(unknown)}. "
+            f"Locations: {', '.join(known) or 'none'}[/red]"
+        )
+        raise typer.Exit(code=1)
+    if not yes and not typer.confirm(
+        "Record that the old plain versions were deleted in: " + ", ".join(chosen) + "?", default=False
+    ):
+        raise typer.Exit(code=1)
     failed = False
-    for location in _locations():
+    for name in chosen:
         try:
             root = clients.open_cloud_uri(
-                location, settings, None, error=StorageError, what="storage location", check=False
+                known[name], settings, None, error=StorageError, what="storage location", check=False
             )
             check_location(root, settings, thorough=True, create=False)
             encrypt_job.record_old_versions_deleted(root)
         except Exception as e:
-            console.print(f"[red]{location}: {e}[/red]")
+            console.print(f"[red]{name}: {e}[/red]")
             failed = True
             continue
-        console.print(f"[green]{location}: recorded; the old-versions warning ends until the next rewrite.[/green]")
+        console.print(f"[green]{name}: recorded; its old-versions warning ends until the next rewrite.[/green]")
     if failed:
         raise typer.Exit(code=1)

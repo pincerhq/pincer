@@ -122,9 +122,16 @@ class _Marker:
         migration: dict[str, Any] = self.data.setdefault("migration", {})
         return migration
 
-    def save(self, **changes: Any) -> None:
+    def save(self, *, rewrote: bool = False, **changes: Any) -> None:
+        """Apply `changes` and write the marker. `rewrote`: objects were
+        rewritten since the last save; `last_rewrite_at` is stamped with the
+        save's own time, so it is never older than a stamp saved before it
+        (`pincer storage old-versions-deleted`)."""
         for _ in range(3):
-            self.migration.update(changes, updated_at=datetime.now(UTC).isoformat())
+            now = datetime.now(UTC).isoformat()
+            self.migration.update(changes, updated_at=now)
+            if rewrote:
+                self.migration[LAST_REWRITE] = now
             try:
                 write_marker(self.root, self.data, if_version=self.version)
             except KeyConflict:
@@ -218,29 +225,54 @@ def old_versions_now(root: CloudPath, migration: dict[str, Any]) -> str | None:
     """
     if migration.get("state") != "complete":
         return old_versions(root, migration.get("old_versions"))
-    return old_versions(
-        root,
-        migration.get("old_versions"),
-        rewritten_at=migration.get(LAST_REWRITE),
-        deleted_at=migration.get(OLD_VERSIONS_DELETED),
-    )
+    deleted_at = migration.get(OLD_VERSIONS_DELETED)
+    rewritten_at = migration.get(LAST_REWRITE)
+    if rewritten_at is None and deleted_at is None:
+        # A marker from before `last_rewrite_at` existed: its last update is no
+        # older than its last rewrite. (With a deletion recorded, no rewrite
+        # was stamped after it, and later updates are not rewrites.)
+        rewritten_at = migration.get("updated_at")
+    return old_versions(root, migration.get("old_versions"), rewritten_at=rewritten_at, deleted_at=deleted_at)
 
 
 def record_old_versions_deleted(root: CloudPath) -> None:
     """Record that the owner deleted the old plain versions at `root`: the
     old-versions warning ends until the job rewrites another object.
 
-    Only once encrypting existing data is complete: before that, rewrites
-    that leave new plain versions are still to come.
+    Only once encrypting existing data is complete, and not while a job holds
+    the location's lease: rewrites that leave new plain versions may still be
+    coming. The state is checked again on the marker version the stamp is
+    written over, so a job that starts in between is not missed.
+    Raises StorageEncryptionError when it cannot record.
     """
-    marker = _Marker(root)
-    state = marker.migration.get("state", "pending")
-    if state != "complete":
+    lease = Lease(root)
+    if not lease.acquire():
         raise StorageEncryptionError(
-            f"Encrypting existing data on {root} is {state}: run `pincer storage encrypt` until it is complete, "
-            "then delete the old versions"
+            f"Another process is encrypting {root}: wait until it is complete, then delete the old versions"
         )
-    marker.save(**{OLD_VERSIONS_DELETED: datetime.now(UTC).isoformat()})
+    try:
+        for _ in range(3):
+            found = read_marker(root)
+            if found is None:
+                raise StorageEncryptionError(f"Storage encryption is not enabled on {root}")
+            data, version = found
+            migration = data.setdefault("migration", {})
+            state = migration.get("state", "pending")
+            if state != "complete":
+                raise StorageEncryptionError(
+                    f"Encrypting existing data on {root} is {state}: run `pincer storage encrypt` until it is "
+                    "complete, then delete the old versions"
+                )
+            now = datetime.now(UTC).isoformat()
+            migration.update({OLD_VERSIONS_DELETED: now, "updated_at": now})
+            try:
+                write_marker(root, data, if_version=version)
+            except KeyConflict:
+                continue  # rewritten meanwhile: check its state again
+            return
+        raise StorageUnavailable(f"The storage encryption marker of {root} kept changing; try again")
+    finally:
+        lease.release()
 
 
 def _parse(iso: str | None) -> datetime | None:
@@ -293,6 +325,8 @@ def encrypt_location(
     if not dry_run and migration.get("state") != "complete" and scheme in _ORDERED_LISTING:
         resume_after = migration.get("cursor")
     done_before = int(migration.get("done") or 0) if resume_after else 0
+    # Before the first save below, which updates `migration` in place.
+    was_complete = migration.get("state") == "complete"
     progress.old_versions = old_versions(root, migration.get("old_versions"))
     if progress.old_versions:
         logger.warning(
@@ -309,8 +343,9 @@ def encrypt_location(
             on_object(key, outcome)
 
     since_save = 0
-    # Saved with progress once this run rewrote an object: soft delete's retention counts from it.
-    rewrites: dict[str, str] = {}
+    # An object was rewritten since the last save: the next save stamps
+    # `last_rewrite_at`, from which soft delete's retention counts.
+    rewrote = False
     cursor = resume_after
     # `done` as of the cursor: objects past it are listed, and counted, again on resume.
     done_at_cursor = done_before
@@ -335,7 +370,7 @@ def encrypt_location(
                 outcome = _encrypt_one(client, path)
                 if outcome == "encrypted":
                     progress.encrypted += 1
-                    rewrites[LAST_REWRITE] = datetime.now(UTC).isoformat()
+                    rewrote = True
                 else:
                     progress.changed += 1
                 report(key, outcome)
@@ -351,7 +386,8 @@ def encrypt_location(
         since_save += 1
         if not dry_run and since_save >= PROGRESS_EVERY:
             since_save = 0
-            marker.save(state="running", cursor=cursor, done=done_at_cursor, **rewrites)
+            marker.save(state="running", cursor=cursor, done=done_at_cursor, rewrote=rewrote)
+            rewrote = False
             if heartbeat is not None and not heartbeat():
                 logger.warning("Storage encryption of %s: lost the lease to another process; stopping", root)
                 stop = stop or threading.Event()
@@ -363,18 +399,24 @@ def encrypt_location(
         return progress
     if stopped:
         progress.state = "running"
-        marker.save(state="running", cursor=cursor, done=done_at_cursor, **rewrites)
+        marker.save(state="running", cursor=cursor, done=done_at_cursor, rewrote=rewrote)
     elif progress.failed:
         # Resume from the start next time: the failed objects come before the cursor.
         progress.state = "pending"
-        marker.save(state="pending", cursor=None, done=done_before + progress.encrypted + progress.already, **rewrites)
+        marker.save(
+            state="pending", cursor=None, done=done_before + progress.encrypted + progress.already, rewrote=rewrote
+        )
     else:
         progress.state = "complete"
-        if LAST_REWRITE not in rewrites and not migration.get(LAST_REWRITE):
-            # Complete for the first time with nothing rewritten in this run:
-            # objects overwritten since encryption was enabled count from now.
-            rewrites[LAST_REWRITE] = datetime.now(UTC).isoformat()
-        marker.save(state="complete", cursor=None, done=done_before + progress.encrypted + progress.already, **rewrites)
+        # Complete for the first time: objects overwritten since encryption
+        # was enabled count from now too, whatever this run rewrote. A run on
+        # a location that was complete already stamps only its own rewrites.
+        marker.save(
+            state="complete",
+            cursor=None,
+            done=done_before + progress.encrypted + progress.already,
+            rewrote=rewrote or not was_complete,
+        )
         # Every object is encrypted: only now does the check file appear.
         storage_key = getattr(client, "encryption_key", None)
         if storage_key is not None:

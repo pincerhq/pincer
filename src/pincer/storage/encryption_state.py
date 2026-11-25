@@ -44,6 +44,7 @@ import json
 import logging
 import re
 import threading
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -74,7 +75,13 @@ MARKER_VERSION = 1
 LAST_REWRITE = "last_rewrite_at"
 OLD_VERSIONS_DELETED = "old_versions_deleted_at"
 
+#: After an HNS probe that could not finish (not a refusal), ordinary opens of
+#: the location fail fast with the same error for this long before probing again.
+PROBE_RETRY_SECONDS = 30.0
+
 _lock = threading.RLock()
+#: location → (monotonic time, error) of its last HNS probe that could not finish.
+_probe_failed: dict[str, tuple[float, str]] = {}
 _verified: set[tuple[str, str | None]] = set()
 _refused: dict[str, str] = {}
 #: Locations the startup check could not finish (the store was unreachable):
@@ -87,6 +94,7 @@ def reset_for_tests() -> None:
         _verified.clear()
         _refused.clear()
         _unchecked.clear()
+        _probe_failed.clear()
 
 
 def is_not_found(error: Exception) -> bool:
@@ -383,7 +391,14 @@ def _probe_if_hns(location: CloudPath) -> None:
     client = location.client
     if not (hasattr(client, "probe_hns") and client.is_hns(location)):
         return
-    for step, problem in client.probe_hns(location / STATE_DIR):
+    try:
+        steps = client.probe_hns(location / STATE_DIR)
+    except StorageUnavailable as e:
+        # Not a refusal; back off instead of probing on every open.
+        _probe_failed[_norm(str(location))] = (time.monotonic(), str(e))
+        raise
+    _probe_failed.pop(_norm(str(location)), None)
+    for step, problem in steps:
         if problem is not None:
             raise StorageEncryptionError(
                 f"Storage encryption check on the Azure hierarchical-namespace account of {location} failed at "
@@ -422,6 +437,9 @@ def check_location(
     with _lock:
         if location in _refused:
             raise StorageEncryptionError(_refused[location])
+        failed = _probe_failed.get(location)
+        if failed is not None and not thorough and time.monotonic() - failed[0] < PROBE_RETRY_SECONDS:
+            raise StorageUnavailable(f"{failed[1]} (probed again in at most {PROBE_RETRY_SECONDS:.0f}s)")
         if cache_key in _verified and not thorough:
             return
         if key is None and not thorough and location not in _unchecked:

@@ -1912,7 +1912,7 @@ class SecurityDoctor:
                 # soft delete also ends once its retention has passed.
                 warnings.append(
                     f"{location}: encrypted, but old plain versions may remain readable: {old}. "
-                    "Delete them, then run `pincer storage old-versions-deleted` "
+                    f"Delete them, then run `pincer storage old-versions-deleted {location}` "
                     "(see docs/guides/storage-encryption.md#versioned-buckets)"
                 )
             else:

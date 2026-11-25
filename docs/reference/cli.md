@@ -233,7 +233,7 @@ uses to read and act on them.
 | `pincer storage encrypt` | Encrypt every object stored before `PINCER_STORAGE_ENCRYPTION_KEY` was set, in place, in the storage root and a cloud skills dir outside it. Safe to run again; a running `pincer run` does the same in the background |
 | `pincer storage encrypt --dry-run` | Only count the objects not encrypted yet |
 | `pincer storage encryption-status` | For each cloud storage location: encryption on or off, and how far encrypting existing data got |
-| `pincer storage old-versions-deleted` | Record that the plain versions left on a versioned bucket were deleted, ending the old-versions warning until the job rewrites another object |
+| `pincer storage old-versions-deleted LOCATION... [--yes]` | Record that the plain versions left in a versioned bucket were deleted, ending that location's old-versions warning until the job rewrites another object there |
 
 See [Storage encryption](../guides/storage-encryption.md).
 

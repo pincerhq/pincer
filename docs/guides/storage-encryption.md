@@ -180,10 +180,13 @@ command and the doctor check the bucket again each time they run:
   everything encrypted already rewrites nothing and does not restart that clock.
 - Versioning keeps them until they are deleted, and Pincer cannot tell which
   old versions predate encryption, so the warning stays while versioning is on
-  (enabled or, on S3, suspended). Once you have deleted them, run
-  `pincer storage old-versions-deleted`: it records that in the marker, and
-  the warning (and the doctor check) clears. It comes back if a later run
-  rewrites another object, because that leaves a new plain version.
+  (enabled or, on S3, suspended). Once you have deleted them in a location,
+  run `pincer storage old-versions-deleted <location>` (for example
+  `s3://docs`; it asks for confirmation, or pass `--yes`). It records that in
+  that location's marker only, and its warning (and the doctor check) clears.
+  It is refused while the job is not complete or runs in another process. The
+  warning comes back if a later run rewrites another object there, because
+  that leaves a new plain version.
 
 Running `pincer storage encrypt` again also refreshes what the marker
 records.

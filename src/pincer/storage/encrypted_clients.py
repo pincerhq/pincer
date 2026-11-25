@@ -58,6 +58,17 @@ logger = logging.getLogger(__name__)
 _CPK_CODE_MARKERS = ("CustomerSpecifiedEncryption", "CustomerProvidedKey", "EncryptionKey")
 #: Object metadata an in-place S3 rewrite carries over (a multipart copy would drop it).
 _S3_KEPT_HEADERS = ("ContentType", "ContentEncoding", "ContentDisposition", "ContentLanguage", "CacheControl")
+#: Azure error codes that refuse an HNS probe step for good: the account does not
+#: support what a keyed request sends. Any other failure is probed again later.
+_PROBE_REFUSAL_CODES = frozenset(
+    {
+        "UnsupportedHeader",
+        "UnsupportedQueryParameter",
+        "UnsupportedHttpVerb",
+        "InvalidHeaderValue",
+        "InvalidQueryParameterValue",
+    }
+)
 
 # ── S3 (SSE-C) ─────────────────────────────────────────────────────────
 
@@ -369,28 +380,25 @@ def datalake_errors(operation: str, path: object) -> Iterator[None]:
         raise
 
 
-#: HTTP statuses of a probe step that may pass on their own: a timeout, throttling,
-#: or a missing permission (401/403, which the operator can grant without the
-#: location being refused). Every 5xx is transient too.
-_TRANSIENT_STATUSES = frozenset({401, 403, 408, 429})
+def _probe_refusal_code(error: BaseException) -> str | None:
+    """The service error code when a failed HNS probe step is refused for good,
+    else None (the step may pass when tried again).
 
-
-def _probe_error_is_transient(error: BaseException) -> bool:
-    """True when a failed HNS probe step may succeed when tried again.
-
-    The HTTP status comes from the error or the error it wraps (a
-    StorageUnavailable from `datalake_errors` carries the service error as its
-    cause). No status at all (a connection error or a timeout before an
-    answer) is transient; a 4xx other than those above is a deterministic
-    refusal.
+    Only the codes in `_PROBE_REFUSAL_CODES` refuse: the account does not
+    support a header or parameter Pincer sends with the key, which no retry
+    fixes. Anything else (a missing container, an expired token, a missing
+    permission, throttling, a server error, a timeout) is left to be probed
+    again. The code comes from the error or the error it wraps (a
+    StorageUnavailable from `datalake_errors` carries the service error as
+    its cause).
     """
     seen: BaseException | None = error
     while seen is not None:
-        status = getattr(seen, "status_code", None)
-        if isinstance(status, int):
-            return status >= 500 or status in _TRANSIENT_STATUSES
+        code = azure_error_code(seen)  # type: ignore[arg-type]
+        if code is not None:
+            return code if code in _PROBE_REFUSAL_CODES else None
         seen = seen.__cause__
-    return True
+    return None
 
 
 class EncryptedAzureBlobClient(AzureBlobClient):
@@ -597,12 +605,13 @@ class EncryptedAzureBlobClient(AzureBlobClient):
         Steps: write the file with the key, read its properties through Data
         Lake with the key, read it back, rename it, delete it. Returns each
         step and None, or the error that stopped it (later steps are not run):
-        a refusal about the key or the content, or any other 4xx the service
-        answers for good (an unsupported header or operation, say). An error
-        that may pass (throttling, a timeout, a server error, a missing
-        permission: see `_probe_error_is_transient`) raises StorageUnavailable
-        instead, so the location is not refused for it and is probed again on
-        its next use. The probe file is removed whatever happens.
+        a refusal about the key or the content, or a service error code that
+        no retry fixes (an unsupported header, say: `_PROBE_REFUSAL_CODES`).
+        Any other error (a missing container or permission, an expired token,
+        throttling, a server error, a timeout) raises StorageUnavailable
+        instead, so the location is not refused for it; `check_location` waits
+        `PROBE_RETRY_SECONDS` before probing it again. The probe file is
+        removed whatever happens.
         """
         token = uuid.uuid4().hex
         first = base / f"probe-{token}"
@@ -653,7 +662,7 @@ class EncryptedAzureBlobClient(AzureBlobClient):
                     results.append((name, f"{type(e).__name__}: {e}"))
                     break
                 except Exception as e:
-                    if not is_key_error(e) and _probe_error_is_transient(e):
+                    if not is_key_error(e) and _probe_refusal_code(e) is None:
                         raise StorageUnavailable(
                             f"Storage encryption check on the Azure hierarchical-namespace account of {base} "
                             f"could not finish step '{name}': {type(e).__name__}: {e}"
