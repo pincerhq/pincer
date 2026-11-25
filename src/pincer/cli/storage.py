@@ -136,7 +136,7 @@ def storage_encryption_status() -> None:
     from pincer.storage import clients, encrypt_job
     from pincer.storage.encryption import load_key
     from pincer.storage.encryption_state import check_location, status
-    from pincer.storage.errors import StorageError
+    from pincer.storage.errors import StorageEncryptionError, StorageError
 
     settings = get_settings_relaxed()
     key = load_key(settings)
@@ -153,7 +153,7 @@ def storage_encryption_status() -> None:
             # Refuses a turned-off or changed key; writes nothing.
             check_location(root, settings, thorough=True, create=False)
             marker = status(root)
-        except StorageError as e:
+        except StorageEncryptionError as e:
             table.add_row(location, f"[red]refused: {e}[/red]", "", "")
             continue
         except Exception as e:
@@ -165,12 +165,8 @@ def storage_encryption_status() -> None:
         migration = marker.get("migration", {})
         state = migration.get("state", "pending")
         colour = "green" if state == "complete" else "yellow"
-        # Checked again now (read-only): the warning ends once the old versions are gone.
-        old_versions = encrypt_job.old_versions(
-            root,
-            migration.get("old_versions"),
-            rewritten_at=migration.get("updated_at") if state == "complete" else None,
-        )
+        # Checked again now (read-only); see `old_versions_now` for when the warning ends.
+        old_versions = encrypt_job.old_versions_now(root, migration)
         table.add_row(
             location,
             f"[green]on since {marker.get('enabled_at', '?')}[/green]",
@@ -179,3 +175,42 @@ def storage_encryption_status() -> None:
             str(migration.get("updated_at", "")),
         )
     console.print(table)
+
+
+@storage_app.command(name="old-versions-deleted")
+def storage_old_versions_deleted() -> None:
+    """Record that the plain versions left by encrypting in place were deleted.
+
+    On a bucket with versioning (or soft delete), encrypting rewrites each
+    object and keeps the plain one as an old version, so `pincer doctor` and
+    `encryption-status` warn about it while versioning stays on. Once you have
+    deleted those versions (docs/guides/storage-encryption.md#versioned-buckets),
+    run this to end the warning; it comes back when the job rewrites another
+    object. Pincer cannot list which old versions predate encryption, so it
+    takes your word for it.
+    """
+    from pincer.config import get_settings_relaxed
+    from pincer.storage import clients, encrypt_job
+    from pincer.storage.encryption import load_key
+    from pincer.storage.encryption_state import check_location
+    from pincer.storage.errors import StorageError
+
+    settings = get_settings_relaxed()
+    if load_key(settings) is None:
+        console.print("[red]PINCER_STORAGE_ENCRYPTION_KEY is not set: storage encryption is off.[/red]")
+        raise typer.Exit(code=1)
+    failed = False
+    for location in _locations():
+        try:
+            root = clients.open_cloud_uri(
+                location, settings, None, error=StorageError, what="storage location", check=False
+            )
+            check_location(root, settings, thorough=True, create=False)
+            encrypt_job.record_old_versions_deleted(root)
+        except Exception as e:
+            console.print(f"[red]{location}: {e}[/red]")
+            failed = True
+            continue
+        console.print(f"[green]{location}: recorded; the old-versions warning ends until the next rewrite.[/green]")
+    if failed:
+        raise typer.Exit(code=1)

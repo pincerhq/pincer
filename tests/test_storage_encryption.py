@@ -1251,6 +1251,19 @@ def test_doctor_runs_the_hns_probe_once(bucket: Callable[..., tuple[Any, Any]]) 
     assert len(calls) == 1
 
 
+def test_doctor_warns_when_the_hns_probe_could_not_finish(bucket: Callable[..., tuple[Any, Any]]) -> None:
+    settings, root = bucket()
+    root.client.is_hns = lambda _path: True
+    root.client.probe_hns = MagicMock(side_effect=StorageUnavailable("step 'rename through Data Lake': ServerBusy"))
+    try:
+        result = _doctor(settings)
+    finally:
+        del root.client.is_hns, root.client.probe_hns
+    assert result.status == "warning"
+    assert "ServerBusy" in result.message and "checked again on its next use" in result.message
+    assert "refuses" not in (result.fix_hint or "")
+
+
 def test_doctor_reports_each_hns_probe_failure(bucket: Callable[..., tuple[Any, Any]]) -> None:
     settings, root = bucket()
     root.client.is_hns = lambda _path: True
@@ -1609,7 +1622,7 @@ def test_the_sdk_layer_logs_a_plain_read_once(tmp_path: Path, caplog: Any) -> No
     from pincer.storage import encryption
     from pincer.storage.objects import objects_for
 
-    encryption._noted_plain.clear()
+    encryption.reset_noted_plain()
     client = _s3(tmp_path)
     objects = objects_for(client.CloudPath("s3://b/"))
     body = MagicMock()
@@ -1664,7 +1677,7 @@ def test_azure_reports_versioning_and_soft_delete() -> None:
 def test_the_jobs_check_does_not_log_plain_objects(tmp_path: Path, caplog: Any) -> None:
     from pincer.storage import encryption
 
-    encryption._noted_plain.clear()
+    encryption.reset_noted_plain()
     s3 = _s3(tmp_path)
     s3.client.head_object.side_effect = [_client_error(400, "400"), _head()]
     assert s3.is_encrypted(s3.CloudPath("s3://b/plain")) is False
@@ -1686,11 +1699,33 @@ def test_the_jobs_check_does_not_log_plain_objects(tmp_path: Path, caplog: Any) 
 def test_note_plain_remembers_a_bounded_number_of_objects(monkeypatch: Any) -> None:
     from pincer.storage import encryption
 
-    encryption._noted_plain.clear()
+    encryption.reset_noted_plain()
     monkeypatch.setattr(encryption, "NOTED_PLAIN_MAX", 3)
     for n in range(10):
         encryption.note_plain(f"s3://b/{n}")
     assert list(encryption._noted_plain) == ["s3://b/7", "s3://b/8", "s3://b/9"]
+    encryption.reset_noted_plain()
+
+
+def test_note_plain_logs_at_debug_once_the_window_overflows(monkeypatch: Any, caplog: Any) -> None:
+    import logging
+
+    from pincer.storage import encryption
+
+    encryption.reset_noted_plain()
+    monkeypatch.setattr(encryption, "NOTED_PLAIN_MAX", 3)
+    caplog.set_level(logging.DEBUG, logger=encryption.logger.name)
+    try:
+        # A scan cycling over more plain objects than the window holds.
+        for _ in range(3):
+            for n in range(5):
+                encryption.note_plain(f"s3://b/{n}")
+    finally:
+        encryption.reset_noted_plain()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert sum("is not encrypted yet" in w for w in warnings) == 4
+    assert sum("more than 3 objects were read without the key" in w for w in warnings) == 1
+    assert any(r.levelno == logging.DEBUG and "s3://b/0 is not encrypted yet" in r.getMessage() for r in caplog.records)
 
 
 def _gcs_http_400(message: str, path: str = ".encrypted", reason: str = "invalid") -> Exception:
@@ -1755,6 +1790,70 @@ def test_soft_delete_stops_counting_once_its_retention_has_passed(tmp_path: Path
     assert encrypt_job.old_versions(root, rewritten_at=long_ago) == "versioning is on"
 
 
+def test_soft_delete_counts_from_the_last_rewrite_not_the_last_run(seeded: Any) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    root, _ = seeded
+    soft = [OldVersions("soft delete keeps them for 7 day(s)", retention_seconds=7 * 86400)]
+    root.client.old_versions_kept = lambda _root: soft
+    try:
+        assert encrypt_job.encrypt_location(root).encrypted == 4
+        first = encryption_state.status(root)["migration"]
+        assert first["last_rewrite_at"]
+        # Rewritten 8 days ago: retention has passed.
+        marker, version = encryption_state.read_marker(root)  # type: ignore[misc]
+        long_ago = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+        marker["migration"]["last_rewrite_at"] = long_ago
+        encryption_state.write_marker(root, marker, if_version=version)
+        assert encrypt_job.old_versions_now(root, encryption_state.status(root)["migration"]) is None
+        # A run that rewrites nothing moves updated_at, not the rewrite clock.
+        assert encrypt_job.encrypt_location(root).encrypted == 0
+        migration = encryption_state.status(root)["migration"]
+        assert migration["last_rewrite_at"] == long_ago
+        assert encrypt_job.old_versions_now(root, migration) is None
+    finally:
+        del root.client.old_versions_kept
+
+
+def test_a_marker_rebuilt_from_the_check_file_starts_the_rewrite_clock(seeded: Any) -> None:
+    root, _ = seeded
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    encrypt_job.encrypt_location(root)
+    (root / ".pincer" / "encryption.json").unlink()
+    encryption_state.reset_for_tests()
+    _open(settings)
+    migration = encryption_state.status(root)["migration"]
+    assert migration["state"] == "complete"
+    assert migration["last_rewrite_at"]
+
+
+def test_old_versions_deleted_ends_the_warning_until_the_next_rewrite(seeded: Any, monkeypatch: Any) -> None:
+    root, fake = seeded
+    root.client.old_versions_kept = lambda _root: [OldVersions("versioning is enabled on S3 bucket docs")]
+    settings = _settings(Path("/tmp"), storage_root="s3://docs/", storage_encryption_key=KEY_B64)
+    try:
+        # Not complete yet: refused, rewrites are still to come.
+        result = _cli(settings, monkeypatch, "old-versions-deleted")
+        assert result.exit_code == 1 and "run `pincer storage encrypt`" in result.output
+        assert _cli(settings, monkeypatch, "encrypt").exit_code == 0
+        assert _doctor(settings).status == "warning"
+        result = _cli(settings, monkeypatch, "old-versions-deleted")
+        assert result.exit_code == 0, result.output
+        assert _doctor(settings).status == "pass"
+        assert "old plain versions" not in _cli(settings, monkeypatch, "encryption-status").output
+        # Another service drops a plain object; the next run rewrites it: the warning is back.
+        (root / "late.txt").write_text("late")
+        assert _cli(settings, monkeypatch, "encrypt").exit_code == 0
+        assert _doctor(settings).status == "warning"
+    finally:
+        del root.client.old_versions_kept
+
+
+def test_old_versions_deleted_needs_the_key(tmp_path: Path, monkeypatch: Any) -> None:
+    result = _cli(_settings(tmp_path), monkeypatch, "old-versions-deleted")
+    assert result.exit_code == 1 and "is not set" in result.output
+
+
 def test_azure_old_versions_are_checked_independently() -> None:
     client = _azure()
     service = client.service_client
@@ -1797,6 +1896,45 @@ def test_a_transient_hns_probe_error_is_not_a_refusal() -> None:
         client.probe_hns(client.CloudPath("az://c/.pincer"))
     assert not isinstance(caught.value, StorageEncryptionError)
     assert blob.delete_blob.call_count == 2  # still cleaned up
+
+
+def _probing_azure(failing_step: str, error: Exception) -> Any:
+    client = _azure(hns=True)
+    blob = client.service_client.get_blob_client.return_value
+    uploaded: list[bytes] = []
+    blob.upload_blob.side_effect = lambda data, **_: uploaded.append(data)
+    blob.download_blob.return_value.readall.side_effect = lambda: uploaded[0]
+    fc = client.data_lake_client.get_file_system_client.return_value.get_file_client.return_value
+    fc.get_file_properties.return_value = {}
+    getattr(fc, failing_step).side_effect = error
+    return client
+
+
+def test_a_deterministic_hns_probe_4xx_is_a_failed_step() -> None:
+    unsupported = _azure_error("UnsupportedHeader")
+    unsupported.status_code = 409
+    client = _probing_azure("rename_file", unsupported)
+    steps = client.probe_hns(client.CloudPath("az://c/.pincer"))
+    assert steps[-1][0] == "rename through Data Lake"
+    assert "UnsupportedHeader" in (steps[-1][1] or "")
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (403, "AuthorizationPermissionMismatch"),
+        (429, "TooManyRequests"),
+        (500, "InternalError"),
+        (None, "ServiceRequestError"),
+    ],
+)
+def test_an_hns_probe_error_that_may_pass_is_not_a_failed_step(status: int | None, code: str) -> None:
+    error = _azure_error(code)
+    error.status_code = status
+    client = _probing_azure("delete_file", error)
+    with pytest.raises(StorageUnavailable, match="could not finish step 'delete through Data Lake'") as caught:
+        client.probe_hns(client.CloudPath("az://c/.pincer"))
+    assert not isinstance(caught.value, StorageEncryptionError)
 
 
 def test_an_unreachable_hns_probe_on_an_ordinary_open_is_not_cached(bucket: Callable[..., tuple[Any, Any]]) -> None:

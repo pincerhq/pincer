@@ -28,7 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pincer run` / `pincer serve` start on their own, or by
   `pincer storage encrypt [--dry-run]`. `pincer storage encryption-status`
   shows the progress. Until the job is done, objects stored without the key
-  stay readable.
+  stay readable. On a versioned bucket, `pincer storage old-versions-deleted`
+  records that the plain versions left behind were deleted.
 - The storage browser shows plain content: on an encrypted root, download and
   preview links go through Pincer's `/api/storage/signed/{token}` route, which
   serves the file decrypted. `GET /api/storage` gains `encrypted`.

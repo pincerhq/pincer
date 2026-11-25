@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 #: Objects `note_plain` logged, most recent last.
 _noted_plain: OrderedDict[str, None] = OrderedDict()
 _noted_lock = threading.Lock()
+#: Set once more than NOTED_PLAIN_MAX objects were read plain: later ones log at DEBUG.
+_noted_overflow = False
 
 
 @dataclass(frozen=True)
@@ -320,13 +322,27 @@ def azure_error_code(error: Exception) -> str | None:
 # ── Plain objects read with the fallback ──
 
 
+def reset_noted_plain() -> None:
+    """Forget which objects were logged as plain (tests)."""
+    global _noted_overflow
+    with _noted_lock:
+        _noted_plain.clear()
+        _noted_overflow = False
+
+
 def note_plain(path: object) -> None:
     """Log, once per object, that a read found it stored without the key.
 
     For reads and stats only: the encryption job's own checks do not call it.
     Remembers at most `NOTED_PLAIN_MAX` objects, so a bucket full of plain
-    objects does not grow the process."""
+    objects does not grow the process. Once more objects than that were read
+    plain, one WARNING says so and later ones are logged at DEBUG: a scan that
+    cycles over more plain objects than the window holds does not log a
+    WARNING on every read.
+    """
+    global _noted_overflow
     name = str(path)
+    overflowed = False
     with _noted_lock:
         if name in _noted_plain:
             _noted_plain.move_to_end(name)
@@ -334,7 +350,19 @@ def note_plain(path: object) -> None:
         _noted_plain[name] = None
         while len(_noted_plain) > NOTED_PLAIN_MAX:
             _noted_plain.popitem(last=False)
-    logger.warning(
-        "Storage encryption: %s is not encrypted yet; read it without the key (`pincer storage encrypt` encrypts it)",
-        name,
+            if not _noted_overflow:
+                _noted_overflow = overflowed = True
+        quiet = _noted_overflow and not overflowed
+    message = (
+        "Storage encryption: %s is not encrypted yet; read it without the key (`pincer storage encrypt` encrypts it)"
     )
+    if quiet:
+        logger.debug(message, name)
+        return
+    logger.warning(message, name)
+    if overflowed:
+        logger.warning(
+            "Storage encryption: more than %d objects were read without the key; "
+            "further ones are logged at DEBUG until `pincer storage encrypt` completes",
+            NOTED_PLAIN_MAX,
+        )

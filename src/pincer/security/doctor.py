@@ -1833,7 +1833,7 @@ class SecurityDoctor:
         probe, and how far encrypting existing data got."""
         from pincer.storage import clients, encrypt_job, encryption_state
         from pincer.storage.encryption import TLS_WARNING_DOC, load_key, tls_problem
-        from pincer.storage.errors import StorageError
+        from pincer.storage.errors import StorageEncryptionError, StorageError
         from pincer.storage.layout import storage_root_for
 
         name, category = "storage_encryption", "filesystem"
@@ -1882,11 +1882,16 @@ class SecurityDoctor:
                 # probe already ran above (step by step).
                 encryption_state.check_location(root, settings, thorough=True, create=False, probe=False)
                 marker = encryption_state.status(root) if key is not None else None
-            except StorageError as e:
+            except StorageEncryptionError as e:
+                # Refused for good: a wrong or missing key, a failed probe step.
                 problems.append(f"{location}: {e}")
                 continue
             except Exception as e:
-                warnings.append(f"{location}: could not check ({type(e).__name__}: {e})")
+                # Unreachable, throttled, a missing permission: not a refusal, and
+                # Pincer checks the location again on its next open.
+                warnings.append(
+                    f"{location}: could not check ({type(e).__name__}: {e}); it is checked again on its next use"
+                )
                 continue
             if key is None:
                 notes.append(f"{location}: not encrypted")
@@ -1901,13 +1906,14 @@ class SecurityDoctor:
                 warnings.append(
                     f"{location}: encrypting existing data is {state} ({migration.get('done', 0)} object(s) done){hns}"
                 )
-            elif old := encrypt_job.old_versions(
-                root, migration.get("old_versions"), rewritten_at=migration.get("updated_at")
-            ):
-                # Checked again now (read-only): the warning ends once the old versions are gone.
+            elif old := encrypt_job.old_versions_now(root, migration):
+                # Checked again now (read-only). With versioning on it ends only
+                # once the owner records the deletion (or turns versioning off);
+                # soft delete also ends once its retention has passed.
                 warnings.append(
                     f"{location}: encrypted, but old plain versions may remain readable: {old}. "
-                    "Delete them (see docs/guides/storage-encryption.md#versioned-buckets)"
+                    "Delete them, then run `pincer storage old-versions-deleted` "
+                    "(see docs/guides/storage-encryption.md#versioned-buckets)"
                 )
             else:
                 notes.append(f"{location}: encrypted, existing data complete{hns}")

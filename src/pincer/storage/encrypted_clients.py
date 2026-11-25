@@ -369,6 +369,30 @@ def datalake_errors(operation: str, path: object) -> Iterator[None]:
         raise
 
 
+#: HTTP statuses of a probe step that may pass on their own: a timeout, throttling,
+#: or a missing permission (401/403, which the operator can grant without the
+#: location being refused). Every 5xx is transient too.
+_TRANSIENT_STATUSES = frozenset({401, 403, 408, 429})
+
+
+def _probe_error_is_transient(error: BaseException) -> bool:
+    """True when a failed HNS probe step may succeed when tried again.
+
+    The HTTP status comes from the error or the error it wraps (a
+    StorageUnavailable from `datalake_errors` carries the service error as its
+    cause). No status at all (a connection error or a timeout before an
+    answer) is transient; a 4xx other than those above is a deterministic
+    refusal.
+    """
+    seen: BaseException | None = error
+    while seen is not None:
+        status = getattr(seen, "status_code", None)
+        if isinstance(status, int):
+            return status >= 500 or status in _TRANSIENT_STATUSES
+        seen = seen.__cause__
+    return True
+
+
 class EncryptedAzureBlobClient(AzureBlobClient):
     def __init__(self, *args: Any, encryption_key: StorageKey, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -573,11 +597,12 @@ class EncryptedAzureBlobClient(AzureBlobClient):
         Steps: write the file with the key, read its properties through Data
         Lake with the key, read it back, rename it, delete it. Returns each
         step and None, or the error that stopped it (later steps are not run):
-        a refusal about the key or the content. An error that is not about the
-        key (throttling, a timeout, a server error, a missing permission)
-        raises StorageUnavailable instead, so the location is not refused for
-        it and is probed again on its next use. The probe file is removed
-        whatever happens.
+        a refusal about the key or the content, or any other 4xx the service
+        answers for good (an unsupported header or operation, say). An error
+        that may pass (throttling, a timeout, a server error, a missing
+        permission: see `_probe_error_is_transient`) raises StorageUnavailable
+        instead, so the location is not refused for it and is probed again on
+        its next use. The probe file is removed whatever happens.
         """
         token = uuid.uuid4().hex
         first = base / f"probe-{token}"
@@ -628,7 +653,7 @@ class EncryptedAzureBlobClient(AzureBlobClient):
                     results.append((name, f"{type(e).__name__}: {e}"))
                     break
                 except Exception as e:
-                    if not is_key_error(e):
+                    if not is_key_error(e) and _probe_error_is_transient(e):
                         raise StorageUnavailable(
                             f"Storage encryption check on the Azure hierarchical-namespace account of {base} "
                             f"could not finish step '{name}': {type(e).__name__}: {e}"

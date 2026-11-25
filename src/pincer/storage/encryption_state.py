@@ -68,6 +68,11 @@ RESERVED_NAMES = frozenset({STATE_DIR, SENTINEL})
 _HMAC_RE = re.compile(r"[0-9a-f]{64}")
 JOB_LOCK = "encrypt.lock"
 MARKER_VERSION = 1
+#: Migration fields: when the job last rewrote an object in place (soft
+#: delete's retention counts from it), and when the owner said the old plain
+#: versions were deleted (`pincer storage old-versions-deleted`).
+LAST_REWRITE = "last_rewrite_at"
+OLD_VERSIONS_DELETED = "old_versions_deleted_at"
 
 _lock = threading.RLock()
 _verified: set[tuple[str, str | None]] = set()
@@ -348,6 +353,8 @@ def ensure_enabled(
         if has_sentinel:
             logger.warning("Storage encryption: the marker of %s was deleted; writing it again", name)
             marker["migration"]["state"] = "complete"
+            # When the rewrites happened is lost with the marker: count soft delete's retention from now.
+            marker["migration"][LAST_REWRITE] = marker["migration"]["updated_at"]
         try:
             write_marker(location, marker, if_absent=True)
             if not has_sentinel:

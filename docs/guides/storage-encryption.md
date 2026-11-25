@@ -176,11 +176,14 @@ The job detects these settings and records them in the marker.
 command and the doctor check the bucket again each time they run:
 
 - Soft delete removes the plain copies on its own: the warning ends once its
-  retention has passed since the job completed.
-- Versioning keeps them until they are deleted: the warning stays while
-  versioning is on (enabled or, on S3, suspended), because Pincer cannot tell
-  which old versions predate encryption. Once you have deleted those, it is
-  safe to ignore.
+  retention has passed since the job last rewrote an object. A run that finds
+  everything encrypted already rewrites nothing and does not restart that clock.
+- Versioning keeps them until they are deleted, and Pincer cannot tell which
+  old versions predate encryption, so the warning stays while versioning is on
+  (enabled or, on S3, suspended). Once you have deleted them, run
+  `pincer storage old-versions-deleted`: it records that in the marker, and
+  the warning (and the doctor check) clears. It comes back if a later run
+  rewrites another object, because that leaves a new plain version.
 
 Running `pincer storage encrypt` again also refreshes what the marker
 records.

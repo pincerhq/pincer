@@ -38,6 +38,8 @@ from pincer.storage import clients
 from pincer.storage.encryption import OldVersions, load_key
 from pincer.storage.encryption_state import (
     JOB_LOCK,
+    LAST_REWRITE,
+    OLD_VERSIONS_DELETED,
     SENTINEL,
     STATE_DIR,
     is_not_found,
@@ -158,21 +160,34 @@ def _encrypt_one(client: Any, path: CloudPath) -> str:
     raise KeyConflict(f"{path} kept changing, still without the key, while it was being encrypted")
 
 
-def old_versions(root: CloudPath, recorded: str | None = None, *, rewritten_at: str | None = None) -> str | None:
+def old_versions(
+    root: CloudPath,
+    recorded: str | None = None,
+    *,
+    rewritten_at: str | None = None,
+    deleted_at: str | None = None,
+) -> str | None:
     """Why plain versions replaced by an in-place rewrite may stay readable at
     `root` (bucket versioning, soft delete), or None when they do not.
 
     Read-only: the job runs it, and `pincer doctor` and `encryption-status`
-    run it again, so the answer follows the bucket's settings once the old
-    versions are deleted. When it cannot be checked (the credentials may lack
+    run it again (through `old_versions_now`), so the answer follows the
+    bucket's settings. When it cannot be checked (the credentials may lack
     `s3:GetBucketVersioning`, `storage.buckets.get` or the Azure service
     properties), it logs a warning and keeps `recorded`, the answer saved in
     the marker; with none, it answers "unknown".
 
-    `rewritten_at` (ISO time the job last completed): soft delete whose
+    `rewritten_at` (ISO time of the job's last rewrite): soft delete whose
     retention has passed since then has removed the plain copies on its own,
-    so it no longer counts.
+    so it no longer counts. `deleted_at` (ISO time the owner ran `pincer
+    storage old-versions-deleted`): with no rewrite after it, the old
+    versions are gone, whatever the bucket's settings.
     """
+    deleted = _parse(deleted_at)
+    if deleted is not None:
+        rewritten = _parse(rewritten_at)
+        if rewritten is None or rewritten <= deleted:
+            return None
     check = getattr(root.client, "old_versions_kept", None)
     if check is None:
         return recorded
@@ -192,14 +207,55 @@ def old_versions(root: CloudPath, recorded: str | None = None, *, rewritten_at: 
     return "; ".join(notes) or None
 
 
-def _seconds_since(iso: str | None) -> float | None:
+def old_versions_now(root: CloudPath, migration: dict[str, Any]) -> str | None:
+    """`old_versions` for a location's saved `migration`, checked again now (read-only).
+
+    The warning ends when versioning and soft delete are off, when soft
+    delete's retention has passed since the last rewrite, or when the owner
+    deleted the old versions and said so (`pincer storage old-versions-deleted`)
+    with no rewrite since. Until the job is complete, rewrites are still to
+    come, so neither of the last two counts yet.
+    """
+    if migration.get("state") != "complete":
+        return old_versions(root, migration.get("old_versions"))
+    return old_versions(
+        root,
+        migration.get("old_versions"),
+        rewritten_at=migration.get(LAST_REWRITE),
+        deleted_at=migration.get(OLD_VERSIONS_DELETED),
+    )
+
+
+def record_old_versions_deleted(root: CloudPath) -> None:
+    """Record that the owner deleted the old plain versions at `root`: the
+    old-versions warning ends until the job rewrites another object.
+
+    Only once encrypting existing data is complete: before that, rewrites
+    that leave new plain versions are still to come.
+    """
+    marker = _Marker(root)
+    state = marker.migration.get("state", "pending")
+    if state != "complete":
+        raise StorageEncryptionError(
+            f"Encrypting existing data on {root} is {state}: run `pincer storage encrypt` until it is complete, "
+            "then delete the old versions"
+        )
+    marker.save(**{OLD_VERSIONS_DELETED: datetime.now(UTC).isoformat()})
+
+
+def _parse(iso: str | None) -> datetime | None:
     if not iso:
         return None
     try:
         then = datetime.fromisoformat(iso)
     except ValueError:
         return None
-    return (datetime.now(UTC) - then).total_seconds()
+    return then if then.tzinfo else then.replace(tzinfo=UTC)
+
+
+def _seconds_since(iso: str | None) -> float | None:
+    then = _parse(iso)
+    return None if then is None else (datetime.now(UTC) - then).total_seconds()
 
 
 def encrypt_location(
@@ -253,6 +309,8 @@ def encrypt_location(
             on_object(key, outcome)
 
     since_save = 0
+    # Saved with progress once this run rewrote an object: soft delete's retention counts from it.
+    rewrites: dict[str, str] = {}
     cursor = resume_after
     # `done` as of the cursor: objects past it are listed, and counted, again on resume.
     done_at_cursor = done_before
@@ -277,6 +335,7 @@ def encrypt_location(
                 outcome = _encrypt_one(client, path)
                 if outcome == "encrypted":
                     progress.encrypted += 1
+                    rewrites[LAST_REWRITE] = datetime.now(UTC).isoformat()
                 else:
                     progress.changed += 1
                 report(key, outcome)
@@ -292,7 +351,7 @@ def encrypt_location(
         since_save += 1
         if not dry_run and since_save >= PROGRESS_EVERY:
             since_save = 0
-            marker.save(state="running", cursor=cursor, done=done_at_cursor)
+            marker.save(state="running", cursor=cursor, done=done_at_cursor, **rewrites)
             if heartbeat is not None and not heartbeat():
                 logger.warning("Storage encryption of %s: lost the lease to another process; stopping", root)
                 stop = stop or threading.Event()
@@ -304,14 +363,18 @@ def encrypt_location(
         return progress
     if stopped:
         progress.state = "running"
-        marker.save(state="running", cursor=cursor, done=done_at_cursor)
+        marker.save(state="running", cursor=cursor, done=done_at_cursor, **rewrites)
     elif progress.failed:
         # Resume from the start next time: the failed objects come before the cursor.
         progress.state = "pending"
-        marker.save(state="pending", cursor=None, done=done_before + progress.encrypted + progress.already)
+        marker.save(state="pending", cursor=None, done=done_before + progress.encrypted + progress.already, **rewrites)
     else:
         progress.state = "complete"
-        marker.save(state="complete", cursor=None, done=done_before + progress.encrypted + progress.already)
+        if LAST_REWRITE not in rewrites and not migration.get(LAST_REWRITE):
+            # Complete for the first time with nothing rewritten in this run:
+            # objects overwritten since encryption was enabled count from now.
+            rewrites[LAST_REWRITE] = datetime.now(UTC).isoformat()
+        marker.save(state="complete", cursor=None, done=done_before + progress.encrypted + progress.already, **rewrites)
         # Every object is encrypted: only now does the check file appear.
         storage_key = getattr(client, "encryption_key", None)
         if storage_key is not None:
