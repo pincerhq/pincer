@@ -27,10 +27,9 @@ type Disposition = Literal["inline", "attachment"]
 def signing_key(settings: Settings) -> bytes:
     """The key for local presigned links, derived from the JWT secret so a
     link stays valid across restarts and replicas that share that secret."""
-    from pincer.security.credentials import load_or_create_jwt_secret
+    from pincer.security.credentials import jwt_derived_key
 
-    secret = load_or_create_jwt_secret(settings.jwt_secret.get_secret_value(), settings.data_dir)
-    return hmac.new(secret.encode(), b"pincer-storage-presign", hashlib.sha256).digest()
+    return jwt_derived_key(settings.jwt_secret.get_secret_value(), settings.data_dir, b"pincer-storage-presign")
 
 
 def _signature(key: bytes, payload: str) -> str:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -237,6 +238,14 @@ def decode_token(secret: str, token: str, *, typ: TokenType) -> TokenClaims:
     if any(value is not None and not isinstance(value, str) for value in (call, sid, jti)):
         raise TokenInvalidError("invalid token")
     return TokenClaims(sub=sub, typ=typ, ver=ver, exp=int(payload["exp"]), call=call, sid=sid, jti=jti)
+
+
+def jwt_derived_key(configured: str, data_dir: Path, label: bytes) -> bytes:
+    """A key for one purpose, derived from the JWT signing secret (see
+    `load_or_create_jwt_secret`) and separated from other purposes by `label`:
+    it holds across restarts and across replicas that share that secret."""
+    secret = load_or_create_jwt_secret(configured, data_dir)
+    return hmac.new(secret.encode(), label, hashlib.sha256).digest()
 
 
 def load_or_create_jwt_secret(configured: str, data_dir: Path) -> str:

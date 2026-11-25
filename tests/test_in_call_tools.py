@@ -8,6 +8,7 @@ every tool through the bound gate exactly like Agent.stream_voice_turn).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from unittest.mock import MagicMock
 
@@ -40,6 +41,14 @@ CREATE_ARGS = {
     "attendees": "mueller@praxis.de",
 }
 CREATE_RESULT = "Event created: 'Beratung'\nStart: 2026-08-18T14:00:00+02:00 | End: ...\nID: ev1\nLink: https://x"
+
+
+def _call_key(args, *, call=CALL, settings=None, tool="google__create_event"):
+    """The key a gate on ``call`` derives for ``args`` (its zone and signing secret)."""
+    from pincer.voice.localtime import get_voice_timezone
+
+    settings = settings if settings is not None else _settings()
+    return ict.CallKeySigner(ict.call_key_secret(settings), get_voice_timezone(settings)).issue(call, tool, args)
 
 
 def _settings(**overrides):
@@ -84,12 +93,13 @@ async def _start(
     owner=True,
     grants=(),
     owner_identity="owner-1",
+    call=CALL,
 ):
     """``owner=False`` places the outbound call with no tracked initiating
     user, so it stays on the remote party's authority (#252).
     ``owner_identity`` is the placing user's Pincer identity (owner authority
     needs a real one); with the ``owner_phone`` fixture, ``"owner"`` makes the
-    callee the owner themselves."""
+    callee the owner themselves. ``call`` is the CallSid (a later call)."""
     settings = settings or _settings()
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
@@ -104,7 +114,7 @@ async def _start(
     await channel.start(_blocking_handler)
     if owner:
         status_notify.register_outbound_call(
-            CALL,
+            call,
             user_id="12345",
             channel="telegram",
             language=language,
@@ -113,7 +123,7 @@ async def _start(
         )
     if appointment:
         scheduling.register_appointment(
-            CALL,
+            call,
             scheduling.AppointmentTask(
                 task_id="t1",
                 user_id="12345",
@@ -127,11 +137,58 @@ async def _start(
                 candidates=["2026-08-18T14:00:00+02:00"],
             ),
         )
-    state = await engine.on_call_start(CALL, "+4930123456", direction, language=language)
-    channel._ensure_call_tracking(CALL, state)  # state machine + gate exist before the first turn
+    state = await engine.on_call_start(call, "+4930123456", direction, language=language)
+    channel._ensure_call_tracking(call, state)  # state machine + gate exist before the first turn
     if modes:
         state.metadata[tp.META_MODE_OVERRIDES] = dict(modes)
     return channel, engine, state
+
+
+LATER_CALL = "CA_later"
+
+
+def _replay_settings(**overrides):
+    settings = _settings(**overrides)
+    settings.voice_timezone = "Europe/Berlin"
+    return settings
+
+
+def _recording(arguments, sent, *, delay_s=0.0, result=(CREATE_RESULT, False)):
+    async def _run():
+        sent.append(arguments.get("idempotency_key"))
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        return result
+
+    return _run
+
+
+async def _deferred_create(settings) -> dict:
+    """Call A: the model's create times out (Google may still have committed it) and is deferred."""
+    timeout = settings.voice_tool_timeout_s
+    settings.voice_tool_timeout_s = 0.05  # type: ignore[assignment]
+    channel, _, state = await _start(ToolAgent([]), settings=settings, appointment=True, modes=OFF)
+    try:
+        arguments = dict(CREATE_ARGS)
+        await channel.get_tool_gate(CALL).run(
+            "google__create_event", arguments, _recording(arguments, [], delay_s=1.0), trusted_key=False
+        )
+    finally:
+        await channel.stop()
+        settings.voice_tool_timeout_s = timeout  # call B runs with the normal timeout
+    return state.metadata["deferred_actions"][0]
+
+
+async def _replay_on_later_call(settings, replayed: dict) -> list[str]:
+    """Call B: the model re-emits a draft ("yes, book it"); returns the key the calendar got."""
+    channel, _, _ = await _start(ToolAgent([]), settings=settings, appointment=True, modes=OFF, call=LATER_CALL)
+    sent: list[str] = []
+    arguments = dict(replayed)
+    await channel.get_tool_gate(LATER_CALL).run(
+        "google__create_event", arguments, _recording(arguments, sent), trusted_key=False
+    )
+    await channel.stop()
+    return sent
 
 
 def _agent_lines(channel):
@@ -399,6 +456,8 @@ async def test_user_mode_timeout(monkeypatch):
     assert denied.deny_reason == "approval_timeout"
     deferred = state.metadata["deferred_actions"]
     assert deferred[0]["tool"] == "google__create_event" and deferred[0]["reason"] == "approval_timeout"
+    # The approval path queues the draft with the call's key as well (#334)
+    assert deferred[0]["draft_args"]["idempotency_key"] == _call_key(CREATE_ARGS, settings=settings)
     await channel.stop()
 
 
@@ -762,7 +821,7 @@ async def test_repeated_create_is_idempotent_per_call(owner_phone):
     first = await gate.run("google__create_event", first_args, _executor(first_args))
     second_args = dict(CREATE_ARGS)
     second = await gate.run("google__create_event", second_args, _executor(second_args))
-    assert seen[0] == seen[1] == ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)
+    assert seen[0] == seen[1] == _call_key(CREATE_ARGS)
     assert first.content == "[TOOL RESULT: Der Termin ist eingetragen.]"
     assert second.content == "[TOOL RESULT: Der Termin stand bereits im Kalender.]"
     # A key trusted code (the receptionist) supplied is kept…
@@ -774,7 +833,7 @@ async def test_repeated_create_is_idempotent_per_call(owner_phone):
     later = {**CREATE_ARGS, "start": "2026-08-18T15:00:00+02:00", "idempotency_key": seen[0]}
     result = await gate.run("google__create_event", later, _executor(later), trusted_key=False)
     later_action = {k: v for k, v in later.items() if k != "idempotency_key"}
-    assert seen[-1] == ict.call_idempotency_key(CALL, "google__create_event", later_action)
+    assert seen[-1] == _call_key(later_action)
     assert seen[-1] != seen[0]
     assert result.content == "[TOOL RESULT: Der Termin ist eingetragen.]"
     await channel.stop()
@@ -811,7 +870,7 @@ async def test_owner_approved_create_gets_the_call_key(owner_phone):
     result = await gate.run("google__create_event", arguments, _run, trusted_key=False)
     await approver
     assert result.executed
-    assert sent == [ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)]
+    assert sent == [_call_key(CREATE_ARGS)]
     await channel.stop()
 
 
@@ -842,7 +901,7 @@ async def test_agent_passes_model_tool_calls_as_untrusted(owner_phone):
     assert not result.is_error
     # The gate keys the model's own arguments (a re-emit after a verbal confirmation gives the same key
     # and fingerprint); the voice zone reaches the tool through the turn's context, not the arguments.
-    assert sent[0]["idempotency_key"] == ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)
+    assert sent[0]["idempotency_key"] == _call_key(CREATE_ARGS)
     assert "timezone" not in sent[0]
     assert zones == ["Europe/Berlin"]
     await channel.stop()
@@ -887,7 +946,7 @@ async def test_a_verbally_confirmed_re_emit_through_the_agent_runs_the_proposed_
     )
 
     assert not second.is_error
-    key = ict.call_idempotency_key(CALL, "google__create_event", proposed)
+    key = _call_key(proposed)
     assert sent == [({**proposed, "idempotency_key": key}, "Europe/Berlin")]
     await channel.stop()
 
@@ -1012,7 +1071,7 @@ async def test_tool_timeout_defers_to_followup():
     assert deferred[0]["draft_args"] == {
         **CREATE_ARGS,
         "timezone": "Europe/Berlin",
-        "idempotency_key": ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS),
+        "idempotency_key": _call_key(CREATE_ARGS, settings=settings),
     }
     denied = [a for a in channel.get_transcript(CALL).actions if a.action_type == "tool_denied"][0]
     assert denied.deny_reason == "tool_timeout"
@@ -1032,6 +1091,95 @@ async def test_tool_timeout_defers_to_followup():
     await proc._write_deferred_followups(CALL, "12345", "Praxis", deferred)
     assert "followup" in mem.stored[0]["extra_tags"] and "tool=google__create_event" in mem.stored[0]["content"]
     assert "⏳" in PostCallProcessor._render_deferred(deferred, "de")
+    await channel.stop()
+
+
+@pytest.mark.parametrize("source", ["draft", "memory"])
+async def test_a_deferred_create_replayed_on_a_later_call_keeps_its_key(source):
+    """#334: call A's create timed out but committed; the user calls back and says "yes, book it".
+    The re-emitted draft keeps call A's key, so the calendar finds the event instead of booking a
+    second one. Also through the follow-up memory text, and on a call in another zone."""
+    from pincer.voice.postcall import PostCallProcessor
+
+    settings = _replay_settings()
+    item = await _deferred_create(settings)
+    key = item["draft_args"]["idempotency_key"]
+    assert key == _call_key(CREATE_ARGS, settings=settings)
+    if source == "memory":
+        followup = PostCallProcessor(settings, memory=None, db_path="")._followup_call(item)
+        replayed = json.loads(followup.split("args=", 1)[1])
+    else:
+        replayed = dict(item["draft_args"])
+    settings.voice_timezone = "America/New_York"  # call B is read in another zone; the draft is pinned
+    assert await _replay_on_later_call(settings, replayed) == [key]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"start": "2026-08-18T15:00:00+02:00"},
+        {"summary": "Andere"},
+        {"attendees": "someone@else.de"},
+        {"timezone": "Europe/Kyiv"},
+    ],
+)
+async def test_a_deferred_key_copied_onto_a_different_booking_is_replaced(change):
+    """The key is bound to the draft's arguments: on a different booking it does not verify, and the
+    later call keys that booking itself (no "already exists" for an event it never made)."""
+    settings = _replay_settings()
+    item = await _deferred_create(settings)
+    replayed = {**item["draft_args"], **change}
+    sent = await _replay_on_later_call(settings, replayed)
+    action = {k: v for k, v in replayed.items() if k != "idempotency_key"}
+    assert sent == [_call_key(action, call=LATER_CALL, settings=settings)]
+    assert sent[0] != item["draft_args"]["idempotency_key"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "copied",
+        "pincer-reception-CA_other",
+        "pincer-appointment-t1",
+        "pincer-call-" + "a" * 20,  # the pre-#334 format
+        "pincer-call-aaaaaaaaaaaa-bbbbbbbbbbbbbbbb",
+        "pincer-call-" + "ä" * 12 + "-" + "ö" * 16,
+    ],
+)
+async def test_a_forged_key_on_a_later_call_is_replaced(key):
+    settings = _replay_settings()
+    item = await _deferred_create(settings)
+    action = {k: v for k, v in item["draft_args"].items() if k != "idempotency_key"}
+    sent = await _replay_on_later_call(settings, {**action, "idempotency_key": key})
+    assert sent == [_call_key(action, call=LATER_CALL, settings=settings)]
+
+
+async def test_a_deferred_key_does_not_verify_under_another_secret():
+    """Keys are signed with the JWT secret: replicas that don't share PINCER_JWT_SECRET (or a new
+    secret) give the replay a fresh key — a possible duplicate, never a wrong match."""
+    from pydantic import SecretStr
+
+    settings = _replay_settings()
+    item = await _deferred_create(settings)
+    other = _replay_settings()
+    other.jwt_secret = SecretStr("another-jwt-secret-for-in-call-idempotency-keys-987654321")
+    sent = await _replay_on_later_call(other, dict(item["draft_args"]))
+    action = {k: v for k, v in item["draft_args"].items() if k != "idempotency_key"}
+    assert sent == [_call_key(action, call=LATER_CALL, settings=other)]
+    assert sent[0] != item["draft_args"]["idempotency_key"]
+
+
+async def test_a_failed_create_defers_its_draft_with_the_calls_key():
+    """The tool-error path queues the draft with the settled key too (no key passed down to it)."""
+    settings = _replay_settings()
+    channel, _, state = await _start(ToolAgent([]), settings=settings, appointment=True, modes=OFF)
+    arguments = dict(CREATE_ARGS)
+    run = _recording(arguments, [], result=("Error: 503 backend error", True))
+    result = await channel.get_tool_gate(CALL).run("google__create_event", arguments, run, trusted_key=False)
+    assert result.deny_reason == "tool_error"
+    deferred = state.metadata["deferred_actions"]
+    assert deferred[0]["reason"] == "tool_error"
+    assert deferred[0]["draft_args"]["idempotency_key"] == _call_key(CREATE_ARGS, settings=settings)
     await channel.stop()
 
 
