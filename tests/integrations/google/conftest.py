@@ -35,6 +35,17 @@ def workspace_dir(tmp_path_factory, monkeypatch):
     return root
 
 
+@pytest.fixture(autouse=True)
+def fresh_partial_scope_log(monkeypatch):
+    """get_google_factory logs the partial-scope warning once per token state: give each test a
+    fresh process's state, so a WARNING one test expects is not demoted by an earlier test."""
+    import pincer.integrations.google as google
+    from pincer.core.log_once import LogOnce
+
+    monkeypatch.setattr(google, "_PARTIAL_SCOPE_LOG", LogOnce(google._log))
+    monkeypatch.setattr(google, "_partial_scope_state", None)
+
+
 # ── Auth & factory fixtures ───────────────────────────────────────────────────
 
 

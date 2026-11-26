@@ -43,8 +43,8 @@ _SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
 _TOKEN_MISSING_LOG = LogOnce(logger)
 # A crashing Workspace registration (with its traceback): WARNING once, DEBUG until it registers again.
 _REGISTRATION_FAILURE_LOG = LogOnce(logger)
-# A token missing a required scope, apart from the crash log: a crash must not demote the one
-# message that says what to do.
+# A token missing a required scope (GoogleScopeError), apart from the crash log: a crash must not
+# demote the one message that says what to do.
 _SCOPE_FAILURE_LOG = LogOnce(logger)
 
 
@@ -369,10 +369,21 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
         # A token is there now: if it goes missing later in this process, say so at full level again.
         _SETUP_HINT_LOG.clear()
         _TOKEN_MISSING_LOG.clear()
-    except RuntimeError as e:  # e.g. a token missing a required scope: as repeating as any other failure
-        _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
     except Exception as e:
-        _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
+        if _is_scope_error(e):  # as repeating as any other failure, but needs no traceback
+            _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
+        else:
+            _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
+
+
+def _is_scope_error(exc: Exception) -> bool:
+    """True for a token missing a required scope (``GoogleScopeError``). Checked inside the
+    handler, so a Google package that fails to import is still caught and logged as a crash."""
+    try:
+        from pincer.integrations.google.auth import GoogleScopeError
+    except Exception:
+        return False
+    return isinstance(exc, GoogleScopeError)
 
 
 def _log_no_google_token(settings: Settings) -> None:

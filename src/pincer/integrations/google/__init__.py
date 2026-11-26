@@ -22,12 +22,48 @@ Setup::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from pincer.core.log_once import LogOnce
 
 if TYPE_CHECKING:
     from pincer.integrations.google.auth import GoogleAuth
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
+
+_log = logging.getLogger(__name__)
+
+
+class _ScopeState(NamedTuple):
+    """The token state a partial-scope warning was logged for."""
+
+    source: str
+    token_path: str
+    token_fingerprint: str  # changes on a re-auth, even one that misses the same scopes again
+    skipped: tuple[str, ...]
+
+
+# get_google_factory runs on every GET /api/integrations: the partial-scope warning is logged
+# once per token state (WARNING, then DEBUG). Not LogOncePerKey: a state must warn again after
+# the token was full (or gone) in between, so the warning is re-armed whenever the state changes.
+_PARTIAL_SCOPE_LOG = LogOnce(_log)
+_partial_scope_state: _ScopeState | None = None
+
+
+def _scope_state(resolved: tuple[GoogleAuth, list[str], list[str]] | None) -> _ScopeState | None:
+    """The partial-scope state of a ``_resolve_auth`` result; None when no service is skipped."""
+    if resolved is None or not resolved[1]:
+        return None
+    auth, skipped, _missing = resolved
+    return _ScopeState(auth.source, str(auth.token_path), auth.token_fingerprint(), tuple(skipped))
+
+
+def _note_partial_scope_state(state: _ScopeState | None) -> None:
+    """Re-arm the partial-scope warning when the token state differs from the one last seen."""
+    global _partial_scope_state
+    if state != _partial_scope_state:
+        _PARTIAL_SCOPE_LOG.clear()
+        _partial_scope_state = state
 
 
 def _resolve_auth(settings: Any = None) -> tuple[GoogleAuth, list[str], list[str]] | None:
@@ -49,7 +85,7 @@ def _resolve_auth(settings: Any = None) -> tuple[GoogleAuth, list[str], list[str
         return None
     unknown = [s for s in cfg.services if s not in SERVICE_SCOPES]
     if unknown:
-        logging.getLogger(__name__).warning("Ignoring unknown [integrations.google] services: %s", unknown)
+        _log.warning("Ignoring unknown [integrations.google] services: %s", unknown)
     configured = [s for s in cfg.services if s in SERVICE_SCOPES]
 
     location = locate_token(settings if settings is not None else get_settings_relaxed())
@@ -107,15 +143,14 @@ def get_google_factory() -> GoogleServiceFactory | None:
     """
     from pincer.integrations.google.service_factory import GoogleServiceFactory
 
-    _log = logging.getLogger(__name__)
-
     resolved = _resolve_auth()
+    _note_partial_scope_state(_scope_state(resolved))
     if resolved is None:
         return None
     auth, skipped, missing = resolved
 
     if skipped:
-        _log.warning(
+        _PARTIAL_SCOPE_LOG.log(
             "Google Workspace token is missing %d required scope(s) — "
             "%s tools disabled until you re-authenticate.\n"
             "  Missing: %s\n"

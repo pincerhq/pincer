@@ -95,6 +95,92 @@ def test_legacy_calendar_only_token_registers_calendar_tools(env, caplog):
     assert "gmail" in caplog.text and "meet" in caplog.text
 
 
+def _partial_scope_records(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "required scope(s)" in r.getMessage()]
+
+
+def _partial_scope_levels(caplog) -> list[int]:
+    return [r.levelno for r in _partial_scope_records(caplog)]
+
+
+def test_partial_scope_warning_is_logged_once_per_token_state(env, caplog):
+    """get_google_factory runs on every GET /api/integrations: a token missing a scope is one
+    WARNING, then DEBUG — not one WARNING per dashboard poll."""
+    oauth_dir, _ = env
+    _write_files(oauth_dir, _NO_MEET)
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.integrations.google"):
+        for _ in range(3):
+            assert get_google_factory() is not None
+    assert _partial_scope_levels(caplog) == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+
+
+def test_partial_scope_warning_rearms_when_the_scopes_change(env, caplog):
+    """A token missing a different scope set is a new condition: WARNING again."""
+    oauth_dir, _ = env
+    _write_files(oauth_dir, _NO_MEET)
+    get_google_factory()
+
+    no_tasks = [s for s in ALL_SCOPES if s not in SERVICE_SCOPES["tasks"]]
+    _write_files(oauth_dir, no_tasks)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pincer.integrations.google"):
+        get_google_factory()
+        get_google_factory()
+    assert _partial_scope_levels(caplog) == [logging.WARNING, logging.DEBUG]
+    assert "tasks" in _partial_scope_records(caplog)[0].getMessage()
+
+
+def test_partial_scope_warning_rearms_after_a_re_auth_missing_the_same_scopes(env, caplog):
+    """A re-auth (a new grant at the same path) that misses the same scopes again is when the user
+    most needs the warning: WARNING again, though the missing set is unchanged."""
+    oauth_dir, _ = env
+    _write_files(oauth_dir, _NO_MEET)
+    get_google_factory()
+
+    token = oauth_dir / "google_workspace_token.json"
+    data = json.loads(token.read_text())
+    data["refresh_token"] = "1//re-authed"
+    token.write_text(json.dumps(data))
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pincer.integrations.google"):
+        get_google_factory()
+        get_google_factory()
+    assert _partial_scope_levels(caplog) == [logging.WARNING, logging.DEBUG]
+
+
+def test_partial_scope_warning_is_not_rearmed_by_an_access_token_refresh(env, caplog):
+    """A refresh rewrites the access token in the file but keeps the grant: still the same state."""
+    oauth_dir, _ = env
+    _write_files(oauth_dir, _NO_MEET)
+    get_google_factory()
+
+    token = oauth_dir / "google_workspace_token.json"
+    data = json.loads(token.read_text())
+    data["token"] = "ya29.refreshed"
+    data["expiry"] = "2099-02-01T00:00:00Z"
+    token.write_text(json.dumps(data))
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pincer.integrations.google"):
+        get_google_factory()
+    assert _partial_scope_levels(caplog) == [logging.DEBUG]
+
+
+def test_partial_scope_warning_rearms_after_a_full_token(env, caplog):
+    """A full token clears the condition: when the token loses a scope again, WARNING again."""
+    oauth_dir, _ = env
+    _write_files(oauth_dir, _NO_MEET)
+    get_google_factory()
+    _write_files(oauth_dir, ALL_SCOPES)
+    get_google_factory()
+
+    _write_files(oauth_dir, _NO_MEET)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pincer.integrations.google"):
+        get_google_factory()
+    assert _partial_scope_levels(caplog) == [logging.WARNING]
+
+
 def test_token_missing_meet_registers_everything_but_meet(env):
     oauth_dir, _ = env
     _write_files(oauth_dir, _NO_MEET)
