@@ -150,7 +150,7 @@ def unsupported_features(error: BaseException) -> frozenset[Feature]:
             return frozenset({Feature.RESPONSES_API})
         return frozenset()
     if isinstance(error, anthropic.APIStatusError) and error.status_code == 400:
-        message = _anthropic_message(error)
+        message = anthropic_error_field(error, "message")
         features: set[Feature] = set()
         if (beta := _UNKNOWN_BETA.search(message)) is not None:
             named = re.findall(r"`([^`]+)`", beta.group(1))
@@ -167,11 +167,13 @@ def _error_code(error: openai.APIStatusError) -> str | None:
     return code if isinstance(code, str) else None
 
 
-def _anthropic_message(error: anthropic.APIStatusError) -> str:
+def anthropic_error_field(error: anthropic.APIStatusError, field: str) -> str:
+    """``field`` (``"type"``, ``"message"``) of the error an Anthropic body carries
+    (``{"type": "error", "error": {...}}``), or "" when the body has no such string."""
     body: Any = error.body
     inner = body.get("error") if isinstance(body, dict) else None
-    message = inner.get("message") if isinstance(inner, dict) else None
-    return message if isinstance(message, str) else ""
+    value = inner.get(field) if isinstance(inner, dict) else None
+    return value if isinstance(value, str) else ""
 
 
 def reasoning_wire(settings: Settings, provider: str) -> ReasoningWire | None:

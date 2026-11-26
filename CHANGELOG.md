@@ -522,10 +522,14 @@ from the variable name.
   SDK would retry (a timeout, a 5xx, an overload) also switches at once: the
   primary and each fallback get one attempt. If every fallback fails too, the
   primary is tried once more, with its retry, after a rate limit, an overload or
-  a server error; any other failure (a 4xx, a timeout, a lost connection)
-  returns the primary's error at once. That retry, and a primary with no
-  fallback, retry a 429 that arrives before the first token: three attempts, the
-  wait doubling up to 60 s. Once text has streamed, nothing is retried.
+  a server error (also one Anthropic reports inside the stream), a request
+  timeout (408) or a conflict (409); any other failure (another 4xx, a timeout,
+  a lost connection) returns the primary's error at once. That retry, and a
+  primary with no fallback, retry a 429 that arrives before the first token:
+  three attempts, the wait doubling up to 60 s. They also keep the SDK's own
+  retries of a timeout or a lost connection (two more attempts), which a first
+  try with a fallback configured skips. Once text has streamed, nothing is
+  retried.
 
 #### The system prompt stays the same for a whole conversation (#357)
 
