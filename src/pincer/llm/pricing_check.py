@@ -53,25 +53,22 @@ class ModelUse:
 def models_to_price(settings: Settings, config_dir: Path | None = None) -> list[ModelUse]:
     """Every model Pincer will call that costs money: the chat model of every provider with
     credentials, the summary model, the voice turn model when voice is on, and the MCP
-    sampling model when the standalone MCP server would sample (read from `config_dir`,
-    default cwd). A free provider (a keyless compatible endpoint) is left out, and so is a claude-*
-    id an OpenAI-wire provider would never send. `daily_budget_usd` plays no part."""
+    sampling model when the standalone MCP server would sample (its toml read from `config_dir`,
+    default cwd, plus the MCP env switches). A free provider (a keyless compatible endpoint) is
+    left out, and so is a claude-* id an OpenAI-wire provider would never send. `daily_budget_usd` plays no part."""
     uses = [use for use in _model_uses(settings) if not is_free_provider(settings, use.provider)]
     return uses + _sampling_uses(settings, config_dir)
 
 
 def _sampling_uses(settings: Settings, config_dir: Path | None) -> list[ModelUse]:
     """The standalone MCP server's sampling model, which calls the Anthropic API directly, when
-    the toml says it would sample (`sampling_model`: no .env, no env vars, so the check is the
-    same wherever it runs). A malformed MCP section is reported by the MCP config's own load,
-    not here: this check must not crash startup over it."""
+    it would sample by the toml and the MCP env switches the runtime honours (`sampling_model`,
+    which never loads .env). An unreadable or malformed MCP config gives no model: the MCP
+    config's own load reports it, and this check must not crash startup over it."""
     from pincer.mcp.config import sampling_model
     from pincer.mcp.sampling import SAMPLING_PROVIDER
 
-    try:
-        model = sampling_model(config_dir)
-    except (KeyError, AttributeError, TypeError, ValueError):
-        return []
+    model = sampling_model(config_dir)
     if model is None or not has_credentials(settings, SAMPLING_PROVIDER):
         return []
     return [ModelUse(SAMPLING_PROVIDER, model, "sampling")]

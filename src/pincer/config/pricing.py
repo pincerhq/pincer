@@ -158,6 +158,9 @@ def _merged_section(config_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         except ValueError as e:  # tomllib.TOMLDecodeError
             errors.append(f"{name}: {e}")
             continue
+        except OSError as e:  # PermissionError, IsADirectoryError
+            errors.append(f"{name}: can't be read ({e.strerror or e})")
+            continue
         pricing = raw.get("pricing", {})
         if not isinstance(pricing, dict):
             errors.append(f"{name}: [pricing] must be a table of model entries")
