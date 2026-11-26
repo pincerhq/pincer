@@ -179,8 +179,8 @@ def test_an_all_day_create_is_confirmed_as_whole_days(language, one_day, three_d
     ("language", "spoken"),
     [
         ("en", "move the appointment 'Vacation' to start on Tuesday, November 10"),
-        ("de", "den Termin „Vacation“ auf einen Beginn am Dienstag, der zehnte November verschieben"),
-        ("uk", "перенесу зустріч 'Vacation' на вівторок, 10 листопада як день початку"),
+        ("de", "den Termin „Vacation“ so verschieben, dass er am Dienstag, dem zehnten November, beginnt"),
+        ("uk", "перенесу зустріч 'Vacation' так, щоб вона починалась у вівторок, 10 листопада"),
     ],
 )
 def test_an_all_day_update_without_an_end_names_no_length(language, spoken):
@@ -189,6 +189,30 @@ def test_an_all_day_update_without_an_end_names_no_length(language, spoken):
     args = {"event_id": "e", "summary": "Vacation", "start": "2026-11-10"}
 
     assert ts.describe_action("google__update_event", args, language) == spoken
+
+
+@pytest.mark.parametrize(
+    ("start", "uk_day", "de_day"),
+    [
+        ("2026-11-09", "понеділок, 9 листопада", "Montag, dem neunten November"),
+        ("2026-11-11", "середу, 11 листопада", "Mittwoch, dem elften November"),
+        ("2026-11-12", "четвер, 12 листопада", "Donnerstag, dem zwölften November"),
+        ("2026-11-13", "п'ятницю, 13 листопада", "Freitag, dem dreizehnten November"),
+        ("2026-11-14", "суботу, 14 листопада", "Samstag, dem vierzehnten November"),
+        ("2026-11-15", "неділю, 15 листопада", "Sonntag, dem fünfzehnten November"),
+    ],
+)
+def test_an_all_day_update_start_reads_naturally_on_every_weekday(start, uk_day, de_day):
+    """#335: after "у" a Ukrainian weekday is accusative ("у середу", not "у середа"); after "am" the
+    German date is dative ("am Mittwoch, dem elften November"). Tuesday is covered by the test above."""
+    args = {"event_id": "e", "summary": "Vacation", "start": start}
+
+    assert ts.describe_action("google__update_event", args, "uk") == (
+        f"перенесу зустріч 'Vacation' так, щоб вона починалась у {uk_day}"
+    )
+    assert ts.describe_action("google__update_event", args, "de") == (
+        f"den Termin „Vacation“ so verschieben, dass er am {de_day}, beginnt"
+    )
 
 
 def test_spoken_datetime_forms():

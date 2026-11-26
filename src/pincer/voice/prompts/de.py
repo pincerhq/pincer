@@ -363,6 +363,9 @@ E5, E10 oder Diesel?).\
 ACTION_DESCRIPTIONS = {
     "google__create_event": "den Termin {title} am {when} eintragen",
     "google__update_event": "den Termin {title} auf {when} verschieben",
+    "google__update_event.from_day": "den Termin {title} so verschieben, dass er am {when}, beginnt",
+    # The case {when} is rendered in for the template above: "am Dienstag, dem zehnten November".
+    "google__update_event.from_day.case": "dative",
     "send_owner_message": "an meinen Nutzer weitergeben: {text}",
     "memory_note": "mir notieren: {note}",
     "default": "{tool} ausführen",
@@ -370,7 +373,6 @@ ACTION_DESCRIPTIONS = {
 
 TOOL_SPEECH = {
     "when.all_day": "{days}, ganztägig",
-    "when.from_day": "einen Beginn am {day}",
     "google__check_freebusy.free": "Frei wäre: {slots}.",
     "google__check_freebusy.all_free": "In dem Zeitraum ist alles frei.",
     "google__check_freebusy.none_free": "In dem Zeitraum ist leider nichts frei.",

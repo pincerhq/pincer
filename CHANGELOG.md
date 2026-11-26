@@ -1340,6 +1340,15 @@ mounting a directory. Install the new `remote-skills` extra
   MCP config the check can't read is logged as a warning. A `pincer.toml` or
   `pincer.local.toml` that can't be read (no permission, or a directory) now
   refuses with the file named instead of crashing startup.
+- **Voice: the confirmation for moving an all-day event to a new first day reads
+  naturally in German and Ukrainian (#335).** When an update gives only a new
+  start day, the caller used to hear "den Termin „X“ auf einen Beginn am
+  Dienstag, der zehnte November verschieben" or "перенесу зустріч 'X' на
+  вівторок, 10 листопада як день початку". Now it is "den Termin „X“ so
+  verschieben, dass er am Dienstag, dem zehnten November, beginnt" and
+  "перенесу зустріч 'X' так, щоб вона починалась у вівторок, 10 листопада",
+  with the dative date in German and the accusative weekday in Ukrainian
+  ("у середу", "у п'ятницю").
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

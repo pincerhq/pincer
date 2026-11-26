@@ -392,15 +392,17 @@ def render_time_de(dt: datetime) -> str:
     return f"{hour_word} Uhr {number_words_de(dt.minute)}"
 
 
-def render_date_de(dt: datetime) -> str:
-    """'Dienstag, der achtzehnte August'."""
+def render_date_de(dt: datetime, case: str = "nominative") -> str:
+    """'Dienstag, der achtzehnte August'; dative 'Dienstag, dem achtzehnten August' (after 'am')."""
     weekday = WEEKDAY_NAMES_DE[dt.weekday()]
+    if case == "dative":
+        return f"{weekday}, dem {ordinal_words_de(dt.day)}n {MONTH_NAMES_DE[dt.month - 1]}"
     return f"{weekday}, der {ordinal_words_de(dt.day)} {MONTH_NAMES_DE[dt.month - 1]}"
 
 
-def render_datetime_de(dt: datetime, include_time: bool = True) -> str:
+def render_datetime_de(dt: datetime, include_time: bool = True, case: str = "nominative") -> str:
     """'Dienstag, der achtzehnte August um vierzehn Uhr dreißig'."""
-    date_part = render_date_de(dt)
+    date_part = render_date_de(dt, case=case)
     if not include_time:
         return date_part
     return f"{date_part} um {render_time_de(dt)}"

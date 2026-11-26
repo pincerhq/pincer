@@ -387,6 +387,8 @@ class TestRendering:
         assert render_date_de(datetime(2025, 8, 1)) == "Freitag, der erste August"
         assert render_date_de(datetime(2025, 8, 3)) == "Sonntag, der dritte August"
         assert render_date_de(datetime(2025, 12, 31)) == "Mittwoch, der einunddreißigste Dezember"
+        assert render_date_de(datetime(2025, 8, 1), case="dative") == "Freitag, dem ersten August"
+        assert render_date_de(datetime(2025, 12, 31), case="dative") == "Mittwoch, dem einunddreißigsten Dezember"
 
     def test_render_datetime_no_iso_leakage(self):
         rendered = render_datetime_de(datetime(2025, 8, 19, 14, 30))

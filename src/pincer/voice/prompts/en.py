@@ -348,6 +348,9 @@ action you cannot perform.
 ACTION_DESCRIPTIONS = {
     "google__create_event": "create the appointment {title} on {when}",
     "google__update_event": "move the appointment {title} to {when}",
+    "google__update_event.from_day": "move the appointment {title} to start on {when}",
+    # The case {when} is rendered in for the template above; English dates do not change.
+    "google__update_event.from_day.case": "nominative",
     "send_owner_message": "pass on to my user: {text}",
     "memory_note": "make a note of: {note}",
     "default": "carry out {tool}",
@@ -357,7 +360,6 @@ ACTION_DESCRIPTIONS = {
 # the tool said, already in speakable form (no JSON, no ISO timestamps).
 TOOL_SPEECH = {
     "when.all_day": "{days}, all day",
-    "when.from_day": "start on {day}",
     "google__check_freebusy.free": "Free would be: {slots}.",
     "google__check_freebusy.all_free": "That whole time range is free.",
     "google__check_freebusy.none_free": "Unfortunately nothing is free in that time range.",

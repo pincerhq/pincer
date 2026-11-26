@@ -353,6 +353,9 @@ IN_CALL_TOOL_RULES = """\
 ACTION_DESCRIPTIONS = {
     "google__create_event": "створю зустріч {title} на {when}",
     "google__update_event": "перенесу зустріч {title} на {when}",
+    "google__update_event.from_day": "перенесу зустріч {title} так, щоб вона починалась у {when}",
+    # The case {when} is rendered in for the template above: "у середу, 11 листопада".
+    "google__update_event.from_day.case": "accusative",
     "send_owner_message": "передам моєму користувачеві: {text}",
     "memory_note": "занотую: {note}",
     "default": "виконаю {tool}",
@@ -360,7 +363,6 @@ ACTION_DESCRIPTIONS = {
 
 TOOL_SPEECH = {
     "when.all_day": "{days}, на весь день",
-    "when.from_day": "{day} як день початку",
     "google__check_freebusy.free": "Вільно: {slots}.",
     "google__check_freebusy.all_free": "Увесь цей проміжок вільний.",
     "google__check_freebusy.none_free": "На жаль, у цей проміжок нічого не вільно.",

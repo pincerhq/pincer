@@ -42,6 +42,10 @@ _WEEKDAYS = {
     "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
     "uk": ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя"],
 }
+# Accusative, after a preposition: "у середу", "у п'ятницю".
+_WEEKDAYS_ACCUSATIVE = {
+    "uk": ["понеділок", "вівторок", "середу", "четвер", "п'ятницю", "суботу", "неділю"],
+}
 _MONTHS = {
     "en": [
         "January",
@@ -114,15 +118,20 @@ def parse_iso(value: Any) -> datetime | None:
         return None
 
 
-def spoken_datetime(dt: datetime, language: str, include_time: bool = True) -> str:
-    """'Dienstag, der achtzehnte August um vierzehn Uhr' / 'Tuesday, August 18 at 2:00 PM'."""
+def spoken_datetime(dt: datetime, language: str, include_time: bool = True, case: str = "nominative") -> str:
+    """'Dienstag, der achtzehnte August um vierzehn Uhr' / 'Tuesday, August 18 at 2:00 PM'.
+
+    ``case`` is the grammatical case the sentence needs: "dative" (de, after "am") and
+    "accusative" (uk, after "у"/"на") change the form; any other case is nominative.
+    """
     lang = _lang(language)
     if lang == "de":
         from pincer.voice.nlu_de import render_datetime_de
 
-        return render_datetime_de(dt, include_time=include_time)
+        return render_datetime_de(dt, include_time=include_time, case=case)
     if lang == "uk":
-        text = f"{_WEEKDAYS['uk'][dt.weekday()]}, {dt.day} {_MONTHS['uk'][dt.month - 1]}"
+        weekdays = (_WEEKDAYS_ACCUSATIVE if case == "accusative" else _WEEKDAYS)["uk"]
+        text = f"{weekdays[dt.weekday()]}, {dt.day} {_MONTHS['uk'][dt.month - 1]}"
         return f"{text} о {dt.strftime('%H:%M')}" if include_time else text
     text = f"{_WEEKDAYS['en'][dt.weekday()]}, {_MONTHS['en'][dt.month - 1]} {dt.day}"
     if not include_time:
@@ -449,12 +458,16 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
     Dienstag, der achtzehnte August um vierzehn Uhr eintragen'."""
     args = args or {}
     table = get_prompt("ACTION_DESCRIPTIONS", language) or {}
-    template = str(table.get(tool_name) or table.get("default") or "{tool}")
     start = parse_iso(args.get("start"))
-    if start and _is_date_only(args.get("start")) and tool_name == "google__update_event" and not args.get("end"):
-        # A new start alone keeps the stored duration, which the caller has not heard: no length.
-        when = _tpl("when.from_day", language).format(day=spoken_datetime(start, language, include_time=False))
-    elif start and _is_date_only(args.get("start")):
+    all_day = start is not None and _is_date_only(args.get("start"))
+    # A new start alone keeps the stored duration, which the caller has not heard: no length.
+    new_first_day = all_day and tool_name == "google__update_event" and not args.get("end")
+    key = f"{tool_name}.from_day" if new_first_day else tool_name
+    template = str(table.get(key) or table.get(tool_name) or table.get("default") or "{tool}")
+    if new_first_day:
+        case = str(table.get(f"{key}.case") or "nominative")
+        when = spoken_datetime(start, language, include_time=False, case=case)
+    elif all_day:
         end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
         when = _spoken_all_day(start, end, language)
     else:
