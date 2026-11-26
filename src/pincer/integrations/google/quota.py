@@ -3,7 +3,7 @@ Quota / rate-limit handling for Google Workspace API calls.
 
 Google returns HTTP 429 (Too Many Requests) or HTTP 403 with
 ``reason=rateLimitExceeded`` when quota is hit.  This module provides
-an exponential-backoff retry wrapper.
+an exponential-backoff retry wrapper. An exhausted (daily) quota is never retried.
 """
 
 from __future__ import annotations
@@ -26,10 +26,12 @@ T = TypeVar("T")
 # outage check in scheduler/triggers). Retried on the spot: short-lived limits and hiccups.
 _RETRIABLE_STATUS_CODES = frozenset({429, 503})
 RETRIABLE_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded", "backendError"})
-# Exhausted quotas last until Google resets them (daily): never retried, but an outage, not a bug.
+# Exhausted quotas last until Google resets them (daily): never retried, even on a 429, but an
+# outage, not a bug.
 EXHAUSTED_QUOTA_REASONS = frozenset({"quotaExceeded", "dailyLimitExceeded"})
 _SERVER_ERROR_STATUS = 500
 _UPPER_SNAKE_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$")
+_REASONS_ATTR = "_pincer_error_reasons"
 
 
 def _http_error(exc: BaseException) -> Any:
@@ -52,41 +54,55 @@ def _reason_name(raw: str) -> str:
 
 def _error_entries(error: Any) -> list[Any]:
     """Both reason sources of an error body: the legacy ``error.errors[]`` and google.rpc
-    ``error.details[]`` (ErrorInfo). googleapiclient's ``error_details`` holds only the first of
-    ``detail``/``details``/``errors``/``message`` present, so ``details`` hides ``errors``."""
-    entries = list(error.error_details) if isinstance(error.error_details, list) else []
+    ``error.details[]`` (ErrorInfo), read from ``error.content`` (googleapiclient parses the body
+    too, but its ``error_details`` holds only the first of ``detail``/``details``/``errors``/
+    ``message`` present, so ``details`` hides ``errors``). A body that is not JSON, or not shaped
+    like a Google error, has no entries: its status code alone decides."""
     try:
         data = json.loads(error.content.decode("utf-8"))
     except (AttributeError, UnicodeDecodeError, ValueError):
-        return entries
+        return []
     body = data[0] if isinstance(data, list) and data else data
     inner = body.get("error") if isinstance(body, dict) else None
-    if isinstance(inner, dict):
-        for key in ("errors", "details"):
-            if isinstance(inner.get(key), list):
-                entries.extend(inner[key])
-    return entries
+    if not isinstance(inner, dict):
+        return []
+    return [entry for key in ("errors", "details") if isinstance(inner.get(key), list) for entry in inner[key]]
 
 
-def error_reasons(exc: BaseException) -> set[str]:
+def error_reasons(exc: BaseException) -> frozenset[str]:
     """The ``reason`` fields of a Google ``HttpError``, from ``errors[]`` and ErrorInfo ``details[]``
-    alike, in camelCase (empty for anything else)."""
+    alike, in camelCase.
+
+    Cached on the error, so the retry wrapper and the outage check share one parse of its body
+    (our parse; googleapiclient's own one in ``HttpError.__init__`` is not counted).
+
+    Returns:
+        The reasons; empty for anything that is not a Google ``HttpError``.
+    """
     error = _http_error(exc)
     if error is None:
-        return set()
-    return {
-        _reason_name(str(entry["reason"]))
-        for entry in _error_entries(error)
-        if isinstance(entry, dict) and entry.get("reason")
-    }
+        return frozenset()
+    reasons: frozenset[str] | None = getattr(error, _REASONS_ATTR, None)
+    if reasons is None:
+        reasons = frozenset(
+            _reason_name(str(entry["reason"]))
+            for entry in _error_entries(error)
+            if isinstance(entry, dict) and entry.get("reason")
+        )
+        setattr(error, _REASONS_ATTR, reasons)
+    return reasons
 
 
 def _is_retriable(exc: Exception) -> bool:
-    """Return True if *exc* looks like a retriable Google API error."""
+    """Return True if *exc* looks like a retriable Google API error. An exhausted quota is never
+    retried, whatever its status (403 or 429): it lasts until Google resets it."""
     error = _http_error(exc)
     if error is None:
         return False
-    return error.status_code in _RETRIABLE_STATUS_CODES or bool(error_reasons(exc) & RETRIABLE_REASONS)
+    reasons = error_reasons(exc)
+    if reasons & EXHAUSTED_QUOTA_REASONS:
+        return False
+    return error.status_code in _RETRIABLE_STATUS_CODES or bool(reasons & RETRIABLE_REASONS)
 
 
 def is_google_outage(exc: BaseException) -> bool:

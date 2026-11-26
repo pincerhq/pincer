@@ -1263,6 +1263,12 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- **A Google 429 for an exhausted daily quota is no longer retried (#333).**
+  A 429 `RESOURCE_EXHAUSTED` whose reason is `QUOTA_EXCEEDED` or
+  `dailyLimitExceeded` was retried five times (about 31 s of back-off) on a
+  quota that only resets daily, so the call always ran into the tool timeout.
+  It now fails at once, the same as the 403 form, and still counts as a Google
+  outage in the reminder loop.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a
