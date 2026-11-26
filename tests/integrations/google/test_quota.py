@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -167,3 +168,52 @@ async def test_a_non_json_body_has_no_reasons_and_falls_back_to_the_status():
     assert is_google_outage(error) is True
     assert await with_backoff(_fn) == "ok"
     assert len(attempts) == 2
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b'{"error": "Rate Limit Exceeded"}', b'{"message": "oops"}', b"[]", b'"oops"', b"\xff\xfe"],
+    ids=["error-is-a-string", "no-error-key", "empty-list", "json-string", "not-utf-8"],
+)
+@pytest.mark.usefixtures("instant_backoff")
+async def test_a_body_not_shaped_like_a_google_error_has_no_reasons(content):
+    """Issue #333: valid JSON that is not a Google error body (or bytes that are not UTF-8) gives no
+    reasons, so a 429 is still retried on its status code alone."""
+    error = HttpError(SimpleNamespace(status=429, reason="HTTP 429"), content)
+    _fn, attempts = _raising(error, times=1)
+
+    assert error_reasons(error) == frozenset()
+    assert await with_backoff(_fn) == "ok"
+    assert len(attempts) == 2
+
+
+def test_a_list_wrapped_error_body_is_read():
+    """Some Google APIs wrap the error body in a list: its ``errors[]`` reasons still count."""
+    body = [{"error": {"code": 429, "message": "Quota", "errors": [{"reason": "dailyLimitExceeded"}]}}]
+    error = HttpError(SimpleNamespace(status=429, reason="HTTP 429"), json.dumps(body).encode())
+
+    assert error_reasons(error) == frozenset({"dailyLimitExceeded"})
+    assert quota._is_retriable(error) is False
+
+
+def test_anything_but_a_google_http_error_has_no_reasons():
+    assert error_reasons(ValueError("boom")) == frozenset()
+    assert quota._is_retriable(ValueError("boom")) is False
+
+
+@pytest.mark.usefixtures("instant_backoff")
+async def test_a_limit_that_outlasts_every_retry_is_raised():
+    error = _http_error(503)
+    _fn, attempts = _raising(error, times=10)
+
+    with pytest.raises(HttpError) as raised:
+        await with_backoff(_fn, max_retries=2)
+    assert raised.value is error
+    assert len(attempts) == 3
+
+
+def test_without_googleapiclient_nothing_is_a_google_error(monkeypatch):
+    monkeypatch.setitem(sys.modules, "googleapiclient.errors", None)  # makes the import raise ImportError
+
+    assert is_google_outage(_http_error(503)) is False
+    assert error_reasons(_http_error(403, "quotaExceeded")) == frozenset()
