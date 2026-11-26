@@ -900,6 +900,7 @@ class Agent:
         # DEBUG repeats, INFO on recovery), not once per message.
         self._mcp_list_outage = LogOnce(logger, recovery="Fetching the MCP server list for prompt recovered")
         self._memory_outage = LogOnce(logger, recovery="Fetching memories for prompt recovered")
+        self._language_outage = LogOnce(logger, recovery="Reading the preferred language for prompt recovered")
         self._close_known_outage = LogOnce(logger, recovery="Closing onboarding for known users recovered")
         # Voice calls whose resolved provider/model was already logged (once per call)
         self._voice_model_logged: set[str] = set()
@@ -2498,10 +2499,12 @@ class Agent:
         if not (read and self._memory):
             return None
         try:
-            return await get_preferred_language(self._memory, user_id)
+            language = await get_preferred_language(self._memory, user_id)
         except Exception:
-            logger.warning("Failed to read the preferred language for prompt", exc_info=True)
+            self._language_outage.log("Failed to read the preferred language for prompt", exc_info=True)
             return None
+        self._language_outage.clear()
+        return language
 
     async def _turn_context(self, user_id: str, text: str, *, memory: bool, user_timezone: str) -> str:
         """The context sent with the user's message: memories recalled for
