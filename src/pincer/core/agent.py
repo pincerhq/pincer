@@ -1257,7 +1257,9 @@ class Agent:
                 outcome = await self._recover_from_rejected_history(session, e, recovery)
                 if outcome is _PairRecovery.RETRY:
                     continue
-                if outcome is _PairRecovery.CLEARED:
+                # After a dial, the cleared session must not ask for a resend: the resend would
+                # dial again (issue #354). The placed-call reply below goes into the cleared session.
+                if outcome is _PairRecovery.CLEARED and not call_sids:
                     final_text = _SESSION_CLEARED_TEXT
                     break
                 if call_sids:
@@ -1760,7 +1762,11 @@ class Agent:
                         outcome = await self._recover_from_rejected_history(session, e, recovery)
                         if outcome is _PairRecovery.RETRY:
                             continue
+                        # As on the non-stream path (issue #354): after a dial, the error goes straight to
+                        # the placed-call handler rather than asking for a resend that would dial again
                         if outcome is _PairRecovery.CLEARED:
+                            if call_sids:
+                                raise
                             yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
                             return
                     logger.exception("Stream failed after %d chars", len(step_text))
