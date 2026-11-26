@@ -18,10 +18,11 @@ from googleapiclient.errors import HttpError
 
 from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
+from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE
 from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
 from pincer.integrations.google.tools_calendar import (
-    INVALID_DATE_MESSAGE,
     REVERSED_ALL_DAY_MESSAGE,
+    google__check_freebusy,
     google__create_event,
     google__get_event,
     google__list_events,
@@ -740,6 +741,87 @@ async def test_update_with_an_impossible_bare_date_names_it(fake_factory, fake, 
 
     assert str(refused.value) == INVALID_DATE_MESSAGE.format(value="2026-02-30")
     assert fake.sent("events.update") == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"end": "2026-02-30"},  # was KIND_CHANGE_MESSAGE, then the date refusal a turn later
+        {"start": "2026-02-30"},
+        {"start": "2026-02-30", "end": "2026-03-02"},
+        {"start": "2026-02-30T10:00:00"},  # an impossible date-time: was a raw 400
+        {"end": "2026-02-28T25:00:00"},  # a real day with an impossible hour
+    ],
+)
+async def test_update_of_a_timed_event_with_an_impossible_date_names_it(fake_factory, fake, arguments):
+    """Issue #337: an impossible date or time on a timed event gets the date refusal first,
+    naming the whole value, before the event is read."""
+    event_id = fake.seed_event("primary", "Dentist", "2026-02-20T10:00:00+02:00", "2026-02-20T11:00:00+02:00")
+    bad = arguments.get("start", arguments.get("end"))
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, **arguments)
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("2026-02-30T10:00:00", "2026-02-30T11:00:00"),
+        ("2026-02-28T10:00:00", "2026-02-28T10:61:00"),
+        ("2026-02-30Z", "2026-03-01T10:00:00Z"),
+    ],
+)
+async def test_create_with_an_impossible_date_time_names_it(fake_factory, fake, start, end):
+    """Issue #337: an impossible date-time reached Google unchanged and came back as a raw 400."""
+    bad = start if start.startswith("2026-02-30") else end
+
+    with pytest.raises(ValueError) as refused:
+        await google__create_event(fake_factory, summary="Dentist", start=start, end=end)
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert fake.calls == []
+
+
+def _on_call_context() -> dict[str, str]:
+    from pincer.core.clock import CALL_TIMEZONE_KEY
+
+    return {"timezone": "Europe/Kyiv", CALL_TIMEZONE_KEY: "Europe/Berlin"}
+
+
+_READ_TOOLS = [
+    lambda factory, ctx, **kw: google__list_events(factory, context=ctx, **kw),
+    lambda factory, ctx, **kw: google__search_events(factory, query="Dentist", context=ctx, **kw),
+    lambda factory, ctx, **kw: google__check_freebusy(factory, emails="me@example.com", context=ctx, **kw),
+]
+
+
+@pytest.mark.parametrize("call", _READ_TOOLS, ids=["list", "search", "freebusy"])
+@pytest.mark.parametrize(
+    ("bounds", "bad"),
+    [
+        ({"time_min": "2026-02-30"}, "2026-02-30"),
+        ({"time_min": "2026-02-01", "time_max": "2026-02-30"}, "2026-02-30"),
+        ({"time_min": "2026-02-30T10:00:00"}, "2026-02-30T10:00:00"),
+        ({"time_min": "2026-02-28T25:00"}, "2026-02-28T25:00"),
+        (
+            {"time_min": "2026-02-01T00:00:00+02:00", "time_max": "2026-02-30T00:00:00+02:00"},
+            "2026-02-30T00:00:00+02:00",
+        ),
+    ],
+)
+@pytest.mark.parametrize("on_call", [False, True], ids=["chat", "call"])
+async def test_read_ranges_with_an_impossible_date_name_it(fake_factory, fake, call, bounds, bad, on_call):
+    """Issue #337: list/search/free-busy bounds showed Python's "day is out of range for month"
+    (bare dates) or reached Google unchanged (date-times, and every free/busy bound without a zone).
+    The refusal comes before any Google call, the calendar-zone lookup included."""
+    with pytest.raises(ValueError) as refused:
+        await call(fake_factory, _on_call_context() if on_call else None, **bounds)
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert fake.calls == []
 
 
 def test_the_update_schema_states_the_same_all_day_end_rule_as_create(fake_registry):

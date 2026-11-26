@@ -615,3 +615,60 @@ async def test_a_zoneless_answer_ends_the_outage_for_the_lookup_log(fake, caplog
 
         assert len(fake.sent("calendars.get")) == 3  # precondition: each call really looked up the zone
         assert _levels() == ["WARNING", "WARNING"]
+
+
+# ── Impossible dates (issue #337) ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "2026-02-28",
+        "2028-02-29",
+        "2026-02-28T10:00:00",
+        "2026-02-28 10:00",
+        "2026-02-28T10:00:00.123456789Z",
+        "2026-02-28t10:00:00z",
+        "20260228",
+        "soon",
+    ],
+)
+def test_require_real_dates_accepts_real_dates_and_leaves_other_text_alone(value):
+    """Real dates and date-times (RFC 3339's lowercase t/z included) and non-date text pass."""
+    from pincer.integrations.google.calendar_tz import require_real_dates
+
+    require_real_dates(value, "2026-03-01")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-02-30",
+        "2026-02-29T10:00",
+        "2026-13-01T00:00:00Z",
+        "2026-02-28T25:00",
+        "2026-02-28T10:61",
+        "2026-02-30Z",
+        "20260230",
+    ],
+)
+def test_require_real_dates_refuses_an_impossible_date_or_time_by_its_whole_value(value):
+    """Each refusal names the value exactly as given (stripped), time included."""
+    from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, require_real_dates
+
+    with pytest.raises(ValueError) as refused:
+        require_real_dates("2026-03-01", f" {value} ")
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=value)
+
+
+@pytest.mark.parametrize("end", [False, True])
+def test_localize_bound_refuses_an_impossible_bare_date_by_name(end):
+    """It showed Python's "day is out of range for month"."""
+    from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, localize_bound
+
+    with pytest.raises(ValueError) as refused:
+        localize_bound("2026-02-30", ZoneInfo("Europe/Kyiv"), end=end)
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value="2026-02-30")

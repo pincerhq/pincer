@@ -18,6 +18,13 @@ instant and are re-serialised as RFC 3339 (``+0200``, ``+02``, ``Z`` and minute
 precision all become ``…:SS+HH:MM``). A wall-clock time that does not exist
 (the spring-forward gap, e.g. 03:30 in Kyiv on 2026-03-29) takes the offset in
 force before the gap, so it lands one hour later in local time (04:30).
+
+Validation: a value that starts like a date must be a real one before any of
+it reaches Google — ``2026-02-30``, ``2026-02-30T10:00:00`` and
+``2026-02-28T25:00`` are refused with one readable message
+(:data:`INVALID_DATE_MESSAGE`), not Python's "day is out of range" or Google's
+raw 400. The calendar tools check their inputs with :func:`require_real_dates`
+first.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ import logging
 import re
 import time
 import weakref
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pincer.core.clock import load_zone, resolve_timezone
@@ -49,6 +56,13 @@ SOURCE_IDENTITY = "identity"
 SOURCE_SETTINGS = "settings"
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A value that starts like a date: "2026-02-30", "20260230", "2026-02-30T10:00:00", "2026-02-30Z".
+_DATE_LIKE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8})(?!\d)")
+
+INVALID_DATE_MESSAGE = (
+    "{value} is not a real date or time (check the day, month, hour and minute). "
+    "Pass an existing one in the same form: YYYY-MM-DD for a whole day, YYYY-MM-DDTHH:MM:SS for a time."
+)
 
 # One resolver (and so one zone cache) per Google service factory.
 _RESOLVERS: weakref.WeakKeyDictionary[Any, CalendarTimezoneResolver] = weakref.WeakKeyDictionary()
@@ -78,6 +92,29 @@ def parse_iso(value: str) -> datetime | None:
         return datetime.fromisoformat(value.strip())
     except ValueError:
         return None
+
+
+def parse_bare_day(value: str) -> date:
+    """Parse a bare ``YYYY-MM-DD``; one that matches the pattern but does not exist
+    (``2026-02-30``) raises :data:`INVALID_DATE_MESSAGE`, not Python's "day is out of range"."""
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(INVALID_DATE_MESSAGE.format(value=value.strip())) from None
+
+
+def require_real_dates(*values: str) -> None:
+    """Refuse, with :data:`INVALID_DATE_MESSAGE` naming the whole value, any value that starts
+    like a date but is not a real date or date-time (``2026-02-30``, ``2026-02-30T10:00:00``,
+    ``2026-02-28T25:00``, ``2026-02-30Z``) — before it reaches Google.
+
+    Empty values and text that does not start like a date pass unchanged. RFC 3339's
+    lowercase ``t``/``z`` are accepted (Python's parser only knows the uppercase ones).
+    """
+    for value in values:
+        text = value.strip() if value else ""
+        if _DATE_LIKE_RE.match(text) and parse_iso(text.upper()) is None:
+            raise ValueError(INVALID_DATE_MESSAGE.format(value=text))
 
 
 def is_date_only(value: str) -> bool:
@@ -124,7 +161,7 @@ def localize_bound(value: str, zone: ZoneInfo, *, end: bool = False) -> str:
     if not value:
         return value
     if _DATE_ONLY_RE.match(value.strip()):
-        day = datetime.fromisoformat(value.strip())
+        day = datetime.combine(parse_bare_day(value), datetime.min.time())
         if end:
             day += timedelta(days=1)
         return day.replace(tzinfo=zone).isoformat()

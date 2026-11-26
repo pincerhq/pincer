@@ -31,7 +31,9 @@ from pincer.integrations.google.calendar_tz import (
     localize,
     localize_bound,
     needs_zone,
+    parse_bare_day,
     parse_iso,
+    require_real_dates,
     resolver_for,
     rfc3339,
 )
@@ -61,7 +63,6 @@ REVERSED_ALL_DAY_MESSAGE = (
     "An all-day event's end date is before its start. The end date is exclusive: "
     "pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)."
 )
-INVALID_DATE_MESSAGE = "{value} is not a real date (check the day and month). Pass an existing date as YYYY-MM-DD."
 #: The all-day end rule in the create and update schemas' ``end`` descriptions (one wording for both).
 ALL_DAY_END_RULE = (
     "For an all-day event the end date is EXCLUSIVE: pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)"
@@ -118,7 +119,8 @@ def _range(time_min: str, time_max: str, zone: ZoneInfo | None, *, defaults: boo
     ``defaults`` (list, free/busy) the start is now and a missing end is the
     whole local day for a bare-date start, else 7 days after the start — never
     "now + 7 days", which can land before a future start and return nothing.
-    Without ``defaults`` (search) a missing bound stays missing.
+    Without ``defaults`` (search) a missing bound stays missing. The callers have
+    already refused impossible dates (require_real_dates).
     """
 
     def _bound(value: str, *, end: bool = False) -> str:
@@ -189,8 +191,9 @@ async def fetch_events(
 
     Bounds follow ``_range`` with defaults (offset-less ones read in the
     calendar's zone, or ``working_zone`` when given; a bare date alone is
-    that whole local day).
+    that whole local day). An impossible date or time is refused before Google is asked.
     """
+    require_real_dates(time_min, time_max)
     svc = await factory.get("calendar")
     if working_zone is not None:
         zone, label = working_zone, CONFIGURED_ZONE_LABEL
@@ -284,6 +287,7 @@ async def google__search_events(
     context: dict[str, Any] | None = None,
 ) -> str:
     """Search calendar events by text query, optionally within a date range."""
+    require_real_dates(time_min, time_max)
     svc = await factory.get("calendar")
     zone, label = await _working_zone(factory, svc, calendar_id, context)
     t_min, t_max = _range(time_min, time_max, zone, defaults=False)
@@ -319,6 +323,7 @@ async def google__check_freebusy(
 
     Offset-less bounds are read in the user's own (primary) calendar zone (on a call, the call's).
     """
+    require_real_dates(time_min, time_max)
     svc = await factory.get("calendar")
     zone = (
         (await _working_zone(factory, svc, "primary", context))[0]
@@ -446,6 +451,7 @@ async def google__create_event(
     schema tells the model to pass the day after the last day); an end equal to
     the start means that one day, an end before it is refused.
     """
+    require_real_dates(start, end)
     if is_date_only(start) != is_date_only(end):
         raise ValueError(ALL_DAY_CREATE_MESSAGE)
     all_day = _all_day_span(start, end) if is_date_only(start) else None
@@ -526,15 +532,6 @@ async def google__create_event(
     )
 
 
-def _bare_day(value: str) -> date:
-    """A bare ``YYYY-MM-DD`` the caller gave, as a date; one that matches the pattern but does
-    not exist (``2026-02-30``) is refused by name, not with Python's "day is out of range"."""
-    try:
-        return date.fromisoformat(value.strip())
-    except ValueError:
-        raise ValueError(INVALID_DATE_MESSAGE.format(value=value.strip())) from None
-
-
 def _all_day_span(start: str, end: str) -> dict[str, dict[str, Any]]:
     """The ``start``/``end`` fields of an all-day event from two bare dates (create and update).
 
@@ -542,7 +539,7 @@ def _all_day_span(start: str, end: str) -> dict[str, dict[str, Any]]:
     (sent as start+1; Google refuses an empty range), and an end before the start
     is refused before anything is written (a model mistake, not "that one day").
     """
-    first, last = _bare_day(start), _bare_day(end)
+    first, last = parse_bare_day(start), parse_bare_day(end)
     if last < first:
         raise ValueError(REVERSED_ALL_DAY_MESSAGE)
     return {"start": {"date": first.isoformat()}, "end": {"date": max(last, first + timedelta(days=1)).isoformat()}}
@@ -605,7 +602,7 @@ def _end_keeping_duration(
         if not (old_start.get("date") and old_end.get("date")):
             raise ValueError(KIND_CHANGE_MESSAGE)
         days = date.fromisoformat(old_end["date"]) - date.fromisoformat(old_start["date"])
-        return {"date": (_bare_day(new_start["date"]) + days).isoformat()}
+        return {"date": (date.fromisoformat(new_start["date"]) + days).isoformat()}
     if not (old_start.get("dateTime") and old_end.get("dateTime")):
         raise ValueError(KIND_CHANGE_MESSAGE)
     was_start, was_end = parse_iso(old_start["dateTime"]), parse_iso(old_end["dateTime"])
@@ -650,14 +647,17 @@ async def google__update_event(
     all-day event; two bare dates follow create's all-day rules (_all_day_span), and so
     does a bare end alone on an all-day event (against its stored start).
     Given only a new start, the end moves with it (the stored duration is kept);
-    given only a new end, the start stays.
+    given only a new end, the start stays. An impossible date or time is refused
+    before the event is read; a reversed all-day range after it, before any write.
     """
-    all_day = _all_day_span(start, end) if is_date_only(start) and is_date_only(end) else None
+    require_real_dates(start, end)
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
-    stored_day = (event.get("start") or {}).get("date")
-    if not start and is_date_only(end) and stored_day:
-        all_day = _all_day_span(stored_day, end)
+    # The one all-day decision: two bare dates, or a lone bare end against a stored all-day start.
+    span_start = start
+    if not span_start and is_date_only(end):
+        span_start = str((event.get("start") or {}).get("date") or "")
+    all_day = _all_day_span(span_start, end) if is_date_only(span_start) and is_date_only(end) else None
     if summary:
         event["summary"] = summary
     if description:
@@ -670,7 +670,7 @@ async def google__update_event(
         if not value or key in changed:
             continue
         if is_date_only(value):
-            changed[key] = {"date": value.strip()}
+            changed[key] = {"date": value.strip()}  # already checked (require_real_dates)
             continue
         # Read in the zone the times were shown in (or the caller's); keep the event's own zone.
         if timezone.strip():
