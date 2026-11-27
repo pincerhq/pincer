@@ -141,8 +141,10 @@ def _render_datetime_uk(dt: datetime, include_time: bool, case: GrammaticalCase)
     """'вівторок, 18 серпня о 14:30'; accusative 'середу, 11 листопада' (after "у"/"на").
 
     Only the weekday changes with the case; the day-month part is genitive in every case.
-    Ukrainian has no dative date in these sentences, so "dative" renders the nominative.
+    No Ukrainian sentence needs a dative date, so "dative" is refused rather than spoken as nominative.
     """
+    if case == "dative":
+        raise ValueError("Ukrainian dates have no dative form")
     weekdays = _WEEKDAYS_ACCUSATIVE["uk"] if case == "accusative" else _WEEKDAYS["uk"]
     text = f"{weekdays[dt.weekday()]}, {dt.day} {_MONTHS['uk'][dt.month - 1]}"
     return f"{text} о {dt.strftime('%H:%M')}" if include_time else text

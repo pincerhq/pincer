@@ -215,16 +215,22 @@ def test_an_all_day_update_start_reads_naturally_on_every_weekday(start, uk_day,
     )
 
 
-def test_every_from_day_case_is_a_known_grammatical_case():
-    """PR #426 review: a typo in a pack's FROM_DAY_CASE ("datve") would quietly render the nominative."""
-    from typing import get_args
-
-    from pincer.voice.language import GrammaticalCase
+def test_each_pack_declares_the_case_its_from_day_sentence_needs():
+    """PR #426 review: a pack that drops or mistypes FROM_DAY_CASE would quietly speak the nominative.
+    "am" takes the dative in German, "у" the accusative in Ukrainian; English dates have no case."""
     from pincer.voice.prompts import de, en, uk
 
-    for pack in (de, en, uk):
-        case = getattr(pack, "FROM_DAY_CASE", "nominative")
-        assert case in get_args(GrammaticalCase), (pack.__name__, case)
+    assert de.FROM_DAY_CASE == "dative"
+    assert uk.FROM_DAY_CASE == "accusative"
+    assert not hasattr(en, "FROM_DAY_CASE")
+
+
+def test_an_unsupported_language_case_pair_is_refused():
+    """PR #426 review: a valid case a language can't render must fail, not speak the nominative."""
+    from datetime import datetime
+
+    with pytest.raises(ValueError, match="dative"):
+        ts.spoken_datetime(datetime(2026, 11, 11), "uk", include_time=False, case="dative")
 
 
 def test_spoken_datetime_forms():
