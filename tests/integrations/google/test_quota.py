@@ -137,11 +137,27 @@ async def test_a_429_for_an_exhausted_quota_in_error_info_is_not_retried():
     assert is_google_outage(error) is True
 
 
+@pytest.mark.parametrize("status", [403, 429])
+@pytest.mark.usefixtures("instant_backoff")
+async def test_an_exhausted_quota_beside_a_short_lived_limit_is_not_retried(status):
+    """PR #425 review: a body naming both a rate limit and an exhausted quota is not retried. The
+    exhausted reason wins: the daily quota still blocks the call once the per-minute limit clears."""
+    error = _error_info_http_error(status, "QUOTA_EXCEEDED", legacy_reason="rateLimitExceeded")
+    _fn, attempts = _raising(error, times=5)
+
+    assert error_reasons(error) == frozenset({"quotaExceeded", "rateLimitExceeded"})
+    with pytest.raises(HttpError):
+        await with_backoff(_fn)
+    assert len(attempts) == 1
+    assert is_google_outage(error) is True
+
+
 @pytest.mark.usefixtures("instant_backoff")
 async def test_the_retry_wrapper_and_the_outage_check_share_one_parse_of_the_body(monkeypatch):
-    """Issue #333: the retry check and the outage check each re-parsed the body. Only quota's own
-    ``json`` is counted; googleapiclient's parse in ``HttpError.__init__`` is outside this module."""
-    error = _error_info_http_error(429, "QUOTA_EXCEEDED", legacy_reason="quotaExceeded")
+    """Issue #333: the retry check and the outage check each re-parsed the body. A 403 makes both
+    reach the reasons (a 429 is an outage on its status alone). Only quota's own ``json`` is counted;
+    googleapiclient's parse in ``HttpError.__init__`` is outside this module."""
+    error = _error_info_http_error(403, "QUOTA_EXCEEDED")
     parses: list[int] = []
 
     def _counting_loads(*args: Any, **kwargs: Any) -> Any:
@@ -154,7 +170,6 @@ async def test_the_retry_wrapper_and_the_outage_check_share_one_parse_of_the_bod
     with pytest.raises(HttpError):
         await with_backoff(_fn)
     assert is_google_outage(error) is True
-    assert error_reasons(error) == frozenset({"quotaExceeded"})
     assert len(parses) == 1
 
 
@@ -187,18 +202,29 @@ async def test_a_body_not_shaped_like_a_google_error_has_no_reasons(content):
     assert len(attempts) == 2
 
 
-def test_a_list_wrapped_error_body_is_read():
+@pytest.mark.usefixtures("instant_backoff")
+async def test_a_list_wrapped_error_body_is_read():
     """Some Google APIs wrap the error body in a list: its ``errors[]`` reasons still count."""
     body = [{"error": {"code": 429, "message": "Quota", "errors": [{"reason": "dailyLimitExceeded"}]}}]
     error = HttpError(SimpleNamespace(status=429, reason="HTTP 429"), json.dumps(body).encode())
+    _fn, attempts = _raising(error, times=5)
 
     assert error_reasons(error) == frozenset({"dailyLimitExceeded"})
-    assert quota._is_retriable(error) is False
+    with pytest.raises(HttpError):
+        await with_backoff(_fn)
+    assert len(attempts) == 1
 
 
-def test_anything_but_a_google_http_error_has_no_reasons():
-    assert error_reasons(ValueError("boom")) == frozenset()
-    assert quota._is_retriable(ValueError("boom")) is False
+@pytest.mark.usefixtures("instant_backoff")
+async def test_anything_but_a_google_http_error_has_no_reasons():
+    error = ValueError("boom")
+    _fn, attempts = _raising(error, times=5)
+
+    assert error_reasons(error) == frozenset()
+    assert is_google_outage(error) is False
+    with pytest.raises(ValueError, match="boom"):
+        await with_backoff(_fn)
+    assert len(attempts) == 1
 
 
 @pytest.mark.usefixtures("instant_backoff")
