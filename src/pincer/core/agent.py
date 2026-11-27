@@ -348,6 +348,14 @@ class _PairRecovery(StrEnum):
     RAISE = "raise"  # not a tool-pairing error
 
 
+def _asks_for_resend(outcome: _PairRecovery, call_sids: list[str]) -> bool:
+    """Whether a chat turn whose history was rejected ends by asking the user to resend: only when the
+    session was cleared and the turn placed no call. After a dial the resend would dial again, the cleared
+    session no longer showing the call (issue #354); such a turn ends as any failure after a dial does, with
+    the placed-call reply, which the cleared session then keeps."""
+    return outcome is _PairRecovery.CLEARED and not call_sids
+
+
 @dataclass
 class _Recovery:
     """How a turn has recovered so far from a history the endpoint rejected: how often it retried, one count
@@ -1260,9 +1268,10 @@ class Agent:
                 outcome = await self._recover_from_rejected_history(session, e, recovery)
                 if outcome is _PairRecovery.RETRY:
                     continue
-                if outcome is _PairRecovery.CLEARED:
+                if _asks_for_resend(outcome, call_sids):
                     final_text = _SESSION_CLEARED_TEXT
                     break
+                # A cleared session after a dial goes on to the placed-call reply (see `_asks_for_resend`)
                 if call_sids:
                     # A call is already ringing: an error response would hide
                     # it from the channel, which then never waits for its report.
@@ -1763,9 +1772,12 @@ class Agent:
                         outcome = await self._recover_from_rejected_history(session, e, recovery)
                         if outcome is _PairRecovery.RETRY:
                             continue
-                        if outcome is _PairRecovery.CLEARED:
+                        if _asks_for_resend(outcome, call_sids):
                             yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT, cost_usd=total_cost)
                             return
+                        if outcome is _PairRecovery.CLEARED:
+                            # After a dial: straight to the placed-call reply (see `_asks_for_resend`)
+                            raise
                     logger.exception("Stream failed after %d chars", len(step_text))
                     if not step_text.strip():
                         raise

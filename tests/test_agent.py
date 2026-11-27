@@ -1888,6 +1888,38 @@ async def test_unrepairable_tool_pair_error_clears_the_session_without_retrying(
     assert "earlier" not in [m.content for m in session.messages]
 
 
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_a_session_cleared_after_a_dial_reports_the_call_instead_of_asking_for_a_resend(
+    settings, mock_llm, session_manager, cost_tracker, streaming
+):
+    """Clearing the session hides the earlier dial, so a resend would dial again (issue #354); the turn
+    instead reports the placed call, and that reply is what the cleared session keeps."""
+    session = await session_manager.get_or_create("user1", "test")
+    session.messages = [
+        LLMMessage(role=MessageRole.USER, content="earlier"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="earlier reply"),
+    ]
+    mock_llm.complete.side_effect = [_two_dials_then_text()[0], LLMError(_ANTHROPIC_NO_TOOLS)]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _dialing_registry(_DIAL_RESULTS))
+
+    if streaming:
+        mock_llm.stream_turn = _steps_from(mock_llm.complete)
+        chunks = [c async for c in agent.handle_message_stream(user_id="user1", channel="test", text="call them")]
+        assert [c.call_sid for c in chunks if c.type == StreamEventType.TOOL_DONE] == ["", "CA9"]
+        reply = "".join(c.content for c in chunks if c.type == StreamEventType.DONE)
+    else:
+        result = await agent.handle_message("user1", "test", "call them")
+        assert result.call_sids == ["CA9"]
+        reply = result.text
+
+    assert reply == _CALL_PLACED_THEN_FAILED_TEXT
+    assert mock_llm.complete.call_count == 2
+    saved = await session_manager.get_or_create("user1", "test")
+    assert "earlier" not in [m.content for m in saved.messages]
+    assert saved.messages[-1].role == MessageRole.ASSISTANT
+    assert saved.messages[-1].content == _CALL_PLACED_THEN_FAILED_TEXT
+
+
 @pytest.mark.asyncio
 async def test_other_llm_errors_raise_and_keep_the_history(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
