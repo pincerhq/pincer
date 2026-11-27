@@ -12,6 +12,13 @@ import pathlib
 import tempfile
 from typing import Any
 
+from pydantic import SecretStr
+
+# Signs the in-call idempotency keys (in_call_tools.call_key_secret): a MagicMock's
+# jwt_secret is no string, and the same value on every gate lets a test replay one
+# call's key on another.
+TEST_JWT_SECRET = "test-jwt-secret-for-in-call-idempotency-keys-0123456789"
+
 _TMP = pathlib.Path(tempfile.mkdtemp(prefix="pincer-voice-tests-"))
 
 
@@ -59,6 +66,7 @@ def apply_in_call_tool_defaults(settings: Any, **overrides: Any) -> Any:
         "voice_max_writes_per_call": 3,
         "voice_guests_tools_allowed": "",
         "default_user_id": "",
+        "jwt_secret": SecretStr(TEST_JWT_SECRET),
     }
     values.update(overrides)
     for key, value in values.items():

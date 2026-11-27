@@ -34,12 +34,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
+import secrets
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import cache, cached_property
 from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.calendar_tz import is_date_only, localize, needs_zone
@@ -60,8 +63,10 @@ from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from pathlib import Path
     from zoneinfo import ZoneInfo
 
+    from pincer.config import Settings
     from pincer.voice.engine import CallState, VoiceEngine
     from pincer.voice.state_machine import CallStateMachine
     from pincer.voice.transcript import CallAction, TranscriptLogger
@@ -147,6 +152,15 @@ CALL_LOCAL_TIME_ARGS = ("start", "end", "time_min", "time_max")
 # Creates whose event is stored in the call's zone when made on the call (tools_calendar._write_zone).
 CALL_ZONED_CREATE_TOOLS = frozenset({"google__create_event"})
 
+# Call idempotency keys (CallKeySigner): pincer-call-{nonce}-{tag}, the tag signed with a key
+# derived from the JWT secret under this label.
+CALL_KEY_PREFIX = "pincer-call-"
+_CALL_KEY_NONCE_LEN = 12
+_CALL_KEY_TAG_LEN = 16
+_CALL_KEY_LABEL = b"pincer-call-idempotency"
+# Signs call keys when no JWT secret can be loaded: they then verify only until a restart.
+_PROCESS_SECRET = secrets.token_urlsafe(48)
+
 
 def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> dict[str, Any]:
     """``args`` as they would run on the call, for a replay off it: offset-less times get the
@@ -166,14 +180,81 @@ def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> 
     return draft
 
 
-def call_idempotency_key(call_sid: str, tool_name: str, args: dict[str, Any]) -> str:
-    """Stable key for one action on one call (``sha1(call_sid + fingerprint)``)."""
-    fingerprint = tool_policy.action_fingerprint(tool_name, args)
-    digest = hashlib.sha1((call_sid + fingerprint).encode("utf-8"), usedforsecurity=False).hexdigest()
-    return f"pincer-call-{digest[:20]}"
+def call_key_secret(settings: Settings) -> bytes:
+    """The key that signs call idempotency keys, derived from the JWT secret (as the
+    storage presign key is), so a key issued on one call still verifies on a later
+    one, across restarts and replicas that share ``PINCER_JWT_SECRET``."""
+    return _call_key_secret(settings.jwt_secret.get_secret_value(), settings.data_dir)
+
+
+@cache
+def _call_key_secret(configured: str, data_dir: Path | None) -> bytes:
+    """Resolved once per process, the fallback included: every call in a process signs and
+    verifies with the same key. (A fallback retried per call would sign a call made during a
+    brief data-dir failure with one key and verify its replay with another: a duplicate.)
+
+    Without a usable JWT secret a per-process one is used: keys then verify only until a
+    restart, and a replay after that gets a fresh key (a possible duplicate, never a wrong
+    match)."""
+    from pincer.security.credentials import derived_key, jwt_derived_key
+
+    if configured or data_dir is not None:
+        try:
+            return jwt_derived_key(configured, data_dir, _CALL_KEY_LABEL)
+        except (OSError, ValueError) as exc:
+            reason = f"the JWT secret cannot be loaded ({type(exc).__name__}: {exc})"
+    else:
+        reason = "no JWT secret is configured and there is no data dir"
+    logger.warning("Call idempotency keys use a per-process secret until a restart: %s", reason)
+    return derived_key(_PROCESS_SECRET, _CALL_KEY_LABEL)
+
+
+@dataclass(frozen=True)
+class CallKeySigner:
+    """Issues and checks call idempotency keys: ``pincer-call-{nonce}-{tag}``.
+
+    The nonce (``sha1(call_sid + fingerprint)``) keeps the key the same for a yes said
+    twice or a retried turn on one call. The tag signs the nonce with the action, so a
+    later call can check that Pincer issued the key for exactly these arguments. It is
+    bound to the zone-pinned draft, which is what a deferred replay re-emits; pinning is
+    a no-op on args that are already pinned, so a draft verifies on any later call,
+    whatever that call's zone."""
+
+    secret: bytes = field(repr=False)
+    zone: ZoneInfo
+
+    def issue(self, call_sid: str, tool_name: str, args: dict[str, Any]) -> str:
+        """The key for this action on this call."""
+        fingerprint = tool_policy.action_fingerprint(tool_name, args)
+        digest = hashlib.sha1((call_sid + fingerprint).encode("utf-8"), usedforsecurity=False).hexdigest()
+        nonce = digest[:_CALL_KEY_NONCE_LEN]
+        return f"{CALL_KEY_PREFIX}{nonce}-{self._tag(nonce, tool_name, args)}"
+
+    def verifies(self, key: str, tool_name: str, args: dict[str, Any]) -> bool:
+        """Whether ``key`` was issued (on any call) for exactly ``args``. A key copied onto a
+        different booking, a foreign key, or a made-up one does not."""
+        if not key.startswith(CALL_KEY_PREFIX):
+            return False
+        nonce, sep, tag = key.removeprefix(CALL_KEY_PREFIX).partition("-")
+        if not sep or len(nonce) != _CALL_KEY_NONCE_LEN or len(tag) != _CALL_KEY_TAG_LEN:
+            return False
+        # Issued keys are hex. Anything else is refused before it is encoded: a lone surrogate
+        # (valid in JSON tool arguments) would raise there and fail the whole tool call.
+        if not (nonce.isascii() and tag.isascii()):
+            return False
+        return hmac.compare_digest(tag.encode(), self._tag(nonce, tool_name, args).encode())
+
+    def _tag(self, nonce: str, tool_name: str, args: dict[str, Any]) -> str:
+        bound = tool_policy.action_fingerprint(tool_name, draft_in_call_zone(tool_name, args, self.zone))
+        message = "\x1f".join((nonce, tool_name, bound)).encode("utf-8")
+        return hmac.new(self.secret, message, hashlib.sha256).hexdigest()[:_CALL_KEY_TAG_LEN]
 
 
 _current_gate: ContextVar[InCallToolGate | None] = ContextVar("pincer_in_call_tool_gate", default=None)
+# The idempotency key run() settled for the tool use in progress: read where a draft is
+# deferred, so no path between them has to pass it along. Per task, so a tool use that
+# waits (an owner approval) keeps its own key while another turn runs.
+_settled_key: ContextVar[str] = ContextVar("pincer_in_call_settled_key", default="")
 
 
 @contextmanager
@@ -374,25 +455,35 @@ class InCallToolGate:
         It is written into ``arguments`` in place — that dict is what
         ``execute`` sends — and left out of the decision, so the fingerprint a
         verbal yes authorized still matches the model's re-emitted call. With
-        ``trusted_key=False`` (the model's own tool calls) any key in the
-        arguments is replaced: the model can see a key in its history and copy
-        it onto a different booking, which the calendar would then answer with
-        "already exists". Trusted code (the receptionist) keeps its own key.
+        ``trusted_key=False`` (the model's own tool calls) a key in the
+        arguments is kept only if it verifies (``CallKeySigner.verifies``): one this
+        gate, or a gate on an earlier call, issued for exactly these arguments,
+        as in a deferred draft replayed on a later call. Any other key is
+        replaced: the model can see a key in its history and copy it onto a
+        different booking, which the calendar would then answer with "already
+        exists". Trusted code (the receptionist) keeps its own key.
         """
         args = dict(arguments or {})
         if not trusted_key:
             args.pop("idempotency_key", None)
         # Before any branch: every path that can reach `execute` (direct,
-        # confirmed, owner-approved) sends `arguments`, so the key must be
-        # settled there first — never a key the model copied from history.
-        if tool_name in IDEMPOTENT_CREATE_TOOLS and isinstance(arguments, dict):
-            if not trusted_key:
-                arguments.pop("idempotency_key", None)
-            if not arguments.get("idempotency_key"):
-                arguments["idempotency_key"] = call_idempotency_key(self.call_sid, tool_name, args)
-        # A deferred draft carries the same key, so its replay off the call finds an event this call's
-        # timed-out write committed ("already created") instead of booking it again.
-        key = str((arguments or {}).get("idempotency_key") or "") if tool_name in IDEMPOTENT_CREATE_TOOLS else ""
+        # confirmed, owner-approved) sends `arguments`, so the key is settled
+        # there first. A deferred draft carries the same key (see _add_deferred),
+        # so its replay finds an event this call's timed-out write committed
+        # ("already created") instead of booking it again.
+        key = self._settle_key(tool_name, arguments, args, trusted_key=trusted_key)
+        token = _settled_key.set(key)
+        try:
+            return await self._dispatch(tool_name, args, execute)
+        finally:
+            _settled_key.reset(token)
+
+    async def _dispatch(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        execute: Callable[[], Awaitable[tuple[str, bool]]],
+    ) -> GateResult:
         decision = tool_policy.decide(tool_name, self.state, self.settings, args, self.requires_approval)
         logger.info(
             "In-call tool decision [%s]: %s -> %s (%s, tier=%s, mode=%s)",
@@ -408,10 +499,32 @@ class InCallToolGate:
         if decision.action == "need_verbal":
             return await self._start_verify(tool_name, args, decision)
         if decision.action == "need_user_approval":
-            return await self._user_approval(tool_name, args, execute, decision, key=key)
+            return await self._user_approval(tool_name, args, execute, decision)
         approval_mode = "auto" if decision.tier == tool_policy.TIER_R else decision.mode
         user_confirmed = True if decision.mode == "verbal" else None
-        return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed, key=key)
+        return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed)
+
+    # ── Idempotency keys ─────────────────────────────────
+
+    @cached_property
+    def _keys(self) -> CallKeySigner:
+        return CallKeySigner(call_key_secret(self.settings), self.call_zone)
+
+    def _settle_key(
+        self, tool_name: str, arguments: dict[str, Any] | None, args: dict[str, Any], *, trusted_key: bool
+    ) -> str:
+        """Write the idempotency key into ``arguments`` (the dict ``execute`` sends) and return it;
+        ``""`` for a tool that takes none. ``args`` is the action, without any key. An untrusted
+        key is kept only if it verifies for exactly this action; otherwise this call's is used."""
+        if tool_name not in IDEMPOTENT_CREATE_TOOLS or not isinstance(arguments, dict):
+            return ""
+        if not trusted_key:
+            supplied = str(arguments.pop("idempotency_key", "") or "")
+            if supplied and self._keys.verifies(supplied, tool_name, args):
+                arguments["idempotency_key"] = supplied
+        if not arguments.get("idempotency_key"):
+            arguments["idempotency_key"] = self._keys.issue(self.call_sid, tool_name, args)
+        return str(arguments["idempotency_key"])
 
     # ── Deny ─────────────────────────────────────────────
 
@@ -461,8 +574,6 @@ class InCallToolGate:
         decision: tool_policy.ToolDecision,
         approval_mode: str,
         user_confirmed: bool | None,
-        *,
-        key: str = "",
     ) -> GateResult:
         lang, _ = self.language()
         self._metric(tool_name, decision, "execute", decision.reason)
@@ -493,7 +604,7 @@ class InCallToolGate:
                     speak_key="TOOL_NO_PROGRESS",
                     approval_mode=approval_mode,
                 )
-            return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode, key=key)
+            return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # the executor normally catches; belt and braces
@@ -512,7 +623,7 @@ class InCallToolGate:
                 approval_mode=approval_mode,
             )
             if decision.tier == tool_policy.TIER_W:
-                self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR, key=key)
+                self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR)
             return result
 
         spoken = render(tool_name, content, lang, args, self.call_zone)
@@ -554,22 +665,22 @@ class InCallToolGate:
         decision: tool_policy.ToolDecision,
         reason: str,
         approval_mode: str,
-        *,
-        key: str = "",
     ) -> GateResult:
         """Timeouts: speak the deferral line, record the denial, and queue the
         action as a post-call follow-up suggestion (Sprint 3 T3.4 mechanism)."""
         result = await self._deny(
             tool_name, args, decision, reason, speak_key="TOOL_TIMEOUT_DEFER", approval_mode=approval_mode
         )
-        self._add_deferred(tool_name, args, reason, key=key)
+        self._add_deferred(tool_name, args, reason)
         return result
 
-    def _add_deferred(self, tool_name: str, args: dict[str, Any], reason: str, *, key: str = "") -> None:
-        """Queue a follow-up draft. ``key`` is the idempotency key the call's own attempt sent: the
-        replay reuses it as its dedup seed, so a write that committed despite timing out is found."""
+    def _add_deferred(self, tool_name: str, args: dict[str, Any], reason: str) -> None:
+        """Queue a follow-up draft. It carries the idempotency key run() settled for this tool use
+        (the one the call's own attempt sent): the replay, in chat or on a later call, reuses it as
+        its dedup seed, so a write that committed despite timing out is found."""
         lang, _ = self.language()
         draft = draft_in_call_zone(tool_name, args, self.call_zone)
+        key = _settled_key.get() if tool_name in IDEMPOTENT_CREATE_TOOLS else ""
         if key:
             draft["idempotency_key"] = key
         deferred = self.state.metadata.setdefault(META_DEFERRED, [])
@@ -721,8 +832,6 @@ class InCallToolGate:
         args: dict[str, Any],
         execute: Callable[[], Awaitable[tuple[str, bool]]],
         decision: tool_policy.ToolDecision,
-        *,
-        key: str = "",
     ) -> GateResult:
         lang, _ = self.language()
         description = describe_action(tool_name, args, lang)
@@ -777,7 +886,7 @@ class InCallToolGate:
         if outcome == approvals.APPROVED:
             await approvals.finalize(req, approvals.APPROVED)
             self.suppress_llm_speech = False  # the LLM phrases the result
-            return await self._execute(tool_name, args, execute, decision, "user", True, key=key)
+            return await self._execute(tool_name, args, execute, decision, "user", True)
         if outcome == approvals.CALL_ENDED:
             await approvals.finalize(req, approvals.CALL_ENDED)
             return await self._deny(tool_name, args, decision, REASON_CALL_ENDED, approval_mode="user")
@@ -792,7 +901,7 @@ class InCallToolGate:
                 approval_mode="user",
             )
         await approvals.finalize(req, approvals.EXPIRED)
-        return await self._defer(tool_name, args, decision, tool_policy.REASON_APPROVAL_TIMEOUT, "user", key=key)
+        return await self._defer(tool_name, args, decision, tool_policy.REASON_APPROVAL_TIMEOUT, "user")
 
     # ── Call end ─────────────────────────────────────────
 
