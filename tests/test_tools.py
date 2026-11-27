@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from pincer.exceptions import ToolNotFoundError
+from pincer.integrations.google.auth import GoogleScopeError
 from pincer.tools.bootstrap import register_default_tools
 from pincer.tools.builtin.shell import is_blocked
 from pincer.tools.registry import ToolRegistry
@@ -102,11 +103,11 @@ def test_workspace_registration_failure_warns_once_with_a_traceback(settings, mo
 
 @pytest.mark.usefixtures("fresh_registration_log")
 def test_a_token_missing_scopes_warns_once_per_outage(settings, monkeypatch, caplog) -> None:
-    """GoogleAuth raises RuntimeError for a token missing a required scope; that is the same per-poll
+    """GoogleAuth raises GoogleScopeError for a token missing a required scope; that is the same per-poll
     condition: one WARNING (no traceback), then DEBUG, and WARNING again after a registration succeeds."""
 
     def _missing_scopes(*_args, **_kwargs):
-        raise RuntimeError("Google token is missing required scopes: calendar")
+        raise GoogleScopeError("Google token is missing required scopes: calendar")
 
     monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
     monkeypatch.setattr("pincer.integrations.google.register_all_tools", _missing_scopes)
@@ -134,8 +135,12 @@ def _crashing(*_args, **_kwargs):
     raise ValueError("boom")
 
 
+def _crashing_runtime_error(*_args, **_kwargs):
+    raise RuntimeError("Event loop is closed")
+
+
 def _missing_scopes(*_args, **_kwargs):
-    raise RuntimeError("Google token is missing required scopes: calendar")
+    raise GoogleScopeError("Google token is missing required scopes: calendar")
 
 
 def _workspace_levels(caplog) -> list[tuple[str, int]]:
@@ -149,12 +154,14 @@ def _workspace_levels(caplog) -> list[tuple[str, int]]:
 
 
 @pytest.mark.usefixtures("fresh_registration_log")
-def test_a_missing_scope_after_a_crash_still_warns(settings, monkeypatch, caplog) -> None:
+@pytest.mark.parametrize("crash", [_crashing, _crashing_runtime_error])
+def test_a_missing_scope_after_a_crash_still_warns(settings, monkeypatch, caplog, crash) -> None:
     """Review 3: the crash and the missing scope shared one LogOnce, so after a crash the one message
-    that says what to do ("missing required scopes") came out at DEBUG."""
+    that says what to do ("missing required scopes") came out at DEBUG. Only GoogleScopeError is that
+    message: any other RuntimeError (e.g. "Event loop is closed") is a crash, with its traceback."""
     monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
     with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
-        monkeypatch.setattr("pincer.integrations.google.register_all_tools", _crashing)
+        monkeypatch.setattr("pincer.integrations.google.register_all_tools", crash)
         register_default_tools(ToolRegistry(), settings)
         monkeypatch.setattr("pincer.integrations.google.register_all_tools", _missing_scopes)
         register_default_tools(ToolRegistry(), settings)
@@ -165,6 +172,8 @@ def test_a_missing_scope_after_a_crash_still_warns(settings, monkeypatch, caplog
         ("Google Workspace tools disabled", logging.WARNING),
         ("Google Workspace tools disabled", logging.DEBUG),
     ]
+    crash_record = next(r for r in caplog.records if r.getMessage().startswith("Google Workspace tools not loaded"))
+    assert crash_record.exc_info is not None
 
 
 @pytest.mark.usefixtures("fresh_registration_log")

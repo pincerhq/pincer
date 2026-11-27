@@ -1313,6 +1313,16 @@ mounting a directory. Install the new `remote-skills` extra
   so the client isn't kept past its own timeout. One that waits longer is
   never shown, and the model or client is told so rather than that it
   expired. A request its client cancels is dropped without showing its prompt.
+- **Google: the partial-scope warning is logged once, not on every dashboard
+  poll (#336).** A Google token missing a scope (e.g. Drive) logged
+  "Google Workspace token is missing N required scope(s)" at WARNING on every
+  `GET /api/integrations`. It is now one WARNING per token state, then DEBUG.
+  It warns again when the missing scopes change, after a re-auth that still
+  misses scopes, or when a full token loses scopes again. Only that
+  missing-scope error (now `GoogleScopeError`) is logged without a traceback
+  when the tools are registered. Any other `RuntimeError` (e.g. "Event loop is
+  closed") is logged as a crash with its traceback, and no longer uses up the
+  scope warning.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

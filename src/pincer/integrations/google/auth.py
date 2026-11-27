@@ -19,6 +19,7 @@ and never written to disk.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -69,6 +70,10 @@ SERVICE_SCOPES: dict[str, list[str]] = {
 
 class GoogleTokenError(RuntimeError):
     """The stored Google token cannot be used or refreshed (revoked, expired, no refresh token): re-auth needed."""
+
+
+class GoogleScopeError(RuntimeError):
+    """The stored Google token lacks scopes the requested services need: re-auth with the full scope set."""
 
 
 def scopes_for_services(services: list[str] | None = None) -> list[str]:
@@ -186,7 +191,7 @@ class GoogleAuth:
         if token_scopes:
             missing = [s for s in self._scopes if s not in token_scopes]
             if missing:
-                raise RuntimeError(
+                raise GoogleScopeError(
                     f"Google token is missing required scopes: {missing}. "
                     f"{self._reauth_hint()} to re-authorise with the full scope set."
                 )
@@ -306,6 +311,18 @@ class GoogleAuth:
         if isinstance(scopes, str):  # google-auth also accepts a space-separated string
             scopes = scopes.split()
         return list(scopes)
+
+    def token_fingerprint(self) -> str:
+        """A short digest of the stored grant ("" if there is no readable token).
+
+        Taken from the refresh token, so it changes on a re-auth (``pincer google
+        setup``) but not when a refresh rewrites the access token in the file.
+        """
+        data = self._token_data()
+        if data is None:
+            return ""
+        basis = data.get("refresh_token") or json.dumps(data, sort_keys=True)
+        return hashlib.sha256(str(basis).encode()).hexdigest()[:16]
 
     def granted_services(self) -> list[str]:
         """Return the services in ``SERVICE_SCOPES`` whose scopes are all in the cached token.

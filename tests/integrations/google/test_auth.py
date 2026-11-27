@@ -13,6 +13,7 @@ from pincer.integrations.google.auth import (
     ALL_SCOPES,
     SERVICE_SCOPES,
     GoogleAuth,
+    GoogleScopeError,
     GoogleTokenError,
     scopes_for_services,
 )
@@ -267,7 +268,7 @@ def test_env_mode_refresh_failure_mentions_env_var():
 def test_env_mode_scope_mismatch_raises_every_time():
     auth = GoogleAuth(token_info=_env_token(["https://www.googleapis.com/auth/calendar"]))
     for _ in range(2):
-        with pytest.raises(RuntimeError, match="missing required scopes"):
+        with pytest.raises(GoogleScopeError, match="missing required scopes"):
             auth.get_credentials()
 
 
@@ -285,3 +286,14 @@ def test_env_mode_space_separated_scopes_string():
 
 def test_file_mode_source():
     assert GoogleAuth(credentials_path="c.json", token_path="t.json").source == "file"
+
+
+def test_token_fingerprint_follows_the_grant_not_the_access_token():
+    """The fingerprint changes with the refresh token (a re-auth), not with a refreshed access token,
+    and never contains the token itself."""
+    info = _env_token(["https://www.googleapis.com/auth/calendar"])
+    fingerprint = GoogleAuth(token_info=info).token_fingerprint()
+    assert fingerprint and info["refresh_token"] not in fingerprint
+    assert GoogleAuth(token_info={**info, "token": "ya29.other"}).token_fingerprint() == fingerprint
+    assert GoogleAuth(token_info={**info, "refresh_token": "1//other"}).token_fingerprint() != fingerprint
+    assert GoogleAuth(token_path="/nonexistent/token.json").token_fingerprint() == ""
