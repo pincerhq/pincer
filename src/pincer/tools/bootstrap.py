@@ -21,6 +21,13 @@ from typing import TYPE_CHECKING
 
 from pincer.core.log_once import LogOnce
 
+try:  # the Google integration is optional: without it, nothing raises GoogleScopeError
+    from pincer.integrations.google.auth import GoogleScopeError
+
+    _GOOGLE_SCOPE_ERRORS: tuple[type[Exception], ...] = (GoogleScopeError,)
+except ImportError:
+    _GOOGLE_SCOPE_ERRORS = ()
+
 if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.tools.registry import ToolRegistry
@@ -369,21 +376,12 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
         # A token is there now: if it goes missing later in this process, say so at full level again.
         _SETUP_HINT_LOG.clear()
         _TOKEN_MISSING_LOG.clear()
+    # A guard for an eager credentials check: today the scope check runs only in get_credentials(),
+    # at tool-call time (GoogleServiceFactory.get), so nothing in this try raises GoogleScopeError.
+    except _GOOGLE_SCOPE_ERRORS as e:  # as repeating as any other failure, but needs no traceback
+        _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
     except Exception as e:
-        if _is_scope_error(e):  # as repeating as any other failure, but needs no traceback
-            _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
-        else:
-            _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
-
-
-def _is_scope_error(exc: Exception) -> bool:
-    """True for a token missing a required scope (``GoogleScopeError``). Checked inside the
-    handler, so a Google package that fails to import is still caught and logged as a crash."""
-    try:
-        from pincer.integrations.google.auth import GoogleScopeError
-    except Exception:
-        return False
-    return isinstance(exc, GoogleScopeError)
+        _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
 
 
 def _log_no_google_token(settings: Settings) -> None:

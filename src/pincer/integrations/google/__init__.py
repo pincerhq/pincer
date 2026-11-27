@@ -33,6 +33,12 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+# get_google_factory runs on every GET /api/integrations: the partial-scope warning is logged
+# once per token state (WARNING, then DEBUG). Not LogOncePerKey: a state must warn again after
+# the token was full (or gone) in between, so the warning is re-armed whenever the state changes.
+_PARTIAL_SCOPE_LOG = LogOnce(_log)
+_partial_scope_state: _ScopeState | None = None
+
 
 class _ScopeState(NamedTuple):
     """The token state a partial-scope warning was logged for."""
@@ -43,11 +49,12 @@ class _ScopeState(NamedTuple):
     skipped: tuple[str, ...]
 
 
-# get_google_factory runs on every GET /api/integrations: the partial-scope warning is logged
-# once per token state (WARNING, then DEBUG). Not LogOncePerKey: a state must warn again after
-# the token was full (or gone) in between, so the warning is re-armed whenever the state changes.
-_PARTIAL_SCOPE_LOG = LogOnce(_log)
-_partial_scope_state: _ScopeState | None = None
+def reset_partial_scope_warning() -> None:
+    """Forget the token state the partial-scope warning was logged for: the next partial token
+    warns at WARNING again, as in a fresh process (used by tests)."""
+    global _partial_scope_state
+    _PARTIAL_SCOPE_LOG.clear()
+    _partial_scope_state = None
 
 
 def _scope_state(resolved: tuple[GoogleAuth, list[str], list[str]] | None) -> _ScopeState | None:
