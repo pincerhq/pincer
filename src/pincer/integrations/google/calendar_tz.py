@@ -19,11 +19,11 @@ precision all become ``…:SS+HH:MM``). A wall-clock time that does not exist
 (the spring-forward gap, e.g. 03:30 in Kyiv on 2026-03-29) takes the offset in
 force before the gap, so it lands one hour later in local time (04:30).
 
-Validation: a bare date or a date-time must be a real one before any of it
-reaches Google. ``2026-02-30`` is refused with :data:`INVALID_DATE_MESSAGE`,
-``2026-02-30T10:00:00`` and ``2026-02-28T25:00`` with
-:data:`INVALID_DATE_TIME_MESSAGE`, not Python's "day is out of range" or
-Google's raw 400. The calendar tools check their inputs with
+Validation: a bare date or a date-time must be a real, readable one before any
+of it reaches Google. ``2026-02-30`` is refused with :data:`INVALID_DATE_MESSAGE`;
+a date-time the tools cannot read (``2026-02-30T10:00:00``, ``2026-02-28T25:00``,
+a lowercase ``z``, ``2026-02-28 10:00 PM``) with :data:`INVALID_DATE_TIME_MESSAGE`
+— not Python's "day is out of range", a misread value or Google's raw 400. The calendar tools check their inputs with
 :func:`require_real_dates` first.
 """
 
@@ -61,8 +61,8 @@ _DATE_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d")
 
 INVALID_DATE_MESSAGE = "{value} is not a real date (check the day and month). Pass an existing date as YYYY-MM-DD."
 INVALID_DATE_TIME_MESSAGE = (
-    "{value} is not a real date and time (check the day, month, hour and minute). "
-    "Pass an existing one as YYYY-MM-DDTHH:MM:SS (keep the time; an offset or an uppercase Z may follow)."
+    "Could not read {value} as a date and time. Pass an existing one as YYYY-MM-DDTHH:MM:SS, "
+    "optionally followed by an offset or an uppercase Z (no Feb 30, no 25:00)."
 )
 
 # One resolver (and so one zone cache) per Google service factory.

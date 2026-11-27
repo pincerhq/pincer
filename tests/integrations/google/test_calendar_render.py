@@ -12,11 +12,13 @@ import asyncio
 import logging
 import re
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from googleapiclient.errors import HttpError
 
 from integrations.google.fake_calendar import FakeCalendarService
+from pincer.integrations.google import tools_calendar
 from pincer.integrations.google.calendar_render import EDIT_HINT
 from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, INVALID_DATE_TIME_MESSAGE, is_date_only
 from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
@@ -839,6 +841,43 @@ async def test_read_ranges_leave_other_date_text_to_google_as_before(fake_factor
 
     sent = fake.calls[-1][1]
     assert "2026-02-28 morning" in (sent.get("timeMax"), sent.get("body", {}).get("timeMax"))
+
+
+# The tools check their dates first (require_real_dates), so these backstops are unreachable
+# through them; PR #428 review: pin them directly, so dropping one fails the suite.
+
+
+@pytest.mark.parametrize(
+    ("time_min", "time_max", "bad"),
+    [("2026-02-30", "", "2026-02-30"), ("2026-02-01", "2026-02-28T25:00", "2026-02-28T25:00")],
+)
+@pytest.mark.parametrize("zone", [ZoneInfo("Europe/Kyiv"), None], ids=["zone", "no-zone"])
+def test_range_refuses_an_impossible_bound_itself(time_min, time_max, bad, zone):
+    with pytest.raises(ValueError) as refused:
+        tools_calendar._range(time_min, time_max, zone, defaults=True)
+
+    assert str(refused.value) == _refusal(bad)
+
+
+def test_end_keeping_duration_refuses_an_impossible_new_all_day_start_itself():
+    with pytest.raises(ValueError) as refused:
+        tools_calendar._end_keeping_duration({"date": "2026-02-20"}, {"date": "2026-02-21"}, {"date": "2026-02-30"})
+
+    assert str(refused.value) == _refusal("2026-02-30")
+
+
+async def test_update_refuses_an_impossible_bare_date_where_it_becomes_a_date_field(fake_factory, fake, monkeypatch):
+    """The update loop parses each bare value it stores, even if the up-front check is skipped:
+    a lone bare end on a timed event (no all-day span, no kept duration) would otherwise get
+    KIND_CHANGE_MESSAGE first, issue #337 item 1."""
+    monkeypatch.setattr(tools_calendar, "require_real_dates", lambda *values: None)
+    event_id = fake.seed_event("primary", "Dentist", "2026-02-20T10:00:00+02:00", "2026-02-20T11:00:00+02:00")
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, end="2026-02-30")
+
+    assert str(refused.value) == _refusal("2026-02-30")
+    assert fake.sent("events.update") == []
 
 
 def test_the_update_schema_states_the_same_all_day_end_rule_as_create(fake_registry):
