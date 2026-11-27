@@ -12,16 +12,19 @@ import asyncio
 import logging
 import re
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from googleapiclient.errors import HttpError
 
 from integrations.google.fake_calendar import FakeCalendarService
+from pincer.integrations.google import tools_calendar
 from pincer.integrations.google.calendar_render import EDIT_HINT
+from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, INVALID_DATE_TIME_MESSAGE, is_date_only
 from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
 from pincer.integrations.google.tools_calendar import (
-    INVALID_DATE_MESSAGE,
     REVERSED_ALL_DAY_MESSAGE,
+    google__check_freebusy,
     google__create_event,
     google__get_event,
     google__list_events,
@@ -51,6 +54,12 @@ WRITE_LOG_OPS = {
     "google__add_google_meet": "add_meet",
     "google__move_event": "move",
 }
+#: The read tools that take a range, called as ``call(factory, context, time_min=..., time_max=...)``.
+READ_TOOLS = [
+    lambda factory, ctx, **kw: google__list_events(factory, context=ctx, **kw),
+    lambda factory, ctx, **kw: google__search_events(factory, query="Dentist", context=ctx, **kw),
+    lambda factory, ctx, **kw: google__check_freebusy(factory, emails="me@example.com", context=ctx, **kw),
+]
 
 
 pytestmark = pytest.mark.usefixtures("berlin_deployment")
@@ -739,6 +748,135 @@ async def test_update_with_an_impossible_bare_date_names_it(fake_factory, fake, 
         await google__update_event(fake_factory, event_id=event_id, **arguments)
 
     assert str(refused.value) == INVALID_DATE_MESSAGE.format(value="2026-02-30")
+    assert fake.sent("events.update") == []
+
+
+def _refusal(value: str) -> str:
+    """The message an impossible ``value`` is refused with: a bare date's, or a date-time's."""
+    return (INVALID_DATE_MESSAGE if is_date_only(value) else INVALID_DATE_TIME_MESSAGE).format(value=value)
+
+
+def _on_call_context() -> dict[str, str]:
+    from pincer.core.clock import CALL_TIMEZONE_KEY
+
+    return {"timezone": "Europe/Kyiv", CALL_TIMEZONE_KEY: "Europe/Berlin"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"end": "2026-02-30"},  # was KIND_CHANGE_MESSAGE, then the date refusal a turn later
+        {"start": "2026-02-30"},
+        {"start": "2026-02-30", "end": "2026-03-02"},
+        {"start": "2026-02-30T10:00:00"},  # an impossible date-time: was a raw 400
+        {"end": "2026-02-28T25:00:00"},  # a real day with an impossible hour
+        {"start": "2026-12-05T10:00:00z"},  # lowercase z: was "Could not read the new start"
+    ],
+)
+async def test_update_of_a_timed_event_with_an_impossible_date_names_it(fake_factory, fake, arguments):
+    """Issue #337: an impossible date or time on a timed event gets the date refusal first,
+    naming the whole value, before the event is read."""
+    event_id = fake.seed_event("primary", "Dentist", "2026-02-20T10:00:00+02:00", "2026-02-20T11:00:00+02:00")
+    bad = arguments.get("start", arguments.get("end"))
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, **arguments)
+
+    assert str(refused.value) == _refusal(bad)
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "bad"),
+    [
+        ("2026-02-30T10:00:00", "2026-02-30T11:00:00", "2026-02-30T10:00:00"),
+        ("2026-02-28T10:00:00", "2026-02-28T10:61:00", "2026-02-28T10:61:00"),
+        ("2026-12-05T10:00:00z", "2026-12-05T11:00:00Z", "2026-12-05T10:00:00z"),
+    ],
+)
+async def test_create_with_an_impossible_date_time_names_it(fake_factory, fake, start, end, bad):
+    """Issue #337: an impossible date-time reached Google unchanged and came back as a raw 400."""
+    with pytest.raises(ValueError) as refused:
+        await google__create_event(fake_factory, summary="Dentist", start=start, end=end)
+
+    assert str(refused.value) == _refusal(bad)
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("call", READ_TOOLS, ids=["list", "search", "freebusy"])
+@pytest.mark.parametrize(
+    ("bounds", "bad"),
+    [
+        ({"time_min": "2026-02-30"}, "2026-02-30"),
+        ({"time_min": "2026-02-01", "time_max": "2026-02-30"}, "2026-02-30"),
+        ({"time_min": "2026-02-30T10:00:00"}, "2026-02-30T10:00:00"),
+        ({"time_min": "2026-02-28T25:00"}, "2026-02-28T25:00"),
+        (
+            {"time_min": "2026-02-01T00:00:00+02:00", "time_max": "2026-02-30T00:00:00+02:00"},
+            "2026-02-30T00:00:00+02:00",
+        ),
+        # PR #428 review: lowercase z passed the check, then _days_after could not read it and
+        # the list's default end became now + 7 days, before the start: an empty list.
+        ({"time_min": "2026-12-05T10:00:00z"}, "2026-12-05T10:00:00z"),
+    ],
+)
+@pytest.mark.parametrize("on_call", [False, True], ids=["chat", "call"])
+async def test_read_ranges_with_an_impossible_date_name_it(fake_factory, fake, call, bounds, bad, on_call):
+    """Issue #337: list/search/free-busy bounds showed Python's "day is out of range for month"
+    (bare dates) or reached Google unchanged (date-times, and every free/busy bound without a zone).
+    The refusal comes before any Google call, the calendar-zone lookup included."""
+    with pytest.raises(ValueError) as refused:
+        await call(fake_factory, _on_call_context() if on_call else None, **bounds)
+
+    assert str(refused.value) == _refusal(bad)
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("call", READ_TOOLS, ids=["list", "search", "freebusy"])
+async def test_read_ranges_leave_other_date_text_to_google_as_before(fake_factory, fake, call):
+    """PR #428 review: only YYYY-MM-DD and YYYY-MM-DD plus a time are checked; a date followed
+    by other text still goes to Google unchanged (which refuses it), as before #337."""
+    with pytest.raises(HttpError):
+        await call(fake_factory, None, time_min="2026-02-01", time_max="2026-02-28 morning")
+
+    sent = fake.calls[-1][1]
+    assert "2026-02-28 morning" in (sent.get("timeMax"), sent.get("body", {}).get("timeMax"))
+
+
+# The tools check their dates first (require_real_dates), so these backstops are unreachable
+# through them; PR #428 review: pin them directly, so dropping one fails the suite.
+
+
+@pytest.mark.parametrize(
+    ("time_min", "time_max", "bad"),
+    [("2026-02-30", "", "2026-02-30"), ("2026-02-01", "2026-02-28T25:00", "2026-02-28T25:00")],
+)
+@pytest.mark.parametrize("zone", [ZoneInfo("Europe/Kyiv"), None], ids=["zone", "no-zone"])
+def test_range_refuses_an_impossible_bound_itself(time_min, time_max, bad, zone):
+    with pytest.raises(ValueError) as refused:
+        tools_calendar._range(time_min, time_max, zone, defaults=True)
+
+    assert str(refused.value) == _refusal(bad)
+
+
+def test_end_keeping_duration_refuses_an_impossible_new_all_day_start_itself():
+    with pytest.raises(ValueError) as refused:
+        tools_calendar._end_keeping_duration({"date": "2026-02-20"}, {"date": "2026-02-21"}, {"date": "2026-02-30"})
+
+    assert str(refused.value) == _refusal("2026-02-30")
+
+
+async def test_update_refuses_an_impossible_bare_date_where_it_becomes_a_date_field(fake_factory, fake, monkeypatch):
+    """The update loop parses each bare value it stores, even if the up-front check is skipped:
+    a lone bare end on a timed event (no all-day span, no kept duration) would otherwise get
+    KIND_CHANGE_MESSAGE first, issue #337 item 1."""
+    monkeypatch.setattr(tools_calendar, "require_real_dates", lambda *values: None)
+    event_id = fake.seed_event("primary", "Dentist", "2026-02-20T10:00:00+02:00", "2026-02-20T11:00:00+02:00")
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, end="2026-02-30")
+
+    assert str(refused.value) == _refusal("2026-02-30")
     assert fake.sent("events.update") == []
 
 
