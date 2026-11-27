@@ -9,9 +9,12 @@ provider-specific code/voice/model mappings.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 DEFAULT_LANGUAGE = "en"
+
+# The grammatical case a spoken date is rendered in, set by the sentence around it.
+GrammaticalCase = Literal["nominative", "dative", "accusative"]
 KNOWN_LANGUAGES = ("en", "de", "uk")
 
 # Twilio ConversationRelay attributes

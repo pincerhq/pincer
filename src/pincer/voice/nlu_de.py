@@ -18,7 +18,11 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from pincer.voice.language import GrammaticalCase
 
 DEFAULT_TZ = ZoneInfo("Europe/Berlin")
 
@@ -392,15 +396,20 @@ def render_time_de(dt: datetime) -> str:
     return f"{hour_word} Uhr {number_words_de(dt.minute)}"
 
 
-def render_date_de(dt: datetime, case: str = "nominative") -> str:
-    """'Dienstag, der achtzehnte August'; dative 'Dienstag, dem achtzehnten August' (after 'am')."""
+def render_date_de(dt: datetime, case: GrammaticalCase = "nominative") -> str:
+    """'Dienstag, der achtzehnte August'; dative 'Dienstag, dem achtzehnten August' (after 'am').
+
+    German has no other case a spoken date needs, so "accusative" renders the nominative.
+    """
     weekday = WEEKDAY_NAMES_DE[dt.weekday()]
+    month = MONTH_NAMES_DE[dt.month - 1]
     if case == "dative":
-        return f"{weekday}, dem {ordinal_words_de(dt.day)}n {MONTH_NAMES_DE[dt.month - 1]}"
-    return f"{weekday}, der {ordinal_words_de(dt.day)} {MONTH_NAMES_DE[dt.month - 1]}"
+        # Weak adjective ending after "dem": the ordinal takes -n (erste -> ersten, elfte -> elften).
+        return f"{weekday}, dem {ordinal_words_de(dt.day)}n {month}"
+    return f"{weekday}, der {ordinal_words_de(dt.day)} {month}"
 
 
-def render_datetime_de(dt: datetime, include_time: bool = True, case: str = "nominative") -> str:
+def render_datetime_de(dt: datetime, include_time: bool = True, case: GrammaticalCase = "nominative") -> str:
     """'Dienstag, der achtzehnte August um vierzehn Uhr dreißig'."""
     date_part = render_date_de(dt, case=case)
     if not include_time:

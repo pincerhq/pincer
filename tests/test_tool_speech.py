@@ -215,6 +215,18 @@ def test_an_all_day_update_start_reads_naturally_on_every_weekday(start, uk_day,
     )
 
 
+def test_every_from_day_case_is_a_known_grammatical_case():
+    """PR #426 review: a typo in a pack's FROM_DAY_CASE ("datve") would quietly render the nominative."""
+    from typing import get_args
+
+    from pincer.voice.language import GrammaticalCase
+    from pincer.voice.prompts import de, en, uk
+
+    for pack in (de, en, uk):
+        case = getattr(pack, "FROM_DAY_CASE", "nominative")
+        assert case in get_args(GrammaticalCase), (pack.__name__, case)
+
+
 def test_spoken_datetime_forms():
     from datetime import datetime
 
