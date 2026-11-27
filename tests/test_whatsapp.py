@@ -507,6 +507,24 @@ class TestWhatsAppMediaAndApproval:
         assert "Requested by: an MCP client" in wa_channel._client.send_message.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_queued_approval_gives_up_after_the_queue_timeout(self, wa_channel, monkeypatch):
+        """A request queued behind an open prompt doesn't wait forever (PR #423 review)."""
+        monkeypatch.setattr("pincer.channels.whatsapp.PROMPT_QUEUE_TIMEOUT", 0.01)
+        wa_channel._client = MagicMock()
+        wa_channel._client.send_message = AsyncMock()
+        first = asyncio.create_task(wa_channel.request_approval("491234567890", "shell_exec", {}))
+        for _ in range(100):
+            if "491234567890" in wa_channel._pending_approvals:
+                break
+            await asyncio.sleep(0)
+
+        second = await wa_channel.request_approval("491234567890", "email_send", {}, requested_by="an MCP client")
+
+        assert second is ApprovalOutcome.TIMED_OUT
+        assert wa_channel._client.send_message.await_count == 1
+        first.cancel()
+
+    @pytest.mark.asyncio
     async def test_request_approval_unavailable_when_not_connected(self, wa_channel):
         wa_channel._client = None
         result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "ls"})

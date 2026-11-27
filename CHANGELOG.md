@@ -1289,14 +1289,23 @@ mounting a directory. Install the new `remote-skills` extra
   server's approval callback was called with no user or channel, so it never
   reached anyone and every approval-gated call was refused. It now asks in the
   Telegram, WhatsApp or Teams chat where a known identity last wrote to
-  Pincer; a guest's message never makes them the approver. The prompt reads
-  "Requested by: an MCP client". Web chat can't show these prompts, so with no
-  such chat yet the MCP client is told approval needs one.
-- **Telegram and Teams: two approvals for the same user no longer overwrite
-  each other (#227).** Each Telegram card now carries its own id, so its
-  buttons answer that prompt only, and a tap on an expired card answers
+  Pincer; a guest's message never makes them the approver, and an identity
+  deactivated since is not asked. `approver = "<pincer_user_id>"` under
+  `[mcp.server]` in `pincer.toml` limits this to one identity; without it, the
+  last known identity to write is asked, which in a shared setup may be a
+  teammate. The prompt reads "Requested by: an MCP client", and on WhatsApp and
+  Teams a typed answer must carry the prompt's 4-digit code ("yes 4821"), so a
+  "yes" meant for the agent's own question can't approve it; other messages go
+  to the agent as usual. A WhatsApp 👍 / 👎 on the prompt still answers it. Web
+  chat can't show these prompts: with no such chat yet, the MCP client is told
+  so, and a prompt that couldn't be delivered is reported as that.
+- **Telegram, WhatsApp and Teams: two approvals for the same user no longer
+  overwrite each other (#227).** Each Telegram card now carries its own id, so
+  its buttons answer that prompt only, and a tap on an expired card answers
   "Expired". Teams asks one approval per user at a time, as WhatsApp already
-  did; a second request waits for the first.
+  did. On both, a second request waits at most 30 s for the first and then
+  expires, so an MCP client isn't kept past its own timeout; a request its
+  client cancels is dropped without showing its prompt.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

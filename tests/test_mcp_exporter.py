@@ -170,10 +170,11 @@ async def test_exported_tool_approval_denied():
     ("approval_cb", "expected"),
     [
         (AsyncMock(return_value=ApprovalOutcome.TIMED_OUT), "expired without an answer"),
-        (AsyncMock(return_value=ApprovalOutcome.UNAVAILABLE), "web chat can't show it"),
+        (AsyncMock(return_value=ApprovalOutcome.UNAVAILABLE), "(internal error)"),
+        (AsyncMock(return_value=ApprovalOutcome.NO_APPROVER), "web chat can't show it"),
         (AsyncMock(side_effect=RuntimeError("boom")), "(internal error)"),
     ],
-    ids=["timed_out", "unavailable", "raises"],
+    ids=["timed_out", "unavailable", "no_approver", "raises"],
 )
 async def test_exported_tool_not_approved_is_not_reported_as_declined(approval_cb, expected):
     reg = _make_registry(["email_send"])

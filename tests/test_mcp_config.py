@@ -803,3 +803,13 @@ def test_env_server_disabled_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     cfg = load_mcp_config(tmp_path)
     assert len(cfg.servers) == 1
     assert cfg.servers[0].enabled is False
+
+
+def test_server_export_approver(tmp_path: Path) -> None:
+    (tmp_path / "pincer.toml").write_text('[mcp.server]\nenabled = true\napprover = "alice"\n')
+    assert load_mcp_config(tmp_path).server.approver == "alice"
+
+
+def test_server_export_approver_defaults_to_none(tmp_path: Path) -> None:
+    (tmp_path / "pincer.toml").write_text("[mcp.server]\nenabled = true\n")
+    assert load_mcp_config(tmp_path).server.approver is None

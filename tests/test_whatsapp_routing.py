@@ -1185,13 +1185,17 @@ def _group_text(text: str, *, sender_user: str = OTHER_PHONE, chat_user: str = G
     return event
 
 
-async def _pending_approval(ch, requester: str = OTHER_PHONE, group: str | None = GROUP) -> asyncio.Task:
+async def _pending_approval(
+    ch, requester: str = OTHER_PHONE, group: str | None = GROUP, requested_by: str | None = None
+) -> asyncio.Task:
     """Start request_approval as if the agent were handling *requester*'s message in *group*."""
     ch._client = MagicMock()
     ch._client.send_message = AsyncMock(return_value=MagicMock(ID=PROMPT_ID))
     token = _active_group.set((requester, (group, "g.us"))) if group else None
     try:
-        task = asyncio.create_task(ch.request_approval(requester, "google__send_message", {"to": "me"}))
+        task = asyncio.create_task(
+            ch.request_approval(requester, "google__send_message", {"to": "me"}, requested_by=requested_by)
+        )
     finally:
         if token is not None:
             _active_group.reset(token)
@@ -1490,6 +1494,40 @@ class TestDirectChatApproval:
         assert ch._client.send_message.await_args.args[1] == "Please reply *yes* or *no*."
         ch._handler.assert_not_called()
         assert await _still_pending(task)
+
+    async def test_mcp_prompt_needs_its_code(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None, requested_by="an MCP client")
+        code = ch._pending_approvals[OWNER_PHONE].code
+        assert f"*yes {code}*" in ch._client.send_message.await_args.args[1]
+
+        await ch._on_message(ch._client, self._self_chat(f"yes {code}"))
+
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
+        ch._handler.assert_not_called()
+
+    async def test_bare_yes_during_mcp_prompt_goes_to_the_agent(self, routing_channel):
+        """A "yes" meant for the agent's own question must not approve an MCP client's call (PR #423 review)."""
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None, requested_by="an MCP client")
+
+        await ch._on_message(ch._client, self._self_chat("yes"))
+
+        ch._handler.assert_called_once()
+        sent = [c.args[1] for c in ch._client.send_message.await_args_list]
+        assert "Please reply *yes* or *no*." not in sent
+        assert await _still_pending(task)
+
+    async def test_reaction_answers_mcp_prompt_without_code(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None, requested_by="an MCP client")
+
+        reaction = _reaction_event(
+            sender_user=OWNER_PHONE, emoji="👍", from_me=True, chat_user=OWNER_PHONE, is_group=False
+        )
+        await ch._on_message(ch._client, reaction)
+
+        assert await asyncio.wait_for(task, 1) is ApprovalOutcome.APPROVED
 
     async def test_reprompt_echo_does_not_reprompt_again(self, routing_channel):
         ch = routing_channel

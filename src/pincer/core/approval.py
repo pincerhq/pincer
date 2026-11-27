@@ -9,11 +9,12 @@ still works: ``True`` is approved, ``False`` is denied.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import AsyncIterator, Awaitable, Hashable
 
 
 class ApprovalOutcome(StrEnum):
@@ -27,6 +28,8 @@ class ApprovalOutcome(StrEnum):
     DENIED = "denied"
     TIMED_OUT = "timed_out"
     UNAVAILABLE = "unavailable"
+    # Nobody could be asked: no chat with the approver is known (MCP-client calls).
+    NO_APPROVER = "no_approver"
 
     def __bool__(self) -> bool:
         return self is ApprovalOutcome.APPROVED
@@ -40,6 +43,11 @@ _REFUSAL_MESSAGES = {
     ),
     ApprovalOutcome.UNAVAILABLE: (
         "Approval for '{tool}' could not be requested (internal error). Tell the user; do not guess a cause."
+    ),
+    ApprovalOutcome.NO_APPROVER: (
+        "Approval for '{tool}' could not be requested: there is no Telegram, WhatsApp or Teams chat with the "
+        "approving user yet, and web chat can't show it. Tell the user; do not retry until they have written "
+        "to Pincer there."
     ),
 }
 
@@ -72,6 +80,54 @@ async def await_decision(decision: Awaitable[bool], timeout: float) -> ApprovalO
         return as_outcome(await asyncio.wait_for(decision, timeout=timeout))
     except TimeoutError:
         return ApprovalOutcome.TIMED_OUT
+
+
+# How long a prompt waits for an earlier one to the same user before giving
+# up: short enough that the caller (an MCP client, often ~60 s) is still there.
+PROMPT_QUEUE_TIMEOUT = 30.0
+
+
+class PromptQueue:
+    """One open prompt per key (a user) at a time; later prompts wait their turn, but not forever.
+
+    For channels where an answer can't say which prompt it is for (a typed
+    "yes"). A key's lock is dropped once nobody holds or waits for it.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[Hashable, asyncio.Lock] = {}
+        self._users: dict[Hashable, int] = {}
+
+    @contextlib.asynccontextmanager
+    async def turn(self, key: Hashable, timeout: float) -> AsyncIterator[bool]:
+        """Wait up to *timeout* seconds for *key*'s turn.
+
+        Yields:
+            True once it is this caller's turn, False if the wait timed out.
+        """
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        self._users[key] = self._users.get(key, 0) + 1
+        try:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=timeout)
+                acquired = True
+            except TimeoutError:
+                acquired = False
+            if not acquired:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                lock.release()
+        finally:
+            self._users[key] -= 1
+            if not self._users[key]:
+                del self._users[key]
+                del self._locks[key]
+
+    def __len__(self) -> int:
+        return len(self._locks)
 
 
 def approval_tool_message(tool_name: str, outcome: ApprovalOutcome) -> str:

@@ -11,6 +11,7 @@ Channels strip their own addressing (mentions, trigger words) before calling
 from __future__ import annotations
 
 import re
+import secrets
 import unicodedata
 
 YES_WORDS = frozenset(
@@ -70,3 +71,20 @@ def parse_yes_no(text: str, *, max_words: int | None = None) -> bool | None:
         if words[0] in answer_words:
             return decision if all(w in answer_words or w in FILLER_WORDS for w in words[1:]) else None
     return None
+
+
+def new_answer_code() -> str:
+    """A 4-digit code a typed answer must carry, for prompts the user didn't start (an MCP client's)."""
+    return f"{secrets.randbelow(10_000):04d}"
+
+
+def parse_coded_yes_no(text: str, code: str) -> bool | None:
+    """Like :func:`parse_yes_no`, but only an answer that carries *code* counts.
+
+    "yes 4821", "4821 no" and "Yes, 4821!" answer; a bare "yes" is None, so it
+    stays a normal message (it may be meant for the agent's own question).
+    """
+    words = _tokens(text)
+    if not words or code not in words:
+        return None
+    return parse_yes_no(" ".join(w for w in words if w != code))

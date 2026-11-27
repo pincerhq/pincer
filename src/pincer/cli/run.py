@@ -1930,6 +1930,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
         _mcp_full_cfg = _load_mcp_cfg(pincer_vars=_pincer_config_vars(settings))
         if _mcp_full_cfg.server.enabled:
+            mcp_approvals.approver = _mcp_full_cfg.server.approver
             mcp_server = PincerMCPServer(
                 config=_mcp_full_cfg.server,
                 tool_registry=tools,

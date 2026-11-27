@@ -174,6 +174,9 @@ class MCPServerExportConfig:
     webhook_url: str | None = None
     # OAuth 2.1 auth config (None = disabled, uses localhost bypass)
     auth: Any | None = None
+    # pincer_user_id asked to approve gated tools an MCP client calls; None =
+    # the last known identity to write on Telegram, WhatsApp or Teams
+    approver: str | None = None
 
 
 @dataclass(frozen=True)
@@ -379,6 +382,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         approval_policy=approval_policy,
         sampling=sampling,
         webhook_url=srv_raw.get("webhook_url"),
+        approver=srv_raw.get("approver") or None,
     )
     return MCPConfig(
         enabled=mcp_raw.get("enabled", True),
@@ -526,6 +530,7 @@ def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] 
         sampling=toml_srv.sampling,
         webhook_url=toml_srv.webhook_url,
         auth=toml_srv.auth,
+        approver=toml_srv.approver,
     )
 
     return MCPConfig(
