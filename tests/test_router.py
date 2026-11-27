@@ -783,12 +783,23 @@ async def test_a_primary_that_timed_out_or_lost_its_connection_is_not_tried_agai
     assert len(fallback.requests) == 1
 
 
-@pytest.mark.parametrize("error_type", ["overloaded_error", "api_error", "rate_limit_error"])
+@pytest.mark.parametrize(
+    "first_reply",
+    [
+        sse.StreamError("overloaded_error"),
+        sse.StreamError("api_error"),
+        sse.StreamError("rate_limit_error"),
+        408,
+        409,
+    ],
+    ids=["in-stream-overloaded", "in-stream-api-error", "in-stream-rate-limit", "408", "409"],
+)
 @pytest.mark.parametrize("method", ["stream_turn", "complete"])
-async def test_an_in_stream_overload_on_the_primary_earns_its_last_try(settings, method, error_type):
-    """Issue #371: an overload the API reports inside the stream arrives with the stream's status,
-    200, yet is transient: with the fallback broken, the primary is asked again and answers."""
-    replies = [sse.StreamError(error_type), ([sse.text("from the primary's retry")], "end_turn")]
+async def test_a_transient_primary_failure_earns_its_last_try(settings, method, first_reply):
+    """Issue #371: an overload reported inside the stream (it arrives with the stream's status,
+    200) and a 408 or 409 (both SDKs retry them) are transient: with the fallback broken, the
+    primary is asked again and answers."""
+    replies = [first_reply, ([sse.text("from the primary's retry")], "end_turn")]
     async with (
         sse.ScriptedAnthropic(settings, replies) as primary,
         sse.ScriptedAnthropic(settings, [401]) as fallback,
@@ -825,22 +836,6 @@ async def test_a_compaction_classifies_an_in_stream_error_by_its_type(settings, 
 
     assert raised.value.retryable is retryable
     assert error_type in str(raised.value)
-
-
-@pytest.mark.parametrize("status", [408, 409])
-@pytest.mark.parametrize("method", ["stream_turn", "complete"])
-async def test_a_408_or_409_primary_earns_its_last_try(settings, method, status):
-    """Issue #371: the SDKs retry a 408 and a 409, so the router counts them transient too."""
-    replies = [status, ([sse.text("from the primary's retry")], "end_turn")]
-    async with (
-        sse.ScriptedAnthropic(settings, replies) as primary,
-        sse.ScriptedAnthropic(settings, [401]) as fallback,
-    ):
-        router = _router_with_pool("a", ["b"], {"a": primary.provider, "b": fallback.provider})
-        answer = await _answer(router, method)
-
-    assert answer.content == "from the primary's retry"
-    assert len(primary.requests) == 2
 
 
 @pytest.mark.parametrize(
