@@ -19,6 +19,11 @@ enabled      = false       # Set to true to expose Pincer as an MCP server
 host         = "127.0.0.1" # Localhost only; use 0.0.0.0 in Docker (see docker-compose.yml)
 port         = 18800
 path         = "/mcp"
+# Who approves gated tools an MCP client calls (pincer_user_id). The prompt
+# goes to that identity's last Telegram, WhatsApp or Teams chat. Unset: the
+# last known identity to write there, which in a shared setup may not be you.
+# A non-string or blank value stops the MCP server at startup.
+# approver = "alice"
 expose_tools = [
     "email_check",
     "calendar_today",          # alias: today's events, in the calendar's timezone

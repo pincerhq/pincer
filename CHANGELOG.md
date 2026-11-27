@@ -1272,6 +1272,47 @@ mounting a directory. Install the new `remote-skills` extra
   the reminder loop. Only those two named reasons count as an exhausted quota:
   a `RATE_LIMIT_EXCEEDED` whose `quota_limit` is a per-day limit, or a bare
   `RESOURCE_EXHAUSTED`, is still retried.
+- **A tool approval that expired or could not be asked is no longer reported
+  as "declined by the user" (#227).** Every approval that didn't go through
+  reached the model as a decline, so it made up a cause ("a permissions
+  problem") and didn't offer to retry. Approval callbacks now return an
+  `ApprovalOutcome` (`APPROVED`, `DENIED`, `TIMED_OUT`, `UNAVAILABLE`,
+  `NO_APPROVER`, `BUSY`; a plain bool still works), and each reaches the model with its own message: a
+  decline asks it not to retry, an expired request asks it to offer another
+  try, and an approval that could not be requested (no SSE stream, an
+  undeliverable prompt, a failing callback) asks it not to guess a cause.
+  This covers web chat, Telegram, WhatsApp, Teams and tools called through
+  the MCP server. Web chat sends a new `approval_resolved` SSE event
+  (`approval_id`, `status`: `approved` / `denied` / `expired`) so the approval
+  card can show its final state.
+- **MCP server: approval-gated tools ask the user again (#227).** The MCP
+  server's approval callback was called with no user or channel, so it never
+  reached anyone and every approval-gated call was refused. It now asks in the
+  Telegram, WhatsApp or Teams chat where a known identity last wrote to
+  Pincer; a guest's message never makes them the approver, and an identity
+  deactivated since is not asked. `approver = "<pincer_user_id>"` under
+  `[mcp.server]` in `pincer.toml` limits this to one identity (`pincer run`
+  warns if it is not an active identity; a non-string or blank value stops
+  the MCP server with a startup error, other MCP servers still load); without
+  it or with `""`, the last known identity to write is asked, which in a shared setup may
+  be a teammate. The prompt reads "Requested by: an MCP client", and on WhatsApp and
+  Teams a typed answer must carry the prompt's 4-digit code ("yes 4821"), so a
+  "yes" meant for the agent's own question can't approve it; other messages go
+  to the agent as usual, and can still answer a question the agent is waiting
+  on. A WhatsApp 👍 / 👎 on the prompt still answers it. Web chat can't show
+  these prompts: with nobody to ask, the MCP client is told there is no active
+  approver chat; a prompt that couldn't be delivered, or a failed identity
+  check, is reported as an internal error. See
+  [Approvals for MCP tool calls](docs/core-components/pincer-mcp-server.md#approvals-for-mcp-tool-calls).
+- **Telegram, WhatsApp and Teams: two approvals for the same user no longer
+  overwrite each other (#227).** Each Telegram card now carries its own id, so
+  its buttons answer that prompt only, and a tap on an expired card answers
+  "Expired". Teams asks one approval per user at a time, as WhatsApp already
+  did. On both, a second request waits for the first: up to 150 s for a prompt
+  the agent raised (one whole earlier prompt), up to 30 s for an MCP client's,
+  so the client isn't kept past its own timeout. One that waits longer is
+  never shown, and the model or client is told so rather than that it
+  expired. A request its client cancels is dropped without showing its prompt.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

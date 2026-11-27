@@ -17,6 +17,7 @@ import html
 import io
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -29,6 +30,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 from pincer.channels.group_trigger import matches_group_trigger
 from pincer.channels.telegram_formatters import markdown_to_telegram_html
+from pincer.core.approval import ApprovalOutcome, await_decision
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -88,6 +90,8 @@ class TelegramChannel(BaseChannel):
         self._handler: MessageHandler | None = None
         self._stream_agent: Any = None
         self._polling_task: asyncio.Task[None] | None = None
+        # approval_id -> future; the id rides in the card's callback data, so
+        # each card answers its own prompt even when several are open.
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._own_username: str | None = None
 
@@ -100,25 +104,57 @@ class TelegramChannel(BaseChannel):
         user_id: str,
         tool_name: str,
         arguments: dict[str, Any],
-    ) -> bool:
-        """Send an inline-keyboard approval prompt and block until the user responds."""
+        *,
+        requested_by: str | None = None,
+    ) -> ApprovalOutcome:
+        """Send an inline-keyboard approval prompt and block until the user responds.
+
+        *requested_by* names who asked when it wasn't the agent itself (an MCP client).
+        """
         assert self._bot is not None
 
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
 
+        approval_id = uuid.uuid4().hex[:16]
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="Approve", callback_data=f"tool_approve:{user_id}"),
-                    InlineKeyboardButton(text="Deny", callback_data=f"tool_deny:{user_id}"),
+                    InlineKeyboardButton(text="Approve", callback_data=f"tool_approve:{approval_id}"),
+                    InlineKeyboardButton(text="Deny", callback_data=f"tool_deny:{approval_id}"),
                 ]
             ]
         )
 
-        prompt_text = f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"
+        origin = f"Requested by: {requested_by}\n" if requested_by else ""
+        prompt_text = (
+            f"*Approval required*\n\n{origin}Tool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"
+        )
         chat_id = self._chat_id(user_id)
+        # Registered before sending, so a tap that beats the send's return still counts.
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending_approvals[approval_id] = future
+        try:
+            outcome = await self._send_approval_prompt(chat_id, prompt_text, keyboard, user_id, tool_name)
+            if outcome is None:
+                outcome = await await_decision(future, 120)
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+        if outcome is ApprovalOutcome.TIMED_OUT:
+            logger.info("Approval timed out for user %s, tool %s", user_id, tool_name)
+        return outcome
+
+    async def _send_approval_prompt(
+        self,
+        chat_id: int,
+        prompt_text: str,
+        keyboard: InlineKeyboardMarkup,
+        user_id: str,
+        tool_name: str,
+    ) -> ApprovalOutcome | None:
+        """Send the approval card, retrying as plain text. UNAVAILABLE if neither send works, else None."""
+        assert self._bot is not None
         try:
             await self._bot.send_message(
                 chat_id=chat_id,
@@ -127,24 +163,22 @@ class TelegramChannel(BaseChannel):
             )
         except Exception as e:
             logger.warning("Approval markdown send failed, retrying plain: %s", e)
-            await self._bot.send_message(
-                chat_id=chat_id,
-                text=prompt_text,
-                parse_mode=None,
-                reply_markup=keyboard,
-            )
-
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bool] = loop.create_future()
-        self._pending_approvals[user_id] = future
-
-        try:
-            return await asyncio.wait_for(future, timeout=120)
-        except TimeoutError:
-            logger.info("Approval timed out for user %s, tool %s", user_id, tool_name)
-            return False
-        finally:
-            self._pending_approvals.pop(user_id, None)
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=prompt_text,
+                    parse_mode=None,
+                    reply_markup=keyboard,
+                )
+            except Exception as plain_err:
+                logger.warning(
+                    "Approval prompt undeliverable to %s for %s (%s); approval unavailable",
+                    user_id,
+                    tool_name,
+                    plain_err,
+                )
+                return ApprovalOutcome.UNAVAILABLE
+        return None
 
     # ── Sprint 11: in-call approval card (`user` mode) ──────────────
 
@@ -575,14 +609,16 @@ class TelegramChannel(BaseChannel):
         @router.callback_query(F.data.startswith("tool_approve:") | F.data.startswith("tool_deny:"))
         async def handle_tool_approval(callback: CallbackQuery) -> None:
             data = callback.data or ""
-            action, _, uid = data.partition(":")
-            future = self._pending_approvals.get(uid)
+            action, _, approval_id = data.partition(":")
+            future = self._pending_approvals.get(approval_id)
             approved = action == "tool_approve"
 
             if future and not future.done():
                 future.set_result(approved)
-
-            label = "Approved" if approved else "Denied"
+                label = "Approved" if approved else "Denied"
+            else:
+                # Expired, already answered, or a card from before a restart.
+                label = "Expired"
             await callback.answer(label)
             if callback.message:
                 with contextlib.suppress(Exception):

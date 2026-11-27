@@ -174,6 +174,27 @@ class MCPServerExportConfig:
     webhook_url: str | None = None
     # OAuth 2.1 auth config (None = disabled, uses localhost bypass)
     auth: Any | None = None
+    # `approver` exactly as written in pincer.toml; read it via checked_approver().
+    # Kept raw so a bad value stops only the MCP server, not the [mcp] section.
+    approver: object = None
+
+    def checked_approver(self) -> str | None:
+        """The pincer_user_id asked to approve gated tools an MCP client calls.
+
+        None (unset or ``""``) means the last known identity to write on
+        Telegram, WhatsApp or Teams. Surrounding spaces are dropped. Raises
+        ValueError for a non-string or a value that is only spaces: this
+        setting restricts who may approve, so a bad value must not fall back
+        to the open default.
+        """
+        raw = self.approver
+        if raw is None or raw == "":
+            return None
+        if not isinstance(raw, str):
+            raise ValueError(f"[mcp.server] approver must be a pincer_user_id string, got {type(raw).__name__}")
+        if not raw.strip():
+            raise ValueError('[mcp.server] approver is blank; set a pincer_user_id or remove the key (or use "")')
+        return raw.strip()
 
 
 @dataclass(frozen=True)
@@ -379,6 +400,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         approval_policy=approval_policy,
         sampling=sampling,
         webhook_url=srv_raw.get("webhook_url"),
+        approver=srv_raw.get("approver"),
     )
     return MCPConfig(
         enabled=mcp_raw.get("enabled", True),
@@ -526,6 +548,7 @@ def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] 
         sampling=toml_srv.sampling,
         webhook_url=toml_srv.webhook_url,
         auth=toml_srv.auth,
+        approver=toml_srv.approver,
     )
 
     return MCPConfig(

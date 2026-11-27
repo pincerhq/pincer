@@ -25,8 +25,9 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from pincer.channels.approval_text import parse_yes_no
+from pincer.channels.approval_text import new_answer_code, parse_coded_yes_no, parse_yes_no
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.core.approval import ApprovalOutcome, PromptQueue, await_decision, prompt_queue_timeout
 
 if TYPE_CHECKING:
     from pincer.config import Settings
@@ -174,6 +175,11 @@ class MicrosoftTeamsChannel(BaseChannel):
         self._conversation_refs: dict[str, str] = {}
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._pending_inputs: dict[str, asyncio.Future[str]] = {}
+        # A yes/no reply can't say which prompt it answers, so one approval per
+        # user at a time: a second request waits (bounded) for the first.
+        self._approval_queue = PromptQueue()
+        # user_id -> code a typed answer must carry, for prompts an MCP client asked for.
+        self._answer_codes: dict[str, str] = {}
         # Active ctx.send callbacks, keyed by user_id, set while a message is
         # being handled so approval/input prompts can reply in-thread instead
         # of going through the proactive send API (which 400s on thread convs).
@@ -320,7 +326,16 @@ class MicrosoftTeamsChannel(BaseChannel):
 
         # Intercept approval/input responses before routing to the agent.
         approval_fut = self._pending_approvals.get(user_id)
-        if approval_fut and not approval_fut.done():
+        code = self._answer_codes.get(user_id)
+        if approval_fut and not approval_fut.done() and code is not None:
+            # A prompt the user didn't start: only an answer with its code
+            # counts, and anything else is a normal message (maybe an answer
+            # to the agent's own question).
+            decision = parse_coded_yes_no(text, code)
+            if decision is not None:
+                approval_fut.set_result(decision)
+                return
+        elif approval_fut and not approval_fut.done():
             decision = parse_yes_no(text)
             if decision is None:
                 try:
@@ -383,31 +398,59 @@ class MicrosoftTeamsChannel(BaseChannel):
         else:
             await self.send(user_id, text)
 
-    async def request_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
-        """Send an approval prompt and wait up to 120 s for a yes/no reply."""
+    async def request_approval(
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        requested_by: str | None = None,
+    ) -> ApprovalOutcome:
+        """Send an approval prompt and wait up to 120 s for a yes/no reply.
+
+        *requested_by* names who asked when it wasn't the agent itself (an MCP
+        client); such a prompt is answered only by a reply carrying its code.
+        BUSY, without showing it, if an earlier prompt to this user stays open
+        past `prompt_queue_timeout`.
+        """
+        async with self._approval_queue.turn(user_id, prompt_queue_timeout(requested_by)) as my_turn:
+            if not my_turn:
+                logger.info("Teams approval for %s / %s not shown: an earlier prompt is still open", user_id, tool_name)
+                return ApprovalOutcome.BUSY
+            return await self._ask_approval(user_id, tool_name, arguments, requested_by)
+
+    async def _ask_approval(
+        self, user_id: str, tool_name: str, arguments: dict[str, Any], requested_by: str | None
+    ) -> ApprovalOutcome:
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
-        prompt = f"🔐 **Approval required**\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nReply **yes** or **no**."
+        code = new_answer_code() if requested_by else None
+        origin = f"Requested by: {requested_by}\n" if requested_by else ""
+        how_to_answer = f"Reply **yes {code}** or **no {code}**." if code else "Reply **yes** or **no**."
+        prompt = f"🔐 **Approval required**\n\n{origin}Tool: `{tool_name}`\nArgs: `{args_preview}`\n\n{how_to_answer}"
         try:
             await self._send_to_user(user_id, prompt)
         except Exception as e:
             logger.warning(
-                "Teams approval prompt undeliverable to %s for %s (%s); denying.",
+                "Teams approval prompt undeliverable to %s for %s (%s); approval unavailable.",
                 user_id,
                 tool_name,
                 e,
             )
-            return False
+            return ApprovalOutcome.UNAVAILABLE
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending_approvals[user_id] = fut
+        if code:
+            self._answer_codes[user_id] = code
         try:
-            return await asyncio.wait_for(fut, timeout=120)
-        except TimeoutError:
-            logger.info("Teams approval timed out for %s / %s", user_id, tool_name)
-            return False
+            outcome = await await_decision(fut, 120)
         finally:
             self._pending_approvals.pop(user_id, None)
+            self._answer_codes.pop(user_id, None)
+        if outcome is ApprovalOutcome.TIMED_OUT:
+            logger.info("Teams approval timed out for %s / %s", user_id, tool_name)
+        return outcome
 
     async def request_input(self, user_id: str, question: str) -> str:
         """Send a question and wait up to 120 s for the user's reply."""

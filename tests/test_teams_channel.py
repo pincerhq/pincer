@@ -21,6 +21,7 @@ from pincer.channels.microsoft_teams import (
     _ActivityFilterMiddleware,
     split_message,
 )
+from pincer.core.approval import ApprovalOutcome
 
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
 
@@ -324,6 +325,68 @@ async def test_handle_activity_answers_pending_approval(text: str, expected: boo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolve", "expected"),
+    [
+        (lambda fut: fut.set_result(True), ApprovalOutcome.APPROVED),
+        (lambda fut: fut.set_result(False), ApprovalOutcome.DENIED),
+        (lambda fut: fut.set_exception(TimeoutError()), ApprovalOutcome.TIMED_OUT),
+    ],
+    ids=["approved", "denied", "timed_out"],
+)
+async def test_request_approval_outcome(resolve, expected) -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._send_to_user = AsyncMock()
+
+    task = asyncio.ensure_future(ch.request_approval("u1", "some_tool", {}))
+    for _ in range(10):
+        if "u1" in ch._pending_approvals:
+            break
+        await asyncio.sleep(0)
+    resolve(ch._pending_approvals["u1"])
+
+    assert await task is expected
+    assert "u1" not in ch._pending_approvals
+
+
+@pytest.mark.asyncio
+async def test_second_approval_waits_for_the_first() -> None:
+    """A yes/no reply can't say which prompt it answers, so prompts for one user are serialised (PR #423 review)."""
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._send_to_user = AsyncMock()
+
+    first = asyncio.ensure_future(ch.request_approval("u1", "email_send", {}))
+    for _ in range(10):
+        if "u1" in ch._pending_approvals:
+            break
+        await asyncio.sleep(0)
+    first_future = ch._pending_approvals["u1"]
+    second = asyncio.ensure_future(ch.request_approval("u1", "google__send_message", {}, requested_by="an MCP client"))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert ch._send_to_user.await_count == 1
+    assert ch._pending_approvals["u1"] is first_future
+
+    first_future.set_result(True)
+    assert await first is ApprovalOutcome.APPROVED
+    for _ in range(10):
+        if ch._pending_approvals.get("u1") not in (None, first_future):
+            break
+        await asyncio.sleep(0)
+    assert "Requested by: an MCP client" in ch._send_to_user.await_args.args[1]
+    ch._pending_approvals["u1"].set_result(False)
+    assert await second is ApprovalOutcome.DENIED
+
+
+@pytest.mark.asyncio
+async def test_request_approval_unavailable_when_prompt_undeliverable() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._send_to_user = AsyncMock(side_effect=RuntimeError("no conversation reference"))
+
+    assert await ch.request_approval("u1", "some_tool", {}) is ApprovalOutcome.UNAVAILABLE
+
+
+@pytest.mark.asyncio
 async def test_handle_activity_empty_text_after_strip_is_ignored() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
     handler = AsyncMock()
@@ -582,3 +645,103 @@ async def test_resolve_ambiguous_email_raises() -> None:
     ch._app = _graph_returning("aad-1", "aad-2")
     with pytest.raises(LookupError, match="matches 2 Teams users"):
         await ch.resolve_internal_user_id("bob@x.com")
+
+
+# ── PR #423 review round 2 ──────────────────────────────────────────────────
+
+
+async def _pending_mcp_approval(ch: MicrosoftTeamsChannel, user_id: str) -> tuple[asyncio.Future, str]:
+    """Start an MCP-client approval for *user_id*; return its task and the code from the prompt."""
+    ch._send_to_user = AsyncMock()
+    task = asyncio.ensure_future(ch.request_approval(user_id, "email_send", {}, requested_by="an MCP client"))
+    for _ in range(10):
+        if user_id in ch._pending_approvals:
+            break
+        await asyncio.sleep(0)
+    return task, ch._answer_codes[user_id]
+
+
+@pytest.mark.asyncio
+async def test_mcp_prompt_shows_and_needs_its_code() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._handler = AsyncMock(return_value="")
+    activity = make_activity(text="placeholder")
+    user_id = ch._activity_user_id(activity)
+    task, code = await _pending_mcp_approval(ch, user_id)
+    assert f"**yes {code}**" in ch._send_to_user.await_args.args[1]
+
+    await ch._handle_activity(make_ctx(make_activity(text=f"yes {code}")))
+
+    assert await task is ApprovalOutcome.APPROVED
+    ch._handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_during_mcp_prompt_goes_to_the_agent() -> None:
+    """A "yes" meant for the agent's own question must not approve an MCP client's call (PR #423 review)."""
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._handler = AsyncMock(return_value="ok")
+    activity = make_activity(text="yes")
+    user_id = ch._activity_user_id(activity)
+    task, _ = await _pending_mcp_approval(ch, user_id)
+    ctx = make_ctx(activity)
+
+    await ch._handle_activity(ctx)
+
+    ch._handler.assert_awaited_once()
+    assert ch._handler.await_args.args[0].text == "yes"
+    assert not ch._pending_approvals[user_id].done()
+    task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_queued_approval_gives_up_after_the_queue_timeout(monkeypatch) -> None:
+    monkeypatch.setattr("pincer.core.approval.MCP_PROMPT_QUEUE_TIMEOUT", 0.01)
+    ch = MicrosoftTeamsChannel(make_settings())
+    first, _ = await _pending_mcp_approval(ch, "u1")
+
+    second = await ch.request_approval("u1", "google__send_message", {}, requested_by="an MCP client")
+
+    assert second is ApprovalOutcome.BUSY
+    assert ch._send_to_user.await_count == 1  # the queued prompt was never shown
+    first.cancel()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queued_approval_never_shows_its_prompt() -> None:
+    """An MCP client that gives up cancels its request; nothing is shown or run later (PR #423 review)."""
+    ch = MicrosoftTeamsChannel(make_settings())
+    first, _ = await _pending_mcp_approval(ch, "u1")
+    queued = asyncio.ensure_future(ch.request_approval("u1", "email_send", {}, requested_by="an MCP client"))
+    await asyncio.sleep(0)
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    ch._pending_approvals["u1"].set_result(True)
+    assert await first is ApprovalOutcome.APPROVED
+
+    assert ch._send_to_user.await_count == 1
+    assert len(ch._approval_queue) == 0
+    assert not ch._answer_codes
+
+
+@pytest.mark.asyncio
+async def test_agent_prompt_behind_an_mcp_prompt_waits_its_turn(monkeypatch) -> None:
+    """An agent prompt is not dropped after the MCP queue limit (PR #423 review)."""
+    monkeypatch.setattr("pincer.core.approval.MCP_PROMPT_QUEUE_TIMEOUT", 0.01)
+    ch = MicrosoftTeamsChannel(make_settings())
+    first, _ = await _pending_mcp_approval(ch, "u1")
+    first_future = ch._pending_approvals["u1"]
+    agent_prompt = asyncio.ensure_future(ch.request_approval("u1", "shell_exec", {}))
+    await asyncio.sleep(0.05)  # longer than the MCP queue limit
+    assert not agent_prompt.done()
+
+    first_future.set_result(False)
+    assert await first is ApprovalOutcome.DENIED
+    for _ in range(10):
+        if ch._pending_approvals.get("u1") not in (None, first_future):
+            break
+        await asyncio.sleep(0)
+    ch._pending_approvals["u1"].set_result(True)
+    assert await agent_prompt is ApprovalOutcome.APPROVED

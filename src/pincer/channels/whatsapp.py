@@ -57,7 +57,7 @@ except ImportError:
     _NEONIZE_VERSION = "not installed"
 
 from pincer.channels import whatsapp_store
-from pincer.channels.approval_text import norm_emoji, parse_yes_no
+from pincer.channels.approval_text import new_answer_code, norm_emoji, parse_coded_yes_no, parse_yes_no
 from pincer.channels.base import (
     BaseChannel,
     ChannelType,
@@ -66,6 +66,7 @@ from pincer.channels.base import (
 )
 from pincer.channels.group_trigger import matches_group_trigger, strip_group_triggers
 from pincer.config.channels import WHATSAPP_SQLITE_FILE, is_postgres_url
+from pincer.core.approval import ApprovalOutcome, PromptQueue, await_decision, prompt_queue_timeout
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -97,6 +98,9 @@ class _PendingPrompt:
     # The group (user, server) the prompt went to, or None for a direct chat.
     # An answer only counts in that chat.
     chat: tuple[str, str] | None
+    # For a prompt the user didn't start (an MCP client's): a typed answer
+    # must carry this code, and other text is a normal message.
+    code: str | None = None
 
 
 # Remediation text keyed by neonize ConnectFailureReason enum values.
@@ -198,6 +202,7 @@ class WhatsAppChannel(BaseChannel):
         self._pending_inputs: dict[str, _PendingPrompt] = {}
         # ("approval" | "input", user_id) → lock; one prompt of each kind per user at a time.
         self._prompt_locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._approval_queue = PromptQueue()
         # message_id of approval prompt → user_id; used to accept 👍/👎 reactions.
         self._approval_prompt_ids: dict[str, str] = {}
         # Per-user in-place progress message: user_id → {id, jid, tools}
@@ -264,55 +269,66 @@ class WhatsAppChannel(BaseChannel):
         user_id: str,
         tool_name: str,
         arguments: dict[str, Any],
-    ) -> bool:
+        *,
+        requested_by: str | None = None,
+    ) -> ApprovalOutcome:
+        """Ask *user_id* to approve a tool call; *requested_by* names a non-agent requester (an MCP client)."""
         if self._client is None:
-            return False
-        # One prompt per user at a time: a second run for the same user waits
-        # here instead of replacing the prompt the user is answering.
-        async with self._prompt_locks[("approval", user_id)]:
-            return await self._ask_approval(user_id, tool_name, arguments)
+            logger.warning("WA approval for %s requested while WhatsApp is not connected", tool_name)
+            return ApprovalOutcome.UNAVAILABLE
+        # One prompt per user at a time: a second request for the same user
+        # waits (bounded) instead of replacing the prompt the user is answering.
+        async with self._approval_queue.turn(user_id, prompt_queue_timeout(requested_by)) as my_turn:
+            if not my_turn:
+                logger.info("WA approval for %s / %s not shown: an earlier prompt is still open", user_id, tool_name)
+                return ApprovalOutcome.BUSY
+            return await self._ask_approval(user_id, tool_name, arguments, requested_by)
 
-    async def _ask_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
+    async def _ask_approval(
+        self, user_id: str, tool_name: str, arguments: dict[str, Any], requested_by: str | None = None
+    ) -> ApprovalOutcome:
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
         chat = self._active_group_for(user_id)
+        code = new_answer_code() if requested_by else None
+        reply = f"*yes {code}* / *no {code}*" if code else "*yes* / *no*"
         how_to_answer = (
-            "Reply *yes* / *no* or react 👍 / 👎 (within 2 min)."
+            f"Reply {reply} or react 👍 / 👎 (within 2 min)."
             if chat is not None
-            else "Reply *yes* / *no*, or react with 👍 / 👎."
+            else f"Reply {reply}, or react with 👍 / 👎."
         )
-        prompt = f"🔐 *Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\n{how_to_answer}"
+        origin = f"Requested by: {requested_by}\n" if requested_by else ""
+        prompt = f"🔐 *Approval required*\n\n{origin}Tool: `{tool_name}`\nArgs: `{args_preview}`\n\n{how_to_answer}"
         prompt_id: str | None = None
         try:
             prompt_id = await self._send_tracked(user_id, prompt)
         except Exception as e:
-            # Can't reach the user to ask — deny cleanly so the tool call
-            # surfaces as "declined by user" rather than a confusing
-            # "approval callback failed" error upstream.
+            # Can't reach the user to ask: the agent reports it as "could not
+            # be requested", not as a decline.
             logger.warning(
-                "WA approval prompt undeliverable to %s for %s (%s); denying.",
+                "WA approval prompt undeliverable to %s for %s (%s); approval unavailable.",
                 user_id,
                 tool_name,
                 e,
             )
-            return False
+            return ApprovalOutcome.UNAVAILABLE
 
         loop = asyncio.get_running_loop()
-        pending = _PendingPrompt(loop.create_future(), chat)
+        pending = _PendingPrompt(loop.create_future(), chat, code)
         self._pending_approvals[user_id] = pending
         if prompt_id:
             self._approval_prompt_ids[prompt_id] = user_id
         try:
-            return await asyncio.wait_for(pending.future, timeout=120)
-        except TimeoutError:
-            logger.info("WA approval timed out for %s / %s", user_id, tool_name)
-            return False
+            outcome = await await_decision(pending.future, 120)
         finally:
             if self._pending_approvals.get(user_id) is pending:
                 del self._pending_approvals[user_id]
             if prompt_id:
                 self._approval_prompt_ids.pop(prompt_id, None)
+        if outcome is ApprovalOutcome.TIMED_OUT:
+            logger.info("WA approval timed out for %s / %s", user_id, tool_name)
+        return outcome
 
     async def request_input(self, user_id: str, question: str) -> str:
         """Prompt the user and wait for their next message as the answer."""
@@ -349,13 +365,14 @@ class WhatsAppChannel(BaseChannel):
     # the requester may be talking to the other members.
     _GROUP_ANSWER_MAX_WORDS = 3
 
-    def _parse_yes_no(self, text: str, *, max_words: int | None = None) -> bool | None:
+    def _parse_yes_no(self, text: str, *, max_words: int | None = None, code: str | None = None) -> bool | None:
         """Read a yes/no answer, ignoring our own mention and ids and the group trigger words.
 
         So "@<our number> yes" and "pincer, yes!" both count as "yes". A
         message that mentions anyone else is addressed to them, not an answer:
         "@Alice yes" is None. ``max_words`` is skipped when the message
         addresses us by mention or trigger word, since it is then not chatter.
+        With ``code``, only an answer carrying it counts ("yes 4821").
         """
         text = text or ""
         own_ids = self._own_ids()
@@ -369,6 +386,8 @@ class WhatsAppChannel(BaseChannel):
         for own_id in own_ids:
             t = re.sub(rf"(?<!\d){re.escape(own_id)}(?!\d)", " ", t)
         t = strip_group_triggers(t, trigger)
+        if code is not None:
+            return parse_coded_yes_no(t, code)
         return parse_yes_no(t, max_words=max_words)
 
     _REACTION_APPROVE = frozenset(norm_emoji(e) for e in ("👍", "✅", "👌", "❤️", "🙏"))
@@ -462,17 +481,21 @@ class WhatsAppChannel(BaseChannel):
 
         Returns True if it resolved one. A message that isn't a yes/no answer
         leaves the approval pending and returns False, so ordinary group
-        chatter goes through the gate.
+        chatter goes through the gate. For an MCP client's prompt (one with a
+        code) such a message may still answer the agent's pending question.
         """
         found = self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group)
         if found is not None:
             user_id, pending = found
-            decision = self._parse_yes_no(text, max_words=self._GROUP_ANSWER_MAX_WORDS if is_group else None)
-            if decision is None:
+            decision = self._parse_yes_no(
+                text, max_words=self._GROUP_ANSWER_MAX_WORDS if is_group else None, code=pending.code
+            )
+            if decision is not None:
+                logger.info("WA approval %s by %s (reply)", "granted" if decision else "denied", user_id)
+                pending.future.set_result(decision)
+                return True
+            if pending.code is None:
                 return False
-            logger.info("WA approval %s by %s (reply)", "granted" if decision else "denied", user_id)
-            pending.future.set_result(decision)
-            return True
         found = self._pending_in_chat(self._pending_inputs, sender_ids, chat_user, is_group)
         if found is not None:
             # Any next message from the requester in that chat answers the question.
@@ -1262,8 +1285,11 @@ class WhatsAppChannel(BaseChannel):
                 return
 
             # A message to Pincer while its approval prompt in this chat is
-            # unanswered re-asks, rather than starting a second agent run.
-            if self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group):
+            # unanswered re-asks, rather than starting a second agent run. Not
+            # for an MCP client's prompt: the user didn't start it, so their
+            # message goes to the agent as usual.
+            waiting = self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group)
+            if waiting is not None and waiting[1].code is None:
                 self._remember_pincer_message(
                     await client.send_message(
                         build_jid(chat_user, source.Chat.Server),
