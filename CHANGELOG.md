@@ -1329,8 +1329,9 @@ mounting a directory. Install the new `remote-skills` extra
   started with an unpriced sampling model and refused every sampling request,
   and `PINCER_MCP_ENABLED=false` still stopped `pincer run` over a model never
   called. It now reads `PINCER_MCP_ENABLED` and
-  `PINCER_MCP_SERVER_EXPORT_ENABLED` from the process environment as the
-  runtime does; a value set only in `.env` is not seen. A `pincer.toml` or
+  `PINCER_MCP_SERVER_EXPORT_ENABLED` as the runtime does: the process
+  environment first, then `.env` (read, not copied into the environment). An
+  MCP config the check can't read is logged as a warning. A `pincer.toml` or
   `pincer.local.toml` that can't be read (no permission, or a directory) now
   refuses with the file named instead of crashing startup.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**

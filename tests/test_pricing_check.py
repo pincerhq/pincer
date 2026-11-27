@@ -702,6 +702,50 @@ def test_the_price_check_does_not_load_the_working_directorys_env_file(
         os.environ.pop(sentinel, None)
 
 
+def _dotenv_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    """A .env in the working directory, with the MCP .env candidates armed as in production."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / ".env").write_text(text, encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", (".env", "../.env"))
+
+
+def test_the_export_turned_on_in_env_file_alone_has_its_sampling_model_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`load_mcp_config` loads .env before `pincer mcp serve` decides, so the check reads it too
+    (without copying it into os.environ)."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_SERVER_EXPORT_ENABLED=true\n")
+    config = _with_sampling(_priced(tmp_path, "claude-a"), _SAMPLING_SERVER_UNSET)
+    assert _first_line(pricing_problems(_settings(), config)) == _SAMPLING_UNPRICED
+    assert os.environ.get("PINCER_MCP_SERVER_EXPORT_ENABLED") is None
+
+
+def test_mcp_turned_off_in_env_file_skips_the_sampling_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_ENABLED=false\n")
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"))) is None
+
+
+def test_the_process_environment_wins_over_the_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """As `load_dotenv(override=False)`: a variable already set is never replaced by .env."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_SERVER_EXPORT_ENABLED=true\n")
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", "false")
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"))) is None
+
+
+def test_an_unreadable_mcp_config_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The check skips the sampling model, but says why instead of skipping it silently."""
+    from pincer.mcp.config import sampling_model
+
+    (tmp_path / "pincer.local.toml").mkdir()
+    with caplog.at_level("WARNING", logger="pincer.mcp.config"):
+        assert sampling_model(tmp_path) is None
+    assert f"MCP config in {tmp_path} can't be read" in caplog.text
+    assert "the price check skips the MCP sampling model" in caplog.text
+
+
 def test_a_sampling_model_is_not_checked_without_an_anthropic_key(tmp_path: Path) -> None:
     settings = _settings(anthropic_api_key="", openai_api_key="sk-test", default_provider="openai", openai_model="m")
     assert pricing_problems(settings, _with_sampling(_priced(tmp_path, "claude-a", "m"))) is None

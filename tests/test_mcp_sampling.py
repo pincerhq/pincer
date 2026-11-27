@@ -526,8 +526,7 @@ async def test_a_failing_client_close_still_closes_the_cost_tracker_and_does_not
 def test_sampling_defaults_to_a_shipped_model() -> None:
     """The retired claude-sonnet-4 default had no price, so its spend could never be recorded."""
     from pincer.config.pricing import load_price_table
-    from pincer.mcp.config import MCPSamplingConfig
-    from pincer.mcp.sampling import DEFAULT_SAMPLING_MODEL
+    from pincer.mcp.config import DEFAULT_SAMPLING_MODEL, MCPSamplingConfig
 
     assert MCPSamplingConfig().model == "claude-sonnet-5-5"
     assert DEFAULT_SAMPLING_MODEL == "claude-sonnet-5-5"

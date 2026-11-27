@@ -25,8 +25,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pincer.mcp.config import DEFAULT_SAMPLING_MODEL
 from pincer.mcp.sampling import (
-    DEFAULT_SAMPLING_MODEL,
     SAMPLING_MODEL_UNPRICED,
     SAMPLING_PROVIDER,
     MeteringUnavailableBackend,
