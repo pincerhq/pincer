@@ -6,6 +6,11 @@ Ukrainian defaults to the informal-polite register common in service calls
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pincer.voice.language import GrammaticalCase
+
 VOICE_SYSTEM_PROMPT = """\
 Ви розмовляєте телефоном наживо. Правила:
 1. Відповідайте ЛИШЕ українською мовою — 1-2 КОРОТКІ речення. Це телефонна розмова, а не листування.
@@ -353,14 +358,18 @@ IN_CALL_TOOL_RULES = """\
 ACTION_DESCRIPTIONS = {
     "google__create_event": "створю зустріч {title} на {when}",
     "google__update_event": "перенесу зустріч {title} на {when}",
+    "google__update_event.from_day": "перенесу зустріч {title} так, щоб вона починалась у {when}",
     "send_owner_message": "передам моєму користувачеві: {text}",
     "memory_note": "занотую: {note}",
     "default": "виконаю {tool}",
 }
 
+# The grammatical case of {when} in ACTION_DESCRIPTIONS["google__update_event.from_day"],
+# e.g. "у середу, 11 листопада".
+FROM_DAY_CASE: GrammaticalCase = "accusative"
+
 TOOL_SPEECH = {
     "when.all_day": "{days}, на весь день",
-    "when.from_day": "{day} як день початку",
     "google__check_freebusy.free": "Вільно: {slots}.",
     "google__check_freebusy.all_free": "Увесь цей проміжок вільний.",
     "google__check_freebusy.none_free": "На жаль, у цей проміжок нічого не вільно.",

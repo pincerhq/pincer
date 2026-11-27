@@ -6,6 +6,11 @@ the caller-facing strings listed in DU_OVERRIDES to the informal register.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pincer.voice.language import GrammaticalCase
+
 VOICE_SYSTEM_PROMPT = """\
 Sie führen ein Live-Telefongespräch auf Deutsch. Regeln:
 1. Antworten Sie in 1-2 KURZEN Sätzen. Das ist ein Telefonat, kein Chat.
@@ -363,14 +368,18 @@ E5, E10 oder Diesel?).\
 ACTION_DESCRIPTIONS = {
     "google__create_event": "den Termin {title} am {when} eintragen",
     "google__update_event": "den Termin {title} auf {when} verschieben",
+    "google__update_event.from_day": "den Termin {title} so verschieben, dass er am {when}, beginnt",
     "send_owner_message": "an meinen Nutzer weitergeben: {text}",
     "memory_note": "mir notieren: {note}",
     "default": "{tool} ausführen",
 }
 
+# The grammatical case of {when} in ACTION_DESCRIPTIONS["google__update_event.from_day"],
+# e.g. "am Dienstag, dem zehnten November".
+FROM_DAY_CASE: GrammaticalCase = "dative"
+
 TOOL_SPEECH = {
     "when.all_day": "{days}, ganztägig",
-    "when.from_day": "einen Beginn am {day}",
     "google__check_freebusy.free": "Frei wäre: {slots}.",
     "google__check_freebusy.all_free": "In dem Zeitraum ist alles frei.",
     "google__check_freebusy.none_free": "In dem Zeitraum ist leider nichts frei.",

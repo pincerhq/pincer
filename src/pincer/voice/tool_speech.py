@@ -28,6 +28,8 @@ from pincer.voice.prompts import get_prompt
 if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
 
+    from pincer.voice.language import GrammaticalCase
+
 logger = logging.getLogger(__name__)
 
 # Anything that looks like machine data: JSON braces and ISO-8601 timestamps.
@@ -41,6 +43,10 @@ _ERROR_PREFIXES = ("error", "[error", "failed", "exception")
 _WEEKDAYS = {
     "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
     "uk": ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя"],
+}
+# Accusative, after a preposition: "у середу", "у п'ятницю".
+_WEEKDAYS_ACCUSATIVE = {
+    "uk": ["понеділок", "вівторок", "середу", "четвер", "п'ятницю", "суботу", "неділю"],
 }
 _MONTHS = {
     "en": [
@@ -114,16 +120,38 @@ def parse_iso(value: Any) -> datetime | None:
         return None
 
 
-def spoken_datetime(dt: datetime, language: str, include_time: bool = True) -> str:
-    """'Dienstag, der achtzehnte August um vierzehn Uhr' / 'Tuesday, August 18 at 2:00 PM'."""
+def spoken_datetime(
+    dt: datetime, language: str, include_time: bool = True, case: GrammaticalCase = "nominative"
+) -> str:
+    """'Dienstag, der achtzehnte August um vierzehn Uhr' / 'Tuesday, August 18 at 2:00 PM'.
+
+    ``case`` is the grammatical case the sentence needs. Each language's renderer owns its case rules.
+    """
     lang = _lang(language)
     if lang == "de":
         from pincer.voice.nlu_de import render_datetime_de
 
-        return render_datetime_de(dt, include_time=include_time)
+        return render_datetime_de(dt, include_time=include_time, case=case)
     if lang == "uk":
-        text = f"{_WEEKDAYS['uk'][dt.weekday()]}, {dt.day} {_MONTHS['uk'][dt.month - 1]}"
-        return f"{text} о {dt.strftime('%H:%M')}" if include_time else text
+        return _render_datetime_uk(dt, include_time, case)
+    return _render_datetime_en(dt, include_time)
+
+
+def _render_datetime_uk(dt: datetime, include_time: bool, case: GrammaticalCase) -> str:
+    """'вівторок, 18 серпня о 14:30'; accusative 'середу, 11 листопада' (after "у"/"на").
+
+    Only the weekday changes with the case; the day-month part is genitive in every case.
+    No Ukrainian sentence needs a dative date, so "dative" is refused rather than spoken as nominative.
+    """
+    if case == "dative":
+        raise ValueError("Ukrainian dates have no dative form")
+    weekdays = _WEEKDAYS_ACCUSATIVE["uk"] if case == "accusative" else _WEEKDAYS["uk"]
+    text = f"{weekdays[dt.weekday()]}, {dt.day} {_MONTHS['uk'][dt.month - 1]}"
+    return f"{text} о {dt.strftime('%H:%M')}" if include_time else text
+
+
+def _render_datetime_en(dt: datetime, include_time: bool) -> str:
+    """'Tuesday, August 18 at 2:30 PM'. English dates have no case."""
     text = f"{_WEEKDAYS['en'][dt.weekday()]}, {_MONTHS['en'][dt.month - 1]} {dt.day}"
     if not include_time:
         return text
@@ -449,12 +477,24 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
     Dienstag, der achtzehnte August um vierzehn Uhr eintragen'."""
     args = args or {}
     table = get_prompt("ACTION_DESCRIPTIONS", language) or {}
-    template = str(table.get(tool_name) or table.get("default") or "{tool}")
     start = parse_iso(args.get("start"))
-    if start and _is_date_only(args.get("start")) and tool_name == "google__update_event" and not args.get("end"):
-        # A new start alone keeps the stored duration, which the caller has not heard: no length.
-        when = _tpl("when.from_day", language).format(day=spoken_datetime(start, language, include_time=False))
-    elif start and _is_date_only(args.get("start")):
+    all_day = start is not None and _is_date_only(args.get("start"))
+    # A new start alone keeps the stored duration, which the caller has not heard: no length.
+    new_first_day = all_day and tool_name == "google__update_event" and not args.get("end")
+    key = f"{tool_name}.from_day" if new_first_day else tool_name
+    template = str(table.get(key) or table.get(tool_name) or table.get("default") or "{tool}")
+    if new_first_day:
+        case: GrammaticalCase = get_prompt("FROM_DAY_CASE", language) or "nominative"
+        try:
+            when = spoken_datetime(start, language, include_time=False, case=case)
+        except ValueError:
+            # A broken pack constant must not break the call turn. The from-day sentence puts the date
+            # after a case-bearing "am"/"у", so a nominative date there is ungrammatical: use the generic
+            # sentence with the nominative date instead.
+            logger.exception("FROM_DAY_CASE %r cannot be rendered for %s", case, language)
+            template = str(table.get(tool_name) or table.get("default") or "{tool}")
+            when = spoken_datetime(start, language, include_time=False)
+    elif all_day:
         end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
         when = _spoken_all_day(start, end, language)
     else:

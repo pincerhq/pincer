@@ -179,8 +179,8 @@ def test_an_all_day_create_is_confirmed_as_whole_days(language, one_day, three_d
     ("language", "spoken"),
     [
         ("en", "move the appointment 'Vacation' to start on Tuesday, November 10"),
-        ("de", "den Termin „Vacation“ auf einen Beginn am Dienstag, der zehnte November verschieben"),
-        ("uk", "перенесу зустріч 'Vacation' на вівторок, 10 листопада як день початку"),
+        ("de", "den Termin „Vacation“ so verschieben, dass er am Dienstag, dem zehnten November, beginnt"),
+        ("uk", "перенесу зустріч 'Vacation' так, щоб вона починалась у вівторок, 10 листопада"),
     ],
 )
 def test_an_all_day_update_without_an_end_names_no_length(language, spoken):
@@ -189,6 +189,72 @@ def test_an_all_day_update_without_an_end_names_no_length(language, spoken):
     args = {"event_id": "e", "summary": "Vacation", "start": "2026-11-10"}
 
     assert ts.describe_action("google__update_event", args, language) == spoken
+
+
+@pytest.mark.parametrize(
+    ("start", "uk_day", "de_day"),
+    [
+        ("2026-11-09", "понеділок, 9 листопада", "Montag, dem neunten November"),
+        ("2026-11-11", "середу, 11 листопада", "Mittwoch, dem elften November"),
+        ("2026-11-12", "четвер, 12 листопада", "Donnerstag, dem zwölften November"),
+        ("2026-11-13", "п'ятницю, 13 листопада", "Freitag, dem dreizehnten November"),
+        ("2026-11-14", "суботу, 14 листопада", "Samstag, dem vierzehnten November"),
+        ("2026-11-15", "неділю, 15 листопада", "Sonntag, dem fünfzehnten November"),
+    ],
+)
+def test_an_all_day_update_start_reads_naturally_on_every_weekday(start, uk_day, de_day):
+    """#335: after "у" a Ukrainian weekday is accusative ("у середу", not "у середа"); after "am" the
+    German date is dative ("am Mittwoch, dem elften November"). Tuesday is covered by the test above."""
+    args = {"event_id": "e", "summary": "Vacation", "start": start}
+
+    assert ts.describe_action("google__update_event", args, "uk") == (
+        f"перенесу зустріч 'Vacation' так, щоб вона починалась у {uk_day}"
+    )
+    assert ts.describe_action("google__update_event", args, "de") == (
+        f"den Termin „Vacation“ so verschieben, dass er am {de_day}, beginnt"
+    )
+
+
+def test_each_pack_declares_the_case_its_from_day_sentence_needs():
+    """PR #426 review: a pack that drops or mistypes FROM_DAY_CASE would quietly speak the nominative.
+    "am" takes the dative in German, "у" the accusative in Ukrainian; English dates have no case."""
+    from pincer.voice.prompts import de, en, uk
+
+    assert de.FROM_DAY_CASE == "dative"
+    assert uk.FROM_DAY_CASE == "accusative"
+    assert not hasattr(en, "FROM_DAY_CASE")
+
+
+def test_an_unsupported_language_case_pair_is_refused():
+    """PR #426 review: a valid case a language can't render must fail, not speak the nominative.
+    Every renderer fails the same way, so callers catch one error type."""
+    from datetime import datetime
+
+    with pytest.raises(ValueError, match="dative"):
+        ts.spoken_datetime(datetime(2026, 11, 11), "uk", include_time=False, case="dative")
+    with pytest.raises(ValueError, match="datve"):
+        ts.spoken_datetime(datetime(2026, 11, 11), "de", include_time=False, case="datve")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("language", "bad_case", "spoken"),
+    [
+        ("uk", "dative", "перенесу зустріч 'X' на середа, 11 листопада"),
+        ("de", "datve", "den Termin „X“ auf Mittwoch, der elfte November verschieben"),
+    ],
+)
+def test_a_broken_from_day_case_falls_back_to_the_generic_sentence(monkeypatch, caplog, language, bad_case, spoken):
+    """PR #426 review: describe_action runs inside the approval gate with no try around it, so a bad pack
+    constant must not raise mid-turn. After "am"/"у" the from-day sentence needs the case it can't get,
+    so the caller hears the generic move sentence instead, and the error is logged."""
+    import importlib
+
+    monkeypatch.setattr(importlib.import_module(f"pincer.voice.prompts.{language}"), "FROM_DAY_CASE", bad_case)
+    args = {"event_id": "e", "summary": "X", "start": "2026-11-11"}
+
+    with caplog.at_level("ERROR", logger="pincer.voice.tool_speech"):
+        assert ts.describe_action("google__update_event", args, language) == spoken
+    assert any(bad_case in r.getMessage() for r in caplog.records)
 
 
 def test_spoken_datetime_forms():
