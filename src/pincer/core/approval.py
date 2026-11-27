@@ -28,8 +28,10 @@ class ApprovalOutcome(StrEnum):
     DENIED = "denied"
     TIMED_OUT = "timed_out"
     UNAVAILABLE = "unavailable"
-    # Nobody could be asked: no chat with the approver is known (MCP-client calls).
+    # Nobody could be asked: no active approver chat is known (MCP-client calls).
     NO_APPROVER = "no_approver"
+    # Never shown: an earlier prompt to the same user stayed open too long.
+    BUSY = "busy"
 
     def __bool__(self) -> bool:
         return self is ApprovalOutcome.APPROVED
@@ -45,9 +47,12 @@ _REFUSAL_MESSAGES = {
         "Approval for '{tool}' could not be requested (internal error). Tell the user; do not guess a cause."
     ),
     ApprovalOutcome.NO_APPROVER: (
-        "Approval for '{tool}' could not be requested: there is no Telegram, WhatsApp or Teams chat with the "
-        "approving user yet, and web chat can't show it. Tell the user; do not retry until they have written "
-        "to Pincer there."
+        "Approval for '{tool}' could not be requested: there is no active approver chat on Telegram, WhatsApp "
+        "or Teams (web chat can't show it). Tell the user; do not guess a cause."
+    ),
+    ApprovalOutcome.BUSY: (
+        "Approval for '{tool}' was not requested: the user still had another approval prompt open, so this one "
+        "was never shown. Tell the user and offer to try again once they have answered it."
     ),
 }
 
@@ -83,8 +88,16 @@ async def await_decision(decision: Awaitable[bool], timeout: float) -> ApprovalO
 
 
 # How long a prompt waits for an earlier one to the same user before giving
-# up: short enough that the caller (an MCP client, often ~60 s) is still there.
-PROMPT_QUEUE_TIMEOUT = 30.0
+# up (BUSY). An agent prompt outlasts one whole earlier prompt (120 s answer
+# window), so it gets its turn; an MCP client's is short enough that the
+# caller (often ~60 s) is still there.
+AGENT_PROMPT_QUEUE_TIMEOUT = 150.0
+MCP_PROMPT_QUEUE_TIMEOUT = 30.0
+
+
+def prompt_queue_timeout(requested_by: str | None) -> float:
+    """Queue wait for a prompt; *requested_by* is set for an MCP client's prompt."""
+    return MCP_PROMPT_QUEUE_TIMEOUT if requested_by else AGENT_PROMPT_QUEUE_TIMEOUT
 
 
 class PromptQueue:

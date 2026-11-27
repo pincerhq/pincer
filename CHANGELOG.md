@@ -1291,21 +1291,27 @@ mounting a directory. Install the new `remote-skills` extra
   Telegram, WhatsApp or Teams chat where a known identity last wrote to
   Pincer; a guest's message never makes them the approver, and an identity
   deactivated since is not asked. `approver = "<pincer_user_id>"` under
-  `[mcp.server]` in `pincer.toml` limits this to one identity; without it, the
-  last known identity to write is asked, which in a shared setup may be a
-  teammate. The prompt reads "Requested by: an MCP client", and on WhatsApp and
+  `[mcp.server]` in `pincer.toml` limits this to one identity (it must be a
+  string, and `pincer run` warns if it is not an active identity); without
+  it, the last known identity to write is asked, which in a shared setup may
+  be a teammate. The prompt reads "Requested by: an MCP client", and on WhatsApp and
   Teams a typed answer must carry the prompt's 4-digit code ("yes 4821"), so a
   "yes" meant for the agent's own question can't approve it; other messages go
-  to the agent as usual. A WhatsApp 👍 / 👎 on the prompt still answers it. Web
-  chat can't show these prompts: with no such chat yet, the MCP client is told
-  so, and a prompt that couldn't be delivered is reported as that.
+  to the agent as usual, and can still answer a question the agent is waiting
+  on. A WhatsApp 👍 / 👎 on the prompt still answers it. Web chat can't show
+  these prompts: with nobody to ask, the MCP client is told there is no active
+  approver chat; a prompt that couldn't be delivered, or a failed identity
+  check, is reported as an internal error. See
+  [Approvals for MCP tool calls](docs/core-components/pincer-mcp-server.md#approvals-for-mcp-tool-calls).
 - **Telegram, WhatsApp and Teams: two approvals for the same user no longer
   overwrite each other (#227).** Each Telegram card now carries its own id, so
   its buttons answer that prompt only, and a tap on an expired card answers
   "Expired". Teams asks one approval per user at a time, as WhatsApp already
-  did. On both, a second request waits at most 30 s for the first and then
-  expires, so an MCP client isn't kept past its own timeout; a request its
-  client cancels is dropped without showing its prompt.
+  did. On both, a second request waits for the first: up to 150 s for a prompt
+  the agent raised (one whole earlier prompt), up to 30 s for an MCP client's,
+  so the client isn't kept past its own timeout. One that waits longer is
+  never shown, and the model or client is told so rather than that it
+  expired. A request its client cancels is dropped without showing its prompt.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

@@ -696,13 +696,13 @@ async def test_bare_yes_during_mcp_prompt_goes_to_the_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_queued_approval_gives_up_after_the_queue_timeout(monkeypatch) -> None:
-    monkeypatch.setattr("pincer.channels.microsoft_teams.PROMPT_QUEUE_TIMEOUT", 0.01)
+    monkeypatch.setattr("pincer.core.approval.MCP_PROMPT_QUEUE_TIMEOUT", 0.01)
     ch = MicrosoftTeamsChannel(make_settings())
     first, _ = await _pending_mcp_approval(ch, "u1")
 
-    second = await ch.request_approval("u1", "google__send_message", {})
+    second = await ch.request_approval("u1", "google__send_message", {}, requested_by="an MCP client")
 
-    assert second is ApprovalOutcome.TIMED_OUT
+    assert second is ApprovalOutcome.BUSY
     assert ch._send_to_user.await_count == 1  # the queued prompt was never shown
     first.cancel()
 
@@ -724,3 +724,24 @@ async def test_cancelled_queued_approval_never_shows_its_prompt() -> None:
     assert ch._send_to_user.await_count == 1
     assert len(ch._approval_queue) == 0
     assert not ch._answer_codes
+
+
+@pytest.mark.asyncio
+async def test_agent_prompt_behind_an_mcp_prompt_waits_its_turn(monkeypatch) -> None:
+    """An agent prompt is not dropped after the MCP queue limit (PR #423 review)."""
+    monkeypatch.setattr("pincer.core.approval.MCP_PROMPT_QUEUE_TIMEOUT", 0.01)
+    ch = MicrosoftTeamsChannel(make_settings())
+    first, _ = await _pending_mcp_approval(ch, "u1")
+    first_future = ch._pending_approvals["u1"]
+    agent_prompt = asyncio.ensure_future(ch.request_approval("u1", "shell_exec", {}))
+    await asyncio.sleep(0.05)  # longer than the MCP queue limit
+    assert not agent_prompt.done()
+
+    first_future.set_result(False)
+    assert await first is ApprovalOutcome.DENIED
+    for _ in range(10):
+        if ch._pending_approvals.get("u1") not in (None, first_future):
+            break
+        await asyncio.sleep(0)
+    ch._pending_approvals["u1"].set_result(True)
+    assert await agent_prompt is ApprovalOutcome.APPROVED

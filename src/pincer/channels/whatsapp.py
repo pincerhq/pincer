@@ -66,7 +66,7 @@ from pincer.channels.base import (
 )
 from pincer.channels.group_trigger import matches_group_trigger, strip_group_triggers
 from pincer.config.channels import WHATSAPP_SQLITE_FILE, is_postgres_url
-from pincer.core.approval import PROMPT_QUEUE_TIMEOUT, ApprovalOutcome, PromptQueue, await_decision
+from pincer.core.approval import ApprovalOutcome, PromptQueue, await_decision, prompt_queue_timeout
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -278,10 +278,10 @@ class WhatsAppChannel(BaseChannel):
             return ApprovalOutcome.UNAVAILABLE
         # One prompt per user at a time: a second request for the same user
         # waits (bounded) instead of replacing the prompt the user is answering.
-        async with self._approval_queue.turn(user_id, PROMPT_QUEUE_TIMEOUT) as my_turn:
+        async with self._approval_queue.turn(user_id, prompt_queue_timeout(requested_by)) as my_turn:
             if not my_turn:
-                logger.info("WA approval for %s / %s gave up waiting for an earlier prompt", user_id, tool_name)
-                return ApprovalOutcome.TIMED_OUT
+                logger.info("WA approval for %s / %s not shown: an earlier prompt is still open", user_id, tool_name)
+                return ApprovalOutcome.BUSY
             return await self._ask_approval(user_id, tool_name, arguments, requested_by)
 
     async def _ask_approval(
@@ -481,7 +481,8 @@ class WhatsAppChannel(BaseChannel):
 
         Returns True if it resolved one. A message that isn't a yes/no answer
         leaves the approval pending and returns False, so ordinary group
-        chatter goes through the gate.
+        chatter goes through the gate. For an MCP client's prompt (one with a
+        code) such a message may still answer the agent's pending question.
         """
         found = self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group)
         if found is not None:
@@ -489,11 +490,12 @@ class WhatsAppChannel(BaseChannel):
             decision = self._parse_yes_no(
                 text, max_words=self._GROUP_ANSWER_MAX_WORDS if is_group else None, code=pending.code
             )
-            if decision is None:
+            if decision is not None:
+                logger.info("WA approval %s by %s (reply)", "granted" if decision else "denied", user_id)
+                pending.future.set_result(decision)
+                return True
+            if pending.code is None:
                 return False
-            logger.info("WA approval %s by %s (reply)", "granted" if decision else "denied", user_id)
-            pending.future.set_result(decision)
-            return True
         found = self._pending_in_chat(self._pending_inputs, sender_ids, chat_user, is_group)
         if found is not None:
             # Any next message from the requester in that chat answers the question.

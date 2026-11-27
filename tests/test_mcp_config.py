@@ -813,3 +813,15 @@ def test_server_export_approver(tmp_path: Path) -> None:
 def test_server_export_approver_defaults_to_none(tmp_path: Path) -> None:
     (tmp_path / "pincer.toml").write_text("[mcp.server]\nenabled = true\n")
     assert load_mcp_config(tmp_path).server.approver is None
+
+
+@pytest.mark.parametrize(("value", "expected"), [('" alice "', "alice"), ('""', None)])
+def test_server_export_approver_is_trimmed(tmp_path: Path, value: str, expected: str | None) -> None:
+    (tmp_path / "pincer.toml").write_text(f"[mcp.server]\nenabled = true\napprover = {value}\n")
+    assert load_mcp_config(tmp_path).server.approver == expected
+
+
+def test_server_export_approver_must_be_a_string(tmp_path: Path) -> None:
+    (tmp_path / "pincer.toml").write_text("[mcp.server]\nenabled = true\napprover = 42\n")
+    with pytest.raises(ValueError, match="approver must be a pincer_user_id string"):
+        load_mcp_config(tmp_path)

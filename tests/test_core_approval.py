@@ -7,7 +7,14 @@ import asyncio
 import pytest
 
 from pincer.channels.approval_text import new_answer_code, parse_coded_yes_no
-from pincer.core.approval import ApprovalOutcome, PromptQueue, approval_tool_message, as_outcome, await_decision
+from pincer.core.approval import (
+    ApprovalOutcome,
+    PromptQueue,
+    approval_tool_message,
+    as_outcome,
+    await_decision,
+    prompt_queue_timeout,
+)
 
 
 def test_only_approved_is_truthy():
@@ -65,8 +72,21 @@ async def test_await_decision_times_out():
 
 def test_no_approver_message_names_the_missing_chat():
     msg = approval_tool_message("email_send", ApprovalOutcome.NO_APPROVER)
-    assert "no Telegram, WhatsApp or Teams chat" in msg
+    assert "no active approver chat on Telegram, WhatsApp or Teams" in msg
     assert "internal error" not in msg
+
+
+def test_busy_message_says_the_prompt_was_never_shown():
+    """A queued prompt that gave up was never seen: don't claim the user was asked (PR #423 review)."""
+    msg = approval_tool_message("shell_exec", ApprovalOutcome.BUSY)
+    assert "never shown" in msg
+    assert "expired" not in msg
+    assert not ApprovalOutcome.BUSY
+
+
+def test_agent_prompts_queue_longer_than_mcp_prompts():
+    assert prompt_queue_timeout(None) > 120  # outlasts one whole earlier prompt
+    assert prompt_queue_timeout("an MCP client") < 60  # before a typical MCP client timeout
 
 
 # ── PromptQueue ──────────────────────────────────────────────────────────────

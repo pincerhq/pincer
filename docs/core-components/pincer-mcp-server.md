@@ -22,7 +22,7 @@ Pincer supports two modes:
 | Another Pincer instance | Agent-to-agent delegation — one Pincer delegates tasks to another |
 | Custom MCP client | Access any tool Pincer has, including third-party skills |
 
-**The key feature:** approval-gated tools (email send, shell exec, file write, voice calls) still require user confirmation — proxied to your active messaging channel (Telegram, WhatsApp, Signal, etc.). Claude Desktop can request a shell command, and the approval prompt appears on your phone.
+**The key feature:** approval-gated tools (email send, shell exec, file write, voice calls) still require user confirmation — proxied to your Telegram, WhatsApp or Teams chat with Pincer (see [Approvals for MCP tool calls](#approvals-for-mcp-tool-calls)). Claude Desktop can request a shell command, and the approval prompt appears on your phone.
 
 ---
 
@@ -83,7 +83,7 @@ All Pincer built-in tools can be exposed. Configure which ones via `expose_tools
 | `memory_search` | Search conversation memory | No |
 | `voice_call` | Make phone calls via Twilio | **Yes** |
 
-When an MCP client calls an approval-required tool, the approval prompt goes to the user's active messaging channel (Telegram, WhatsApp, etc.) before the tool executes.
+When an MCP client calls an approval-required tool, an approval prompt goes to a Telegram, WhatsApp or Teams chat before the tool executes. See [Approvals for MCP tool calls](#approvals-for-mcp-tool-calls).
 
 > Web search is no longer a Pincer built-in — it lives in its own MCP server (`src/pincer-mcps/websearch_server.py`, see [MCP Servers](mcp-servers.md)). To re-expose it here, enable a `websearch` entry under `[[mcp.servers]]` in `pincer.toml`, then add `"websearch__search"` to `expose_tools` above.
 
@@ -122,6 +122,34 @@ expose_tools = [
 ```
 
 There is no separate `approval_tools` list in config — the approval requirement is inherited from Pincer's global tool configuration. Tools that require approval in the agent loop also require approval when called by MCP clients.
+
+### Approvals for MCP tool calls
+
+An MCP call has no chat of its own, so Pincer picks one:
+
+- **Where the prompt goes.** The Telegram, WhatsApp or Teams chat where a known, active identity last wrote to Pincer. A guest's message never makes them the approver. Web chat and voice can't show these prompts, so they are never picked.
+- **Pinning the approver.** In a setup with several identities, the last one to write would be asked, which may be a teammate. Set `approver` to ask only one identity:
+
+  ```toml
+  [mcp.server]
+  approver = "alice"   # a pincer_user_id; unset = the last known identity to write
+  ```
+
+  `pincer run` warns at startup if `approver` is not an active identity. It must be a string; anything else is a config error.
+- **What the prompt looks like.** It says `Requested by: an MCP client` above the tool name.
+  - On **Telegram** you answer with the card's buttons.
+  - On **WhatsApp** and **Teams** a typed answer must carry the prompt's 4-digit code, e.g. `yes 4821` or `no 4821`. A bare "yes" or any other message goes to the agent as usual, so a "yes" meant for the agent's own question can't approve the MCP call. On WhatsApp a 👍 / 👎 reaction on the prompt also answers it.
+- **One prompt at a time on WhatsApp and Teams.** A typed answer can't say which prompt it is for, so a second prompt to the same user waits for the first: up to 30 s for an MCP client's prompt (so the client is still there), 150 s for one the agent raised. If it waits longer, it is not shown. A request the MCP client cancels is dropped without showing its prompt.
+
+What the MCP client gets back when the tool did not run:
+
+| Result | Meaning |
+|--------|---------|
+| `[Denied] User declined to execute <tool>` | The user said no |
+| `[Not approved] The approval request for '<tool>' expired without an answer…` | Nobody answered within 2 minutes |
+| `[Not approved] … no active approver chat on Telegram, WhatsApp or Teams…` | Nobody to ask: no known identity (or not the pinned `approver`) has written there yet, or the one recorded was deactivated |
+| `[Not approved] … the user still had another approval prompt open…` | The prompt was never shown because an earlier one stayed open |
+| `[Not approved] Approval for '<tool>' could not be requested (internal error)…` | The prompt couldn't be delivered, or the identity check failed; see the log |
 
 ---
 
@@ -403,7 +431,7 @@ MCP Server — http://127.0.0.1:18800/mcp
 
 **Principle of least privilege:** The MCP server exposes nothing by default. You explicitly whitelist each tool in `expose_tools`.
 
-**Approval gate preserved:** Approval-required tools always prompt the user through their messaging channel, regardless of whether the call comes from the agent loop or an MCP client. An external tool cannot bypass approval.
+**Approval gate preserved:** Approval-required tools always prompt the user through their messaging channel, regardless of whether the call comes from the agent loop or an MCP client. An external tool cannot bypass approval; when nobody can be asked, the call is refused.
 
 **Localhost-first:** The server binds to `127.0.0.1` by default. Changing this requires explicit config and is flagged by `pincer doctor`.
 
@@ -430,9 +458,14 @@ MCP Server — http://127.0.0.1:18800/mcp
 - All exposed tools are prefixed with `pincer_` in the MCP namespace (e.g., `pincer_email_check`)
 
 **Approval prompt not appearing**
-- The approval is sent to your active messaging channel (Telegram, WhatsApp, etc.)
-- Make sure Pincer's messaging channel is running and reachable
-- Check `pincer doctor` for channel health
+- The prompt goes to the Telegram, WhatsApp or Teams chat where a known identity last wrote to Pincer, never to web chat. Send Pincer a message there first; until then the MCP client gets "no active approver chat".
+- With `approver` set, only that identity is asked: it must be an active identity (`pincer identity list`) and must have written to Pincer on one of those channels. A startup warning says when it isn't active.
+- A guest (a sender with no identity while the guest gate is on) is never asked.
+- On WhatsApp and Teams a prompt waits while another prompt to the same user is open, and is dropped if that takes too long ("another approval prompt open").
+- Make sure Pincer's messaging channel is running and reachable, and check `pincer doctor` for channel health. An "internal error" result means delivery or the identity check failed; the log has the cause.
+
+**Typing "yes" doesn't approve on WhatsApp or Teams**
+- MCP prompts there need the prompt's code: reply `yes 4821` (the code is in the prompt). A bare "yes" goes to the agent.
 
 **Connection refused from remote machine**
 - Default bind is `127.0.0.1` — change to `0.0.0.0` in config

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.channels.approval_text import new_answer_code, parse_coded_yes_no, parse_yes_no
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
-from pincer.core.approval import PROMPT_QUEUE_TIMEOUT, ApprovalOutcome, PromptQueue, await_decision
+from pincer.core.approval import ApprovalOutcome, PromptQueue, await_decision, prompt_queue_timeout
 
 if TYPE_CHECKING:
     from pincer.config import Settings
@@ -410,13 +410,13 @@ class MicrosoftTeamsChannel(BaseChannel):
 
         *requested_by* names who asked when it wasn't the agent itself (an MCP
         client); such a prompt is answered only by a reply carrying its code.
-        TIMED_OUT if an earlier prompt to this user is still open after
-        PROMPT_QUEUE_TIMEOUT.
+        BUSY, without showing it, if an earlier prompt to this user stays open
+        past `prompt_queue_timeout`.
         """
-        async with self._approval_queue.turn(user_id, PROMPT_QUEUE_TIMEOUT) as my_turn:
+        async with self._approval_queue.turn(user_id, prompt_queue_timeout(requested_by)) as my_turn:
             if not my_turn:
-                logger.info("Teams approval for %s / %s gave up waiting for an earlier prompt", user_id, tool_name)
-                return ApprovalOutcome.TIMED_OUT
+                logger.info("Teams approval for %s / %s not shown: an earlier prompt is still open", user_id, tool_name)
+                return ApprovalOutcome.BUSY
             return await self._ask_approval(user_id, tool_name, arguments, requested_by)
 
     async def _ask_approval(

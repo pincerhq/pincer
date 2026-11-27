@@ -1518,6 +1518,22 @@ class TestDirectChatApproval:
         assert "Please reply *yes* or *no*." not in sent
         assert await _still_pending(task)
 
+    async def test_uncoded_text_during_mcp_prompt_answers_the_agents_question(self, routing_channel):
+        """An MCP prompt must not hide a pending ask_user question (PR #423 review)."""
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None, requested_by="an MCP client")
+        question = asyncio.create_task(ch.request_input(OWNER_PHONE, "Which city?"))
+        for _ in range(100):
+            if OWNER_PHONE in ch._pending_inputs:
+                break
+            await asyncio.sleep(0)
+
+        await ch._on_message(ch._client, self._self_chat("Berlin"))
+
+        assert await asyncio.wait_for(question, 1) == "Berlin"
+        ch._handler.assert_not_called()
+        assert await _still_pending(task)
+
     async def test_reaction_answers_mcp_prompt_without_code(self, routing_channel):
         ch = routing_channel
         task = await _pending_approval(ch, requester=OWNER_PHONE, group=None, requested_by="an MCP client")

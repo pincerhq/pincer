@@ -359,6 +359,15 @@ def sampling_model(config_dir: Path | None = None) -> str | None:
     return sampling.model
 
 
+def _parse_approver(raw: Any) -> str | None:
+    """`[mcp.server] approver`: a pincer_user_id, surrounding spaces dropped; unset or "" means none."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"[mcp.server] approver must be a pincer_user_id string, got {type(raw).__name__}")
+    return raw.strip() or None
+
+
 def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPConfig:
     """Parse a raw [mcp] section dict into an MCPConfig."""
     servers = [_parse_server_from_toml(s, pincer_vars) for s in mcp_raw.get("servers", [])]
@@ -382,7 +391,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         approval_policy=approval_policy,
         sampling=sampling,
         webhook_url=srv_raw.get("webhook_url"),
-        approver=srv_raw.get("approver") or None,
+        approver=_parse_approver(srv_raw.get("approver")),
     )
     return MCPConfig(
         enabled=mcp_raw.get("enabled", True),

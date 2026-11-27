@@ -59,7 +59,7 @@ async def test_identity_check_failure_is_not_a_target():
     router, ask, _ = _router(known=AsyncMock(side_effect=RuntimeError("db down")))
     await router.note_message("owner", "telegram")
 
-    assert await router("email_send", {}) is ApprovalOutcome.NO_APPROVER
+    assert await router("email_send", {}) is ApprovalOutcome.NO_APPROVER  # never recorded
 
 
 async def test_repeat_messages_skip_the_identity_check():
@@ -124,3 +124,84 @@ async def test_delivery_failure_stays_unavailable_not_no_approver():
     await router.note_message("owner", "telegram")
 
     assert await router("email_send", {}) is ApprovalOutcome.UNAVAILABLE
+
+
+# ── PR #423 review round 3 ──────────────────────────────────────────────────
+
+
+async def test_identity_check_error_keeps_the_target_and_is_unavailable():
+    """A transient DB error is not "no chat": keep the target, report an internal error."""
+    checks = iter([True, RuntimeError("connection reset"), True])
+
+    async def is_known(_uid):
+        result = next(checks)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    router, ask, _ = _router(known=is_known)
+    await router.note_message("owner", "telegram")
+
+    assert await router("email_send", {}) is ApprovalOutcome.UNAVAILABLE
+    ask.assert_not_awaited()
+    assert await router("email_send", {}) is ApprovalOutcome.APPROVED  # target kept
+    assert ask.await_args.args[2:4] == ("owner", "telegram")
+
+
+async def test_new_target_recorded_during_the_check_is_kept():
+    router, ask, _ = _router()
+    await router.note_message("alice", "telegram")
+
+    async def deactivated_while_bob_writes(uid):
+        if uid == "alice":
+            router._target = ("bob", "telegram")  # bob's message lands during the check
+            return False
+        return True
+
+    router._is_known = deactivated_while_bob_writes
+    assert await router("email_send", {}) is ApprovalOutcome.NO_APPROVER
+    assert router._target == ("bob", "telegram")
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    [
+        ("none", "no known user has messaged on Telegram, WhatsApp or Teams yet"),
+        ("pinned", "approver 'alice' has not messaged on Telegram, WhatsApp or Teams yet"),
+        ("deactivated", "recorded approver bob is no longer active"),
+        ("not_pinned", "recorded user bob is not the configured approver"),
+    ],
+)
+async def test_no_approver_log_names_the_reason(caplog, setup, expected):
+    active = {"bob": True}
+    router, _, _ = _router(known=AsyncMock(side_effect=lambda uid: active.get(uid, False)))
+    if setup == "pinned":
+        router.approver = "alice"
+    if setup in ("deactivated", "not_pinned"):
+        await router.note_message("bob", "telegram")
+    if setup == "deactivated":
+        active["bob"] = False
+    if setup == "not_pinned":
+        router.approver = "alice"
+
+    with caplog.at_level(logging.WARNING, logger="pincer.mcp.channel_approval"):
+        assert await router("email_send", {}) is ApprovalOutcome.NO_APPROVER
+    assert any(expected in r.getMessage() for r in caplog.records)
+
+
+async def test_check_approver_warns_for_an_unknown_approver(caplog):
+    router, _, _ = _router(known=False)
+    router.approver = "alcie"
+
+    with caplog.at_level(logging.WARNING, logger="pincer.mcp.channel_approval"):
+        await router.check_approver()
+    assert any("approver 'alcie' is not an active identity" in r.getMessage() for r in caplog.records)
+
+
+async def test_check_approver_is_quiet_for_an_active_approver_or_a_failed_check(caplog):
+    for known in (True, AsyncMock(side_effect=RuntimeError("db down"))):
+        router, _, _ = _router(known=known)
+        router.approver = "alice"
+        with caplog.at_level(logging.WARNING, logger="pincer.mcp.channel_approval"):
+            await router.check_approver()
+    assert not any("not an active identity" in r.getMessage() for r in caplog.records)
