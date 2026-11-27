@@ -132,13 +132,13 @@ An MCP call has no chat of its own, so Pincer picks one:
 
   ```toml
   [mcp.server]
-  approver = "alice"   # a pincer_user_id; unset = the last known identity to write
+  approver = "alice"   # a pincer_user_id; unset or "" = the last known identity to write
   ```
 
-  `pincer run` warns at startup if `approver` is not an active identity. It must be a string; anything else is a config error.
+  `pincer run` warns at startup if `approver` is not an active identity. Unset or `""` means not pinned. A non-string or a value of only spaces stops the MCP server with a startup error, so it never falls back to asking anyone; the MCP client servers (`[[mcp.servers]]`) still load.
 - **What the prompt looks like.** It says `Requested by: an MCP client` above the tool name.
   - On **Telegram** you answer with the card's buttons.
-  - On **WhatsApp** and **Teams** a typed answer must carry the prompt's 4-digit code, e.g. `yes 4821` or `no 4821`. A bare "yes" or any other message goes to the agent as usual, so a "yes" meant for the agent's own question can't approve the MCP call. On WhatsApp a 👍 / 👎 reaction on the prompt also answers it.
+  - On **WhatsApp** and **Teams** a typed answer must carry the prompt's 4-digit code, e.g. `yes 4821` or `no 4821`. A bare "yes" or any other message goes to the agent as usual (in a WhatsApp group it must still address Pincer with the trigger word, a reply or a mention; the coded answer doesn't need to), so a "yes" meant for the agent's own question can't approve the MCP call. On WhatsApp a 👍 / 👎 reaction on the prompt also answers it.
 - **One prompt at a time on WhatsApp and Teams.** A typed answer can't say which prompt it is for, so a second prompt to the same user waits for the first: up to 30 s for an MCP client's prompt (so the client is still there), 150 s for one the agent raised. If it waits longer, it is not shown. A request the MCP client cancels is dropped without showing its prompt.
 
 What the MCP client gets back when the tool did not run:

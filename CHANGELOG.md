@@ -1276,8 +1276,8 @@ mounting a directory. Install the new `remote-skills` extra
   as "declined by the user" (#227).** Every approval that didn't go through
   reached the model as a decline, so it made up a cause ("a permissions
   problem") and didn't offer to retry. Approval callbacks now return an
-  `ApprovalOutcome` (`APPROVED`, `DENIED`, `TIMED_OUT`, `UNAVAILABLE`; a plain
-  bool still works), and each reaches the model with its own message: a
+  `ApprovalOutcome` (`APPROVED`, `DENIED`, `TIMED_OUT`, `UNAVAILABLE`,
+  `NO_APPROVER`, `BUSY`; a plain bool still works), and each reaches the model with its own message: a
   decline asks it not to retry, an expired request asks it to offer another
   try, and an approval that could not be requested (no SSE stream, an
   undeliverable prompt, a failing callback) asks it not to guess a cause.
@@ -1291,9 +1291,10 @@ mounting a directory. Install the new `remote-skills` extra
   Telegram, WhatsApp or Teams chat where a known identity last wrote to
   Pincer; a guest's message never makes them the approver, and an identity
   deactivated since is not asked. `approver = "<pincer_user_id>"` under
-  `[mcp.server]` in `pincer.toml` limits this to one identity (it must be a
-  string, and `pincer run` warns if it is not an active identity); without
-  it, the last known identity to write is asked, which in a shared setup may
+  `[mcp.server]` in `pincer.toml` limits this to one identity (`pincer run`
+  warns if it is not an active identity; a non-string or blank value stops
+  the MCP server with a startup error, other MCP servers still load); without
+  it or with `""`, the last known identity to write is asked, which in a shared setup may
   be a teammate. The prompt reads "Requested by: an MCP client", and on WhatsApp and
   Teams a typed answer must carry the prompt's 4-digit code ("yes 4821"), so a
   "yes" meant for the agent's own question can't approve it; other messages go

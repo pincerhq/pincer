@@ -167,7 +167,7 @@ async def test_new_target_recorded_during_the_check_is_kept():
     ("setup", "expected"),
     [
         ("none", "no known user has messaged on Telegram, WhatsApp or Teams yet"),
-        ("pinned", "approver 'alice' has not messaged on Telegram, WhatsApp or Teams yet"),
+        ("pinned", "approver 'alice' has no recorded chat on Telegram, WhatsApp or Teams (not seen since start"),
         ("deactivated", "recorded approver bob is no longer active"),
         ("not_pinned", "recorded user bob is not the configured approver"),
     ],

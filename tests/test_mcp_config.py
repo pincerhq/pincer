@@ -807,21 +807,35 @@ def test_env_server_disabled_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 def test_server_export_approver(tmp_path: Path) -> None:
     (tmp_path / "pincer.toml").write_text('[mcp.server]\nenabled = true\napprover = "alice"\n')
-    assert load_mcp_config(tmp_path).server.approver == "alice"
+    assert load_mcp_config(tmp_path).server.checked_approver() == "alice"
 
 
 def test_server_export_approver_defaults_to_none(tmp_path: Path) -> None:
     (tmp_path / "pincer.toml").write_text("[mcp.server]\nenabled = true\n")
-    assert load_mcp_config(tmp_path).server.approver is None
+    assert load_mcp_config(tmp_path).server.checked_approver() is None
 
 
 @pytest.mark.parametrize(("value", "expected"), [('" alice "', "alice"), ('""', None)])
 def test_server_export_approver_is_trimmed(tmp_path: Path, value: str, expected: str | None) -> None:
     (tmp_path / "pincer.toml").write_text(f"[mcp.server]\nenabled = true\napprover = {value}\n")
-    assert load_mcp_config(tmp_path).server.approver == expected
+    assert load_mcp_config(tmp_path).server.checked_approver() == expected
 
 
-def test_server_export_approver_must_be_a_string(tmp_path: Path) -> None:
-    (tmp_path / "pincer.toml").write_text("[mcp.server]\nenabled = true\napprover = 42\n")
-    with pytest.raises(ValueError, match="approver must be a pincer_user_id string"):
-        load_mcp_config(tmp_path)
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [("42", "approver must be a pincer_user_id string, got int"), ('"   "', "approver is blank")],
+)
+def test_server_export_bad_approver_fails_closed(tmp_path: Path, value: str, match: str) -> None:
+    (tmp_path / "pincer.toml").write_text(f"[mcp.server]\nenabled = true\napprover = {value}\n")
+    with pytest.raises(ValueError, match=match):
+        load_mcp_config(tmp_path).server.checked_approver()
+
+
+def test_bad_approver_keeps_mcp_client_servers(tmp_path: Path) -> None:
+    # Only the MCP server is stopped by a bad approver; [[mcp.servers]] still load.
+    (tmp_path / "pincer.toml").write_text(
+        '[[mcp.servers]]\nname = "websearch"\ntransport = "stdio"\ncommand = "python"\n'
+        "[mcp.server]\nenabled = true\napprover = 42\n"
+    )
+    cfg = load_mcp_config(tmp_path)
+    assert [s.name for s in cfg.servers] == ["websearch"]

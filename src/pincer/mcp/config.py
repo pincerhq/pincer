@@ -174,9 +174,27 @@ class MCPServerExportConfig:
     webhook_url: str | None = None
     # OAuth 2.1 auth config (None = disabled, uses localhost bypass)
     auth: Any | None = None
-    # pincer_user_id asked to approve gated tools an MCP client calls; None =
-    # the last known identity to write on Telegram, WhatsApp or Teams
-    approver: str | None = None
+    # `approver` exactly as written in pincer.toml; read it via checked_approver().
+    # Kept raw so a bad value stops only the MCP server, not the [mcp] section.
+    approver: object = None
+
+    def checked_approver(self) -> str | None:
+        """The pincer_user_id asked to approve gated tools an MCP client calls.
+
+        None (unset or ``""``) means the last known identity to write on
+        Telegram, WhatsApp or Teams. Surrounding spaces are dropped. Raises
+        ValueError for a non-string or a value that is only spaces: this
+        setting restricts who may approve, so a bad value must not fall back
+        to the open default.
+        """
+        raw = self.approver
+        if raw is None or raw == "":
+            return None
+        if not isinstance(raw, str):
+            raise ValueError(f"[mcp.server] approver must be a pincer_user_id string, got {type(raw).__name__}")
+        if not raw.strip():
+            raise ValueError('[mcp.server] approver is blank; set a pincer_user_id or remove the key (or use "")')
+        return raw.strip()
 
 
 @dataclass(frozen=True)
@@ -359,15 +377,6 @@ def sampling_model(config_dir: Path | None = None) -> str | None:
     return sampling.model
 
 
-def _parse_approver(raw: Any) -> str | None:
-    """`[mcp.server] approver`: a pincer_user_id, surrounding spaces dropped; unset or "" means none."""
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        raise ValueError(f"[mcp.server] approver must be a pincer_user_id string, got {type(raw).__name__}")
-    return raw.strip() or None
-
-
 def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPConfig:
     """Parse a raw [mcp] section dict into an MCPConfig."""
     servers = [_parse_server_from_toml(s, pincer_vars) for s in mcp_raw.get("servers", [])]
@@ -391,7 +400,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         approval_policy=approval_policy,
         sampling=sampling,
         webhook_url=srv_raw.get("webhook_url"),
-        approver=_parse_approver(srv_raw.get("approver")),
+        approver=srv_raw.get("approver"),
     )
     return MCPConfig(
         enabled=mcp_raw.get("enabled", True),

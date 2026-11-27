@@ -102,7 +102,8 @@ class MCPApprovalRouter:
         target = self._target
         if target is None:
             reason = (
-                f"approver {self.approver!r} has not messaged on Telegram, WhatsApp or Teams yet"
+                f"approver {self.approver!r} has no recorded chat on Telegram, WhatsApp or Teams "
+                "(not seen since start, or not active)"
                 if self.approver
                 else "no known user has messaged on Telegram, WhatsApp or Teams yet"
             )
