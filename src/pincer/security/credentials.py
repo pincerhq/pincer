@@ -30,7 +30,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 
 import jwt
@@ -240,14 +240,6 @@ def decode_token(secret: str, token: str, *, typ: TokenType) -> TokenClaims:
     return TokenClaims(sub=sub, typ=typ, ver=ver, exp=int(payload["exp"]), call=call, sid=sid, jti=jti)
 
 
-def jwt_derived_key(configured: str, data_dir: Path, label: bytes) -> bytes:
-    """A key for one purpose, derived from the JWT signing secret (see
-    `load_or_create_jwt_secret`) and separated from other purposes by `label`:
-    it holds across restarts and across replicas that share that secret."""
-    secret = load_or_create_jwt_secret(configured, data_dir)
-    return hmac.new(secret.encode(), label, hashlib.sha256).digest()
-
-
 def load_or_create_jwt_secret(configured: str, data_dir: Path) -> str:
     """The HS256 signing secret: `PINCER_JWT_SECRET`, else a generated file.
 
@@ -296,6 +288,20 @@ def load_or_create_jwt_secret(configured: str, data_dir: Path) -> str:
             os.unlink(tmp_name)
     logger.info("Generated a new JWT signing secret at %s", path)
     return secret
+
+
+def derived_key(secret: str, label: bytes) -> bytes:
+    """A key for one purpose, derived from `secret` and kept apart from every
+    other purpose's key by `label`."""
+    return hmac.new(secret.encode(), label, hashlib.sha256).digest()
+
+
+@lru_cache(maxsize=16)
+def jwt_derived_key(configured: str, data_dir: Path, label: bytes) -> bytes:
+    """`derived_key` of the JWT signing secret (`load_or_create_jwt_secret`): it
+    holds across restarts and across replicas that share that secret. Cached, so
+    the secret file is read (or created) once per process, not on every use."""
+    return derived_key(load_or_create_jwt_secret(configured, data_dir), label)
 
 
 def _read_secret(path: Path) -> str | None:

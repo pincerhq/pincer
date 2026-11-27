@@ -42,7 +42,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import cached_property, lru_cache
+from functools import cache, cached_property
 from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.calendar_tz import is_date_only, localize, needs_zone
@@ -152,6 +152,15 @@ CALL_LOCAL_TIME_ARGS = ("start", "end", "time_min", "time_max")
 # Creates whose event is stored in the call's zone when made on the call (tools_calendar._write_zone).
 CALL_ZONED_CREATE_TOOLS = frozenset({"google__create_event"})
 
+# Call idempotency keys (CallKeySigner): pincer-call-{nonce}-{tag}, the tag signed with a key
+# derived from the JWT secret under this label.
+CALL_KEY_PREFIX = "pincer-call-"
+_CALL_KEY_NONCE_LEN = 12
+_CALL_KEY_TAG_LEN = 16
+_CALL_KEY_LABEL = b"pincer-call-idempotency"
+# Signs call keys when no JWT secret can be loaded: they then verify only until a restart.
+_PROCESS_SECRET = secrets.token_urlsafe(48)
+
 
 def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> dict[str, Any]:
     """``args`` as they would run on the call, for a replay off it: offset-less times get the
@@ -171,44 +180,33 @@ def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> 
     return draft
 
 
-CALL_KEY_PREFIX = "pincer-call-"
-_CALL_KEY_NONCE_LEN = 12
-_CALL_KEY_TAG_LEN = 16
-_CALL_KEY_LABEL = b"pincer-call-idempotency"
-# Signs call keys when no JWT secret can be loaded: they then verify only until a restart.
-_PROCESS_SECRET = secrets.token_urlsafe(48)
-_process_secret_warned = False
-
-
 def call_key_secret(settings: Settings) -> bytes:
     """The key that signs call idempotency keys, derived from the JWT secret (as the
     storage presign key is), so a key issued on one call still verifies on a later
-    one, across restarts and replicas that share ``PINCER_JWT_SECRET``.
-
-    Without a usable secret a per-process one is used: keys then verify only until a
-    restart, and a replay after that gets a fresh key (a possible duplicate, never a
-    wrong match)."""
-    configured = settings.jwt_secret.get_secret_value()
-    if configured or settings.data_dir is not None:
-        with contextlib.suppress(OSError, ValueError):
-            return _jwt_call_key_secret(configured, settings.data_dir)
-    _warn_process_secret()
-    return hmac.new(_PROCESS_SECRET.encode(), _CALL_KEY_LABEL, hashlib.sha256).digest()
+    one, across restarts and replicas that share ``PINCER_JWT_SECRET``."""
+    return _call_key_secret(settings.jwt_secret.get_secret_value(), settings.data_dir)
 
 
-@lru_cache(maxsize=8)
-def _jwt_call_key_secret(configured: str, data_dir: Path) -> bytes:
-    # Cached: the secret file is read (or created) once per process, not on every call's gate.
-    from pincer.security.credentials import jwt_derived_key
+@cache
+def _call_key_secret(configured: str, data_dir: Path | None) -> bytes:
+    """Resolved once per process, the fallback included: every call in a process signs and
+    verifies with the same key. (A fallback retried per call would sign a call made during a
+    brief data-dir failure with one key and verify its replay with another: a duplicate.)
 
-    return jwt_derived_key(configured, data_dir, _CALL_KEY_LABEL)
+    Without a usable JWT secret a per-process one is used: keys then verify only until a
+    restart, and a replay after that gets a fresh key (a possible duplicate, never a wrong
+    match)."""
+    from pincer.security.credentials import derived_key, jwt_derived_key
 
-
-def _warn_process_secret() -> None:
-    global _process_secret_warned
-    if not _process_secret_warned:
-        _process_secret_warned = True
-        logger.warning("No JWT secret for call idempotency keys; they verify only until a restart")
+    if configured or data_dir is not None:
+        try:
+            return jwt_derived_key(configured, data_dir, _CALL_KEY_LABEL)
+        except (OSError, ValueError) as exc:
+            reason = f"the JWT secret cannot be loaded ({type(exc).__name__}: {exc})"
+    else:
+        reason = "no JWT secret is configured and there is no data dir"
+    logger.warning("Call idempotency keys use a per-process secret until a restart: %s", reason)
+    return derived_key(_PROCESS_SECRET, _CALL_KEY_LABEL)
 
 
 @dataclass(frozen=True)
@@ -240,8 +238,11 @@ class CallKeySigner:
         nonce, sep, tag = key.removeprefix(CALL_KEY_PREFIX).partition("-")
         if not sep or len(nonce) != _CALL_KEY_NONCE_LEN or len(tag) != _CALL_KEY_TAG_LEN:
             return False
-        # Bytes, not str: compare_digest refuses a str with non-ASCII characters.
-        return hmac.compare_digest(tag.encode("utf-8"), self._tag(nonce, tool_name, args).encode("utf-8"))
+        # Issued keys are hex. Anything else is refused before it is encoded: a lone surrogate
+        # (valid in JSON tool arguments) would raise there and fail the whole tool call.
+        if not (nonce.isascii() and tag.isascii()):
+            return False
+        return hmac.compare_digest(tag.encode(), self._tag(nonce, tool_name, args).encode())
 
     def _tag(self, nonce: str, tool_name: str, args: dict[str, Any]) -> str:
         bound = tool_policy.action_fingerprint(tool_name, draft_in_call_zone(tool_name, args, self.zone))
@@ -463,21 +464,14 @@ class InCallToolGate:
         exists". Trusted code (the receptionist) keeps its own key.
         """
         args = dict(arguments or {})
-        supplied = str(args.pop("idempotency_key", "") or "") if not trusted_key else ""
+        if not trusted_key:
+            args.pop("idempotency_key", None)
         # Before any branch: every path that can reach `execute` (direct,
-        # confirmed, owner-approved) sends `arguments`, so the key must be
-        # settled there first — never a key the model copied from history.
-        key = ""
-        if tool_name in IDEMPOTENT_CREATE_TOOLS and isinstance(arguments, dict):
-            if not trusted_key:
-                arguments.pop("idempotency_key", None)
-                if supplied and self._keys.verifies(supplied, tool_name, args):
-                    arguments["idempotency_key"] = supplied
-            if not arguments.get("idempotency_key"):
-                arguments["idempotency_key"] = self._keys.issue(self.call_sid, tool_name, args)
-            key = str(arguments["idempotency_key"])
-        # A deferred draft carries the same key (see _add_deferred), so its replay finds an event
-        # this call's timed-out write committed ("already created") instead of booking it again.
+        # confirmed, owner-approved) sends `arguments`, so the key is settled
+        # there first. A deferred draft carries the same key (see _add_deferred),
+        # so its replay finds an event this call's timed-out write committed
+        # ("already created") instead of booking it again.
+        key = self._settle_key(tool_name, arguments, args, trusted_key=trusted_key)
         token = _settled_key.set(key)
         try:
             return await self._dispatch(tool_name, args, execute)
@@ -515,6 +509,22 @@ class InCallToolGate:
     @cached_property
     def _keys(self) -> CallKeySigner:
         return CallKeySigner(call_key_secret(self.settings), self.call_zone)
+
+    def _settle_key(
+        self, tool_name: str, arguments: dict[str, Any] | None, args: dict[str, Any], *, trusted_key: bool
+    ) -> str:
+        """Write the idempotency key into ``arguments`` (the dict ``execute`` sends) and return it;
+        ``""`` for a tool that takes none. ``args`` is the action, without any key. An untrusted
+        key is kept only if it verifies for exactly this action; otherwise this call's is used."""
+        if tool_name not in IDEMPOTENT_CREATE_TOOLS or not isinstance(arguments, dict):
+            return ""
+        if not trusted_key:
+            supplied = str(arguments.pop("idempotency_key", "") or "")
+            if supplied and self._keys.verifies(supplied, tool_name, args):
+                arguments["idempotency_key"] = supplied
+        if not arguments.get("idempotency_key"):
+            arguments["idempotency_key"] = self._keys.issue(self.call_sid, tool_name, args)
+        return str(arguments["idempotency_key"])
 
     # ── Deny ─────────────────────────────────────────────
 

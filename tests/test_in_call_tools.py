@@ -1144,6 +1144,8 @@ async def test_a_deferred_key_copied_onto_a_different_booking_is_replaced(change
         "pincer-call-" + "a" * 20,  # the pre-#334 format
         "pincer-call-aaaaaaaaaaaa-bbbbbbbbbbbbbbbb",
         "pincer-call-" + "ä" * 12 + "-" + "ö" * 16,
+        # A lone surrogate (JSON tool arguments can carry one) can't be encoded: refused, not raised
+        "pincer-call-" + "\ud800" * 12 + "-" + "a" * 16,
     ],
 )
 async def test_a_forged_key_on_a_later_call_is_replaced(key):
@@ -1167,6 +1169,31 @@ async def test_a_deferred_key_does_not_verify_under_another_secret():
     action = {k: v for k, v in item["draft_args"].items() if k != "idempotency_key"}
     assert sent == [_call_key(action, call=LATER_CALL, settings=other)]
     assert sent[0] != item["draft_args"]["idempotency_key"]
+
+
+def test_the_call_key_secret_is_resolved_once_per_process(tmp_path, monkeypatch):
+    """A JWT secret that can't be loaded on the first call (data dir briefly unavailable) is not
+    retried on the next: every call in the process signs and verifies with the same key, so a
+    draft deferred on the first still verifies on a later one."""
+    from pydantic import SecretStr
+
+    from pincer.security import credentials
+
+    loads: list[object] = []
+
+    def _load(configured, data_dir):
+        loads.append(data_dir)
+        if len(loads) == 1:
+            raise OSError("Read-only file system")
+        return "jwt-secret-that-loads-on-the-second-try-0123456789"
+
+    monkeypatch.setattr(credentials, "load_or_create_jwt_secret", _load)
+    settings = _settings()
+    settings.jwt_secret = SecretStr("")
+    settings.data_dir = tmp_path
+    first = ict.call_key_secret(settings)
+    assert ict.call_key_secret(settings) == first
+    assert loads == [tmp_path]
 
 
 async def test_a_failed_create_defers_its_draft_with_the_calls_key():
