@@ -63,7 +63,8 @@ def models_to_price(settings: Settings, config_dir: Path | None = None) -> list[
 def _sampling_uses(settings: Settings, config_dir: Path | None) -> list[ModelUse]:
     """The standalone MCP server's sampling model, which calls the Anthropic API directly, when
     it would sample by the toml and the MCP env switches the runtime honours (`sampling_model`,
-    which never loads .env). An unreadable or malformed MCP config gives no model: the MCP
+    which reads the switches from os.environ and then .env, without copying .env into
+    os.environ). An unreadable or malformed MCP config gives no model: the MCP
     config's own load reports it, and this check must not crash startup over it."""
     from pincer.mcp.config import sampling_model
     from pincer.mcp.sampling import SAMPLING_PROVIDER

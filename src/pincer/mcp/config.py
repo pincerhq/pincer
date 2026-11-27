@@ -379,22 +379,19 @@ def _export_enabled(toml_enabled: bool, env: Mapping[str, str] | None = None) ->
 
 
 def _sampling_switches() -> dict[str, str]:
-    """The sampling env switches as `load_mcp_config` sees them once it has loaded .env: the
-    process environment first, then the first .env candidate that sets each one (`load_dotenv`
-    with override=False). The files are read, never copied into os.environ."""
-    from dotenv import dotenv_values
+    """The sampling env switches as `load_mcp_config` sees them once it has loaded .env.
 
-    found = {key: os.environ[key] for key in _SAMPLING_SWITCHES if key in os.environ}
-    for candidate in _DOTENV_CANDIDATES:
-        path = Path(candidate)
-        if not path.is_file():
-            continue
-        values = dotenv_values(path)
-        for key in _SAMPLING_SWITCHES:
-            value = values.get(key)
-            if key not in found and value is not None:
-                found[key] = value
-    return found
+    Runs the runtime's own loader, so `PYTHON_DOTENV_DISABLED`, `${VAR}` interpolation and the
+    order of the candidate files behave exactly as there, then takes back what it added: it
+    never overrides a variable already set, so removing the new keys restores os.environ.
+    """
+    before = set(os.environ)
+    try:
+        _load_dotenv_into_environ()
+        return {key: os.environ[key] for key in _SAMPLING_SWITCHES if key in os.environ}
+    finally:
+        for key in set(os.environ) - before:
+            del os.environ[key]
 
 
 def _mcp_section(toml_path: Path) -> dict[str, Any]:
@@ -416,13 +413,16 @@ def _merge_sections(base: dict[str, Any], local: dict[str, Any]) -> dict[str, An
     return _merge_mcp_raw(base, local) if local else base
 
 
-def _servers_mergeable(*sections: dict[str, Any]) -> bool:
-    """Every `[[mcp.servers]]` entry is a table with a name, as `_merge_mcp_raw` needs."""
-    for section in sections:
+def _sections_mergeable(base: dict[str, Any], local: dict[str, Any]) -> bool:
+    """Everything `_merge_mcp_raw` touches has the shape it needs: every `[[mcp.servers]]` entry
+    is a table with a string name, and a local `[mcp.server]` table merges onto a table."""
+    for section in (base, local):
         servers = section.get("servers", [])
-        if not isinstance(servers, list) or not all(isinstance(s, dict) and "name" in s for s in servers):
+        if not isinstance(servers, list):
             return False
-    return True
+        if not all(isinstance(s, dict) and isinstance(s.get("name"), str) for s in servers):
+            return False
+    return not (isinstance(local.get("server"), dict) and not isinstance(base.get("server", {}), dict))
 
 
 def sampling_model(config_dir: Path | None = None) -> str | None:
@@ -446,8 +446,8 @@ def sampling_model(config_dir: Path | None = None) -> str | None:
     except (OSError, ValueError) as e:  # ValueError: tomllib.TOMLDecodeError, or [mcp] not a table
         _log_no_sampling_model(base_dir, e)
         return None
-    if not _servers_mergeable(base, local):
-        _log_no_sampling_model(base_dir, "a [[mcp.servers]] entry is not a table with a name")
+    if not _sections_mergeable(base, local):
+        _log_no_sampling_model(base_dir, "an [[mcp.servers]] entry or [mcp.server] can't be merged")
         return None
     mcp_raw = _merge_sections(base, local)
     server = mcp_raw.get("server", {})

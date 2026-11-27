@@ -618,6 +618,28 @@ def test_a_local_mcp_section_that_cant_be_merged_gives_no_sampling_model(tmp_pat
     assert pricing_problems(_settings(), config) is None
 
 
+@pytest.mark.parametrize(
+    ("base", "local"),
+    [
+        (_SAMPLING_ON + '[[mcp.servers]]\nname = ["a"]\n', '[[mcp.servers]]\nname = "b"\n'),
+        ("[mcp]\nserver = 5\n", "[mcp.server]\nenabled = true\n[mcp.server.sampling]\nenabled = true\n"),
+    ],
+    ids=["server-name-not-a-string", "server-not-a-table-under-a-local-table"],
+)
+def test_sections_that_cant_be_merged_are_logged_not_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, base: str, local: str
+) -> None:
+    """`_merge_mcp_raw` would raise TypeError on these; the check logs them and skips sampling."""
+    from pincer.mcp.config import sampling_model
+
+    config = _with_sampling(_priced(tmp_path, "claude-a"), base)
+    (config / "pincer.local.toml").write_text(local, encoding="utf-8")
+    with caplog.at_level("WARNING", logger="pincer.mcp.config"):
+        assert sampling_model(config) is None
+        assert pricing_problems(_settings(), config) is None
+    assert "can't be merged" in caplog.text
+
+
 @pytest.mark.parametrize("kind", ["directory", "unreadable", "invalid-toml"])
 def test_an_unreadable_local_toml_does_not_crash_the_check(tmp_path: Path, kind: str) -> None:
     """The sampling lookup leaves it to the MCP config's own load, like a malformed section; the
@@ -726,6 +748,25 @@ def test_the_export_turned_on_in_env_file_alone_has_its_sampling_model_checked(
 def test_mcp_turned_off_in_env_file_skips_the_sampling_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_ENABLED=false\n")
     assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"))) is None
+
+
+def test_a_disabled_dotenv_is_not_read_by_the_check_either(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With PYTHON_DOTENV_DISABLED the runtime never loads .env, so its switches don't count here."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_ENABLED=false\n")
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
+        _SAMPLING_UNPRICED
+    )
+
+
+def test_env_file_interpolation_resolves_as_at_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`${VAR}` in .env resolves against the process environment first, as `load_dotenv(override=False)`."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_TEST_MCP_ON=false\nPINCER_MCP_ENABLED=${PINCER_TEST_MCP_ON}\n")
+    monkeypatch.setenv("PINCER_TEST_MCP_ON", "true")
+    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
+        _SAMPLING_UNPRICED
+    )
+    assert os.environ.get("PINCER_MCP_ENABLED") is None  # the loader's additions are taken back
 
 
 def test_the_process_environment_wins_over_the_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
