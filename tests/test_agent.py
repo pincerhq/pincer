@@ -1857,7 +1857,6 @@ async def test_unrepairable_tool_pair_error_clears_the_session_without_retrying(
     assert "earlier" not in [m.content for m in session.messages]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
 async def test_a_session_cleared_after_a_dial_reports_the_call_instead_of_asking_for_a_resend(
     settings, mock_llm, session_manager, cost_tracker, streaming
