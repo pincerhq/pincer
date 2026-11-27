@@ -12,8 +12,9 @@ class ConfigError(PincerError):
 class LLMError(PincerError):
     """Error communicating with an LLM provider.
 
-    ``retryable``: the failure is transient (a rate limit, an overload, a server error), so the
-    same request may succeed when asked again; a 4xx or a connection failure is not.
+    ``retryable``: the failure is transient (a 408, a 409, a rate limit, an overload, a server
+    error, also when reported inside a stream), so the same request may succeed when asked again;
+    any other 4xx is not, and neither is a connection failure or a transport timeout (no status).
 
     ``wire``: the ``"<provider name>:<model>"`` the failed request went to, when the provider that raised
     it knows (see ``llm.replay``); "" otherwise."""

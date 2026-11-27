@@ -29,7 +29,13 @@ from pincer.llm.base import (
     rate_limit_backoff,
     transient_status,
 )
-from pincer.llm.capabilities import BINDING_BETA, COMPACTION_BETA, endpoint_capabilities, learn_from_error
+from pincer.llm.capabilities import (
+    BINDING_BETA,
+    COMPACTION_BETA,
+    anthropic_error_field,
+    endpoint_capabilities,
+    learn_from_error,
+)
 from pincer.llm.model_params import ReasoningWire, anthropic_accepts_sampling, resolve_and_warn, thinking_is_bound
 from pincer.llm.replay import replayable_raw, wire_tag
 
@@ -54,6 +60,8 @@ _AUTOMATIC: dict[str, str] = {"type": "ephemeral"}
 # On-demand compaction (issue #358): the request that asks for a summary carries the beta of
 # `COMPACTION_BETA`; `thinking.block_binding` (thinking-block binding controls) is accepted with `BINDING_BETA`
 _COMPACTION_PARAMETER = {"compaction": {"type": "summarize"}}
+# Error types worth asking again whatever the HTTP status they arrive with (issue #371)
+_TRANSIENT_ERROR_TYPES = frozenset({"overloaded_error", "api_error", "rate_limit_error"})
 
 
 class AnthropicCompatibleProvider(BaseLLMProvider):
@@ -183,7 +191,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                     continue  # the endpoint rejected a beta: the same request goes without it
                 message = f"Anthropic API error: {e.status_code} {e.message}"
                 wire = wire_tag(self._provider_name, kwargs["model"])
-                raise LLMError(message, retryable=transient_status(e.status_code), wire=wire) from e
+                raise LLMError(message, retryable=_transient(e), wire=wire) from e
             except anthropic.APIConnectionError as e:
                 raise LLMError(f"Anthropic connection error: {e}") from e
             break
@@ -241,7 +249,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
                     continue  # the endpoint rejected a beta: the same turn streams without it
                 message = f"Anthropic stream error: {e.status_code} {e.message}"
                 wire = wire_tag(self._provider_name, kwargs["model"])
-                raise LLMError(message, retryable=transient_status(e.status_code), wire=wire) from e
+                raise LLMError(message, retryable=_transient(e), wire=wire) from e
             except anthropic.APIConnectionError as e:
                 raise LLMError(f"Anthropic connection error: {e}") from e
 
@@ -278,7 +286,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             # A rejected beta switches the endpoint's compaction off (the Compactor then uses the summary model)
             learn_from_error(self._settings, self._provider_name, e, caps)
             message = f"Anthropic API error: {e.status_code} {e.message}"
-            raise LLMError(message, retryable=transient_status(e.status_code)) from e
+            raise LLMError(message, retryable=_transient(e)) from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"Anthropic connection error: {e}") from e
 
@@ -547,6 +555,14 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             raw=raw,
             thinking_dropped=_thinking_dropped(response),
         )
+
+
+def _transient(error: anthropic.APIStatusError) -> bool:
+    """Whether a failed request is worth asking again: by its HTTP status, or by its error type. An
+    error the API reports inside a stream (``event: error``) carries the stream's status, 200, so
+    only its type tells an overload from a bad request. Such a ``rate_limit_error`` is not an
+    ``anthropic.RateLimitError``, so it skips the 429 backoff: only the router asks again."""
+    return transient_status(error.status_code) or anthropic_error_field(error, "type") in _TRANSIENT_ERROR_TYPES
 
 
 def _thinking_dropped(response: Message | BetaMessage) -> list[ThinkingDrop]:

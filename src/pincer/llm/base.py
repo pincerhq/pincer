@@ -329,9 +329,14 @@ class LLMResponse:
 
 
 def transient_status(status_code: int) -> bool:
-    """An HTTP status worth asking again (Q24a): a rate limit (429), an overload (529) or another
-    server error (5xx). A 4xx is the request's own fault and would fail the same way."""
-    return status_code == 429 or status_code >= 500
+    """An HTTP status worth asking again (Q24a), the set both SDKs retry: a request timeout (408),
+    a conflict (409), a rate limit (429), an overload (529) or another server error (5xx). Any
+    other 4xx is the request's own fault and would fail the same way. A transport timeout or a
+    lost connection has no status and is deliberately not transient to the router (Q24a): on a
+    call, asking again would only add dead air. The SDK still retries one itself on a request
+    that runs with its retries, so a primary without failovers (or on its last try) is asked up
+    to twice more, while a first try with failovers configured fails over at once instead."""
+    return status_code in (408, 409, 429) or status_code >= 500
 
 
 def rate_limit_backoff(retry_after: float, attempt: int) -> float:

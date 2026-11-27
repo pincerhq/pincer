@@ -28,6 +28,15 @@ class Reject:
     message: str
 
 
+@dataclass
+class StreamError:
+    """A stream that starts (HTTP 200) and then fails with an ``event: error`` of this error type, as
+    the API reports an overload that hits a request already streaming (``overloaded_error``)."""
+
+    type: str
+    message: str = "scripted stream error"
+
+
 # One scripted response: streamed blocks + stop reason (+ usage), an HTTP error status, or an
 # exception the transport raises (e.g. httpx.ReadTimeout)
 Scripted = (
@@ -36,6 +45,7 @@ Scripted = (
     | tuple[list[dict[str, Any]], str, dict[str, Any], dict[str, Any]]
     | int
     | Reject
+    | StreamError
     | Exception
 )
 
@@ -125,7 +135,8 @@ def sse_body(
 class ScriptedAnthropic:
     """An Anthropic provider whose HTTP responses are scripted, one per request:
     `(blocks, stop_reason)` or `(blocks, stop_reason, usage)` streams a response, an int
-    returns that HTTP error, an exception is raised by the transport. ``provider`` is the provider
+    returns that HTTP error, a `StreamError` fails a started stream, an exception is raised by the
+    transport. ``provider`` is the provider
     name the leaf runs under ("anthropic", or a configured compatible endpoint's name)."""
 
     def __init__(self, settings: Settings, responses: list[Scripted], provider: str = "anthropic") -> None:
@@ -166,6 +177,11 @@ class ScriptedAnthropic:
         scripted = self._responses.pop(0)
         if isinstance(scripted, Exception):
             raise scripted
+        if isinstance(scripted, StreamError):
+            start = sse_body([], "end_turn").split(b"\n\n", 1)[0] + b"\n\n"  # message_start only
+            error = {"type": "error", "error": {"type": scripted.type, "message": scripted.message}}
+            body = start + f"event: error\ndata: {json.dumps(error)}\n\n".encode()
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
         if isinstance(scripted, Reject):
             error = {"type": "error", "error": {"type": "invalid_request_error", "message": scripted.message}}
             return httpx.Response(scripted.status, json=error)

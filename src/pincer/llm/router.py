@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from pincer.config import get_settings
 from pincer.core.log_once import LogOncePerKey
@@ -225,6 +225,19 @@ def plan_voice_turn(settings: Settings, value: str | None = None, *, build: Buil
     )
 
 
+class _TurnArgs(TypedDict):
+    """What every try of one ``complete``/``stream_turn`` call sends besides its messages and model:
+    the primary's first try, each failover and the primary's last try ask for the same thing. One
+    shape for both methods, and every key is required, so the two cannot drift apart (#371)."""
+
+    tools: list[dict[str, Any]] | None
+    max_tokens: int | None
+    temperature: float | None
+    system: str | None
+    reasoning_effort: ReasoningEffort | None
+    thinking: ThinkingMode | None
+
+
 class LLMRouter(BaseLLMProvider):
     """Single construction + failover entry point. Drop-in `BaseLLMProvider`."""
 
@@ -269,9 +282,9 @@ class LLMRouter(BaseLLMProvider):
 
     def _first_tries(self) -> tuple[BaseLLMProvider, list[BaseLLMProvider]]:
         """The primary, and the providers one request is first sent to, once each and without
-        retries (Q23: fail over first): the primary, then the failovers in random order. None
-        without failovers. When they all fail, the primary is asked once more with its retry,
-        if its failure was transient (Q24, Q24a)."""
+        retries (Q23: fail over first): the primary, then the failovers in random order. An
+        empty list without failovers. When they all fail, the primary is asked once more with
+        its retry, if its failure was transient (Q24, Q24a)."""
         primary, failovers = self._primary_and_failovers()
         if not failovers:
             return primary, []
@@ -389,28 +402,29 @@ class LLMRouter(BaseLLMProvider):
         each raises a 429 at once. Then the primary again, with its retry, when its first
         failure was transient; otherwise its error is raised. An explicit ``model`` goes to
         the primary only: failovers use their own model (see ``stream_turn``)."""
-        request: dict[str, Any] = {
-            "tools": tools,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "system": system,
-            "reasoning_effort": reasoning_effort,
-            "thinking": thinking,
-            "pinned": pinned,
-        }
+        request = _TurnArgs(
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+        )
         primary, first_tries = self._first_tries()
         primary_err: LLMError | None = None
         for index, provider in enumerate(first_tries):
             try:
                 with rate_limit_retries(False):
-                    return await provider.complete(messages, model=model if index == 0 else None, **request)
+                    return await provider.complete(
+                        messages, model=model if index == 0 else None, pinned=pinned, **request
+                    )
             except (LLMError, LLMRateLimitError) as err:
                 if index == 0:
                     primary_err = err
                 logger.warning("complete provider %d failed: %s — trying next", index, err)
         if primary_err is not None and not primary_err.retryable:
             raise primary_err
-        return await primary.complete(messages, model=model, **request)
+        return await primary.complete(messages, model=model, pinned=pinned, **request)
 
     async def stream_turn(
         self,
@@ -433,14 +447,14 @@ class LLMRouter(BaseLLMProvider):
         An explicit ``model`` is the primary's id (e.g. a voice turn's
         ``azure:gpt-5-mini`` on an azure default): a failover leaf of another
         vendor would 404 on it, so failovers get ``None`` — their own model."""
-        request: dict[str, Any] = {
-            "tools": tools,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "system": system,
-            "reasoning_effort": reasoning_effort,
-            "thinking": thinking,
-        }
+        request = _TurnArgs(
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+            reasoning_effort=reasoning_effort,
+            thinking=thinking,
+        )
         primary, first_tries = self._first_tries()
         primary_err: LLMError | None = None
         for index, provider in enumerate(first_tries):
