@@ -119,9 +119,11 @@ def _range(time_min: str, time_max: str, zone: ZoneInfo | None, *, defaults: boo
     ``defaults`` (list, free/busy) the start is now and a missing end is the
     whole local day for a bare-date start, else 7 days after the start — never
     "now + 7 days", which can land before a future start and return nothing.
-    Without ``defaults`` (search) a missing bound stays missing. The callers have
-    already refused impossible dates (require_real_dates).
+    Without ``defaults`` (search) a missing bound stays missing. An impossible
+    date or date-time is refused here too; the tools also check first, so the
+    refusal comes before their zone lookup.
     """
+    require_real_dates(time_min, time_max)
 
     def _bound(value: str, *, end: bool = False) -> str:
         return localize_bound(value, zone, end=end) if zone else rfc3339(value)
@@ -602,7 +604,7 @@ def _end_keeping_duration(
         if not (old_start.get("date") and old_end.get("date")):
             raise ValueError(KIND_CHANGE_MESSAGE)
         days = date.fromisoformat(old_end["date"]) - date.fromisoformat(old_start["date"])
-        return {"date": (date.fromisoformat(new_start["date"]) + days).isoformat()}
+        return {"date": (parse_bare_day(new_start["date"]) + days).isoformat()}
     if not (old_start.get("dateTime") and old_end.get("dateTime")):
         raise ValueError(KIND_CHANGE_MESSAGE)
     was_start, was_end = parse_iso(old_start["dateTime"]), parse_iso(old_end["dateTime"])
@@ -670,7 +672,7 @@ async def google__update_event(
         if not value or key in changed:
             continue
         if is_date_only(value):
-            changed[key] = {"date": value.strip()}  # already checked (require_real_dates)
+            changed[key] = {"date": parse_bare_day(value).isoformat()}
             continue
         # Read in the zone the times were shown in (or the caller's); keep the event's own zone.
         if timezone.strip():

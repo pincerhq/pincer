@@ -19,12 +19,12 @@ precision all become ``…:SS+HH:MM``). A wall-clock time that does not exist
 (the spring-forward gap, e.g. 03:30 in Kyiv on 2026-03-29) takes the offset in
 force before the gap, so it lands one hour later in local time (04:30).
 
-Validation: a value that starts like a date must be a real one before any of
-it reaches Google — ``2026-02-30``, ``2026-02-30T10:00:00`` and
-``2026-02-28T25:00`` are refused with one readable message
-(:data:`INVALID_DATE_MESSAGE`), not Python's "day is out of range" or Google's
-raw 400. The calendar tools check their inputs with :func:`require_real_dates`
-first.
+Validation: a bare date or a date-time must be a real one before any of it
+reaches Google. ``2026-02-30`` is refused with :data:`INVALID_DATE_MESSAGE`,
+``2026-02-30T10:00:00`` and ``2026-02-28T25:00`` with
+:data:`INVALID_DATE_TIME_MESSAGE`, not Python's "day is out of range" or
+Google's raw 400. The calendar tools check their inputs with
+:func:`require_real_dates` first.
 """
 
 from __future__ import annotations
@@ -56,12 +56,13 @@ SOURCE_IDENTITY = "identity"
 SOURCE_SETTINGS = "settings"
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# A value that starts like a date: "2026-02-30", "20260230", "2026-02-30T10:00:00", "2026-02-30Z".
-_DATE_LIKE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8})(?!\d)")
+# A date-time: a YYYY-MM-DD date, then a time part ("2026-02-30T10:00:00", "2026-02-28 25:00").
+_DATE_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d")
 
-INVALID_DATE_MESSAGE = (
-    "{value} is not a real date or time (check the day, month, hour and minute). "
-    "Pass an existing one in the same form: YYYY-MM-DD for a whole day, YYYY-MM-DDTHH:MM:SS for a time."
+INVALID_DATE_MESSAGE = "{value} is not a real date (check the day and month). Pass an existing date as YYYY-MM-DD."
+INVALID_DATE_TIME_MESSAGE = (
+    "{value} is not a real date and time (check the day, month, hour and minute). "
+    "Pass an existing one as YYYY-MM-DDTHH:MM:SS (keep the time; an offset or an uppercase Z may follow)."
 )
 
 # One resolver (and so one zone cache) per Google service factory.
@@ -104,17 +105,20 @@ def parse_bare_day(value: str) -> date:
 
 
 def require_real_dates(*values: str) -> None:
-    """Refuse, with :data:`INVALID_DATE_MESSAGE` naming the whole value, any value that starts
-    like a date but is not a real date or date-time (``2026-02-30``, ``2026-02-30T10:00:00``,
-    ``2026-02-28T25:00``, ``2026-02-30Z``) — before it reaches Google.
+    """Refuse an impossible bare date (``2026-02-30``: :data:`INVALID_DATE_MESSAGE`) or
+    date-time (``2026-02-30T10:00:00``, ``2026-02-28T25:00``: :data:`INVALID_DATE_TIME_MESSAGE`),
+    naming the whole value, before it reaches Google.
 
-    Empty values and text that does not start like a date pass unchanged. RFC 3339's
-    lowercase ``t``/``z`` are accepted (Python's parser only knows the uppercase ones).
+    A date-time must be one the tools can read (``parse_iso``): a lowercase ``z`` is
+    refused too, since nothing downstream understands it. Empty values and anything else
+    (other formats, free text) pass unchanged, as before.
     """
     for value in values:
         text = value.strip() if value else ""
-        if _DATE_LIKE_RE.match(text) and parse_iso(text.upper()) is None:
-            raise ValueError(INVALID_DATE_MESSAGE.format(value=text))
+        if is_date_only(text):
+            parse_bare_day(text)
+        elif _DATE_TIME_RE.match(text) and parse_iso(text) is None:
+            raise ValueError(INVALID_DATE_TIME_MESSAGE.format(value=text))
 
 
 def is_date_only(value: str) -> bool:

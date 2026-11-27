@@ -18,7 +18,7 @@ from googleapiclient.errors import HttpError
 
 from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
-from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE
+from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, INVALID_DATE_TIME_MESSAGE, is_date_only
 from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
 from pincer.integrations.google.tools_calendar import (
     REVERSED_ALL_DAY_MESSAGE,
@@ -52,6 +52,12 @@ WRITE_LOG_OPS = {
     "google__add_google_meet": "add_meet",
     "google__move_event": "move",
 }
+#: The read tools that take a range, called as ``call(factory, context, time_min=..., time_max=...)``.
+READ_TOOLS = [
+    lambda factory, ctx, **kw: google__list_events(factory, context=ctx, **kw),
+    lambda factory, ctx, **kw: google__search_events(factory, query="Dentist", context=ctx, **kw),
+    lambda factory, ctx, **kw: google__check_freebusy(factory, emails="me@example.com", context=ctx, **kw),
+]
 
 
 pytestmark = pytest.mark.usefixtures("berlin_deployment")
@@ -743,6 +749,17 @@ async def test_update_with_an_impossible_bare_date_names_it(fake_factory, fake, 
     assert fake.sent("events.update") == []
 
 
+def _refusal(value: str) -> str:
+    """The message an impossible ``value`` is refused with: a bare date's, or a date-time's."""
+    return (INVALID_DATE_MESSAGE if is_date_only(value) else INVALID_DATE_TIME_MESSAGE).format(value=value)
+
+
+def _on_call_context() -> dict[str, str]:
+    from pincer.core.clock import CALL_TIMEZONE_KEY
+
+    return {"timezone": "Europe/Kyiv", CALL_TIMEZONE_KEY: "Europe/Berlin"}
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -751,6 +768,7 @@ async def test_update_with_an_impossible_bare_date_names_it(fake_factory, fake, 
         {"start": "2026-02-30", "end": "2026-03-02"},
         {"start": "2026-02-30T10:00:00"},  # an impossible date-time: was a raw 400
         {"end": "2026-02-28T25:00:00"},  # a real day with an impossible hour
+        {"start": "2026-12-05T10:00:00z"},  # lowercase z: was "Could not read the new start"
     ],
 )
 async def test_update_of_a_timed_event_with_an_impossible_date_names_it(fake_factory, fake, arguments):
@@ -762,43 +780,28 @@ async def test_update_of_a_timed_event_with_an_impossible_date_names_it(fake_fac
     with pytest.raises(ValueError) as refused:
         await google__update_event(fake_factory, event_id=event_id, **arguments)
 
-    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert str(refused.value) == _refusal(bad)
     assert fake.calls == []
 
 
 @pytest.mark.parametrize(
-    ("start", "end"),
+    ("start", "end", "bad"),
     [
-        ("2026-02-30T10:00:00", "2026-02-30T11:00:00"),
-        ("2026-02-28T10:00:00", "2026-02-28T10:61:00"),
-        ("2026-02-30Z", "2026-03-01T10:00:00Z"),
+        ("2026-02-30T10:00:00", "2026-02-30T11:00:00", "2026-02-30T10:00:00"),
+        ("2026-02-28T10:00:00", "2026-02-28T10:61:00", "2026-02-28T10:61:00"),
+        ("2026-12-05T10:00:00z", "2026-12-05T11:00:00Z", "2026-12-05T10:00:00z"),
     ],
 )
-async def test_create_with_an_impossible_date_time_names_it(fake_factory, fake, start, end):
+async def test_create_with_an_impossible_date_time_names_it(fake_factory, fake, start, end, bad):
     """Issue #337: an impossible date-time reached Google unchanged and came back as a raw 400."""
-    bad = start if start.startswith("2026-02-30") else end
-
     with pytest.raises(ValueError) as refused:
         await google__create_event(fake_factory, summary="Dentist", start=start, end=end)
 
-    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert str(refused.value) == _refusal(bad)
     assert fake.calls == []
 
 
-def _on_call_context() -> dict[str, str]:
-    from pincer.core.clock import CALL_TIMEZONE_KEY
-
-    return {"timezone": "Europe/Kyiv", CALL_TIMEZONE_KEY: "Europe/Berlin"}
-
-
-_READ_TOOLS = [
-    lambda factory, ctx, **kw: google__list_events(factory, context=ctx, **kw),
-    lambda factory, ctx, **kw: google__search_events(factory, query="Dentist", context=ctx, **kw),
-    lambda factory, ctx, **kw: google__check_freebusy(factory, emails="me@example.com", context=ctx, **kw),
-]
-
-
-@pytest.mark.parametrize("call", _READ_TOOLS, ids=["list", "search", "freebusy"])
+@pytest.mark.parametrize("call", READ_TOOLS, ids=["list", "search", "freebusy"])
 @pytest.mark.parametrize(
     ("bounds", "bad"),
     [
@@ -810,6 +813,9 @@ _READ_TOOLS = [
             {"time_min": "2026-02-01T00:00:00+02:00", "time_max": "2026-02-30T00:00:00+02:00"},
             "2026-02-30T00:00:00+02:00",
         ),
+        # PR #428 review: lowercase z passed the check, then _days_after could not read it and
+        # the list's default end became now + 7 days, before the start: an empty list.
+        ({"time_min": "2026-12-05T10:00:00z"}, "2026-12-05T10:00:00z"),
     ],
 )
 @pytest.mark.parametrize("on_call", [False, True], ids=["chat", "call"])
@@ -820,8 +826,19 @@ async def test_read_ranges_with_an_impossible_date_name_it(fake_factory, fake, c
     with pytest.raises(ValueError) as refused:
         await call(fake_factory, _on_call_context() if on_call else None, **bounds)
 
-    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert str(refused.value) == _refusal(bad)
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("call", READ_TOOLS, ids=["list", "search", "freebusy"])
+async def test_read_ranges_leave_other_date_text_to_google_as_before(fake_factory, fake, call):
+    """PR #428 review: only YYYY-MM-DD and YYYY-MM-DD plus a time are checked; a date followed
+    by other text still goes to Google unchanged (which refuses it), as before #337."""
+    with pytest.raises(HttpError):
+        await call(fake_factory, None, time_min="2026-02-01", time_max="2026-02-28 morning")
+
+    sent = fake.calls[-1][1]
+    assert "2026-02-28 morning" in (sent.get("timeMax"), sent.get("body", {}).get("timeMax"))
 
 
 def test_the_update_schema_states_the_same_all_day_end_rule_as_create(fake_registry):

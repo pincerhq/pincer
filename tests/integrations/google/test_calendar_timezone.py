@@ -16,6 +16,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from integrations.google.fake_calendar import FakeCalendarService
+from pincer.integrations.google.calendar_tz import (
+    INVALID_DATE_MESSAGE,
+    INVALID_DATE_TIME_MESSAGE,
+    localize_bound,
+    require_real_dates,
+)
 from pincer.integrations.google.tools_calendar import (
     google__check_freebusy,
     google__create_event,
@@ -629,45 +635,41 @@ async def test_a_zoneless_answer_ends_the_outage_for_the_lookup_log(fake, caplog
         "2026-02-28T10:00:00",
         "2026-02-28 10:00",
         "2026-02-28T10:00:00.123456789Z",
-        "2026-02-28t10:00:00z",
-        "20260228",
+        "2026-02-28T10:00:00+02:00",
+        "2026-02-28t10:00:00",  # a lowercase t alone: Python (so every tool) reads it
+        "20260230",  # not YYYY-MM-DD: left to Google, as before
+        "2026-02-28 morning",  # a date followed by free text: left to Google, as before
         "soon",
     ],
 )
 def test_require_real_dates_accepts_real_dates_and_leaves_other_text_alone(value):
-    """Real dates and date-times (RFC 3339's lowercase t/z included) and non-date text pass."""
-    from pincer.integrations.google.calendar_tz import require_real_dates
-
+    """Real dates and date-times pass; anything that is not YYYY-MM-DD (plus a time) is not checked."""
     require_real_dates(value, "2026-03-01")
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "message"),
     [
-        "2026-02-30",
-        "2026-02-29T10:00",
-        "2026-13-01T00:00:00Z",
-        "2026-02-28T25:00",
-        "2026-02-28T10:61",
-        "2026-02-30Z",
-        "20260230",
+        ("2026-02-30", INVALID_DATE_MESSAGE),
+        ("2026-13-01", INVALID_DATE_MESSAGE),
+        ("2026-02-29T10:00", INVALID_DATE_TIME_MESSAGE),
+        ("2026-13-01T00:00:00Z", INVALID_DATE_TIME_MESSAGE),
+        ("2026-02-28T25:00", INVALID_DATE_TIME_MESSAGE),
+        ("2026-02-28 10:61", INVALID_DATE_TIME_MESSAGE),
+        ("2026-02-28T10:00:00z", INVALID_DATE_TIME_MESSAGE),  # lowercase z: nothing downstream reads it
     ],
 )
-def test_require_real_dates_refuses_an_impossible_date_or_time_by_its_whole_value(value):
-    """Each refusal names the value exactly as given (stripped), time included."""
-    from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, require_real_dates
-
+def test_require_real_dates_refuses_an_impossible_date_or_time_by_its_whole_value(value, message):
+    """A bare date keeps #316's message; a date-time gets its own, and each names the value (stripped)."""
     with pytest.raises(ValueError) as refused:
         require_real_dates("2026-03-01", f" {value} ")
 
-    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=value)
+    assert str(refused.value) == message.format(value=value)
 
 
 @pytest.mark.parametrize("end", [False, True])
 def test_localize_bound_refuses_an_impossible_bare_date_by_name(end):
     """It showed Python's "day is out of range for month"."""
-    from pincer.integrations.google.calendar_tz import INVALID_DATE_MESSAGE, localize_bound
-
     with pytest.raises(ValueError) as refused:
         localize_bound("2026-02-30", ZoneInfo("Europe/Kyiv"), end=end)
 
