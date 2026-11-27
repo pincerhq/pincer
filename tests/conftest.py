@@ -71,6 +71,10 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     # A developer's telemetry config would make `pincer run` tests export, or refuse to start.
     for var in ("PINCER_TELEMETRY_DSN", "PINCER_TELEMETRY_UPTRACE_DSN", "PINCER_TELEMETRY_POSTHOG_DSN", "OTEL_DSN"):
         monkeypatch.delenv(var, raising=False)
+    # The MCP switches decide whether the price check prices the sampling model, and the
+    # docker-compose setup exports them: a developer's shell must not flip those tests.
+    for var in ("PINCER_MCP_ENABLED", "PINCER_MCP_SERVER_EXPORT_ENABLED"):
+        monkeypatch.delenv(var, raising=False)
     # ...and so would a [telemetry] section in the repo's pincer.toml / pincer.local.toml.
     monkeypatch.setattr("pincer.config.telemetry.TELEMETRY_TOML_FILES", ())
     # ...and stop it doing so in the first place: without this the MCP config

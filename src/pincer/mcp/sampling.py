@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("pincer.mcp.sampling")
 
-DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
 SAMPLING_PROVIDER = "anthropic"  # standalone sampling calls the Anthropic API directly
 # The image types the Anthropic API takes (the SDK's Base64ImageSourceParam.media_type)
 _IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")

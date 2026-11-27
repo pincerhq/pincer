@@ -5,6 +5,7 @@ Each refusal is paired with its accepted twin, so a check that always refuses fa
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -527,13 +528,145 @@ def test_a_sampling_model_is_not_checked_while_sampling_is_off(tmp_path: Path) -
     assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"), sampling_off)) is None
 
 
-def test_env_overrides_do_not_change_the_sampling_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The check reads the toml only, so it is the same wherever it runs."""
-    monkeypatch.setenv("PINCER_MCP_ENABLED", "false")
-    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", "false")
-    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
-        "No price for 1 model Pincer will call:\n  - claude-s: sampling on anthropic"
-    )
+_SAMPLING_UNPRICED = "No price for 1 model Pincer will call:\n  - claude-s: sampling on anthropic"
+_SAMPLING_SERVER_UNSET = _SAMPLING_ON.replace("[mcp.server]\nenabled = true\n", "")
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "TRUE"])
+def test_the_export_turned_on_by_env_alone_has_its_sampling_model_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The documented Docker setup turns the server on with PINCER_MCP_SERVER_EXPORT_ENABLED only (#370)."""
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", value)
+    config = _with_sampling(_priced(tmp_path, "claude-a"), _SAMPLING_SERVER_UNSET)
+    assert _first_line(pricing_problems(_settings(), config)) == _SAMPLING_UNPRICED
+
+
+@pytest.mark.parametrize(
+    ("var", "value"),
+    [
+        ("PINCER_MCP_ENABLED", "false"),
+        ("PINCER_MCP_ENABLED", "0"),
+        ("PINCER_MCP_ENABLED", "No"),
+        ("PINCER_MCP_SERVER_EXPORT_ENABLED", "false"),
+        ("PINCER_MCP_SERVER_EXPORT_ENABLED", "off"),
+    ],
+)
+def test_a_sampling_model_is_not_checked_when_env_turns_mcp_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, var: str, value: str
+) -> None:
+    """The runtime never samples then, so `pincer run` must not refuse over the model (#370)."""
+    monkeypatch.setenv(var, value)
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"))) is None
+
+
+def test_mcp_enabled_by_env_does_not_override_a_toml_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """As at runtime: PINCER_MCP_ENABLED can only turn MCP off."""
+    monkeypatch.setenv("PINCER_MCP_ENABLED", "true")
+    config = _with_sampling(_priced(tmp_path, "claude-a"), "[mcp]\nenabled = false\n" + _SAMPLING_ON)
+    assert pricing_problems(_settings(), config) is None
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"PINCER_MCP_ENABLED": "false"},
+        {"PINCER_MCP_ENABLED": "true"},
+        {"PINCER_MCP_SERVER_EXPORT_ENABLED": "true"},
+        {"PINCER_MCP_SERVER_EXPORT_ENABLED": "false"},
+        {"PINCER_MCP_SERVER_EXPORT_ENABLED": "1", "PINCER_MCP_ENABLED": "no"},
+    ],
+)
+@pytest.mark.parametrize(
+    "toml",
+    [_SAMPLING_ON, _SAMPLING_SERVER_UNSET, "[mcp]\nenabled = false\n" + _SAMPLING_ON, "[mcp.server]\nenabled = true\n"],
+    ids=["all-on", "server-unset", "mcp-off", "sampling-unset"],
+)
+def test_the_sampling_check_agrees_with_the_runtime_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str], toml: str
+) -> None:
+    """The check samples exactly when the runtime's MCP config would, whichever switch decides."""
+    from pincer.mcp.config import load_mcp_config, sampling_model
+
+    monkeypatch.setattr("pincer.mcp.config._load_dotenv_into_environ", lambda: None)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    (tmp_path / "pincer.toml").write_text(toml, encoding="utf-8")
+    runtime = load_mcp_config(tmp_path)
+    samples = runtime.enabled and runtime.server.enabled and runtime.server.sampling.enabled
+    assert sampling_model(tmp_path) == (runtime.server.sampling.model if samples else None)
+
+
+@pytest.mark.parametrize("local", ["mcp = []\n", "mcp = {}\n", 'mcp = ""\n'])
+def test_an_empty_local_mcp_value_is_ignored_as_at_runtime(tmp_path: Path, local: str) -> None:
+    """The runtime skips an empty [mcp] in pincer.local.toml, so the check still sees pincer.toml's."""
+    config = _with_sampling(_priced(tmp_path, "claude-a"))
+    (config / "pincer.local.toml").write_text(local, encoding="utf-8")
+    assert _first_line(pricing_problems(_settings(), config)) == _SAMPLING_UNPRICED
+
+
+@pytest.mark.parametrize(
+    "local",
+    ["mcp = 1\n", '[[mcp.servers]]\ntransport = "stdio"\n'],
+    ids=["mcp-not-a-table", "server-entry-without-name"],
+)
+def test_a_local_mcp_section_that_cant_be_merged_gives_no_sampling_model(tmp_path: Path, local: str) -> None:
+    """The runtime's own load refuses it; the price check does not crash over it."""
+    config = _with_sampling(_priced(tmp_path, "claude-a"))
+    (config / "pincer.local.toml").write_text(local, encoding="utf-8")
+    assert pricing_problems(_settings(), config) is None
+
+
+@pytest.mark.parametrize(
+    ("base", "local"),
+    [
+        (_SAMPLING_ON + '[[mcp.servers]]\nname = ["a"]\n', '[[mcp.servers]]\nname = "b"\n'),
+        ("[mcp]\nserver = 5\n", "[mcp.server]\nenabled = true\n[mcp.server.sampling]\nenabled = true\n"),
+    ],
+    ids=["server-name-not-a-string", "server-not-a-table-under-a-local-table"],
+)
+def test_sections_that_cant_be_merged_are_logged_not_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, base: str, local: str
+) -> None:
+    """`_merge_mcp_raw` would raise TypeError on these; the check logs them and skips sampling."""
+    from pincer.mcp.config import sampling_model
+
+    config = _with_sampling(_priced(tmp_path, "claude-a"), base)
+    (config / "pincer.local.toml").write_text(local, encoding="utf-8")
+    with caplog.at_level("WARNING", logger="pincer.mcp.config"):
+        assert sampling_model(config) is None
+        assert pricing_problems(_settings(), config) is None
+    assert "can't be merged" in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["directory", "unreadable", "invalid-toml"])
+def test_an_unreadable_local_toml_does_not_crash_the_check(tmp_path: Path, kind: str) -> None:
+    """The sampling lookup leaves it to the MCP config's own load, like a malformed section; the
+    price table, which can't be known without the file, refuses naming it (#370)."""
+    from pincer.mcp.config import sampling_model
+
+    config = _with_sampling(_priced(tmp_path, "claude-a"))
+    local = config / "pincer.local.toml"
+    if kind == "directory":
+        local.mkdir()
+    elif kind == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root reads a 0o000 file")
+        local.write_text("[mcp]\n", encoding="utf-8")
+        local.chmod(0o000)
+    else:
+        local.write_text("[mcp\n", encoding="utf-8")
+    try:
+        assert sampling_model(config) is None
+        problems = pricing_problems(_settings(), config)
+        assert problems is not None
+        assert problems.startswith(
+            "Invalid [pricing] entries in pincer.toml / pincer.local.toml:\n  - pincer.local.toml: "
+        )
+    finally:
+        if local.is_file():
+            local.chmod(0o644)
 
 
 @pytest.mark.parametrize(
@@ -555,10 +688,17 @@ def test_a_sampling_model_is_not_checked_when_the_runtime_would_never_sample(tmp
 @pytest.mark.parametrize(
     "toml",
     [
-        '[[mcp.servers]]\ntransport = "stdio"\n' + _SAMPLING_ON,  # KeyError: no name
-        '[mcp]\nserver = "x"\n',  # AttributeError: not a table
+        '[mcp]\nserver = "x"\n',  # not a table
+        "[mcp.server]\nenabled = true\nsampling = 1\n",  # not a table
+        "[mcp.server]\nenabled = true\n[mcp.server.sampling]\nenabled = true\nmodel = 5\n",  # not a string
+        '[mcp.server]\nenabled = true\n[mcp.server.sampling]\nenabled = true\nbudget_per_day = "x"\n',  # ValueError
     ],
-    ids=["server-entry-without-name", "server-not-a-table"],
+    ids=[
+        "server-not-a-table",
+        "sampling-not-a-table",
+        "model-not-a-string",
+        "budget-not-a-number",
+    ],
 )
 def test_a_malformed_mcp_section_does_not_crash_the_check(tmp_path: Path, toml: str) -> None:
     """The MCP config's own load reports it; the price check just has no sampling model."""
@@ -568,8 +708,6 @@ def test_a_malformed_mcp_section_does_not_crash_the_check(tmp_path: Path, toml: 
 def test_the_price_check_does_not_load_the_working_directorys_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
-
     sentinel = "PINCER_TEST_DOTENV_SENTINEL"
     cwd = tmp_path / "cwd"
     cwd.mkdir()
@@ -584,6 +722,69 @@ def test_the_price_check_does_not_load_the_working_directorys_env_file(
         assert os.environ.get(sentinel) is None  # not `in os.environ`: its failure would print the whole env
     finally:
         os.environ.pop(sentinel, None)
+
+
+def _dotenv_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    """A .env in the working directory, with the MCP .env candidates armed as in production."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / ".env").write_text(text, encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", (".env", "../.env"))
+
+
+def test_the_export_turned_on_in_env_file_alone_has_its_sampling_model_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`load_mcp_config` loads .env before `pincer mcp serve` decides, so the check reads it too
+    (without copying it into os.environ)."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_SERVER_EXPORT_ENABLED=true\n")
+    config = _with_sampling(_priced(tmp_path, "claude-a"), _SAMPLING_SERVER_UNSET)
+    assert _first_line(pricing_problems(_settings(), config)) == _SAMPLING_UNPRICED
+    assert os.environ.get("PINCER_MCP_SERVER_EXPORT_ENABLED") is None
+
+
+def test_mcp_turned_off_in_env_file_skips_the_sampling_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_ENABLED=false\n")
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"))) is None
+
+
+def test_a_disabled_dotenv_is_not_read_by_the_check_either(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With PYTHON_DOTENV_DISABLED the runtime never loads .env, so its switches don't count here."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_ENABLED=false\n")
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
+        _SAMPLING_UNPRICED
+    )
+
+
+def test_env_file_interpolation_resolves_as_at_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`${VAR}` in .env resolves against the process environment first, as `load_dotenv(override=False)`."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_TEST_MCP_ON=false\nPINCER_MCP_ENABLED=${PINCER_TEST_MCP_ON}\n")
+    monkeypatch.setenv("PINCER_TEST_MCP_ON", "true")
+    assert _first_line(pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a")))) == (
+        _SAMPLING_UNPRICED
+    )
+    assert os.environ.get("PINCER_MCP_ENABLED") is None  # the loader's additions are taken back
+
+
+def test_the_process_environment_wins_over_the_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """As `load_dotenv(override=False)`: a variable already set is never replaced by .env."""
+    _dotenv_in_cwd(tmp_path, monkeypatch, "PINCER_MCP_SERVER_EXPORT_ENABLED=true\n")
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", "false")
+    assert pricing_problems(_settings(), _with_sampling(_priced(tmp_path, "claude-a"))) is None
+
+
+def test_an_unreadable_mcp_config_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The check skips the sampling model, but says why instead of skipping it silently."""
+    from pincer.mcp.config import sampling_model
+
+    (tmp_path / "pincer.local.toml").mkdir()
+    with caplog.at_level("WARNING", logger="pincer.mcp.config"):
+        assert sampling_model(tmp_path) is None
+    assert f"MCP config in {tmp_path} can't be read" in caplog.text
+    assert "the price check skips the MCP sampling model" in caplog.text
 
 
 def test_a_sampling_model_is_not_checked_without_an_anthropic_key(tmp_path: Path) -> None:

@@ -1329,6 +1329,17 @@ mounting a directory. Install the new `remote-skills` extra
   when the tools are registered. Any other `RuntimeError` (e.g. "Event loop is
   closed") is logged as a crash with its traceback, and no longer uses up the
   scope warning.
+- **The startup price check follows the MCP env switches for the sampling model
+  (#370).** It read only the toml switches, so a server turned on with
+  `PINCER_MCP_SERVER_EXPORT_ENABLED=true` alone (the documented Docker setup)
+  started with an unpriced sampling model and refused every sampling request,
+  and `PINCER_MCP_ENABLED=false` still stopped `pincer run` over a model never
+  called. It now reads `PINCER_MCP_ENABLED` and
+  `PINCER_MCP_SERVER_EXPORT_ENABLED` as the runtime does: the process
+  environment first, then `.env` (read, not copied into the environment). An
+  MCP config the check can't read is logged as a warning. A `pincer.toml` or
+  `pincer.local.toml` that can't be read (no permission, or a directory) now
+  refuses with the file named instead of crashing startup.
 - **Unknown `/api/*` paths answer 404 instead of the dashboard page (#382).**
   When the dashboard build is served, its catch-all route answered every unknown
   `GET` with `index.html` and status 200, `/api/*` included. A client calling a

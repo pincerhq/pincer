@@ -41,12 +41,23 @@ from pincer.config.toml_loader import read_toml_raw as _read_toml_raw
 from pincer.utils.csv_list import split_csv
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pincer.config.main import Settings
+
+logger = logging.getLogger(__name__)
 
 # Mirrors Settings.model_config["env_file"] in pincer/config/main.py: ".env" takes
 # priority over "../.env" (monorepo layout — commands run from a subdirectory
 # still find the repo-root .env as a fallback).
 _DOTENV_CANDIDATES = (".env", "../.env")
+# How the MCP env switches read a value (case-insensitive); anything else is neither
+_ENV_TRUE = ("true", "1", "yes")
+_ENV_FALSE = ("false", "0", "no")
+# The env switches that decide whether the standalone MCP server samples
+_SAMPLING_SWITCHES = ("PINCER_MCP_ENABLED", "PINCER_MCP_SERVER_EXPORT_ENABLED")
+# What the standalone server samples with when [mcp.server.sampling] names no model
+DEFAULT_SAMPLING_MODEL = "claude-sonnet-5-5"
 # The tools exposed to MCP clients when ``expose_tools`` is not set: conservative, read-only plus
 # skills. Calendar is today's events only (owner ruling, #297): full list/search is opt-in.
 DEFAULT_EXPOSE_TOOLS = (
@@ -151,7 +162,7 @@ class MCPSamplingConfig:
     """Sampling configuration — allows MCP server to handle LLM inference requests."""
 
     enabled: bool = False
-    model: str = "claude-sonnet-5-5"
+    model: str = DEFAULT_SAMPLING_MODEL
     budget_per_day: float = 5.00
     max_tokens: int = 1024
 
@@ -346,35 +357,122 @@ def _parse_sampling(samp_raw: dict[str, Any]) -> MCPSamplingConfig:
     """Parse a raw [mcp.server.sampling] table."""
     return MCPSamplingConfig(
         enabled=samp_raw.get("enabled", False),
-        model=samp_raw.get("model", "claude-sonnet-5-5"),
+        model=samp_raw.get("model", DEFAULT_SAMPLING_MODEL),
         budget_per_day=float(samp_raw.get("budget_per_day", 5.00)),
         max_tokens=int(samp_raw.get("max_tokens", 1024)),
     )
 
 
+def _env_disables_mcp(env: Mapping[str, str] | None = None) -> bool:
+    """`PINCER_MCP_ENABLED` set to false in `env` (default os.environ): MCP is off whatever the
+    toml says. Any other value leaves the toml switch in charge (it never turns on MCP the toml
+    turns off)."""
+    env = os.environ if env is None else env
+    return env.get("PINCER_MCP_ENABLED", "").lower() in _ENV_FALSE
+
+
+def _export_enabled(toml_enabled: bool, env: Mapping[str, str] | None = None) -> bool:
+    """Whether the standalone MCP server is on: `PINCER_MCP_SERVER_EXPORT_ENABLED` when set in
+    `env` (default os.environ), else the toml's `[mcp.server] enabled`."""
+    value = (os.environ if env is None else env).get("PINCER_MCP_SERVER_EXPORT_ENABLED", "").lower()
+    return value in _ENV_TRUE if value else toml_enabled
+
+
+def _sampling_switches() -> dict[str, str]:
+    """The sampling env switches as `load_mcp_config` sees them once it has loaded .env.
+
+    Runs the runtime's own loader, so `PYTHON_DOTENV_DISABLED`, `${VAR}` interpolation and the
+    order of the candidate files behave exactly as there, then takes back what it added: it
+    never overrides a variable already set, so removing the new keys restores os.environ.
+    """
+    before = set(os.environ)
+    try:
+        _load_dotenv_into_environ()
+        return {key: os.environ[key] for key in _SAMPLING_SWITCHES if key in os.environ}
+    finally:
+        for key in set(os.environ) - before:
+            del os.environ[key]
+
+
+def _mcp_section(toml_path: Path) -> dict[str, Any]:
+    """The `[mcp]` table of one toml file; {} when the file or the section is absent or empty."""
+    section = (_read_toml_raw(toml_path) or {}).get("mcp") or {}
+    if not isinstance(section, dict):
+        raise ValueError(f"{toml_path.name}: [mcp] must be a table")
+    return section
+
+
+def _mcp_sections(base_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The `[mcp]` sections of pincer.toml and pincer.local.toml in `base_dir`. Raises what
+    reading them raises: OSError, or ValueError for invalid TOML or an `[mcp]` that is not a table."""
+    return _mcp_section(base_dir / "pincer.toml"), _mcp_section(base_dir / "pincer.local.toml")
+
+
+def _merge_sections(base: dict[str, Any], local: dict[str, Any]) -> dict[str, Any]:
+    """pincer.toml's `[mcp]` section with pincer.local.toml's merged on top."""
+    return _merge_mcp_raw(base, local) if local else base
+
+
+def _sections_mergeable(base: dict[str, Any], local: dict[str, Any]) -> bool:
+    """Everything `_merge_mcp_raw` touches has the shape it needs: every `[[mcp.servers]]` entry
+    is a table with a string name, and a local `[mcp.server]` table merges onto a table."""
+    for section in (base, local):
+        servers = section.get("servers", [])
+        if not isinstance(servers, list):
+            return False
+        if not all(isinstance(s, dict) and isinstance(s.get("name"), str) for s in servers):
+            return False
+    return not (isinstance(local.get("server"), dict) and not isinstance(base.get("server", {}), dict))
+
+
 def sampling_model(config_dir: Path | None = None) -> str | None:
     """The model the standalone MCP server would sample with, per pincer.toml with
     pincer.local.toml merged on top (as `load_mcp_config` merges them) in `config_dir`
-    (default: cwd); None when it would never sample.
+    (default: cwd) and the MCP env switches; None when it would never sample.
 
-    It samples only when `[mcp] enabled` (default on), `[mcp.server] enabled` (default off;
-    `pincer mcp serve` exits without it) and `[mcp.server.sampling] enabled` (default off) are
-    all set, read with the runtime's defaults and truthiness.
+    It samples only when MCP is on (`[mcp] enabled`, default on, and `PINCER_MCP_ENABLED` not
+    false), the server is on (`PINCER_MCP_SERVER_EXPORT_ENABLED` when set, else `[mcp.server]
+    enabled`, default off; `pincer mcp serve` exits without it) and `[mcp.server.sampling]
+    enabled` (default off) is set, all with the runtime's precedence and truthiness. The two
+    switches are read from os.environ, then from .env as `load_mcp_config` would load it, without
+    copying .env into os.environ.
 
-    A pure read of the two files, for the startup price check: unlike `load_mcp_config` it never
-    loads .env into os.environ, and no environment variable changes the result. A malformed
-    section raises what reading it raises (KeyError, AttributeError, TypeError, ValueError).
+    For the startup price check: a config it can't read, parse or make sense of is logged and
+    gives None (the MCP config's own load refuses it), so the check never crashes over it.
     """
     base_dir = config_dir or Path.cwd()
-    mcp_raw: dict[str, Any] = {}
-    for name in ("pincer.toml", "pincer.local.toml"):
-        raw = _read_toml_raw(base_dir / name) or {}
-        mcp_raw = _merge_mcp_raw(mcp_raw, raw.get("mcp") or {})
+    try:
+        base, local = _mcp_sections(base_dir)
+    except (OSError, ValueError) as e:  # ValueError: tomllib.TOMLDecodeError, or [mcp] not a table
+        _log_no_sampling_model(base_dir, e)
+        return None
+    if not _sections_mergeable(base, local):
+        _log_no_sampling_model(base_dir, "an [[mcp.servers]] entry or [mcp.server] can't be merged")
+        return None
+    mcp_raw = _merge_sections(base, local)
     server = mcp_raw.get("server", {})
-    sampling = _parse_sampling(server.get("sampling", {}))
-    if not (mcp_raw.get("enabled", True) and server.get("enabled", False) and sampling.enabled):
+    samp_raw = server.get("sampling", {}) if isinstance(server, dict) else None
+    if not isinstance(samp_raw, dict):
+        _log_no_sampling_model(base_dir, "[mcp.server] or [mcp.server.sampling] is not a table")
+        return None
+    try:
+        sampling = _parse_sampling(samp_raw)
+    except (ValueError, TypeError) as e:  # float()/int() of budget_per_day, max_tokens
+        _log_no_sampling_model(base_dir, e)
+        return None
+    if not isinstance(sampling.model, str):
+        _log_no_sampling_model(base_dir, "[mcp.server.sampling] model is not a string")
+        return None
+    switches = _sampling_switches()
+    if _env_disables_mcp(switches) or not mcp_raw.get("enabled", True):
+        return None
+    if not (_export_enabled(server.get("enabled", False), switches) and sampling.enabled):
         return None
     return sampling.model
+
+
+def _log_no_sampling_model(base_dir: Path, why: object) -> None:
+    logger.warning("MCP config in %s can't be read (%s); the price check skips the MCP sampling model", base_dir, why)
 
 
 def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPConfig:
@@ -456,13 +554,13 @@ def _load_env_servers(pincer_vars: dict[str, str] | None = None) -> list[MCPServ
                 MCPServerConfig(
                     name=name,
                     transport=transport,
-                    enabled=enabled_str in ("true", "1", "yes"),
+                    enabled=enabled_str in _ENV_TRUE,
                     command=os.environ.get(f"{prefix}COMMAND"),
                     args=args,
                     env=env,
                     url=os.environ.get(f"{prefix}URL"),
                     headers={},
-                    sandbox=sandbox_str in ("true", "1", "yes"),
+                    sandbox=sandbox_str in _ENV_TRUE,
                     sandbox_memory_mb=int(os.environ.get(f"{prefix}SANDBOX_MEMORY_MB", "0")),
                     approval_required=approval,
                     timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
@@ -497,20 +595,10 @@ def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] 
     _load_dotenv_into_environ()
     base_dir = config_dir or Path.cwd()
 
-    # Load raw TOML dicts
-    base_raw = _read_toml_raw(base_dir / "pincer.toml")
-    local_raw = _read_toml_raw(base_dir / "pincer.local.toml")
-
-    # Merge [mcp] sections from both files
-    mcp_raw: dict[str, Any] | None = base_raw.get("mcp") if base_raw else None
-    if local_raw:
-        local_mcp = local_raw.get("mcp")
-        if local_mcp:
-            mcp_raw = _merge_mcp_raw(mcp_raw or {}, local_mcp)
+    mcp_raw = _merge_sections(*_mcp_sections(base_dir))
 
     # Global MCP toggle
-    enabled_env = os.environ.get("PINCER_MCP_ENABLED", "").lower()
-    if enabled_env in ("false", "0", "no"):
+    if _env_disables_mcp():
         return MCPConfig(enabled=False)
     if mcp_raw and not mcp_raw.get("enabled", True):
         return MCPConfig(enabled=False)
@@ -530,16 +618,13 @@ def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] 
     max_servers = int(os.environ.get("PINCER_MCP_MAX_SERVERS", toml_cfg.max_servers if toml_cfg else 10))
     tool_prefix_env = os.environ.get("PINCER_MCP_TOOL_PREFIX", "")
     tool_prefix = (
-        tool_prefix_env.lower() not in ("false", "0", "no")
-        if tool_prefix_env
-        else (toml_cfg.tool_prefix if toml_cfg else True)
+        tool_prefix_env.lower() not in _ENV_FALSE if tool_prefix_env else (toml_cfg.tool_prefix if toml_cfg else True)
     )
 
     # MCP server export config (env overrides TOML)
     toml_srv = toml_cfg.server if toml_cfg else MCPServerExportConfig()
-    srv_enabled_env = os.environ.get("PINCER_MCP_SERVER_EXPORT_ENABLED", "").lower()
     srv_export = MCPServerExportConfig(
-        enabled=(srv_enabled_env in ("true", "1", "yes") if srv_enabled_env else toml_srv.enabled),
+        enabled=_export_enabled(toml_srv.enabled),
         host=os.environ.get("PINCER_MCP_SERVER_EXPORT_HOST", toml_srv.host),
         port=int(os.environ.get("PINCER_MCP_SERVER_EXPORT_PORT", toml_srv.port)),
         path=os.environ.get("PINCER_MCP_SERVER_EXPORT_PATH", toml_srv.path),
