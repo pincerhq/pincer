@@ -239,13 +239,14 @@ def test_an_unsupported_language_case_pair_is_refused():
 @pytest.mark.parametrize(
     ("language", "bad_case", "spoken"),
     [
-        ("uk", "dative", "перенесу зустріч 'X' так, щоб вона починалась у середа, 11 листопада"),
-        ("de", "datve", "den Termin „X“ so verschieben, dass er am Mittwoch, der elfte November, beginnt"),
+        ("uk", "dative", "перенесу зустріч 'X' на середа, 11 листопада"),
+        ("de", "datve", "den Termin „X“ auf Mittwoch, der elfte November verschieben"),
     ],
 )
-def test_a_broken_from_day_case_degrades_to_the_nominative(monkeypatch, caplog, language, bad_case, spoken):
+def test_a_broken_from_day_case_falls_back_to_the_generic_sentence(monkeypatch, caplog, language, bad_case, spoken):
     """PR #426 review: describe_action runs inside the approval gate with no try around it, so a bad pack
-    constant must not raise mid-turn. The caller hears the nominative and the error is logged."""
+    constant must not raise mid-turn. After "am"/"у" the from-day sentence needs the case it can't get,
+    so the caller hears the generic move sentence instead, and the error is logged."""
     import importlib
 
     monkeypatch.setattr(importlib.import_module(f"pincer.voice.prompts.{language}"), "FROM_DAY_CASE", bad_case)

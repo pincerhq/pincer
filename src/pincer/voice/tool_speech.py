@@ -488,8 +488,11 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
         try:
             when = spoken_datetime(start, language, include_time=False, case=case)
         except ValueError:
-            # A broken pack constant must not break the call turn: speak the nominative instead.
+            # A broken pack constant must not break the call turn. The from-day sentence puts the date
+            # after a case-bearing "am"/"у", so a nominative date there is ungrammatical: use the generic
+            # sentence with the nominative date instead.
             logger.exception("FROM_DAY_CASE %r cannot be rendered for %s", case, language)
+            template = str(table.get(tool_name) or table.get("default") or "{tool}")
             when = spoken_datetime(start, language, include_time=False)
     elif all_day:
         end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
