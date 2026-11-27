@@ -402,14 +402,17 @@ _DATE_ARTICLES_DE: dict[GrammaticalCase, str] = {"nominative": "der", "dative": 
 
 def render_date_de(dt: datetime, case: GrammaticalCase = "nominative") -> str:
     """'Dienstag, der achtzehnte August'; dative 'Dienstag, dem achtzehnten August' (after 'am');
-    accusative 'Dienstag, den achtzehnten August' (after 'auf')."""
+    accusative 'Dienstag, den achtzehnten August' (after 'auf'). An unknown case raises ValueError."""
+    article = _DATE_ARTICLES_DE.get(case)
+    if article is None:
+        raise ValueError(f"German dates have no {case!r} form")
     weekday = WEEKDAY_NAMES_DE[dt.weekday()]
     month = MONTH_NAMES_DE[dt.month - 1]
     ordinal = ordinal_words_de(dt.day)
     if case != "nominative":
         # Weak adjective ending after "dem"/"den": the ordinal takes -n (erste -> ersten, elfte -> elften).
         ordinal += "n"
-    return f"{weekday}, {_DATE_ARTICLES_DE[case]} {ordinal} {month}"
+    return f"{weekday}, {article} {ordinal} {month}"
 
 
 def render_datetime_de(dt: datetime, include_time: bool = True, case: GrammaticalCase = "nominative") -> str:

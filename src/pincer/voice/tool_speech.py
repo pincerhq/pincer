@@ -485,7 +485,12 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
     template = str(table.get(key) or table.get(tool_name) or table.get("default") or "{tool}")
     if new_first_day:
         case: GrammaticalCase = get_prompt("FROM_DAY_CASE", language) or "nominative"
-        when = spoken_datetime(start, language, include_time=False, case=case)
+        try:
+            when = spoken_datetime(start, language, include_time=False, case=case)
+        except ValueError:
+            # A broken pack constant must not break the call turn: speak the nominative instead.
+            logger.exception("FROM_DAY_CASE %r cannot be rendered for %s", case, language)
+            when = spoken_datetime(start, language, include_time=False)
     elif all_day:
         end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
         when = _spoken_all_day(start, end, language)

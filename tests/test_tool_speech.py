@@ -226,11 +226,34 @@ def test_each_pack_declares_the_case_its_from_day_sentence_needs():
 
 
 def test_an_unsupported_language_case_pair_is_refused():
-    """PR #426 review: a valid case a language can't render must fail, not speak the nominative."""
+    """PR #426 review: a valid case a language can't render must fail, not speak the nominative.
+    Every renderer fails the same way, so callers catch one error type."""
     from datetime import datetime
 
     with pytest.raises(ValueError, match="dative"):
         ts.spoken_datetime(datetime(2026, 11, 11), "uk", include_time=False, case="dative")
+    with pytest.raises(ValueError, match="datve"):
+        ts.spoken_datetime(datetime(2026, 11, 11), "de", include_time=False, case="datve")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("language", "bad_case", "spoken"),
+    [
+        ("uk", "dative", "перенесу зустріч 'X' так, щоб вона починалась у середа, 11 листопада"),
+        ("de", "datve", "den Termin „X“ so verschieben, dass er am Mittwoch, der elfte November, beginnt"),
+    ],
+)
+def test_a_broken_from_day_case_degrades_to_the_nominative(monkeypatch, caplog, language, bad_case, spoken):
+    """PR #426 review: describe_action runs inside the approval gate with no try around it, so a bad pack
+    constant must not raise mid-turn. The caller hears the nominative and the error is logged."""
+    import importlib
+
+    monkeypatch.setattr(importlib.import_module(f"pincer.voice.prompts.{language}"), "FROM_DAY_CASE", bad_case)
+    args = {"event_id": "e", "summary": "X", "start": "2026-11-11"}
+
+    with caplog.at_level("ERROR", logger="pincer.voice.tool_speech"):
+        assert ts.describe_action("google__update_event", args, language) == spoken
+    assert any(bad_case in r.getMessage() for r in caplog.records)
 
 
 def test_spoken_datetime_forms():
