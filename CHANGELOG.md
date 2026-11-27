@@ -528,8 +528,10 @@ from the variable name.
   primary with no fallback, retry a 429 that arrives before the first token:
   three attempts, the wait doubling up to 60 s. They also keep the SDK's own
   retries of a timeout or a lost connection (two more attempts), which a first
-  try with a fallback configured skips. Once text has streamed, nothing is
-  retried.
+  try with a fallback configured skips. A rate limit Anthropic reports inside
+  the stream is not a 429 and gets no backoff: the primary is asked again only
+  as its last try after every fallback failed, and not at all without a
+  fallback. Once text has streamed, nothing is retried.
 
 #### The system prompt stays the same for a whole conversation (#357)
 

@@ -139,6 +139,45 @@ async def test_complete_second_failover_serves_when_first_fails():
 
 
 @pytest.mark.asyncio
+class _RecordingComplete(BaseLLMProvider):
+    """Answers each ``complete`` with the next scripted outcome (an error is raised), recording the
+    keyword arguments of every call."""
+
+    def __init__(self, outcomes: list[LLMResponse | LLMError]) -> None:
+        self._outcomes = list(outcomes)
+        self.calls: list[dict[str, Any]] = []
+
+    async def complete(self, messages=None, **kwargs):  # type: ignore[override]
+        self.calls.append(kwargs)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, LLMError):
+            raise outcome
+        return outcome
+
+    async def stream_turn(self, messages=None, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+        yield
+
+    async def close(self) -> None:
+        pass
+
+
+async def test_complete_forwards_pinned_to_every_try():
+    """A pinned call stays pinned on the primary's first try, the failover and the primary's last
+    try: an unpinned one would resolve reasoning and thinking differently."""
+    primary = _RecordingComplete(
+        [LLMError("primary overloaded", retryable=True), LLMResponse(content="from a", model="a", provider="a")]
+    )
+    failover = _RecordingComplete([LLMError("failover broken")])
+    router = _router_with_pool("a", ["b"], {"a": primary, "b": failover})
+
+    answer = await router.complete(messages=[], pinned=True)
+
+    assert answer.content == "from a"
+    assert [call["pinned"] for call in primary.calls] == [True, True]
+    assert [call["pinned"] for call in failover.calls] == [True]
+
+
 async def test_stream_turn_fails_over_before_first_event():
     primary = FakeProvider("primary", stream_fail_before=True)
     fb = FakeProvider("fb", stream_tokens=["He", "llo"])

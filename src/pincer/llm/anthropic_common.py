@@ -560,7 +560,8 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
 def _transient(error: anthropic.APIStatusError) -> bool:
     """Whether a failed request is worth asking again: by its HTTP status, or by its error type. An
     error the API reports inside a stream (``event: error``) carries the stream's status, 200, so
-    only its type tells an overload from a bad request."""
+    only its type tells an overload from a bad request. Such a ``rate_limit_error`` is not an
+    ``anthropic.RateLimitError``, so it skips the 429 backoff: only the router asks again."""
     return transient_status(error.status_code) or anthropic_error_field(error, "type") in _TRANSIENT_ERROR_TYPES
 
 
