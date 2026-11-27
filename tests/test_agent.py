@@ -1537,6 +1537,36 @@ async def test_an_unavailable_memory_backend_warns_once_per_outage(
     ]
 
 
+async def test_an_unreadable_preferred_language_warns_once_per_outage(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    """#338: the language read sits next to the memory search; it must not
+    log a WARNING with a traceback on every message of an outage either."""
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+    memory.list_memories.side_effect = [
+        ConnectionError("down"),
+        ConnectionError("still down"),
+        [],
+        ConnectionError("again"),
+    ]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.core.agent"):
+        for _ in range(4):
+            await agent.handle_message("user1", "test", "Hello!")
+
+    assert memory.list_memories.await_count == 4
+    failure = "Failed to read the preferred language for prompt"
+    recovery = "Reading the preferred language for prompt recovered"
+    assert _outage_log(caplog, failure, recovery) == [
+        ("WARNING", True),
+        ("DEBUG", True),
+        ("INFO", False),
+        ("WARNING", True),
+    ]
+
+
 async def test_an_unavailable_mcp_server_list_warns_once_per_outage(
     settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
 ):
